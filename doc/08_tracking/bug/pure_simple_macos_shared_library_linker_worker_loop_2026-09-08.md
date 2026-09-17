@@ -1,8 +1,19 @@
-# Pure-Simple macOS shared-library link fails in linker selection/runtime closure
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-09-16 — PR #455 merged and both code fixes verified clean in tree
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+Closed during the 2026-09-16 macOS bug/todo db sweep. PR #455 MERGED 2026-09-07
+(2b4e4e3314a) was verified on origin/main, and both code fixes are clean in
+tree: src/runtime/runtime_thread.c:1987 Darwin weak_import of
+worker_loop_entry, and src/compiler_rust/compiler/src/linker/native.rs:573-574
+`-undefined dynamic_lookup` for Darwin shared plugins. The remaining
+end-to-end admission is gated on the separately-tracked open bug
+selfhost_native_build_vhdl_builtin_string_resolution_2026-09-08.md — no further
+work belongs to this entry. The in-file status body remains the authoritative
+record and the repro was not re-run this pass. Re-open with a fresh dated repro
+if the symptom returns.
+
+---
+
+# Pure-Simple macOS shared-library link fails in linker selection/runtime closure
 
 ## Status
 
@@ -86,4 +97,3 @@ runtime symbol. The output dylib must contain the five requested C exports.
 3. `nm` exposes exactly the five `simple_chromium_oracle_*` ABI symbols plus
    explicitly documented Simple runtime initialization symbols.
 4. The native ABI integration test loads, invokes, and exact-once releases it.
-

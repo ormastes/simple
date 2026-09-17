@@ -1,0 +1,1086 @@
+#!/bin/sh
+# WM Web 2D retained Metal/SIMD perf evidence gate.
+#
+# Closes the gap filed in
+# doc/08_tracking/bug/gui_web_2d_retained_metal_simd_wm_perf_evidence_gap_2026-07-06.md:
+# one retained evidence gate that launches the GUI web showcase FROM THE FILESYSTEM
+# through the hosted WM file-bridge protocol and records, per backend
+# (software, cpu_simd, vulkan, metal — the sibling check-chrome-web-showcase-perf.shs
+# matrix plus the two backends this bug requires), a retained-frame row with
+#   viewport, backend requested/resolved, source revision, readback provenance,
+#   p50/p95 timing, RSS, fallback status, and a checksum/frame digest.
+#
+# Model: check-chrome-web-showcase-perf.shs (receipt classification, fail-closed
+# PASS/FAIL/ERROR conventions, selftest-first). Launch/capture pattern:
+# check-hosted-wm-capture-evidence.shs (spawn "$SIMPLE_BIN" run <app> --mode=interpreter
+# with bridge env under a timeout, capture PPM frame + receipt) — which records no
+# timing; this gate adds the timing. Capture mechanism: the existing WM file bridge
+# (P6 PPM frame + WmFsFrameReceipt + seq file), never a new capture mechanism.
+# Chrome capture: the lane reuses src/app/ui/chrome_showcase/main.spl and its receipt
+# verbatim (the sibling's headless-Chrome ABI path) when the shim is present.
+#
+# Honest scope on the current macOS/aarch64 host:
+#   - The gate composes its WM client from the repo's OWN shared modules
+#     (common.ui.wm_app_process_contract wire format + the canonical Simple Web
+#     renderer simple_web_render_html_to_pixels_with_engine2d_backend over the
+#     filesystem showcase examples/06_io/ui/browser_common_elements_showcase.html).
+#     The in-tree widget/graphics-2d WM showcase entries do not compile today
+#     (undefined fns), so a faithful gate cannot launder them; the generated client
+#     is a build artifact under BUILD_DIR, not a repo source edit.
+#   - Backend resolution is the engine's own probe
+#     (simple_web_engine2d_resolved_backend_name_with_reason): when Metal resolves
+#     to software the row FAILS with the probe reason carried, never a silent pass.
+#   - RSS is sampled via ps(1) (macOS has no /usr/bin/time -v); the row says so.
+#
+# Fail-closed conventions, identical to the other check scripts:
+#   PASS — <n> backend row(s) checked ...   exit 0
+#   FAIL — ...                              exit 1
+#   ERROR — nothing was checked (<why>)     exit 2
+# A backend whose driver produced no evidence is ERROR; a driver that ran but
+# reported failure, a GPU backend that resolved to a CPU lane, or a frame whose
+# digest/checksum is missing is FAIL. `--selftest` runs first and is fatal.
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+BACKENDS="${BACKENDS:-software cpu_simd vulkan metal}"
+BUILD_DIR="${BUILD_DIR:-build/wm-web2d-retained-perf-evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/wm_web_2d_retained_perf_$(date -u +%F).md}"
+SELFTEST_ONLY=0
+CHROME_CAPTURE=1
+RUN_SIMPLEOS_ROW="${WM_WEB2D_RETAINED_PERF_RUN_SIMPLEOS:-0}"
+SIMPLEOS_TIMEOUT_SECS="${WM_WEB2D_RETAINED_PERF_SIMPLEOS_TIMEOUT_SECS:-1200}"
+PERF_TIMEOUT_SECS="${WM_WEB2D_RETAINED_PERF_PERF_TIMEOUT_SECS:-600}"
+WM_TIMEOUT_SECS="${WM_WEB2D_RETAINED_PERF_WM_TIMEOUT_SECS:-420}"
+VIEWPORT_W="${WM_WEB2D_RETAINED_PERF_WIDTH:-320}"
+VIEWPORT_H="${WM_WEB2D_RETAINED_PERF_HEIGHT:-240}"
+RETAINED_FRAMES="${WM_WEB2D_RETAINED_PERF_FRAMES:-10}"
+WM_EVENTS="${WM_WEB2D_RETAINED_PERF_EVENTS:-5}"
+SHOWCASE_HTML="${WM_WEB2D_RETAINED_PERF_HTML:-examples/06_io/ui/browser_common_elements_showcase.html}"
+DRIVER_SRC="$BUILD_DIR/wm_web_2d_retained_client.spl"
+
+usage() {
+    echo "Usage: sh scripts/check/check-wm-web2d-retained-perf-evidence.shs [--selftest] [--no-chrome-capture]"
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --no-chrome-capture) CHROME_CAPTURE=0 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown-argument:$arg)"; exit 2 ;;
+    esac
+done
+
+# ---- receipt/log reader ---------------------------------------------------------
+# Reads exactly one key from a key=value file. A duplicated key is a malformed
+# receipt and is refused (same discipline as the sibling scripts).
+receipt_field() {
+    _rf_file=$1; _rf_key=$2
+    [ -f "$_rf_file" ] || return 1
+    _rf_count=$(grep -c "^${_rf_key}=" "$_rf_file" 2>/dev/null || echo 0)
+    [ "$_rf_count" = "1" ] || return 1
+    sed -n "s/^${_rf_key}=//p" "$_rf_file"
+}
+
+# ---- retained-frame driver log classifier ---------------------------------------
+# classify_driver_log <log> <requested-backend> -> echoes "<status> <detail>"
+# status in ok|blocked|fail|error. The driver log is a TRANSCRIPT (driver_status
+# advances started -> ready -> done), so each key is read as its LAST occurrence;
+# a key whose value changes across the run (digest drift) is refused. The strict
+# duplicate-refusal receipt_field stays in force for the chrome receipt, which is
+# a single-written artifact.
+DRIVER_REQUIRED_KEYS="driver_status driver_mode driver_backend_requested driver_backend_resolved driver_backend_fallback_reason driver_frame_w driver_frame_h driver_readback_source driver_readback_source_basis driver_render_pixels driver_render_nonzero driver_render_checksum driver_frame_checksum_canon"
+log_field() {
+    _lf_file=$1; _lf_key=$2
+    [ -f "$_lf_file" ] || return 1
+    sed -n "s/^${_lf_key}=//p" "$_lf_file" 2>/dev/null | tail -n 1
+}
+
+classify_driver_log() {
+    _cd_file=$1; _cd_requested=$2
+    if [ ! -f "$_cd_file" ]; then
+        echo "error missing-driver-log"
+        return
+    fi
+    for _cd_key in $DRIVER_REQUIRED_KEYS; do
+        if ! log_field "$_cd_file" "$_cd_key" >/dev/null; then
+            echo "fail missing-key:$_cd_key"
+            return
+        fi
+    done
+    _cd_status=$(log_field "$_cd_file" driver_status)
+    _cd_resolved=$(log_field "$_cd_file" driver_backend_resolved)
+    _cd_digest_values=$(sed -n 's/^driver_frame_sha256=//p' "$_cd_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    case "$_cd_status" in
+        done) : ;;
+        fail) echo "fail driver-reported-failure"; return ;;
+        blocked) echo "blocked $(log_field "$_cd_file" driver_reason)"; return ;;
+        *) echo "fail unknown-driver-status:$_cd_status"; return ;;
+    esac
+    # A claimed frame without a digest is not evidence — refuse it (fail-closed);
+    # two different digests for one run are transcript drift, also refused.
+    if [ "$_cd_digest_values" != "1" ]; then
+        echo "fail missing-or-drifting-frame-digest"
+        return
+    fi
+    # Honest fallback gate: a GPU backend that resolved to a CPU lane is a FAIL of
+    # that backend's claim, with the probe reason carried (never a silent pass).
+    case "$_cd_requested" in
+        metal|vulkan)
+            case "$_cd_resolved" in
+                metal|vulkan) : ;;
+                *) echo "fail backend-fallback:$_cd_requested->$_cd_resolved"; return ;;
+            esac
+            ;;
+    esac
+    echo "ok passed"
+}
+
+# ---- chrome showcase receipt classifier (verbatim sibling discipline) -----------
+CHROME_REQUIRED_KEYS="binary_path binary_size binary_mtime chrome_lib_sha256 backend_stage engine2d_backend_requested engine2d_backend_reported inventory_version catalog_sha256 viewport frame_source reason tabs wall_ms_total pixels_total verdict"
+
+classify_chrome_receipt() {
+    _cc_file=$1
+    if [ ! -f "$_cc_file" ]; then
+        echo "error missing-receipt"
+        return
+    fi
+    for _cc_key in $CHROME_REQUIRED_KEYS; do
+        if ! receipt_field "$_cc_file" "$_cc_key" >/dev/null; then
+            echo "fail missing-or-duplicate-key:$_cc_key"
+            return
+        fi
+    done
+    _cc_tabs=$(receipt_field "$_cc_file" tabs)
+    case "$_cc_tabs" in
+        ''|*[!0-9]*) echo "fail non-numeric-tabs"; return ;;
+    esac
+    if [ "$_cc_tabs" -le 0 ]; then
+        echo "error zero-tabs"
+        return
+    fi
+    _cc_source=$(receipt_field "$_cc_file" frame_source)
+    if [ "$_cc_source" != "chrome" ] && [ "$_cc_source" != "stub-pattern" ]; then
+        echo "fail unknown-frame-source:$_cc_source"
+        return
+    fi
+    _cc_verdict=$(receipt_field "$_cc_file" verdict)
+    # A stub-pattern run can never be `passed` — same laundering protection as the
+    # sibling: hand-editing one key must not turn a synthetic pattern into a claimed
+    # Chrome pass.
+    if [ "$_cc_source" = "stub-pattern" ] && [ "$_cc_verdict" = "passed" ]; then
+        echo "fail stub-pattern-claims-passed"
+        return
+    fi
+    case "$_cc_verdict" in
+        passed) echo "ok passed" ;;
+        environment-blocked) echo "blocked $(receipt_field "$_cc_file" reason)" ;;
+        failed) echo "fail receipt-verdict-failed" ;;
+        could-not-complete-in-time) echo "fail timed-out" ;;
+        *) echo "fail unknown-verdict:$_cc_verdict" ;;
+    esac
+}
+
+# ---- percentile (nearest-rank over integer samples, one per line) ---------------
+percentile() {
+    _p_file=$1; _p_pct=$2
+    LC_ALL=C sort -n "$_p_file" | awk -v pct="$_p_pct" 'NR == 1 { n = 0 } { v[NR] = $1; n = NR } END {
+        if (n == 0) { print ""; exit }
+        r = int((pct * n + 99) / 100)
+        if (r < 1) r = 1
+        if (r > n) r = n
+        print v[r]
+    }'
+}
+
+# ---- selftest -------------------------------------------------------------------
+write_fixture_driver_log() {
+    _wf_file=$1; _wf_status=$2; _wf_requested=$3; _wf_resolved=$4; _wf_digest=$5
+    {
+        echo "driver_status=$_wf_status"
+        echo "driver_reason=no-fixture-reason"
+        echo "driver_mode=wm"
+        echo "driver_backend_requested=$_wf_requested"
+        echo "driver_backend_resolved=$_wf_resolved"
+        echo "driver_backend_fallback_reason="
+        echo "driver_frame_w=320"
+        echo "driver_frame_h=240"
+        echo "driver_readback_source=renderer-cpu-mirror-lane"
+        echo "driver_readback_source_basis=renderer-internal-contract"
+        echo "driver_render_pixels=76800"
+        echo "driver_render_nonzero=76800"
+        echo "driver_render_checksum=329853488256000"
+        echo "driver_frame_checksum_canon=329283806422413"
+        [ "$_wf_digest" = "OMIT" ] || echo "driver_frame_sha256=deadbeef"
+    } > "$_wf_file"
+}
+
+write_fixture_chrome_receipt() {
+    _wf_file=$1; _wf_verdict=$2; _wf_source=$3; _wf_tabs=$4
+    {
+        echo "binary_path=/x/simple"
+        echo "binary_size=1"
+        echo "binary_mtime=2"
+        echo "chrome_lib_sha256="
+        echo "backend_stage=blocked:no-cef-drop"
+        echo "engine2d_backend_requested=vulkan"
+        echo "engine2d_backend_reported=vulkan"
+        echo "inventory_version=web-renderable-feature-inventory-v1"
+        echo "catalog_sha256=deadbeef"
+        echo "viewport=320x180"
+        [ "$_wf_source" = "OMIT" ] || echo "frame_source=$_wf_source"
+        echo "reason=no-cef-drop"
+        echo "tabs=$_wf_tabs"
+        echo "wall_ms_total=100"
+        echo "pixels_total=460800"
+        echo "verdict=$_wf_verdict"
+    } > "$_wf_file"
+}
+
+selftest() {
+    _st_dir=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest-mktemp-failed)"; exit 2; }
+    _st_fail=0
+    _st_n=0
+
+    # 1. good driver log -> ok
+    write_fixture_driver_log "$_st_dir/a.env" done cpu_simd cpu_simd keep
+    _st_n=$((_st_n + 1))
+    case "$(classify_driver_log "$_st_dir/a.env" cpu_simd)" in
+        ok*) : ;;
+        *) echo "selftest FAIL fixture=good-driver-log got=$(classify_driver_log "$_st_dir/a.env" cpu_simd)"; _st_fail=1 ;;
+    esac
+
+    # 2. missing driver log -> error
+    _st_n=$((_st_n + 1))
+    case "$(classify_driver_log "$_st_dir/absent.env" cpu_simd)" in
+        error*) : ;;
+        *) echo "selftest FAIL fixture=missing-driver-log"; _st_fail=1 ;;
+    esac
+
+    # 3. driver status=fail -> fail
+    write_fixture_driver_log "$_st_dir/c.env" fail cpu_simd cpu_simd keep
+    _st_n=$((_st_n + 1))
+    case "$(classify_driver_log "$_st_dir/c.env" cpu_simd)" in
+        fail*) : ;;
+        *) echo "selftest FAIL fixture=driver-status-fail"; _st_fail=1 ;;
+    esac
+
+    # 4. zero timing samples is caught by the caller as error, never a pass: the
+    #    sample-count guard lives in run_backend; here cover the digest sabotage.
+    write_fixture_driver_log "$_st_dir/d.env" done cpu_simd cpu_simd OMIT
+    _st_n=$((_st_n + 1))
+    case "$(classify_driver_log "$_st_dir/d.env" cpu_simd)" in
+        fail*missing-or-drifting-frame-digest*) : ;;
+        *) echo "selftest FAIL fixture=missing-frame-digest"; _st_fail=1 ;;
+    esac
+
+    # 5. metal resolving to software -> fail (honest fallback), reason carried
+    write_fixture_driver_log "$_st_dir/e.env" done metal software keep
+    _st_n=$((_st_n + 1))
+    case "$(classify_driver_log "$_st_dir/e.env" metal)" in
+        fail*'backend-fallback:metal->software'*) : ;;
+        *) echo "selftest FAIL fixture=metal-fallback-to-software"; _st_fail=1 ;;
+    esac
+
+    # 6. blocked driver row carrying its reason -> blocked, not ok
+    write_fixture_driver_log "$_st_dir/f.env" blocked cpu_simd cpu_simd keep
+    _st_n=$((_st_n + 1))
+    case "$(classify_driver_log "$_st_dir/f.env" cpu_simd)" in
+        blocked*) : ;;
+        *) echo "selftest FAIL fixture=driver-blocked"; _st_fail=1 ;;
+    esac
+
+    # 7. good chrome receipt -> ok
+    write_fixture_chrome_receipt "$_st_dir/g.env" passed chrome 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_chrome_receipt "$_st_dir/g.env")" in
+        ok*) : ;;
+        *) echo "selftest FAIL fixture=good-chrome-receipt"; _st_fail=1 ;;
+    esac
+
+    # 8. stub-pattern run claiming passed -> fail (laundering protection)
+    write_fixture_chrome_receipt "$_st_dir/h.env" passed stub-pattern 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_chrome_receipt "$_st_dir/h.env")" in
+        fail*stub-pattern-claims-passed*) : ;;
+        *) echo "selftest FAIL fixture=stub-claims-passed"; _st_fail=1 ;;
+    esac
+
+    # 9. environment-blocked stub run -> blocked with reason
+    write_fixture_chrome_receipt "$_st_dir/i.env" environment-blocked stub-pattern 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_chrome_receipt "$_st_dir/i.env")" in
+        blocked*) : ;;
+        *) echo "selftest FAIL fixture=chrome-environment-blocked"; _st_fail=1 ;;
+    esac
+
+    # 10. percentile nearest-rank over a known sample
+    printf '10\n20\n30\n40\n100\n' > "$_st_dir/samples.env"
+    _st_n=$((_st_n + 1))
+    _p50=$(percentile "$_st_dir/samples.env" 50)
+    _p95=$(percentile "$_st_dir/samples.env" 95)
+    if [ "$_p50" = "30" ] && [ "$_p95" = "100" ]; then
+        :
+    else
+        echo "selftest FAIL fixture=percentile got p50=$_p50 p95=$_p95"
+        _st_fail=1
+    fi
+
+    rm -rf "$_st_dir"
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest-failed, $_st_n fixture(s) run)"
+        exit 2
+    fi
+    echo "selftest: $_st_n/$_st_n fixtures passed"
+}
+
+selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 10 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+# ---- binary identity --------------------------------------------------------------
+# Same probe order as check-chrome-web-showcase-perf.shs; the deployed default
+# bin/simple is the Rust bootstrap seed on this host, so a content probe decides
+# identity (marker string embedded only in the Rust driver), never the path.
+SEED_MARKER='Rust-built Simple binary is a bootstrap seed only'
+is_rust_seed_simple() {
+    _irs_candidate=$1
+    case "$_irs_candidate" in
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+    esac
+    if [ -r "$_irs_candidate" ] && grep -a -q -F "$SEED_MARKER" "$_irs_candidate" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+BIN=${WM_WEB2D_RETAINED_PERF_SIMPLE_BIN:-}
+if [ -z "$BIN" ]; then
+    MAIN_ROOT=$(cd "$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)
+    for cand in \
+        "$ROOT/bin/release/aarch64-apple-darwin-macho/simple" \
+        "$ROOT/bin/release/aarch64-apple-darwin/simple" \
+        "$ROOT/bin/simple" \
+        "${MAIN_ROOT:-/nonexistent}/bin/release/aarch64-apple-darwin-macho/simple" \
+        "${MAIN_ROOT:-/nonexistent}/bin/simple"; do
+        if [ -x "$cand" ]; then BIN=$cand; break; fi
+    done
+fi
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+    echo "wm_web_2d_retained_perf_status=error"
+    echo "wm_web_2d_retained_perf_reason=deployed-binary-not-executable:${BIN:-none}"
+    echo "ERROR — nothing was checked (deployed-binary-not-executable)"
+    exit 2
+fi
+BIN_SIZE=$(stat -f '%z' "$BIN" 2>/dev/null || stat -c '%s' "$BIN")
+BIN_MTIME=$(stat -f '%m' "$BIN" 2>/dev/null || stat -c '%Y' "$BIN")
+if is_rust_seed_simple "$BIN"; then
+    BIN_IDENTITY=rust-seed
+else
+    BIN_IDENTITY=self-hosted
+fi
+
+# ---- source revision (content-sha256, no override allowed) ------------------------
+SOURCE_REVISION_FILES="scripts/check/check-wm-web2d-retained-perf-evidence.shs $SHOWCASE_HTML examples/06_io/ui/web_standards_showcase_gui.spl src/lib/common/ui/wm_app_process_contract.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl"
+SOURCE_REVISION_OVERRIDE_STATUS=none
+if [ -n "${SOURCE_REVISION_FILES_OVERRIDE:-}" ] || [ -n "${SOURCE_REVISION_OVERRIDE:-}" ]; then
+    SOURCE_REVISION_OVERRIDE_STATUS=forbidden
+fi
+compute_source_revision() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum $SOURCE_REVISION_FILES 2>/dev/null | sha256sum | awk '{ print substr($1, 1, 12) }'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 $SOURCE_REVISION_FILES 2>/dev/null | shasum -a 256 | awk '{ print substr($1, 1, 12) }'
+    else
+        echo unknown
+    fi
+}
+SOURCE_REVISION=$(compute_source_revision)
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+# ---- retained-frame WM client driver (build artifact, composed from shared modules)
+cat > "$DRIVER_SRC" <<'SIMPLE'
+# Generated by check-wm-web2d-retained-perf-evidence.shs — do not edit.
+# WM file-bridge client that renders the filesystem web showcase through the
+# canonical Simple Web renderer on a requested Engine2D backend, publishes
+# P6 PPM frames + WmFsFrameReceipts, and records retained-frame render timing.
+# Backend resolution and fallback reason come from the engine's own probe.
+
+use std.io_runtime.{env_get, getpid, file_write, file_read, file_read_bytes, file_exists, time_now_unix_micros, file_hash_sha256_or_empty}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.common.image.ppm_decode.{encode_ppm_p6, decode_ppm_to_argb, PpmImage}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_engine2d_resolved_backend_name_with_reason}
+use common.ui.wm_app_process_contract.{
+    WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV,
+    wm_web_standards_showcase_bridge_request_sized_with_backend,
+    wm_web_standards_showcase_event_path, wm_web_standards_showcase_frame_seq_path,
+    showcase_backend_token,
+    wm_fs_bridge_encode, wm_fs_app_event_seq_path, wm_fs_app_event_decode,
+    wm_fs_frame_receipt, wm_fs_frame_receipt_encode, wm_fs_frame_receipt_path,
+    wm_fs_frame_checksum}
+
+fn _env_or(key: text, fallback: text) -> text:
+    val raw = env_get(key) ?? ""
+    if raw == "":
+        return fallback
+    raw
+
+fn _env_i64(key: text, fallback: i64) -> i64:
+    val raw = env_get(key) ?? ""
+    if raw == "":
+        return fallback
+    raw.to_i64() ?? fallback
+
+fn buffer_stats(pixels: [u32]) -> (i64, i64):
+    var nonzero = 0i64
+    var checksum = 0i64
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        val p = pixels[i]
+        if (p & 0x00FFFFFFu32) != 0u32:
+            nonzero = nonzero + 1
+        checksum = checksum + (p.to_i64() & 0xFFFFFFFF)
+        i = i + 1
+    (nonzero, checksum)
+
+fn publish_frame(frame_path: text, seq_path: text, frame_seq: i64, w: i32, h: i32, pixels: [u32], receipt: text) -> bool:
+    val bytes = encode_ppm_p6(w.to_u32(), h.to_u32(), pixels)
+    if bytes.len() == 0 or not file_write_bytes(frame_path, bytes):
+        return false
+    if not file_write(seq_path, frame_seq.to_text()):
+        return false
+    file_write(wm_fs_frame_receipt_path(frame_path), receipt)
+
+# Canonical content checksum: re-decode the WRITTEN PPM artifact with the repo
+# decoder and sum its ARGB pixels. The renderer's internal u32 buffer is not
+# 0xAARRGGBB (BGRA lineage), so summing it in memory does not describe the
+# artifact; the PPM re-decode is the checksum a third party can recompute.
+fn published_checksum(path: text) -> i64:
+    val bytes = file_read_bytes(path)
+    val decoded = decode_ppm_to_argb(bytes)
+    match decoded:
+        case Ok(img):
+            var sum = 0i64
+            var i = 0
+            val n = img.pixels.len()
+            while i < n:
+                sum = sum + (img.pixels[i].to_i64() & 0xFFFFFFFF)
+                i = i + 1
+            sum
+        case Err(msg):
+            -1
+
+fn render_once(html: text, w: i32, h: i32, resolved: text) -> ([u32], i64):
+    val t0 = time_now_unix_micros()
+    val p = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, resolved)
+    (p, time_now_unix_micros() - t0)
+
+fn paint_frame(mut e: Engine2D, w: i32, h: i32, img: [u32]) -> Engine2D:
+    e.clear(0xFF101522u32)
+    e.draw_rect_filled(0, 0, w, 4, 0xFF2563EBu32)
+    e.draw_image(0, 0, w, h, img)
+    e
+
+fn main() -> i64:
+    val mode = _env_or("WM_WEB2D_DRIVER_MODE", "perf")
+    val requested = _env_or("WM_WEB2D_BACKEND", "software")
+    val html_path = _env_or("WM_WEB2D_HTML", "examples/06_io/ui/browser_common_elements_showcase.html")
+    val w = _env_i64("WM_WEB2D_W", 320).to_i32()
+    val h = _env_i64("WM_WEB2D_H", 240).to_i32()
+    val retained_frames = _env_i64("WM_WEB2D_RETAINED_FRAMES", 15)
+    val max_events = _env_i64("WM_WEB2D_MAX_EVENTS", 5)
+
+    print "driver_status=started"
+    print "driver_mode=" + mode
+    print "driver_backend_requested=" + requested
+    print "driver_showcase_content=" + html_path
+
+    val (resolved, reason) = simple_web_engine2d_resolved_backend_name_with_reason(w, h, requested)
+    print "driver_backend_resolved=" + resolved
+    print "driver_backend_fallback_reason=" + reason
+
+    if not file_exists(html_path):
+        print "driver_status=fail"
+        print "driver_reason=html-not-found:" + html_path
+        return 1
+    val html = file_read(html_path)
+
+    val (first, first_us) = render_once(html, w, h, resolved)
+    val stats = buffer_stats(first)
+    print "driver_render_us_first=" + first_us.to_text()
+    print "driver_render_pixels=" + first.len().to_text()
+    print "driver_render_nonzero=" + stats.0.to_text()
+    print "driver_render_checksum=" + stats.1.to_text()
+
+    # Engine2D create+present+read_pixels_with_source() is load-bearing beyond its
+    # metadata: creating the engine initialises the pinned font registry the web
+    # renderer measures against. Without this block the same program silently
+    # renders the Helvetica platform-fallback lane (different pixels — measured
+    # 2026-09-17). The FRAME PAYLOAD is the renderer's own readback buffer; the
+    # engine readback contributes provenance metadata only (its own pixel buffer
+    # is not used as the frame).
+    var engine = Engine2D.create_with_backend(w, h, resolved)
+    engine = paint_frame(engine, w, h, first)
+    engine.present()
+    val prov = engine.read_pixels_with_source()
+    print "driver_readback_source=" + prov.source
+    print "driver_readback_source_basis=engine-readback-with-source"
+    print "driver_engine_backend_handle=" + prov.backend_handle.to_text()
+    print "driver_engine_device_identity=" + prov.device_identity.to_text()
+    engine.shutdown()
+    print "driver_frame_w=" + w.to_text()
+    print "driver_frame_h=" + h.to_text()
+
+    if mode == "perf":
+        var last = first
+        var i = 1i64
+        while i < retained_frames:
+            val rs = time_now_unix_micros()
+            val p = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, resolved)
+            val us = time_now_unix_micros() - rs
+            val st = buffer_stats(p)
+            last = p
+            print "retained_us_" + i.to_text() + "=" + us.to_text()
+            print "retained_checksum_" + i.to_text() + "=" + st.1.to_text()
+            i = i + 1
+        # Frame proof for the perf lane too: publish the final retained buffer as
+        # a PPM artifact and digest it, so the classifier's digest gate is uniform.
+        val perf_frame_path = _env_or("WM_WEB2D_PERF_FRAME", "")
+        if perf_frame_path != "":
+            val bytes = encode_ppm_p6(w.to_u32(), h.to_u32(), last)
+            if bytes.len() == 0 or not file_write_bytes(perf_frame_path, bytes):
+                print "driver_status=fail"
+                print "driver_reason=perf-frame-write-failed"
+                return 1
+            print "driver_frame_sha256=" + file_hash_sha256_or_empty(perf_frame_path)
+            print "driver_frame_checksum_canon=" + published_checksum(perf_frame_path).to_text()
+        print "driver_status=done"
+        return 0
+
+    # WM file-bridge client mode: bridge first, frame second (the host's window
+    # wait must not sit behind the first render).
+    val bridge_path = env_get(WM_BRIDGE_FILE_ENV) ?? ""
+    val frame_path = env_get(WM_FRAME_FILE_ENV) ?? ""
+    if bridge_path == "" or frame_path == "":
+        print "driver_status=fail"
+        print "driver_reason=missing-bridge-env"
+        return 2
+    val event_path = _env_or(WM_EVENT_FILE_ENV, wm_web_standards_showcase_event_path(frame_path))
+    val seq_path = _env_or(WM_FRAME_SEQ_FILE_ENV, wm_web_standards_showcase_frame_seq_path(frame_path))
+    val pid = getpid()
+    val req = wm_web_standards_showcase_bridge_request_sized_with_backend(pid, frame_path, w + 8, h + 32, showcase_backend_token(requested))
+    if not file_write(bridge_path, wm_fs_bridge_encode(req)):
+        print "driver_status=fail"
+        print "driver_reason=bridge-write-failed"
+        return 1
+    var frame_seq = 1i64
+    val receipt0 = wm_fs_frame_receipt(0, frame_seq, resolved, prov.source, prov.backend_handle, prov.device_identity, first.len(), wm_fs_frame_checksum(first))
+    if not publish_frame(frame_path, seq_path, frame_seq, w, h, first, wm_fs_frame_receipt_encode(receipt0)):
+        print "driver_status=fail"
+        print "driver_reason=frame-write-failed"
+        return 1
+    print "driver_frame_sha256=" + file_hash_sha256_or_empty(frame_path)
+    print "driver_frame_checksum_canon=" + published_checksum(frame_path).to_text()
+    print "driver_status=ready"
+
+    var timing = ""
+    var consumed = 0i64
+    var last_event_seq = 0i64
+    var ticks = 0i64
+    while consumed < max_events and ticks < 2000000:
+        val next_seq = last_event_seq + 1
+        val ev_path = wm_fs_app_event_seq_path(event_path, next_seq)
+        if file_exists(ev_path):
+            val ev = wm_fs_app_event_decode(file_read(ev_path))
+            if ev.seq == next_seq:
+                last_event_seq = next_seq
+                val rs = time_now_unix_micros()
+                val p = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, resolved)
+                val us = time_now_unix_micros() - rs
+                val st = buffer_stats(p)
+                frame_seq = frame_seq + 1
+                val rc = wm_fs_frame_receipt(next_seq, frame_seq, resolved, prov.source, prov.backend_handle, prov.device_identity, p.len(), wm_fs_frame_checksum(p))
+                if not publish_frame(frame_path, seq_path, frame_seq, w, h, p, wm_fs_frame_receipt_encode(rc)):
+                    print "driver_status=fail"
+                    print "driver_reason=frame-refresh-failed"
+                    return 1
+                timing = timing + "evt_seq=" + next_seq.to_text() + " frame_seq=" + frame_seq.to_text() + " render_us=" + us.to_text() + " checksum=" + st.1.to_text() + "\n"
+                file_write(frame_path + ".timing", timing)
+                print "driver_event evt_seq=" + next_seq.to_text() + " frame_seq=" + frame_seq.to_text() + " render_us=" + us.to_text() + " checksum=" + st.1.to_text()
+                consumed = consumed + 1
+                thread_sleep(1)
+                continue
+        thread_sleep(30)
+        ticks = ticks + 1
+    print "driver_events_consumed=" + consumed.to_text()
+    print "driver_status=done"
+    0
+SIMPLE
+
+# ---- WM event writer (wire format pinned by common.ui.wm_app_process_contract) ---
+write_wm_event() {
+    _we_path=$1; _we_seq=$2; _we_kind=$3; _we_x=$4; _we_y=$5; _we_btn=$6; _we_pressed=$7
+    printf 'seq=%s\nkind=%s\nx=%s\ny=%s\nbutton=%s\npressed=%s\nkey_code=0\nch=\nmods=0\nwheel=0\n' \
+        "$_we_seq" "$_we_kind" "$_we_x" "$_we_y" "$_we_btn" "$_we_pressed" > "$_we_path.$_we_seq"
+}
+
+# Wait until file $1 exists and (optionally) contains the fixed string $2, up to
+# $3 seconds. $2 is a literal line fragment (grep -F), not a key=value pattern:
+# the WM bridge wire format has value-less lines such as "kind=create_window".
+wait_for_file() {
+    _wf_path=$1; _wf_key=$2; _wf_deadline=$(( $(date +%s) + $3 ))
+    while [ "$(date +%s)" -lt "$_wf_deadline" ]; do
+        if [ -s "$_wf_path" ]; then
+            if [ -z "$_wf_key" ] || grep -qF "$_wf_key" "$_wf_path" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# Sample the max RSS (KB) of pid $1 while it lives, one sample per $2 seconds.
+sample_rss_max_kb() {
+    _sr_pid=$1; _sr_interval=${2:-1}
+    _sr_max=0
+    while kill -0 "$_sr_pid" 2>/dev/null; do
+        _sr_kb=$(ps -o rss= -p "$_sr_pid" 2>/dev/null | tr -d ' ')
+        case "$_sr_kb" in
+            ''|*[!0-9]*) : ;;
+            *) [ "$_sr_kb" -gt "$_sr_max" ] && _sr_max=$_sr_kb ;;
+        esac
+        sleep "$_sr_interval"
+    done
+    echo "$_sr_max"
+}
+
+CHILD_PIDS=""
+cleanup_children() {
+    for _cc_pid in $CHILD_PIDS; do
+        kill "$_cc_pid" 2>/dev/null || true
+    done
+}
+trap cleanup_children EXIT HUP INT TERM
+
+RUN_PID=""
+run_driver() { # mode backend outdir timeout
+    _rd_mode=$1; _rd_backend=$2; _rd_out=$3; _rd_timeout=$4
+    mkdir -p "$_rd_out"
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_LIMIT=0 \
+    WM_WEB2D_DRIVER_MODE="$_rd_mode" WM_WEB2D_BACKEND="$_rd_backend" \
+    WM_WEB2D_HTML="$SHOWCASE_HTML" WM_WEB2D_W="$VIEWPORT_W" WM_WEB2D_H="$VIEWPORT_H" \
+    WM_WEB2D_RETAINED_FRAMES="$RETAINED_FRAMES" WM_WEB2D_MAX_EVENTS="$WM_EVENTS" \
+    WM_WEB2D_PERF_FRAME="$3/perf.frame.ppm" \
+    WM_SIMPLE_BIN="$BIN" \
+    SIMPLE_WM_APP_MODE=client \
+    SIMPLE_WM_BRIDGE_FILE="$ROOT/$3/wm.bridge" \
+    SIMPLE_WM_FRAME_FILE="$ROOT/$3/wm.frame.ppm" \
+    SIMPLE_WM_EVENT_FILE="$ROOT/$3/wm.frame.ppm.event" \
+    SIMPLE_WM_FRAME_SEQ_FILE="$ROOT/$3/wm.frame.ppm.seq" \
+    timeout "$_rd_timeout" "$BIN" run "$DRIVER_SRC" --mode=interpreter > "$_rd_out/driver.log" 2>&1 &
+    RUN_PID=$!
+    CHILD_PIDS="$CHILD_PIDS $RUN_PID"
+}
+
+# ---- per-backend lane --------------------------------------------------------------
+ROWS_CHECKED=0
+AGG_STATUS=ok
+AGG_REASON=
+AGG_RESOLVED=
+REPORT_ROWS=""
+
+run_backend() {
+    _rb_backend=$1
+    _rb_out="$BUILD_DIR/$_rb_backend"
+    mkdir -p "$_rb_out"
+
+    # Perf lane: retained static-frame re-render distribution.
+    _rb_perf_log="$_rb_out/perf.driver.log"
+    _rb_perf_samples="$_rb_out/perf.samples"
+    _rb_wm_log="$_rb_out/wm.driver.log"
+    _rb_bridge="$_rb_out/wm/wm.bridge"
+    _rb_frame="$_rb_out/wm/wm.frame.ppm"
+    _rb_event="$_rb_out/wm/wm.frame.ppm.event"
+    _rb_seq="$_rb_out/wm/wm.frame.ppm.seq"
+    rm -f "$_rb_perf_log" "$_rb_perf_samples" "$_rb_wm_log" "$_rb_bridge" "$_rb_frame" "$_rb_event" "$_rb_seq" "$_rb_frame.timing" "${_rb_frame}.receipt"
+
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_row=open"
+
+    run_driver perf "$_rb_backend" "$_rb_out/perf" "$PERF_TIMEOUT_SECS"
+    _rb_perf_pid=$RUN_PID
+    wait "$_rb_perf_pid" 2>/dev/null
+    _rb_perf_rc=$?
+    CHILD_PIDS=$(echo " $CHILD_PIDS " | sed "s/ $_rb_perf_pid / /")
+    cp "$_rb_out/perf/driver.log" "$_rb_perf_log" 2>/dev/null || :
+
+    _rb_perf_row_status=error
+    _rb_perf_row_detail="perf-driver-missing-log"
+    _rb_p50=""; _rb_p95=""
+    if [ -f "$_rb_perf_log" ]; then
+        grep -a '^retained_us_' "$_rb_perf_log" | sed 's/^retained_us_[0-9]*=//' > "$_rb_perf_samples"
+        _rb_n=$(wc -l < "$_rb_perf_samples" | tr -d ' ')
+        if [ "$_rb_n" -gt 0 ]; then
+            _rb_p50=$(percentile "$_rb_perf_samples" 50)
+            _rb_p95=$(percentile "$_rb_perf_samples" 95)
+        fi
+        _rb_perf_row=$(classify_driver_log "$_rb_perf_log" "$_rb_backend")
+        _rb_perf_row_status=${_rb_perf_row%% *}
+        _rb_perf_row_detail=${_rb_perf_row#* }
+        if [ "$_rb_perf_rc" -eq 124 ] && [ "$_rb_perf_row_status" = "error" ]; then
+            _rb_perf_row_status=fail
+            _rb_perf_row_detail="perf-timeout"
+        fi
+    fi
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_perf_rc=$_rb_perf_rc"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_perf_status=$_rb_perf_row_status"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_perf_detail=$_rb_perf_row_detail"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_frame_p50_us=${_rb_p50:-unavailable}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_frame_p95_us=${_rb_p95:-unavailable}"
+
+    # WM lane: filesystem launch through the hosted WM file bridge, event-driven
+    # retained frames, RSS sampling while the client lives.
+    run_driver wm "$_rb_backend" "$_rb_out/wm" "$WM_TIMEOUT_SECS"
+    _rb_wm_pid=$RUN_PID
+    _rb_rss_max=0
+    _rb_wm_row_status=error
+    _rb_wm_row_detail="wm-bridge-timeout"
+    _rb_rt_samples="$_rb_out/wm.rt.samples"
+    : > "$_rb_rt_samples"
+    _rb_rss_file="$_rb_out/wm.rss"
+    sample_rss_max_kb "$_rb_wm_pid" 1 > "$_rb_rss_file" 2>/dev/null &
+    _rb_rss_pid=$!
+    if wait_for_file "$_rb_bridge" "kind=create_window" 240; then
+        _rb_bridge_source=$(sed -n 's/^source_path=//p' "$_rb_bridge" | tail -n 1)
+        echo "wm_web_2d_retained_perf_backend_${_rb_backend}_bridge_source=$_rb_bridge_source"
+        if wait_for_file "$_rb_seq" "" "$((WM_TIMEOUT_SECS - 60))"; then
+            # Drive synthetic WM events; time each event->frame-refresh round trip.
+            _ev=1
+            while [ "$_ev" -le "$WM_EVENTS" ]; do
+                case "$_ev" in
+                    1) _k=down; _x=30; _y=40; _b=1; _p=true ;;
+                    2) _k=up; _x=30; _y=40; _b=1; _p=false ;;
+                    3) _k=move; _x=60; _y=50; _b=0; _p=false ;;
+                    4) _k=down; _x=100; _y=80; _b=1; _p=true ;;
+                    *) _k=up; _x=100; _y=80; _b=1; _p=false ;;
+                esac
+                _before=$(cat "$_rb_seq" 2>/dev/null || echo 0)
+                _sent_ms=$(date +%s%N)
+                write_wm_event "$_rb_event" "$_ev" "$_k" "$_x" "$_y" "$_b" "$_p"
+                _deadline=$(( $(date +%s) + 120 ))
+                while [ "$(date +%s)" -lt "$_deadline" ]; do
+                    _now=$(cat "$_rb_seq" 2>/dev/null || echo 0)
+                    if [ "$_now" -gt "$_before" ] 2>/dev/null; then
+                        _done_ms=$(date +%s%N)
+                        echo $(( (_done_ms - _sent_ms) / 1000000 )) >> "$_rb_rt_samples"
+                        break
+                    fi
+                    sleep 0.2 2>/dev/null || sleep 1
+                done
+                _ev=$((_ev + 1))
+            done
+        fi
+        # The RSS sampler runs concurrently with the event loop (started above);
+        # it returns once the driver exits on its own (max_events consumed).
+        wait "$_rb_wm_pid" 2>/dev/null
+        _rb_wm_rc=$?
+        CHILD_PIDS=$(echo " $CHILD_PIDS " | sed "s/ $_rb_wm_pid / /")
+        cp "$_rb_out/wm/driver.log" "$_rb_wm_log" 2>/dev/null || :
+        if [ -f "$_rb_wm_log" ]; then
+            _rb_wm_row=$(classify_driver_log "$_rb_wm_log" "$_rb_backend")
+            _rb_wm_row_status=${_rb_wm_row%% *}
+            _rb_wm_row_detail=${_rb_wm_row#* }
+        fi
+        [ "$_rb_wm_rc" -eq 124 ] && [ "$_rb_wm_row_status" = "error" ] && {
+            _rb_wm_row_status=fail
+            _rb_wm_row_detail="wm-timeout"
+        }
+    else
+        kill "$_rb_wm_pid" 2>/dev/null || true
+        wait "$_rb_wm_pid" 2>/dev/null
+        CHILD_PIDS=$(echo " $CHILD_PIDS " | sed "s/ $_rb_wm_pid / /")
+        cp "$_rb_out/wm/driver.log" "$_rb_wm_log" 2>/dev/null || :
+    fi
+    kill "$_rb_rss_pid" 2>/dev/null || true
+    wait "$_rb_rss_pid" 2>/dev/null
+    _rb_rss_max=$(cat "$_rb_rss_file" 2>/dev/null || echo 0)
+    case "$_rb_rss_max" in ''|*[!0-9]*) _rb_rss_max=0 ;; esac
+
+    _rb_rt_p50=""; _rb_rt_p95=""
+    _rb_rt_n=$(wc -l < "$_rb_rt_samples" | tr -d ' ')
+    if [ "$_rb_rt_n" -gt 0 ]; then
+        _rb_rt_p50=$(percentile "$_rb_rt_samples" 50)
+        _rb_rt_p95=$(percentile "$_rb_rt_samples" 95)
+    fi
+    _rb_resolved=$(log_field "$_rb_wm_log" driver_backend_resolved 2>/dev/null || echo "")
+    [ -z "$_rb_resolved" ] && _rb_resolved=$(log_field "$_rb_perf_log" driver_backend_resolved 2>/dev/null || echo "")
+    _rb_fallback=$(log_field "$_rb_wm_log" driver_backend_fallback_reason 2>/dev/null || echo "")
+    [ -z "$_rb_fallback" ] && _rb_fallback=$(log_field "$_rb_perf_log" driver_backend_fallback_reason 2>/dev/null || echo "")
+    _rb_readback=$(log_field "$_rb_wm_log" driver_readback_source 2>/dev/null || echo "")
+    _rb_checksum=$(log_field "$_rb_wm_log" driver_frame_checksum_canon 2>/dev/null || echo "")
+    [ -z "$_rb_checksum" ] && _rb_checksum=$(log_field "$_rb_perf_log" driver_frame_checksum_canon 2>/dev/null || echo "")
+    _rb_digest=$(log_field "$_rb_wm_log" driver_frame_sha256 2>/dev/null || echo "")
+    _rb_nonzero=$(log_field "$_rb_wm_log" driver_render_nonzero 2>/dev/null || echo "")
+    _rb_receipt_file="${_rb_frame}.receipt"
+    _rb_receipt_status=missing
+    if [ -f "$_rb_receipt_file" ]; then
+        _rb_receipt_status=present
+        for _rk in event_seq frame_seq backend readback_source pixel_count checksum; do
+            grep -q "^${_rk}=" "$_rb_receipt_file" || _rb_receipt_status="missing-key:$_rk"
+        done
+    fi
+
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_wm_status=$_rb_wm_row_status"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_wm_detail=$_rb_wm_row_detail"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_wm_roundtrip_p50_ms=${_rb_rt_p50:-unavailable}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_wm_roundtrip_p95_ms=${_rb_rt_p95:-unavailable}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_max_rss_kb=${_rb_rss_max:-0}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_rss_provenance=ps-sampled"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_backend_resolved=${_rb_resolved:-unknown}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_fallback_reason=${_rb_fallback:-none}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_readback_source=${_rb_readback:-unknown}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_checksum=${_rb_checksum:-unavailable}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_frame_sha256=${_rb_digest:-unavailable}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_nonzero_pixels=${_rb_nonzero:-unavailable}"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_frame_receipt_status=$_rb_receipt_status"
+
+    # Row verdict: the WM lane is the primary evidence; the perf lane must agree.
+    _rb_row_status=$_rb_wm_row_status
+    _rb_row_detail=$_rb_wm_row_detail
+    if [ "$_rb_wm_row_status" = "ok" ] && [ "$_rb_perf_row_status" != "ok" ]; then
+        _rb_row_status=$_rb_perf_row_status
+        _rb_row_detail="perf-lane:$_rb_perf_row_detail"
+    fi
+    if [ "$_rb_wm_row_status" = "ok" ] && [ "$_rb_receipt_status" != "present" ]; then
+        _rb_row_status=fail
+        _rb_row_detail="frame-receipt-$_rb_receipt_status"
+    fi
+    if [ "$_rb_wm_row_status" = "ok" ] && [ "$_rb_rt_n" -le 0 ]; then
+        _rb_row_status=error
+        _rb_row_detail="zero-wm-timing-samples"
+    fi
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_status=$_rb_row_status"
+    echo "wm_web_2d_retained_perf_backend_${_rb_backend}_detail=$_rb_row_detail"
+
+    ROWS_CHECKED=$((ROWS_CHECKED + 1))
+    if [ "$_rb_row_status" = "fail" ]; then
+        AGG_STATUS=fail
+        AGG_REASON="$_rb_backend:$_rb_row_detail"
+    elif [ "$_rb_row_status" = "error" ] && [ "$AGG_STATUS" = "ok" ]; then
+        AGG_STATUS=error
+        AGG_REASON="$_rb_backend:$_rb_row_detail"
+    elif [ "$_rb_row_status" = "blocked" ] && [ "$AGG_STATUS" = "ok" ]; then
+        AGG_STATUS=blocked
+        AGG_REASON="$_rb_backend:$_rb_row_detail"
+    fi
+    AGG_RESOLVED="${AGG_RESOLVED}${AGG_RESOLVED:+,}${_rb_backend}:${_rb_resolved:-unknown}"
+
+    REPORT_ROWS="$REPORT_ROWS
+| $_rb_backend | ${VIEWPORT_W}x${VIEWPORT_H} | $_rb_backend -> ${_rb_resolved:-unknown} | ${_rb_fallback:-none} | $_rb_readback | ${_rb_p50:-unavailable} | ${_rb_p95:-unavailable} | ${_rb_rt_p50:-unavailable} | ${_rb_rt_p95:-unavailable} | ${_rb_rss_max:-0} | ${_rb_checksum:-unavailable} | ${_rb_digest:-unavailable} | $_rb_row_status | $_rb_row_detail |"
+}
+
+for backend in $BACKENDS; do
+    run_backend "$backend"
+done
+
+if [ "$ROWS_CHECKED" -le 0 ]; then
+    echo "wm_web_2d_retained_perf_status=error"
+    echo "wm_web_2d_retained_perf_reason=zero-backends-checked"
+    echo "ERROR — nothing was checked (zero backends checked)"
+    exit 2
+fi
+
+# ---- chrome capture lane (sibling mechanism: src/app/ui/chrome_showcase/main.spl) --
+CHROME_LANE_STATUS=not-requested
+CHROME_LANE_REASON=
+CHROME_ROWS=""
+CHROME_ERROR_COUNT=0
+if [ "$CHROME_CAPTURE" -eq 1 ]; then
+    CHROME_LANE_STATUS=ok
+    CHROME_LANE_REASON=none
+    CHROME_SHIM="build/chrome-render/libsimple_chrome_render.dylib"
+    [ -f "$ROOT/$CHROME_SHIM" ] || CHROME_SHIM="build/chrome-render/libsimple_chrome_render.so"
+    for backend in $BACKENDS; do
+        _ch_out="$BUILD_DIR/chrome_$backend"
+        mkdir -p "$_ch_out"
+        SIMPLE_2D_BACKEND="$backend" \
+        SIMPLE_CHROME_SHOWCASE_OUT="$_ch_out" \
+        SIMPLE_SHOWCASE_BINARY="$BIN" \
+        SIMPLE_SHOWCASE_BINARY_SIZE="$BIN_SIZE" \
+        SIMPLE_SHOWCASE_BINARY_MTIME="$BIN_MTIME" \
+        SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+            timeout "$PERF_TIMEOUT_SECS" "$BIN" run "$ROOT/src/app/ui/chrome_showcase/main.spl" > "$_ch_out/run.log" 2>&1
+        _ch_rc=$?
+        _ch_row=$(classify_chrome_receipt "$_ch_out/receipt.env")
+        _ch_status=${_ch_row%% *}
+        _ch_detail=${_ch_row#* }
+        _ch_source=$(receipt_field "$_ch_out/receipt.env" frame_source 2>/dev/null || echo "")
+        _ch_reported=$(receipt_field "$_ch_out/receipt.env" engine2d_backend_reported 2>/dev/null || echo "")
+        _ch_verdict=$(receipt_field "$_ch_out/receipt.env" verdict 2>/dev/null || echo "")
+        if [ "$_ch_status" = "error" ] && [ "$_ch_rc" -eq 124 ]; then
+            _ch_status=fail
+            _ch_detail="chrome-timeout"
+        fi
+        echo "wm_web_2d_retained_perf_chrome_${backend}_run_rc=$_ch_rc"
+        echo "wm_web_2d_retained_perf_chrome_${backend}_status=$_ch_status"
+        echo "wm_web_2d_retained_perf_chrome_${backend}_detail=$_ch_detail"
+        echo "wm_web_2d_retained_perf_chrome_${backend}_frame_source=${_ch_source:-unknown}"
+        echo "wm_web_2d_retained_perf_chrome_${backend}_backend_reported=${_ch_reported:-unknown}"
+        echo "wm_web_2d_retained_perf_chrome_${backend}_verdict=${_ch_verdict:-unknown}"
+        if [ "$_ch_status" = "fail" ]; then
+            CHROME_LANE_STATUS=fail
+            CHROME_LANE_REASON="$backend:$_ch_detail"
+        elif [ "$_ch_status" = "error" ]; then
+            CHROME_ERROR_COUNT=$((CHROME_ERROR_COUNT + 1))
+        fi
+        CHROME_ROWS="$CHROME_ROWS
+| $backend | $_ch_status | ${_ch_source:-unknown} | ${_ch_reported:-unknown} | ${_ch_verdict:-unknown} | $_ch_detail |"
+    done
+else
+    CHROME_LANE_REASON="--no-chrome-capture"
+fi
+if [ "$CHROME_CAPTURE" -eq 1 ] && [ "$CHROME_LANE_STATUS" = "ok" ]; then
+    _ch_total=$(echo $BACKENDS | wc -w | tr -d ' ')
+    if [ "$CHROME_ERROR_COUNT" = "$_ch_total" ]; then
+        CHROME_LANE_STATUS=error
+        CHROME_LANE_REASON="all-chrome-runs-error:no-receipt-produced"
+    fi
+fi
+echo "wm_web_2d_retained_perf_chrome_lane_status=$CHROME_LANE_STATUS"
+echo "wm_web_2d_retained_perf_chrome_lane_reason=$CHROME_LANE_REASON"
+
+# ---- SimpleOS/QEMU row (wired, bounded, non-blocking) ------------------------------
+SIMPLEOS_STATUS=skipped
+SIMPLEOS_REASON="run-not-requested:set-WM_WEB2D_RETAINED_PERF_RUN_SIMPLEOS=1"
+SIMPLEOS_REPORT=""
+if [ "$RUN_SIMPLEOS_ROW" = "1" ]; then
+    _so_out="$BUILD_DIR/simpleos"
+    mkdir -p "$_so_out"
+    set +e
+    env BUILD_DIR="$_so_out" REPORT_PATH="$_so_out/report.md" \
+        timeout "$SIMPLEOS_TIMEOUT_SECS" sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > "$_so_out/run.log" 2>&1
+    _so_rc=$?
+    set -e
+    if [ "$_so_rc" -eq 124 ]; then
+        SIMPLEOS_STATUS=skipped
+        SIMPLEOS_REASON="bounded-timeout:${SIMPLEOS_TIMEOUT_SECS}s-exceeded"
+    elif [ "$_so_rc" -eq 0 ]; then
+        SIMPLEOS_STATUS=pass
+        SIMPLEOS_REASON="simpleos-wm-fullscreen-evidence-passed"
+    else
+        SIMPLEOS_STATUS=skipped
+        SIMPLEOS_REASON="simpleos-row-unavailable:rc=$_so_rc"
+    fi
+    SIMPLEOS_REPORT="$_so_out/report.md"
+fi
+echo "wm_web_2d_retained_perf_simpleos_status=$SIMPLEOS_STATUS"
+echo "wm_web_2d_retained_perf_simpleos_reason=$SIMPLEOS_REASON"
+
+# ---- aggregate + report -------------------------------------------------------------
+MS_PER_PX=unavailable
+
+{
+    echo "# WM Web 2D Retained Perf Evidence — $(date -u +%FT%TZ)"
+    echo
+    echo "Retained evidence gate for"
+    echo "doc/08_tracking/bug/gui_web_2d_retained_metal_simd_wm_perf_evidence_gap_2026-07-06.md."
+    echo "The hosted-WM lane launches the web showcase from the filesystem through the"
+    echo "WM file-bridge protocol (bridge request -> P6 PPM frame + seq + WmFsFrameReceipt),"
+    echo "drives synthetic WM events, and records per-retained-frame timing; the perf lane"
+    echo "records the retained static-frame re-render distribution. Chrome capture reuses"
+    echo "src/app/ui/chrome_showcase/main.spl verbatim (check-chrome-web-showcase-perf.shs"
+    echo "mechanism). No capture mechanism was invented for this gate."
+    echo
+    echo "## Verdict"
+    echo
+    echo "- status: $AGG_STATUS"
+    echo "- reason: ${AGG_REASON:-none}"
+    echo "- backends_checked: $ROWS_CHECKED"
+    echo "- backends: $BACKENDS"
+    echo "- viewport: ${VIEWPORT_W}x${VIEWPORT_H}"
+    echo "- retained_frames_per_row: $RETAINED_FRAMES"
+    echo "- wm_events_per_row: $WM_EVENTS"
+    echo "- showcase_content: $SHOWCASE_HTML"
+    echo "- source_revision: $SOURCE_REVISION"
+    echo "- source_revision_kind: content-sha256"
+    echo "- source_revision_files: $SOURCE_REVISION_FILES"
+    echo "- source_revision_override_status: $SOURCE_REVISION_OVERRIDE_STATUS"
+    echo "- simple_bin: $BIN"
+    echo "- simple_bin_size: $BIN_SIZE"
+    echo "- simple_bin_mtime: $BIN_MTIME"
+    echo "- simple_bin_identity: $BIN_IDENTITY"
+    echo "- binary_identity_note: content probe for the Rust seed marker; path is never decisive"
+    echo "- rss_provenance: ps-sampled max KB while the WM client lived (no /usr/bin/time -v on macOS)"
+    echo "- readback_provenance_note: engine read_pixels_with_source() tag after a real present on the resolved backend; the frame payload is the renderer readback buffer"
+    echo "- chrome_lane_status: $CHROME_LANE_STATUS"
+    echo "- chrome_lane_reason: $CHROME_LANE_REASON"
+    echo "- simpleos_status: $SIMPLEOS_STATUS"
+    echo "- simpleos_reason: $SIMPLEOS_REASON"
+    echo
+    echo "## Hosted WM retained rows (one per requested backend)"
+    echo
+    echo '| requested | viewport | backend resolved | fallback reason | readback source | frame p50 us | frame p95 us | WM round-trip p50 ms | WM round-trip p95 ms | max RSS KB | checksum | frame sha256 | status | detail |'
+    echo '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
+    printf '%s\n' "$REPORT_ROWS"
+    if [ "$CHROME_CAPTURE" -eq 1 ]; then
+        echo
+        echo "## Chrome capture rows (sibling mechanism)"
+        echo
+        echo '| backend | status | frame_source | backend_reported | verdict | detail |'
+        echo '|---|---|---|---|---|---|'
+        printf '%s\n' "$CHROME_ROWS"
+    fi
+    echo
+    echo "## Evidence index"
+    echo
+    echo "- build dir: $BUILD_DIR"
+    for backend in $BACKENDS; do
+        echo "- $backend perf driver log: $BUILD_DIR/$backend/perf.driver.log"
+        echo "- $backend perf frame: $BUILD_DIR/$backend/perf/perf.frame.ppm"
+        echo "- $backend wm driver log: $BUILD_DIR/$backend/wm.driver.log"
+        echo "- $backend wm frame: $BUILD_DIR/$backend/wm/wm.frame.ppm"
+        echo "- $backend wm receipt: $BUILD_DIR/$backend/wm/wm.frame.ppm.receipt"
+        echo "- $backend wm timing: $BUILD_DIR/$backend/wm/wm.frame.ppm.timing"
+    done
+    if [ -n "$SIMPLEOS_REPORT" ]; then
+        echo "- simpleos report: $SIMPLEOS_REPORT"
+    fi
+} > "$REPORT_PATH"
+
+echo "wm_web_2d_retained_perf_report_path=$REPORT_PATH"
+echo "wm_web_2d_retained_perf_source_revision=$SOURCE_REVISION"
+echo "wm_web_2d_retained_perf_source_revision_override_status=$SOURCE_REVISION_OVERRIDE_STATUS"
+echo "wm_web_2d_retained_perf_simple_bin=$BIN"
+echo "wm_web_2d_retained_perf_simple_bin_size=$BIN_SIZE"
+echo "wm_web_2d_retained_perf_simple_bin_mtime=$BIN_MTIME"
+echo "wm_web_2d_retained_perf_simple_bin_identity=$BIN_IDENTITY"
+echo "wm_web_2d_retained_perf_status=$AGG_STATUS"
+echo "wm_web_2d_retained_perf_reason=${AGG_REASON:-none}"
+echo "wm_web_2d_retained_perf_backend_resolved=$AGG_RESOLVED"
+echo "wm_web_2d_retained_perf_rows=$ROWS_CHECKED"
+echo "wm_web_2d_retained_perf_ms_per_px=$MS_PER_PX"
+
+if [ "$SOURCE_REVISION_OVERRIDE_STATUS" = "forbidden" ]; then
+    echo "FAIL — $ROWS_CHECKED backend row(s) checked, source-revision-override-forbidden"
+    exit 1
+fi
+if [ "$AGG_STATUS" = "error" ]; then
+    echo "ERROR — nothing was checked ($AGG_REASON)"
+    exit 2
+fi
+if [ "$AGG_STATUS" = "fail" ]; then
+    echo "FAIL — $ROWS_CHECKED backend row(s) checked, $AGG_REASON"
+    exit 1
+fi
+echo "PASS — $ROWS_CHECKED backend row(s) checked across $(echo $BACKENDS | wc -w | tr -d ' ') backend(s), status=$AGG_STATUS reason=${AGG_REASON:-none}"
+exit 0

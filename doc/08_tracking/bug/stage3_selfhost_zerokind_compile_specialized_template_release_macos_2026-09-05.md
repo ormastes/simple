@@ -1,8 +1,18 @@
-# Stage 3 self-host fails: E-MIR-TYPE-ZeroKind on `compile_specialized_template_release` scope-tail (macOS arm64)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-09-16 — ZeroKind root cause fixed on main before the frozen repro commit
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+Closed during the 2026-09-16 macOS bug/todo db sweep. The recorded ZeroKind
+victim was the corrupt-aggregate class, cleared on main by 2c89727c11c
+(2026-09-04, "stop turning a nil Optional<aggregate> into a zeroed aggregate"),
+documented in f859550a42c (0 E-MIR-TYPE-ZeroKind raises in every Stage-3 run
+after); the frozen repro commit 5418d2075bb predates the fix. The later Stage-3
+name-resolution failure is tracked separately in
+hir_unresolved_first_decl_is_decimal_digit_full_closure_2026-09-04.md. The
+in-file status body remains the authoritative record and the repro was not
+re-run this pass. Re-open with a fresh dated repro if the symptom returns.
+
+---
+
+# Stage 3 self-host fails: E-MIR-TYPE-ZeroKind on `compile_specialized_template_release` scope-tail (macOS arm64)
 
 **Date:** 2026-09-05
 **Status:** OPEN — blocks the adhoc full-CLI lane at `5418d2075bb` on this host
@@ -261,4 +271,3 @@ Second attempt, 11:28 local: 37 GiB free, no peer bootstrap; worktree
 `<scratch>/zk-wt` at `5418d2075bb` recreated, watchdog re-armed, the same
 `--stop-after-stage2` command started (log: `<scratch>/zk-stage2-build.log`).
 Outcome recorded below when known.
-

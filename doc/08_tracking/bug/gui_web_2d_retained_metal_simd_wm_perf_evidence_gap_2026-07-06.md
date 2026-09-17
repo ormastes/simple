@@ -1,7 +1,81 @@
+## Closed 2026-09-17 — retained WM Web 2D perf evidence gate landed and ran honestly (macOS sweep)
+
+The retained evidence gate this record asked for now exists and has run end to end:
+`scripts/check/check-wm-web2d-retained-perf-evidence.shs` (modeled on
+`check-chrome-web-showcase-perf.shs`, launch/capture pattern from
+`check-hosted-wm-capture-evidence.shs`, fail-closed PASS/FAIL/ERROR conventions,
+10-fixture fatal selftest). Report:
+`doc/09_report/wm_web_2d_retained_perf_2026-09-17.md`.
+
+2026-09-17 run on macOS/aarch64 (source revision `3cbb169cc06b`), one retained row
+per backend at a bounded 320x240 viewport through the hosted WM file bridge
+(bridge request → P6 PPM frame + seq + `WmFsFrameReceipt`, 5 synthetic WM events,
+ps-sampled RSS, PPM re-decode checksums):
+
+- **cpu_simd — ok.** frame p50/p95 11,588,947/11,710,583 us; WM event→frame
+  round-trip p50/p95 12,421/13,448 ms; max RSS sampled; receipt event_seq=5
+  frame_seq=6; readback `cpu_mirror`; canonical checksum 329283806422413 with
+  byte parity against the existing hosted `web_standards_showcase_gui.spl` client.
+- **metal — fail, honest fallback receipt.** Engine probe resolved
+  `metal -> software` with reason `Metal SFFI not available`; the row fails closed
+  per this record's "fail honestly when Metal resolves to software", with the
+  receipt carrying `backend=software` and timing recorded on the fallback lane.
+- **vulkan — error, honest.** Probe resolves a device, but the deployed binary's
+  vulkan route lacks `rt_vulkan_copy_to_buffer_u32`; no timing fabricated.
+- **software — ok** (same evidence shape as cpu_simd; p50/p95
+  11,223,871/11,286,485 us; round-trip 12,198/13,049 ms; 1,488 KB max RSS).
+- Chrome capture lane (sibling mechanism): all rows honest error — the deployed
+  binary lacks `spl_wffi_call_i64_into_bytes`; missing receipt = ERROR, never a pass.
+- SimpleOS/QEMU row: wired but skipped-with-reason by default (bounded, non-blocking).
+
+The absolute times are interpreted-lane figures (a JIT HIR fallback dropped the
+driver module to the interpreter during this run); the evidence claim is the
+existence and honesty of the retained rows, not a native frame-rate claim. Re-open
+with a fresh dated repro if a retained row ever claims Metal timing without a device
+readback, or if the cpu lanes regress below their recorded distributions.
+
+---
+
 # GUI Web 2D retained Metal/SIMD WM perf evidence gap
 
+## 2026-09-17 update (macOS sweep)
+
+The requested retained evidence gate did not exist at the 2026-09-16 triage; it
+does now. `scripts/check/check-wm-web2d-retained-perf-evidence.shs` launches the
+web showcase **from the filesystem** through the hosted WM file-bridge protocol
+(the `check-hosted-wm-capture-evidence.shs` launch pattern, which recorded no
+timing — this gate adds the timing), across `software cpu_simd vulkan metal`
+(the `check-chrome-web-showcase-perf.shs` matrix plus the two backends this bug
+required), and records per retained frame: viewport, backend requested/resolved,
+source revision (content-sha256, override forbidden), readback provenance
+(engine `read_pixels_with_source()` tag), p50/p95 (nearest-rank over per-frame
+samples), RSS (ps-sampled, provenance carried), fallback status, and checksum
+(PPM re-decode, independently recomputed during bring-up). Fail-closed conventions
+match the sibling: missing driver evidence is ERROR, a failed/fallback GPU claim
+is FAIL, a zero-sample row is never a pass, and a stub/laundering receipt shape is
+refused by the classifiers (10-fixture selftest, fatal).
+
+The 2026-09-17 run produced honest retained rows for cpu_simd (ok) and metal
+(honest fallback receipt: `backend-fallback:metal->software`, probe reason
+`Metal SFFI not available`), satisfying this record's core ask; see
+`## Closed 2026-09-17` above and `doc/09_report/wm_web_2d_retained_perf_2026-09-17.md`
+for the full measured rows (including the vulkan and chrome-lane honest failures
+and the SimpleOS skipped-with-reason row). Gate stdout transcript:
+`build/wm-web2d-retained-probe/full_run6.log`; per-backend artifacts under
+`build/wm-web2d-retained-perf-evidence/<backend>/` (driver logs, per-frame
+samples, frames, receipts, timing files).
+
+Known limits carried forward (none block the closure criterion): absolute timing
+is interpreter-lane (JIT HIR fallback observed; the 4K/200 FPS contract remains
+with `check-widget-showcase-4k-200fps.shs` on the self-hosted release lane); the
+deployed binary's vulkan/chrome ABI surface is missing two externs (recorded as
+honest errors, not gate defects); the in-tree widget/graphics-2d WM showcase
+entries currently fail to compile (undefined fns), so the gate composes its WM
+client from the repo's shared renderer + contract modules as a build artifact.
+
+
 - **Date:** 2026-07-06
-- **Status:** open
+- **Status:** CLOSED 2026-09-17 (retained evidence gate landed and ran honestly — see the `## Closed 2026-09-17` header and the `## 2026-09-17 update (macOS sweep)` section below; originally open)
 - **Severity:** high
 - **Area:** GUI Web 2D, Engine2D Metal/SIMD, hosted WM, SimpleOS/QEMU WM
 

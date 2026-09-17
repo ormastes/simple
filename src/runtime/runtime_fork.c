@@ -619,3 +619,90 @@ void rt_fork_child_exit(int64_t exit_code) {
 }
 
 #endif /* _WIN32 / POSIX */
+
+/* ================================================================
+ * Crash Signal Handler (SIGSEGV / SIGBUS)
+ * ================================================================
+ * Moved here verbatim from runtime.c so the seed core-C capsule compiles
+ * it: native_project/tools.rs deliberately omits runtime.c (wholesale
+ * inclusion collides with runtime_native.c), while this file is a member
+ * of BOTH capsules' source lists (seed tools.rs and the pure-Simple
+ * 70.backend/backend/runtime_compiler.spl). Installation reaches here two
+ * ways: the STRONG spl_init_args in runtime.c (pure-Simple lane) calls
+ * rt_install_crash_handler() at process start, and the WEAK spl_init_args
+ * in runtime_native.c — the only definition the seed capsule links — now
+ * carries the same call. Installing twice is harmless: sigaction with the
+ * same handler and flags is idempotent.
+ * See doc/08_tracking/bug/crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06.md. */
+#ifndef _WIN32
+
+#include <execinfo.h>
+
+/* Classify a fault from siginfo_t.si_code.
+ *
+ * Phase 5 of doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md:
+ * si_addr alone cannot tell a wild-pointer dereference apart from a fault the
+ * process brought on itself by exhausting a resource, and the two need
+ * different operator responses (fix the pointer bug vs. raise the limit).
+ * Pure lookup, no allocation, no locking — safe to call from a signal handler. */
+static const char* _spl_fault_class(int signum, int sicode) {
+    if (sicode == SI_USER) return "delivered by kill() — not a genuine fault";
+#ifdef SI_KERNEL
+    if (sicode == SI_KERNEL) return "kernel-raised fault";
+#endif
+    if (signum == SIGSEGV) {
+        if (sicode == SEGV_MAPERR) return "address not mapped — wild/null pointer";
+        /* A guard page (stack overflow, or an mmap'd region past a limit) is
+         * mapped but not accessible, so a resource-limit violation lands here
+         * rather than on SEGV_MAPERR. */
+        if (sicode == SEGV_ACCERR) return "permission denied on a mapped page — guard page / memory-limit violation";
+#ifdef SEGV_BNDERR
+        if (sicode == SEGV_BNDERR) return "bounds-check violation";
+#endif
+        return "unclassified segmentation fault";
+    }
+    if (sicode == BUS_ADRALN) return "misaligned address";
+    if (sicode == BUS_ADRERR) return "nonexistent physical address";
+    if (sicode == BUS_OBJERR) return "object-specific hardware error";
+    return "unclassified bus error";
+}
+
+static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
+    (void)ucontext;
+    const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
+    int sicode = info->si_code;
+
+    /* Use write() not fprintf — async-signal-safe */
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "\n[simple-runtime] Fatal: %s at address %p (si_code=%d: %s)\n",
+        signame, info->si_addr, sicode, _spl_fault_class(signum, sicode));
+    if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
+
+    /* Backtrace */
+    void *frames[32];
+    int nframes = backtrace(frames, 32);
+    if (nframes > 0) {
+        write(STDERR_FILENO, "Backtrace:\n", 11);
+        backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
+    }
+
+    /* Exit with signal-appropriate code */
+    _exit(128 + signum);
+}
+
+int64_t rt_install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = _spl_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+
+    int ok = 1;
+    if (sigaction(SIGSEGV, &sa, NULL) == -1) ok = 0;
+    if (sigaction(SIGBUS, &sa, NULL) == -1) ok = 0;
+    return ok;
+}
+#else
+int64_t rt_install_crash_handler(void) { return 0; }
+#endif /* _WIN32 */

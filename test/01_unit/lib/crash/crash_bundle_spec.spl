@@ -2,14 +2,25 @@
 DS7 (mission-critical robustness plan, Batch D, lane crash-native) —
 CrashBundleV1 spec.
 
-Builds a bundle from a SYNTHETIC failure (this spec never raises a real
-SIGSEGV/SIGABRT — the C runtime's `rt_install_crash_handler` is not
-reachable from Simple code today; see
-src/lib/nogc_sync_mut/crash/crash_bundle.spl's header comment and
-doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md for the
-extern gap that blocks a real signal -> Simple hook). Instead this asserts
-the CrashBundleV1 data model + SDN serialization + std.log ring-record
-round-trip that ARE reachable today.
+The CrashBundleV1 examples below build a bundle from a SYNTHETIC failure
+(they never raise a real signal). The final describe block is Phase 2 of
+doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md: it drives a
+REAL forked SIGSEGV through the C runtime's crash handler
+(rt_install_crash_handler, src/runtime/runtime_fork.c since 2026-09-16,
+installed at process start from both the strong runtime.c spl_init_args and
+the weak runtime_native.c fallback). That example feature-detects the
+deployed tool's fork bridge by probing bin/simple's symbol table with nm —
+calling rt_fork_child_setup() to nil-gate is impossible because `simple
+test` forces the interpreter lane, where an unbacked extern call is a hard
+error rather than a nil (doc/08_tracking/bug/
+unregistered_extern_silent_nil_2026-08-01.md). On the Rust seed (whose
+capsule lacks the fork bridge; see doc/08_tracking/bug/
+crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06.md) the
+example records a visible skip instead of a red. On a deployed binary with
+the bridge it asserts the parent-side evidence named in the bug record's
+unblock condition: rt_fork_parent_wait(pid, 10000) == 139, the child is
+WIFEXITED (not WIFSIGNALED), and the captured stderr carries both the
+"[simple-runtime] Fatal:" banner and the "Backtrace:" dump.
 """
 
 use std.spec
@@ -18,6 +29,33 @@ use std.nogc_sync_mut.crash.crash_bundle.{
 }
 use std.log.{SUBSYS_TEST, LOG_ERROR, log_info_subsys, log_error_subsys}
 use std.fs.{read_file, file_exists}
+
+# Fork-bridge + raw-pointer externs for the Phase 2 example below
+# (src/runtime/runtime_fork.c and the runtime memory family). They are only
+# CALLED after _deployed_tool_has_fork_bridge() proves the deployed tool
+# exports them — under the forced-interpreter `simple test` lane an unbacked
+# extern call is a hard error, not a nil.
+extern fn rt_fork_child_setup() -> i64
+extern fn rt_fork_parent_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_fork_parent_stderr() -> text
+extern fn rt_fork_parent_signaled() -> bool
+extern fn rt_fork_child_exit(code: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+# Process facade for the symbol-table probe (kv260 spec idiom).
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _run_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _deployed_tool_has_fork_bridge() -> bool:
+    """True iff bin/simple (the deployed tool; a symlink nm follows) exports
+    rt_fork_child_setup. Empty-vs-non-empty comparison is newline-safe; a
+    missing nm or unreadable binary yields empty -> false -> visible skip."""
+    if not file_exists("bin/simple"):
+        return false
+    val probe = _run_shell("nm bin/simple 2>/dev/null | grep rt_fork_child_setup | head -1")
+    probe[0] != ""
 
 describe "CrashBundleV1 — synthetic capture (DS7)":
 
@@ -125,3 +163,58 @@ describe "CrashBundleV1 — synthetic capture (DS7)":
         expect(on_disk).to_equal(bundle.to_sdn())
 
         crash_ring_unregister(id)
+
+describe "Phase 2: forked SIGSEGV through the C crash handler":
+
+    it "a forked child's null deref recovers into the Fatal banner + Backtrace, not a bare crash":
+        step("Feature-detect the deployed tool's fork bridge from its symbol table")
+        # @req REQ-SIGSEGV-HARDENING-001
+        # Why not call rt_fork_child_setup() and nil-gate? `simple test`
+        # forces the interpreter lane for the whole run, and an unbacked
+        # extern call there is a HARD error (rc=1, "semantic: unknown extern
+        # function"), not the nil the JIT lane substitutes
+        # (doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md).
+        # So the probe is the same nm oracle the bug record's unblock
+        # condition uses: bin/simple — the deployed tool, a symlink nm
+        # follows — must export rt_fork_child_setup. On binaries that have
+        # the fork bridge but lack the crash handler (the pre-fix darwin
+        # release binaries), this example still runs and fails honestly on
+        # the parent-side banner assertions, which is the true state.
+        val has_bridge = _deployed_tool_has_fork_bridge()
+        if not has_bridge:
+            skip("forked SIGSEGV capture",
+                 "bin/simple exports no rt_fork_child_setup — the deployed tool's capsule lacks the fork bridge (seed; see crash_handler_and_fork_bridge_absent_from_seed_macos_2026-09-06.md)")
+            print "[crash_bundle_spec] SKIP forked SIGSEGV capture: deployed tool lacks the fork bridge"
+            step("Assert the skip predicate itself so a probe regression goes red")
+            expect(has_bridge).to_equal(false)
+        else:
+            val pid = rt_fork_child_setup()
+            if pid == 0:
+                # === CHILD PROCESS ===
+                # Null deref. With the crash handler installed this writes
+                # "[simple-runtime] Fatal: SIGSEGV ..." + "Backtrace:" to the
+                # pipe-captured stderr and _exit()s with 139. The line after
+                # the deref is reached only if it did NOT fault, and exits 1
+                # so the parent-side rc assertion fails honestly instead of
+                # the child outliving the capture.
+                rt_ptr_write_i64(0, 0, 1)
+                rt_fork_child_exit(1)
+            elif pid < 0:
+                # fork() itself failed on a binary that exports the bridge.
+                step("Assert fork failure honestly")
+                expect(pid > 0).to_equal(true)
+            else:
+                # === PARENT PROCESS ===
+                # Unblock-condition assertions from the bug record: the
+                # handler intercepted the fault and _exit()ed, so the child
+                # is WIFEXITED with 128 + SIGSEGV = 139 — asserting
+                # rt_fork_parent_signaled() == true would be asserting the
+                # failure mode.
+                step("Assert the child exited 139 via the handler, not by signal death")
+                val exit_code = rt_fork_parent_wait(pid, 10000)
+                expect(exit_code).to_equal(139)
+                expect(rt_fork_parent_signaled()).to_equal(false)
+                step("Assert the captured stderr carries the banner and the backtrace")
+                val child_stderr = rt_fork_parent_stderr()
+                expect(child_stderr).to_contain("[simple-runtime] Fatal:")
+                expect(child_stderr).to_contain("Backtrace:")

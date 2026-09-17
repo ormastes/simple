@@ -1,9 +1,30 @@
+## 2026-09-16 re-verification (macOS sweep)
+
+Command (macOS aarch64 M4 host, `bin/simple` = Rust seed `src/compiler_rust/target/bootstrap/simple` rebuilt 2026-09-14):
+`bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`
+
+Outcome: **FAIL — 48 examples executed, 47 passed, 1 failed** (exit 1).
+`SPEC FILE VERDICT: ... engine2d_shared_raster_parity_spec.spl outcome=ERROR declared>=48 executed=48 passed=47 failed=1 skipped=0 dropped=0`
+
+Every example this record's fix added passes: all 5 "Rounded-rect FILL parity fix (2026-07-07)" band/corner formula examples (original bug-doc fixture radius=6, radius == min(w,h)/2 stadium clamp, narrow-strip clamp-on-h, semi-transparent fill blend, radius=0 plain rect), plus `draw_rounded_rect is byte-identical to emu — sw now FILLS (was a 1px OUTLINE bug)`.
+
+The single failure is unrelated to this record:
+```
+✗ draw_line (thick) diverges — sw parallel-offset lines vs emu per-point txt square [canonical: design review]
+  expected false to equal true
+```
+The printed matrix now reports `draw_line (thick) | DIVERGE | mism=0` — sw and emu agree on this op (mism=0), so the spec's "diverges" expectation appears stale after the 2026-09-14 spec touch / lib unification; the two r<=0 divergence pins still pass.
+
+Resulting status: **OPEN** — the recorded repro command still exits non-zero, so per sweep rules the record stays open with this fresh evidence; the rounded-rect FILL-kernel defect itself is green on-host.
+
 # kernel_draw_rounded_rect (Metal) drew a stale OUTLINE — CPU-vs-Metal parity DIVERGE
 ## Closed 2026-09-16 — ...06.md`. When that CPU-side bug was fixed on 2026-07-06 (`SoftwareBackend.draw_rounded_rect
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
+
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces; 2026-09-16 macOS re-run: 47/48, sole failure the unrelated `draw_line (thick)` stale-divergence example — see section above)
 
 ## Status
 Fixed (2026-07-07).

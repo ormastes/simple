@@ -2,7 +2,7 @@
 # check-shadow-rect-spirv-pinned.shs -- the checked-in shadow-rect SPIR-V words
 # must be exactly what glslangValidator produces from the checked-in GLSL.
 #
-#   sh scripts/check/check-shadow-rect-spirv-pinned.shs [--selftest]
+#   sh scripts/check/check-shadow-rect-spirv-pinned.shs [--selftest] [--rev <REV>]
 #
 # Why this exists: `backend_vulkan_shadow_rect_spirv.spl` carries ~5.8 KB of
 # hand-unreadable hex. Nothing else in the tree can tell whether those bytes
@@ -16,6 +16,14 @@
 # scripts/tool/spirv-to-spl-words.shs the generator uses, and compare the byte
 # body AND the pinned sha256 line against the committed .spl, byte for byte.
 #
+# --rev <REV> materialises the committed pair with `git archive` and evaluates
+# THAT, never the shared working checkout: both the GLSL and the pinned blob
+# are committed content, and the transcription tool is archived from the same
+# rev because the tool is itself content. A materialisation failure is ERROR,
+# never a pass. Default (no arguments) scans the working checkout, unchanged.
+# ref-mode since 2026-09-16 -- see
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
 # Verdict is the LAST line of stdout, same convention as the pre-push guards:
 #   PASS  -- <n> byte(s) compared, ...            exit 0
 #   FAIL  -- ...                                  exit 1
@@ -25,10 +33,26 @@
 # of evidence.
 set -eu
 
-repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-comp="$repo_root/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp"
-spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl"
-words_tool="$repo_root/scripts/tool/spirv-to-spl-words.shs"
+SELF="$0"
+
+REV=""
+ROOT=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV="$2"; shift 2 ;;
+        --root) ROOT="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+fi
+comp="$ROOT/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp"
+spl="$ROOT/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl"
+words_tool="$ROOT/scripts/tool/spirv-to-spl-words.shs"
 
 fail() { echo "FAIL — $1"; exit 1; }
 oops() { echo "ERROR — nothing was checked ($1)"; exit 2; }
@@ -191,6 +215,46 @@ FIXTURE
         rm -rf "$_t"; return 1
     fi
 
+    # Fixture 5 -- --rev must read the COMMITTED pair, never the working
+    # checkout. This replays the 2026-09-06 wrong-tree incident at miniature
+    # scale: the fixture commits a matching GLSL+blob pair, then dirties the
+    # working copy with the GLSL edit from fixture 3 that is never regenerated.
+    # A working-tree scan of the same directory must FAIL; only a
+    # committed-content scan is correct, and it must PASS. A --rev that
+    # silently fell back to the checkout fails this fixture.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "selftest: FAILED — git unavailable, cannot verify the --rev committed-content path" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _fx="$_t/f5"
+    mkdir -p "$_fx/src/lib/gc_async_mut/gpu/engine2d/shaders" "$_fx/scripts/tool"
+    cp "$words_tool" "$_fx/scripts/tool/spirv-to-spl-words.shs"
+    cp "$_t/ok.comp" "$_fx/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp"
+    cp "$_t/ok.spl" "$_fx/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl"
+    if ! ( cd "$_fx" && git init -q . && git config user.email selftest@example.com \
+           && git config user.name selftest && git add -A && git commit -q -m committed ) \
+           >/dev/null 2>&1; then
+        echo "selftest FIXTURE 5 could not build the fixture repo" >&2
+        rm -rf "$_t"; return 1
+    fi
+    sed 's/for (int k = 0; k < pc.n; ++k)/for (int k = pc.n - 1; k >= 0; --k)/' \
+        "$_fx/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp" > "$_t/f5rev.comp"
+    mv "$_t/f5rev.comp" "$_fx/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp"
+    _out="$_t/f5rev.out"
+    _rc=0
+    SHADOW_RECT_PIN_SELFTEST_CHILD=1 sh "$SELF" --root "$_fx" --rev HEAD > "$_out" 2>&1 || _rc=$?
+    if [ "$_rc" -ne 0 ] || ! grep -q '^PASS' "$_out"; then
+        echo "selftest FIXTURE 5 (--rev did not read committed content) rc=$_rc: $(tail -1 "$_out")" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _out="$_t/f5wt.out"
+    _rc=0
+    SHADOW_RECT_PIN_SELFTEST_CHILD=1 sh "$SELF" --root "$_fx" > "$_out" 2>&1 || _rc=$?
+    if [ "$_rc" -ne 1 ] || ! grep -q '^FAIL' "$_out"; then
+        echo "selftest FIXTURE 5 (working-tree scan must FAIL on the dirty edit) rc=$_rc: $(tail -1 "$_out")" >&2
+        rm -rf "$_t"; return 1
+    fi
+
     rm -rf "$_t"
     return 0
 }
@@ -198,15 +262,44 @@ FIXTURE
 glslang=$(find_glslang)
 [ -n "$glslang" ] || oops "glslangValidator not found; set GLSLANG=/path/to/glslangValidator"
 
-if ! selftest "$glslang"; then
-    st=$?
-    if [ "$st" -eq 2 ]; then oops "selftest could not run"; fi
-    fail "selftest failed (fatal; the guard cannot be trusted)"
+if [ "${SHADOW_RECT_PIN_SELFTEST_CHILD:-0}" != 1 ]; then
+    # Fixture 5 invokes this script recursively; re-running the selftest there
+    # would recurse without end. The child is exercising the real scan path,
+    # which is the point of the fixture.
+    if ! selftest "$glslang"; then
+        st=$?
+        if [ "$st" -eq 2 ]; then oops "selftest could not run"; fi
+        fail "selftest failed (fatal; the guard cannot be trusted)"
+    fi
 fi
 
-if [ "${1:-}" = "--selftest" ]; then
-    echo "PASS — 4 selftest fixture(s) checked, selftest only (no tree scan requested)"
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 5 selftest fixture(s) checked, selftest only (no tree scan requested)"
     exit 0
+fi
+
+# --rev: read the COMMITTED pair, never the shared working checkout. Both the
+# GLSL and the pinned blob are committed content; the transcription tool is
+# archived from the same rev because the tool is itself content.
+if [ -n "$REV" ]; then
+    _work=$(mktemp -d) || oops "mktemp failed"
+    trap 'rm -rf "$_work"' EXIT INT TERM
+    mkdir -p "$_work/rev"
+    _mat_rc=0
+    ( cd "$ROOT" && git archive "$REV" -- \
+        src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp \
+        src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl \
+        scripts/tool/spirv-to-spl-words.shs ) 2>/dev/null \
+        | tar -x -C "$_work/rev" 2>/dev/null || _mat_rc=1
+    if [ "$_mat_rc" -ne 0 ] \
+       || [ ! -f "$_work/rev/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp" ] \
+       || [ ! -f "$_work/rev/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl" ]; then
+        echo "ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    fi
+    comp="$_work/rev/src/lib/gc_async_mut/gpu/engine2d/shaders/shadow_rect.comp"
+    spl="$_work/rev/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_shadow_rect_spirv.spl"
+    words_tool="$_work/rev/scripts/tool/spirv-to-spl-words.shs"
 fi
 
 rc=0
@@ -214,4 +307,4 @@ compare_pair "$comp" "$spl" "$glslang" || rc=$?
 if [ "$rc" -eq 2 ]; then oops "$CMP_REASON"; fi
 if [ "$rc" -eq 1 ]; then fail "$CMP_BYTES byte(s) compared: $CMP_REASON"; fi
 [ "$CMP_BYTES" -gt 0 ] || oops "0 bytes compared"
-echo "PASS — $CMP_BYTES byte(s) compared, 4 selftest fixture(s) checked, backend_vulkan_shadow_rect_spirv.spl matches shaders/shadow_rect.comp (sha256 $(extract_spl_sha "$spl"))"
+echo "PASS — $CMP_BYTES byte(s) compared, 5 selftest fixture(s) checked, backend_vulkan_shadow_rect_spirv.spl matches shaders/shadow_rect.comp (sha256 $(extract_spl_sha "$spl"))"

@@ -4,6 +4,88 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+
+## 2026-09-16 update (macOS sweep)
+
+The five blocking `spirv-pinned` rows added at manifest lines 61-65 after the
+original census — `push-rect-batch-spirv-pinned`, `push-blit-spirv-pinned`,
+`push-blur-rect-spirv-pinned`, `push-shadow-rect-spirv-pinned`,
+`push-glass-material-spirv-pinned` — were the last blocking `tree`-mode rows.
+They are converted to `ref` in this sweep, by the exact pattern documented
+under "The fix pattern" below:
+
+- `--rev <REV>` added to the five scripts
+  (`check-rect-batch-spirv-pinned.shs`, `check-blit-spirv-pinned.shs`,
+  `check-blur-rect-spirv-pinned.shs`, `check-shadow-rect-spirv-pinned.shs`,
+  `check-glass-material-spirv-pinned.shs`). Each materialises the committed
+  pair — the checked-in GLSL plus the pinned SPIR-V blob — with
+  `git archive <REV> -- <paths> | tar -x` into a temp dir and scans that; the
+  transcription tool (`scripts/tool/spirv-to-spl-words.shs`, plus
+  `scripts/tool/extract-blit-glsl.shs` for blit) is archived from the same
+  rev because the tool is itself content (the `sffi-v2-authority` lesson). A
+  failed or incomplete materialisation is
+  `ERROR — nothing was checked (could not materialise <rev>)`, exit 2, never
+  a pass. Default no-arg behavior is unchanged (still scans the working
+  checkout).
+- Each selftest gained a fixture (rect-batch/blur/shadow/glass fixture 5,
+  blit fixture 6) that replays the 2026-09-06 incident at miniature scale:
+  commit a matching pair, dirty the working copy with an unregenerated GLSL
+  edit, and assert BOTH that `--rev HEAD` PASSes AND that a working-tree
+  scan of the same directory FAILs. A `--rev` that silently fell back to the
+  checkout fails the fixture. The selftest is fatal before every scan, so
+  the fixture runs on the push path (unlike the `--scan-only` rows, whose
+  fixtures run only on the bootstrap-tier selftest rows).
+- Manifest rows flipped `tree` -> `ref` with command `... --rev` and the
+  `ref-mode since 2026-09-16` annotation; the five dispatch arms in
+  `check-push-must-pass.shs` moved in the same working-tree change
+  (byte-match verified below; commit them together).
+
+Verification measured on this host (macOS, HEAD `6217f1ce603c`), 2026-09-16,
+all verdicts captured with exit codes, none silent:
+
+- Default mode and `--rev HEAD` for all five scripts: 10/10 runs PASS with
+  identical byte counts and pinned shas across both modes (the working copy
+  is clean at HEAD for these files): rect-batch `5848 byte(s)`, blit `6848`,
+  blur-rect `6544`, shadow-rect `5136`, glass-material `20688`, each
+  `PASS — ... selftest fixture(s) checked` (5/6/5/5/5 fixtures).
+- Fail-closed: `--rev deadbeef...` and `--rev HEAD~999999` both answer
+  `ERROR — nothing was checked (could not materialise ...)` with exit 2.
+- Tool-axis injection (the census's second rot axis; these guards have NO
+  baseline or allowlist file, so that axis has no surface here): the
+  working-copy `spirv-to-spl-words.shs` sabotaged to exit 2 -> `--rev HEAD`
+  still PASSes (the scan uses the rev-archived tool); with the script rotted
+  to point the tool back at the checkout, the same sabotage answers
+  `ERROR — ... (transcription failed: SABOTAGE)` exit 2. Identical injection
+  for blit's `extract-blit-glsl.shs` (`GLSL extraction failed: SABOTAGE`).
+  Both injections discriminate, so the tool half genuinely decides the
+  verdict and is genuinely covered. Files restored byte-identical after.
+- Dispatcher byte-match check (the snippet in "The dispatcher byte-match
+  check" below, re-run against the edited files): 62 manifest keys vs 62
+  arms, `comm -23` EMPTY; the five converted keys byte-match between
+  manifest and arms. `check-push-must-pass.shs --self-test`:
+  `PASS — 20 ledger fixtures checked`.
+- `check-guard-wiring.shs` after the arm edits: the five spirv scripts stay
+  wired; the run is red for 3 NEW unwired
+  (`check-simple-browser-production-{budgets,evidence,security}.shs`),
+  untracked files landed by another lane — not caused by this change and not
+  repaired here (same class of finding as the 2026-09-07 caret-server red).
+
+Work-list status: the five blocking spirv rows are DONE (all five now
+evaluate the pushed commit). This record stays OPEN — zero blocking `tree`
+rows remain, but **35 advisory `tree` rows** remain (all
+`push_blocking=false`; 35 tree / 21 ref / 6 range on the push tier). The
+blocked-on-a-built-artifact group (`push-dual-run-shadow`,
+`push-plan-acceptance-swept`, `push-entry-closure-ratchet`,
+`push-ui-slim-closure*` family needing the bootstrap seed,
+`push-stage4-dynamic-runtime-lane`, and the other missing-binary rows) is a
+BLOCKER, not a justification for tree mode, exactly as stated below; the
+`push-shs-*` cygpath exec halves and `push-local-ci-receipt-selftest` stay in
+their documented buckets. Per-row plans are in "What is left undone" below.
+
+**Status:** OPEN (2026-09-16 macOS sweep: five blocking spirv-pinned rows
+converted tree -> ref, verified; 35 advisory tree rows remain — see the
+update section at the top)
+
 Companion to
 `doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md`,
 which records the defect and the incident. This file is the WORK LIST: every

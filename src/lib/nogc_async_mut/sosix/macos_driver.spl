@@ -1,0 +1,249 @@
+"""Native macOS provider (sosix C5): ring submissions serviced by the runtime proactor.
+
+The kqueue/`dispatch_io`-class analog of C4's Linux io_uring provider: reads and
+writes are submitted to the unified async-driver bridge (`rt_driver_submit_read` /
+`rt_driver_submit_write`, `src/runtime/runtime.h:1582-1600`) and reaped with one
+non-blocking `rt_driver_flush` + `rt_driver_poll(..., 0)` round per native wait.
+Under the C runtime the bridge dispatches to the kqueue backend on `__APPLE__`
+(`src/runtime/platform/async_driver.c:38-42`); under the 2026-09-14 seed binary
+the same symbols are an inline executor over `pread`/`pwrite` reporting
+`backend_name == "rust-syscall"` (measured via the probe transcript in
+doc/08_tracking/todo/sosix_c5_macos_provider_verified_2026-09-12.md).
+
+Honest scope of "native" on macOS: kqueue has no native file async, so BOTH
+backends service file reads/writes off the event loop — the C backend on a
+pthread pool (`src/runtime/platform/async_macos.c`, "File I/O: threadpool
+workers"), the seed backend inline at flush. kqueue's evented legs are network
+sockets and `EVFILT_TIMER`, which this file provider does not claim. What the
+provider gains over the `SosixHostedFileDriver` fallback is the proactor
+pipeline: real `-errno` statuses on read/write completions and no
+open/positioned-IO/close syscall triple per operation (descriptors are cached
+per capability).
+
+Two seed defects shape the binding, both measured 2026-09-16 (probe sources
+inlined in the Appendix of
+doc/08_tracking/bug/rt_driver_poll_data_interpreter_marshalling_2026-09-16.md):
+
+1. `rt_driver_submit_open` is unusable: the bridge is a 5-parameter C ABI
+   (`handle, path, path_len, flags, mode`) but the seed's binding declares a
+   4-parameter extern and drops `path_len`, leaving `mode` in an uncontrolled
+   register — the same `O_RDONLY` open returned `-22` (EINVAL) in one process
+   and a valid fd in another. Descriptors therefore come from the deployed C1
+   pair `rt_io_file_open` (`std.nogc_sync_mut.sffi.fs`): mode 0 (`O_RDONLY`)
+   for read legs, mode 2 (`O_RDWR | O_CREAT`, never `O_TRUNC`) for write legs.
+   Consequence: the seed's `rt_io_file_open` collapses open errors to `-1`, so
+   a missing file surfaces as native code `-1` where a full-native backend
+   would report `-ENOENT`.
+
+2. `rt_driver_poll_data` cannot be bound: the runtime returns a NaN-boxed
+   string word, which the seed's JIT marshals correctly (probe: exact bytes)
+   but the interpreter reads as a raw pointer (probe: header garbage; spec
+   files always run interpreted on this seed because std.spec's own `skip`
+   decorator returns a closure the JIT refuses to compile — the fallback is
+   silent). Read bytes are therefore materialized with a second, positioned
+   re-read through the deployed typed alias `file_read_text_at` AFTER the
+   proactor read completion reports success — the proactor read remains the
+   authority for status, transferred count, and partial progress. Tracked as
+   doc/08_tracking/bug/rt_driver_poll_data_interpreter_marshalling_2026-09-16.md.
+"""
+
+use std.common.contracts.sosix.operation_v1.{SosixOperationId}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.file_operation_v1.{SOSIX_FS_READ_AT}
+use std.common.contracts.sosix.wait_v1.{SOSIX_NATIVE_WAIT_SIGNALED}
+use std.nogc_sync_mut.sffi.fs.{io_file_open, io_file_close}
+use std.nogc_async_mut.io.{file_read_text_at}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsTaken}
+use std.nogc_async_mut.sosix.file_driver.{SOSIX_FILE_DRIVER_STATUS_IO}
+use std.nogc_async_mut.sosix.sync.{SosixSyncWaitDriver}
+
+# Proactor bridge (src/runtime/runtime.h:1582-1600; seed twin
+# src/compiler_rust/runtime/src/async_driver_sffi.rs). Bound only in this
+# allowlisted provider module (scripts/check/no_direct_rt_allowlist.txt).
+# rt_driver_poll_data and rt_driver_submit_open are deliberately NOT bound —
+# see the module docstring (seed marshalling / ABI defects, measured 2026-09-16).
+@unsafe(reason: "creates a copyable raw proactor handle owned by the runtime driver table", capabilities: [ffi])
+extern fn rt_driver_create(queue_depth: i64) -> i64
+@unsafe(reason: "consumes a copyable raw proactor handle and its queued operations", capabilities: [ffi])
+extern fn rt_driver_destroy(handle: i64)
+@unsafe(reason: "submits a positioned read against an unbranded raw descriptor", capabilities: [ffi])
+extern fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i64
+@unsafe(reason: "borrows buffer bytes for one queued positioned write", capabilities: [ffi])
+extern fn rt_driver_submit_write(handle: i64, fd: i64, data: text, len: i64, offset: i64) -> i64
+@unsafe(reason: "pushes queued operations to the backend executor", capabilities: [ffi])
+extern fn rt_driver_flush(handle: i64) -> i64
+@unsafe(reason: "polls a copyable raw proactor handle and returns an unverified completion count", capabilities: [ffi])
+extern fn rt_driver_poll(handle: i64, max: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "indexes an unverified poll snapshot", capabilities: [ffi])
+extern fn rt_driver_poll_id(handle: i64, index: i64) -> i64
+@unsafe(reason: "indexes an unverified poll snapshot; negative values are -errno completions", capabilities: [ffi])
+extern fn rt_driver_poll_result(handle: i64, index: i64) -> i64
+
+class SosixMacosFileDriver:
+    paths: [text]
+    buffers: [text]
+    fds: [i64]
+    fd_modes: [i64]
+    services: u64
+    handle: i64
+    inflight: SosixFsTaken?
+    inflight_op: i64
+
+    static fn create() -> SosixMacosFileDriver:
+        # The proactor handle is opened lazily on the first wait so constructing
+        # the driver stays pure and host-independent.
+        SosixMacosFileDriver(paths: [""], buffers: [""], fds: [-1], fd_modes: [-1],
+            services: 0u64, handle: -1, inflight: nil, inflight_op: 0)
+
+    me open_path(path: text) -> SosixCapabilityRef:
+        self.paths.push(path)
+        self.fds.push(-1)
+        self.fd_modes.push(-1)
+        SosixCapabilityRef(slot: (self.paths.len() - 1).to_u32(), generation: 1u32)
+
+    me buffer_from(bytes: text) -> SosixBufferRef:
+        self.buffers.push(bytes)
+        SosixBufferRef(slot: (self.buffers.len() - 1).to_u32(), generation: 1u32)
+
+    fn buffer_bytes(buffer: SosixBufferRef) -> text:
+        val slot = buffer.slot.to_i64()
+        if slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
+
+    me shutdown():
+        """Close every cached descriptor and release the proactor handle. Idempotent."""
+        var i: i64 = 1
+        while i < self.fds.len():
+            if self.fds[i] >= 0:
+                unsafe(capabilities: [ffi]):
+                    io_file_close(self.fds[i])
+                self.fds[i] = -1
+            i = i + 1
+        if self.handle >= 0:
+            unsafe(capabilities: [ffi]):
+                rt_driver_destroy(self.handle)
+            self.handle = -1
+
+    fn _path_of(file: SosixCapabilityRef) -> text:
+        val slot = file.slot.to_i64()
+        if slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
+
+    me _ensure_handle() -> i64:
+        if self.handle >= 0:
+            return self.handle
+        unsafe(capabilities: [ffi]):
+            self.handle = rt_driver_create(256)
+        self.handle
+
+    # Descriptor per capability, opened with the mode the first operation on
+    # that capability needs; a later operation needing another mode closes and
+    # reopens (read legs accept a cached O_RDWR descriptor from a write leg).
+    me _ensure_fd(slot: i64, path: text, for_write: bool) -> i64:
+        if slot < self.fds.len() and self.fds[slot] >= 0:
+            val have = self.fd_modes[slot]
+            if have == 2 or have == (if for_write: 2 else: 0):
+                return self.fds[slot]
+            unsafe(capabilities: [ffi]):
+                io_file_close(self.fds[slot])
+            self.fds[slot] = -1
+        val want = if for_write: 2 else: 0
+        val fd = unsafe(capabilities: [ffi]):
+            io_file_open(path, want)
+        if fd >= 0:
+            self.fds[slot] = fd
+            self.fd_modes[slot] = want
+        fd
+
+    # One native wait: push queued ops to the backend, reap with a
+    # non-blocking poll. A blocking poll would be wrong here — the macOS
+    # backends complete file I/O off-loop (threadpool or inline), so nothing
+    # ever wakes a timed kevent wait; the sync adapter's retry budget is the
+    # wait, one reap round per native wait as the trait requires.
+    me _reap(fs: SosixHostedFs, taken: SosixFsTaken) -> u8:
+        unsafe(capabilities: [ffi]):
+            rt_driver_flush(self.handle)
+        val count = unsafe(capabilities: [ffi]):
+            rt_driver_poll(self.handle, 16, 0)
+        var i: i64 = 0
+        while i < count:
+            val cid = unsafe(capabilities: [ffi]):
+                rt_driver_poll_id(self.handle, i)
+            if cid == self.inflight_op:
+                val result = unsafe(capabilities: [ffi]):
+                    rt_driver_poll_result(self.handle, i)
+                if result < 0:
+                    fs.complete_taken(taken, result.to_i32(), 0u64)
+                elif taken.request.api_id == SOSIX_FS_READ_AT:
+                    self._complete_read(fs, taken, result)
+                else:
+                    fs.complete_taken(taken, 0, result.to_u64())
+                self.inflight = nil
+                self.inflight_op = 0
+                return SOSIX_NATIVE_WAIT_SIGNALED
+            i = i + 1
+        SOSIX_NATIVE_WAIT_SIGNALED
+
+    # The proactor read is the authority for status/transferred; the bytes
+    # themselves are materialized by a positioned re-read through the deployed
+    # typed alias because rt_driver_poll_data cannot be marshalled by the seed
+    # interpreter (module docstring, defect 2).
+    me _complete_read(fs: SosixHostedFs, taken: SosixFsTaken, result: i64):
+        val path = self._path_of(taken.request.file)
+        match file_read_text_at(path, taken.request.file_offset.to_i64(), result):
+            case Ok(bytes):
+                self.buffers[taken.request.buffer.slot.to_i64()] = bytes
+                fs.complete_taken(taken, 0, result.to_u64())
+            case Err(_):
+                fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+
+    me service(fs: SosixHostedFs) -> bool:
+        """Take the oldest submission and advance it one proactor step."""
+        if self._ensure_handle() < 0:
+            # No proactor on this host: drain one submission as a typed native error.
+            val dead = fs.take_next()
+            if dead.taken:
+                fs.complete_taken(dead, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+            return dead.canceled
+        if val held = self.inflight:
+            return self._reap(fs, held) == SOSIX_NATIVE_WAIT_SIGNALED
+        val taken = fs.take_next()
+        if not taken.taken:
+            return taken.canceled
+        self.services = self.services + 1u64
+        val request = taken.request
+        val path = self._path_of(request.file)
+        val buffer_slot = request.buffer.slot.to_i64()
+        if path == "" or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
+            return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+        if request.api_id == SOSIX_FS_READ_AT:
+            val fd = self._ensure_fd(request.file.slot.to_i64(), path, false)
+            if fd < 0:
+                # Seed rt_io_file_open collapses errno to -1; a full-native
+                # backend would answer -ENOENT here.
+                return fs.complete_taken(taken, -1, 0u64)
+            self.inflight = taken
+            unsafe(capabilities: [ffi]):
+                self.inflight_op = rt_driver_submit_read(self.handle, fd, request.length.to_i64(), request.file_offset.to_i64())
+        else:
+            # `fs._submit` admits only READ_AT and WRITE_AT, so this is the write leg.
+            # The window is validated before any open so a refused write never
+            # creates or touches the file.
+            val start = request.buffer_offset.to_i64()
+            val data = self.buffers[buffer_slot]
+            if start > data.len():
+                return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+            val fd = self._ensure_fd(request.file.slot.to_i64(), path, true)
+            if fd < 0:
+                return fs.complete_taken(taken, -1, 0u64)
+            val stop = start + request.length.to_i64()
+            val window = if stop > data.len(): data[start:data.len()] else: data[start:stop]
+            self.inflight = taken
+            unsafe(capabilities: [ffi]):
+                self.inflight_op = rt_driver_submit_write(self.handle, fd, window, window.len(), request.file_offset.to_i64())
+        self._reap(fs, taken) == SOSIX_NATIVE_WAIT_SIGNALED
+
+impl SosixSyncWaitDriver for SosixMacosFileDriver:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8:
+        self.service(fs)
+        SOSIX_NATIVE_WAIT_SIGNALED
+
+export SosixMacosFileDriver

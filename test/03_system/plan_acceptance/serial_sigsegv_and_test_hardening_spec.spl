@@ -50,8 +50,10 @@ describe "Phase 2: Runtime SIGSEGV Handler":
     it "A null-pointer deref in compiled mode recovers into a backtrace, not a bare process crash":
         step("Locate the closest existing crash-related spec")
         # @req REQ-SIGSEGV-HARDENING-001
-        # rt_install_crash_handler (src/runtime/runtime.c) is already wired
-        # at process start and its backtrace path is real, but nothing
+        # rt_install_crash_handler (src/runtime/runtime_fork.c since
+        # 2026-09-16; it moved there from runtime.c so the seed core-C
+        # capsule compiles it) is already wired at process start and its
+        # backtrace path is real, but nothing
         # drives a genuine fault through it end to end: the closest spec,
         # crash_bundle_spec.spl, only feeds CrashBundleV1.capture() a
         # caller-supplied fault_kind string -- it never forks a child,
@@ -144,7 +146,8 @@ describe "Phase 5: Simple-Level Signal Wiring":
         # src/lib/nogc_sync_mut/io/signal_handlers.spl (255 lines) handles
         # only SIGHUP/SIGINT/SIGTERM/SIGUSR2 via install_signal_handlers
         # (:69); it never mentions SIGSEGV. The C runtime's crash handler
-        # (rt_install_crash_handler, src/runtime/runtime.c) is real but is
+        # (rt_install_crash_handler, src/runtime/runtime_fork.c since
+        # 2026-09-16) is real but is
         # not reachable from Simple code -- no `std.os.signal` module exists
         # either (confirmed: no file under src/lib matches that path).
         # @capture: the grep hit line for SIGSEGV (or its absence) in
@@ -175,22 +178,22 @@ describe "Phase 5: Simple-Level Signal Wiring":
         expect(exit_code_is_segfault(143)).to_equal(expected_sigterm_exit_classified)
 
     it "Distinguish a genuine segfault from a memory-limit violation via si_code":
-        step("Read the crash handler in runtime.c")
+        step("Read the crash handler in runtime_fork.c")
         # @req REQ-SIGSEGV-HARDENING-001
-        # _spl_crash_handler (src/runtime/runtime.c, installed by
-        # rt_install_crash_handler) reads only siginfo_t.si_addr for its
-        # crash report; it never reads si_code, so it cannot tell a genuine
-        # wild-pointer SEGV (SEGV_MAPERR/SEGV_ACCERR) apart from a
-        # resource-limit-triggered fault such as SIGSEGV from a stack-guard
-        # page hit.
-        # @capture: the grep hit line for si_code (or its absence) in
-        # runtime.c's crash handler is the retained classification evidence.
-        val runtime_c_source = read_file("src/runtime/runtime.c")
+        # _spl_crash_handler (src/runtime/runtime_fork.c since 2026-09-16,
+        # moved from runtime.c so the seed core-C capsule compiles it;
+        # installed by rt_install_crash_handler) reads siginfo_t.si_code to
+        # classify the fault, so it can tell a genuine wild-pointer SEGV
+        # (SEGV_MAPERR/SEGV_ACCERR) apart from a resource-limit-triggered
+        # fault such as SIGSEGV from a stack-guard page hit.
+        # @capture: the grep hit line for si_code in runtime_fork.c's crash
+        # handler is the retained classification evidence.
+        val runtime_fork_source = read_file("src/runtime/runtime_fork.c")
         step("Assert the handler inspects si_code to classify the fault")
-        val inspects_si_code = runtime_c_source.contains("si_code")
+        val inspects_si_code = runtime_fork_source.contains("si_code")
         # oracle: expected_inspected names the promised classification
-        # input; provenance: `grep -n si_code src/runtime/runtime.c` is
-        # empty.
+        # input; provenance: `grep -n si_code src/runtime/runtime_fork.c`
+        # shows the _spl_fault_class/_spl_crash_handler block.
         val expected_inspected = true
         expect(inspects_si_code).to_equal(expected_inspected)
 

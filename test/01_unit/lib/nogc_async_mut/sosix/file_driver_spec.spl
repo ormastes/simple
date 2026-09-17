@@ -1,13 +1,15 @@
-"""The reference file driver performs real positioned reads and writes on this host through the unified SOSIX ring: bytes written through the ring come back through the ring, short reads report partial progress, and a missing file surfaces as a typed native error."""
+"""The reference file driver performs real positioned reads and writes on this host through the unified SOSIX ring: bytes written through the ring come back through the ring, short reads report partial progress, and a missing file surfaces as a typed native error. The native macOS provider block (skipped off-macOS) proves the same ring contract over the runtime proactor bridge with real -errno read/write completions."""
 
 use std.spec.*
 use std.env.platform.{get_temp_dir}
+use std.io_runtime.{file_exists}
 use std.nogc_async_mut.io.{file_remove}
 use std.common.contracts.sosix.wait_v1.{SOSIX_SYNC_WAIT_COMPLETED}
 use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_NATIVE}
 use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
 use std.nogc_async_mut.sosix.sync.{sosix_sync_fs_read_at, sosix_sync_fs_write_at}
 use std.nogc_async_mut.sosix.file_driver.{SosixHostedFileDriver, SOSIX_FILE_DRIVER_STATUS_IO}
+use std.nogc_async_mut.sosix.macos_driver.{SosixMacosFileDriver}
 
 fn setup_sosix_hosted_fs() -> SosixHostedFs:
     match SosixHostedFs.create(93u64, 7u64, 2):
@@ -84,3 +86,86 @@ describe "SOSIX reference file driver on the host filesystem":
         expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
         expect(written.error.kind).to_equal(SOSIX_ERROR_NATIVE)
         expect(written.completion.transferred).to_equal(0u64)
+
+# The native provider block is gated here rather than via a skip helper:
+# std.spec's block-taking skip helpers pass the example name through a
+# variable, and the spec builtins only name examples from call-site literals
+# (variable-named rows render as "unnamed").
+if is_macos():
+    describe "SOSIX native macOS file driver over the runtime proactor":
+        # Rows run only on macOS; on any other host the block below prints a
+        # skip line and never fails. The provider lives in
+        # std.nogc_async_mut.sosix.macos_driver.
+
+        it "services the ring through the proactor: bytes written through the ring come back through the ring":
+            step("Register a host path and a source buffer with the native driver")
+            val fs = setup_sosix_hosted_fs()
+            val driver = SosixMacosFileDriver.create()
+            val file = driver.open_path(scratch_path("native_roundtrip"))
+            val source = driver.buffer_from("unified sosix bytes")
+            step("Write the buffer at offset 0 through the proactor bridge")
+            val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 19u64, 0u64)
+            expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+            expect(written.waits).to_be_greater_than(0u64)
+            expect(written.completion.transferred).to_equal(19u64)
+            expect(written.error.kind).to_equal(0u8)
+            step("Read the middle word back at file offset 8 into a fresh buffer")
+            val sink = driver.buffer_from("")
+            val read = sosix_sync_fs_read_at(fs, driver, file, sink, 8u64, 0u64, 5u64, 0u64)
+            expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+            expect(read.completion.transferred).to_equal(5u64)
+            expect(driver.buffer_bytes(sink)).to_equal("sosix")
+            step("Both operations retired their leases: the ring is empty again")
+            expect(driver.services).to_equal(2u64)
+            expect(fs.telemetry().completions).to_equal(2u64)
+            driver.shutdown()
+
+        it "reports a short read past the end of the file as partial progress through the proactor":
+            step("Write five bytes, then ask for sixteen from offset 3")
+            val fs = setup_sosix_hosted_fs()
+            val driver = SosixMacosFileDriver.create()
+            val file = driver.open_path(scratch_path("native_short"))
+            val source = driver.buffer_from("abcde")
+            expect(sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 5u64, 0u64).outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+            val sink = driver.buffer_from("")
+            val read = sosix_sync_fs_read_at(fs, driver, file, sink, 3u64, 0u64, 16u64, 0u64)
+            step("Only the two remaining bytes arrive and the completion says so")
+            expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+            expect(read.completion.transferred).to_equal(2u64)
+            expect(read.completion.partial_progress).to_equal(true)
+            expect(driver.buffer_bytes(sink)).to_equal("de")
+            driver.shutdown()
+
+        it "surfaces a missing file as a typed native error after exactly one wait":
+            step("Read from a path that does not exist")
+            val fs = setup_sosix_hosted_fs()
+            val driver = SosixMacosFileDriver.create()
+            val file = driver.open_path(scratch_path("native_does_not_exist_") + "nope")
+            val sink = driver.buffer_from("")
+            val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 4u64, 0u64)
+            expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+            expect(read.waits).to_equal(1u64)
+            expect(read.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+            # The open goes through the deployed rt_io_file_open, which collapses
+            # errno to -1; a full-native backend would answer -ENOENT here. What
+            # the contract guarantees is a negative native code, never a success.
+            expect(read.error.native_code).to_be_less_than(0)
+            expect(driver.buffer_bytes(sink)).to_equal("")
+            driver.shutdown()
+
+        it "refuses a write whose buffer window starts past the buffer end without creating the file":
+            step("Ask to write 4 bytes from offset 10 of a 5-byte buffer on a fresh path")
+            val path = scratch_path("native_window")
+            val fs = setup_sosix_hosted_fs()
+            val driver = SosixMacosFileDriver.create()
+            val file = driver.open_path(path)
+            val source = driver.buffer_from("abcde")
+            val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 10u64, 4u64, 0u64)
+            expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+            expect(written.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+            expect(written.completion.transferred).to_equal(0u64)
+            step("The window was rejected before the O_RDWR|O_CREAT open: no file exists")
+            expect(file_exists(path)).to_equal(false)
+            driver.shutdown()
+else:
+    print "  describe SOSIX native macOS file driver over the runtime proactor ... skipped (macOS-only)"

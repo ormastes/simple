@@ -1,3 +1,19 @@
+## Closed 2026-09-16 — four fix commits verified on origin/main; on-device frames green
+
+Closed during the 2026-09-16 macOS bug/todo db sweep. Four fix commits were
+verified ancestors of origin/main, none reverted: 764a92b2dd0 (stop one refused
+bind_pipeline latching every Vulkan Engine2D to CPU), e8a1b0b664a (classify
+absent readback instead of pixel mismatch), 126d85af1b5 (drop ghost compute
+batch so post-readback bind_pipeline succeeds), and 1ca930a0e54
+(frame-correctness proof + measured route authorization). The pinning specs
+exist (web_draw_ir_readback_absence_label_spec.spl,
+web_draw_ir_post_readback_dispatch_spec.spl), with on-device 8/8 frames at
+684000 px. The in-file status body remains the authoritative record and the
+repro was not re-run this pass. Re-open with a fresh dated repro if the symptom
+returns.
+
+---
+
 # `reason=pixel-mismatch` on the web Draw IR Vulkan lane is NOT a pixel mismatch (Apple M4, 2026-09-11)
 
 Status: ROOT-CAUSED, not fixed. No product code changed by this record.

@@ -1,8 +1,57 @@
-# `check-store-open-acid.shs` cannot run on macOS aarch64 — and the recorded blocker is not the one that fires here
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-09-16 — gate's own defects fixed and merged; residual tracked elsewhere
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+Closed during the 2026-09-16 macOS bug/todo db sweep. The gate's own two
+defects are fixed and merged (3a3486b12d6 portable gate stat; PR #579 merge
+b9667d6584f verified ancestor), re-verified on macOS aarch64 2026-09-12, and
+the Darwin link-defaults compiler work landed (PR #753 aadd8a1ce68, PR #755
+aa130b9b411, both MERGED 2026-09-12, ancestors verified). The one true residual
+(native slice lowering) is tracked by its own open record
+native_codegen_missing_slice_lowering_2026-08-21.md and is out of scope here.
+The in-file status body remains the authoritative record and the repro was not
+re-run this pass. Re-open with a fresh dated repro if the symptom returns.
+
+---
+
+# `check-store-open-acid.shs` cannot run on macOS aarch64 — and the recorded blocker is not the one that fires here
+
+**Status:** OPEN — but NOT for the reasons in this record's title. The two
+defects it raises against the GATE ITSELF are fixed and re-verified on macOS
+aarch64 at
+`origin/main@b9667d6584f`, 2026-09-12. What remains open is not a gate defect
+and not a portability defect: it is the compiler work named in the corrected
+resume sequence below (Darwin link defaults, native slice lowering). Do not
+read this record as "the gate is broken on macOS" — it is not.
+
+**Resolved here:**
+
+1. **GNU-only `stat -c %s` in the binary-identity line** (the "Secondary defect
+   found in the gate itself" section). Fixed upstream by `3a3486b12d6`; the gate
+   now carries an `_acid_file_size()` helper at `:32-34` that tries `stat -c %s`,
+   falls back to BSD `stat -f %z`, and reports `unknown` rather than an empty
+   field. No silent empty size on macOS.
+2. **The recorded resume condition being the wrong one** (the record's own
+   headline complaint — the `.spipe` state named `rt_sqlite_open`, which never
+   fires on this host). Corrected by the same commit.
+
+**Verified on this Mac, and honestly an ERROR rather than a pass:**
+
+```
+$ sh scripts/check/check-store-open-acid.shs ; echo rc=$?
+ERROR — nothing was checked: no simple binary at <worktree>/bin/simple
+rc=2
+```
+
+That is the correct verdict, not a regression: this is a detached worktree and
+`bin/simple` is an untracked symlink created by `scripts/setup/setup.shs`, so
+there is no binary to drive. The guard refuses to run vacuously rather than
+reporting a pass — the same behaviour this record already praised for the
+missing-probe case. It is also why the gate is not a push-tier row: it needs a
+deployed binary a push host need not have.
+
+Scope note for whoever resumes: the remaining frontier is unchanged from the
+"corrected resume sequence (supersedes both earlier ones)" section — native
+slice lowering first, then the Darwin link defaults. Neither is a shell-gate
+portability item.
 
 - Date: 2026-08-17
 - Area: enterprise_store / native ACID evidence / pre-existing gate portability
@@ -452,3 +501,6 @@ compiler-completeness property. Treating it as an AC-5/AC-6 blocker mis-attribut
 a compiler gap (`native_codegen_missing_slice_lowering_2026-08-21.md`) to the
 database work, and sends people to fix the wrong lane.
 
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

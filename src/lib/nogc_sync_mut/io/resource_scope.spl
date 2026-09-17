@@ -215,12 +215,26 @@ fn _limit_shell(scope: ExecutionResourceScope) -> text:
 # That is what made `simple test <dir>` report 79/79 "Compilation failed" here.
 # There is no substitute shell -- unlike `ulimit -u`, no shell can enforce this
 # on Darwin -- so the address-space cap is dropped with a LOUD stderr note
-# rather than silently. The `-t`/`-u`/`-n` caps below are unaffected and keep
-# their fail-closed `|| exit 125`.
+# rather than silently. The `-t` and `-n` caps below are unaffected and keep
+# their fail-closed `|| exit 125`; `-u` gets the same drop-with-note treatment
+# via _rlimit_nproc_enforceable for Darwin's system-wide RLIMIT_NPROC count.
 # Detected by a single stat rather than `uname -s`: this runs once per bounded
 # child spawn, and shelling out for platform detection inside the spawn path
 # would cost more than the check it guards.
 fn _rlimit_as_enforceable() -> bool:
+    not file_exists("/System/Library/CoreServices/SystemVersion.plist")
+
+# `ulimit -u` maps to RLIMIT_NPROC, and Darwin counts that limit against the
+# USER'S ENTIRE system-wide process table, not the session or the subtree:
+# set to any value below the user's current process count, EVERY fork then
+# fails with EAGAIN (verified 2026-09-17 on Darwin 25: a Tiny scope's
+# `ulimit -u 32` made python's subprocess.Popen die with
+# `BlockingIOError: [Errno 35] Resource temporarily unavailable` while the
+# login session alone held ~150 processes). Unlike `-v` there IS a shell that
+# accepts the option -- the option itself is a trap on macOS, so the pid cap
+# is dropped with a LOUD stderr note, same policy as RLIMIT_AS above.
+# See doc/08_tracking/bug/test_runner_ulimit_caps_unusable_on_macos_2026-09-05.md
+fn _rlimit_nproc_enforceable() -> bool:
     not file_exists("/System/Library/CoreServices/SystemVersion.plist")
 
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
@@ -240,7 +254,10 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     if scope.budget.max_cpu_ms > 0:
         prefix = prefix + "ulimit -t {(scope.budget.max_cpu_ms + 999) / 1000} || exit 125; "
     if scope.budget.max_pids > 0:
-        prefix = prefix + "ulimit -u {scope.budget.max_pids} || exit 125; "
+        if _rlimit_nproc_enforceable():
+            prefix = prefix + "ulimit -u {scope.budget.max_pids} || exit 125; "
+        else:
+            eprint("[resource-scope] pid cap of {scope.budget.max_pids} NOT enforced: RLIMIT_NPROC (`ulimit -u`) counts the whole user process table on this platform; cpu/fd caps still apply")
     if scope.budget.max_fds > 0:
         prefix = prefix + "ulimit -n {scope.budget.max_fds} || exit 125; "
     var command = prefix + "exec " + _shell_quote(cmd)

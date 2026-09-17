@@ -18,7 +18,11 @@
 #define RT_OWNED_FREE_VALUE(v) rt_free_deep(v)
 #endif
 
-#if !defined(_WIN32) && defined(__unix__)
+/* Apple clang does NOT predefine __unix__ (only __APPLE__/__MACH__), so the
+ * Unix body must be admitted explicitly or macOS seeds link only the ENOTSUP
+ * fallback stubs below — the original reason every observed spawn degraded
+ * to ResourceEvidenceQuality.Unavailable on macOS. */
+#if !defined(_WIN32) && (defined(__unix__) || defined(__APPLE__) || defined(__MACH__))
 
 #include <errno.h>
 #include <fcntl.h>
@@ -42,6 +46,20 @@
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #endif
+#ifdef __APPLE__
+/* macOS pidfd-free lifecycle: start identity via sysctl(KERN_PROC_PID) and
+ * per-member tree sampling via proc_pid_rusage(2). */
+#include <sys/sysctl.h>
+#include <libproc.h>
+/* The async token-lease and observation-v4 helpers below serve bodies that
+ * stay Linux-gated at runtime (ENOTSUP), so on macOS they are compiled but
+ * uncalled; silence the resulting -Wunused-function noise for the strict
+ * selfcheck build rather than ifdeffing dozens of definitions away from the
+ * shared slot/struct layout they document.  Linux compilation is untouched. */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+#endif
 
 #define RT_OWNED_PROCESS_SLOTS 16
 #define RT_OWNED_TERM_GRACE_MS 100
@@ -50,14 +68,16 @@
 #define RT_OWNED_ABI_MAX_TIMEOUT_MS 3600000
 #define RT_OWNED_ABI_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 typedef struct RtOwnedTreeSample {
     int64_t charge_bytes;
     int64_t io_read_bytes;
     int64_t io_write_bytes;
     int64_t pids;
 } RtOwnedTreeSample;
+#endif
 
+#ifdef __linux__
 static int64_t owned_proc_counter(pid_t member, const char* file, const char* key,
                                   uint64_t multiplier) {
     char path[96];
@@ -103,6 +123,64 @@ static RtOwnedTreeSample owned_sample_process_group(pid_t pgid) {
 }
 #endif
 
+#ifdef __APPLE__
+/* macOS tree sample: one KERN_PROC_ALL sysctl pass filtered to the owned
+ * process group.  Member resident size comes from proc_pid_rusage(2)
+ * (RUSAGE_INFO_V2, falling back to V0): same-user children are always
+ * readable, so the sum is honest group charge.  io_read/io_write stay 0:
+ * ri_diskio_* counts only disk I/O and would mislabel pager/network traffic
+ * as tree IO evidence, so those counters remain unavailable on macOS.  Like
+ * the Linux /proc sampler this is a point-in-time sample: the receipt
+ * records SAMPLED_TREE quality, never ExactTree. */
+static int64_t owned_apple_proc_rss_bytes(pid_t member) {
+    struct rusage_info_v2 usage;
+    memset(&usage, 0, sizeof(usage));
+    if (proc_pid_rusage(member, RUSAGE_INFO_V2, (rusage_info_t)&usage) == 0)
+        return usage.ri_resident_size > (uint64_t)INT64_MAX
+            ? INT64_MAX : (int64_t)usage.ri_resident_size;
+    struct rusage_info_v0 fallback;
+    memset(&fallback, 0, sizeof(fallback));
+    if (proc_pid_rusage(member, RUSAGE_INFO_V0, (rusage_info_t)&fallback) == 0)
+        return fallback.ri_resident_size > (uint64_t)INT64_MAX
+            ? INT64_MAX : (int64_t)fallback.ri_resident_size;
+    return 0;
+}
+
+static RtOwnedTreeSample owned_sample_process_group(pid_t pgid) {
+    RtOwnedTreeSample sample = {0, 0, 0, 0};
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+    struct kinfo_proc* procs = NULL;
+    size_t size = 0;
+    /* The process list changes size between the two sysctl calls on any
+     * busy host; a grown list makes the second call fail with ENOMEM, so
+     * refresh the sizing and retry instead of silently dropping the sample
+     * (a dropped sample erases descendant pids/charge peaks). */
+    for (int attempt = 0; attempt < 4 && !procs; attempt++) {
+        size = 0;
+        if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 ||
+            size < sizeof(struct kinfo_proc)) return sample;
+        procs = (struct kinfo_proc*)malloc(size);
+        if (!procs) return sample;
+        if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) {
+            free(procs);
+            procs = NULL;
+            if (errno != ENOMEM) return sample;
+        }
+    }
+    if (!procs) return sample;
+    size_t count = size / sizeof(struct kinfo_proc);
+    for (size_t i = 0; i < count; i++) {
+        if (procs[i].kp_eproc.e_pgid != pgid) continue;
+        pid_t member = procs[i].kp_proc.p_pid;
+        if (member <= 0) continue;
+        sample.pids++;
+        sample.charge_bytes += owned_apple_proc_rss_bytes(member);
+    }
+    free(procs);
+    return sample;
+}
+#endif
+
 /* Output is owned by the lease, never by a transient poll caller.  A single
  * bounded record array preserves the interleaving source while separate read
  * cursors let stdout/stderr consumers drain their own stream exactly once. */
@@ -122,7 +200,7 @@ typedef struct RtOwnedCapturedByte {
 #endif
 #endif
 #ifndef RT_OWNED_SIGNAL_GROUP
-#define RT_OWNED_SIGNAL_GROUP(pid, pgid, pidfd, sig) owned_signal_group((pid), (pgid), (pidfd), (sig))
+#define RT_OWNED_SIGNAL_GROUP(pid, pgid, pidfd, identity, sig) owned_signal_group((pid), (pgid), (pidfd), (identity), (sig))
 #endif
 
 typedef struct RtOwnedSlot {
@@ -238,6 +316,7 @@ typedef struct RtOwnedCleanup {
     int err_fd;
     int reserved;
     int reaped;
+    uint64_t start_identity;
 } RtOwnedCleanup;
 
 static RtOwnedSlot rt_owned_slots[RT_OWNED_PROCESS_SLOTS];
@@ -343,6 +422,24 @@ static uint64_t owned_start_identity(pid_t pid) {
     char* end = NULL;
     unsigned long long value = strtoull(cursor, &end, 10);
     return errno == 0 && end != cursor ? (uint64_t)value : 0;
+#elif defined(__APPLE__)
+    /* Quality claim: kinfo_proc.kp_proc.p_starttime is the (tv_sec, tv_usec)
+     * pair the kernel stamps at fork, boot-anchored and unique among all
+     * simultaneously-live processes for a whole boot session.  It therefore
+     * distinguishes a live (or unreaped zombie) leader from a PID the kernel
+     * has already recycled, which is the macOS equivalent of the Linux
+     * /proc field-22 starttime.  Unlike a pidfd it does not PIN the task:
+     * every consumer pairs it with getpgid()/kill(-pgid) and must accept a
+     * theoretical validate-then-kill race, documented at each call site. */
+    struct kinfo_proc info;
+    memset(&info, 0, sizeof(info));
+    size_t size = sizeof(info);
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid};
+    if (sysctl(mib, 4, &info, &size, NULL, 0) != 0) return 0;
+    if (size == 0 || info.kp_proc.p_pid != pid) return 0;
+    uint64_t identity = (uint64_t)info.kp_proc.p_starttime.tv_sec;
+    identity = identity * 1000000u + (uint64_t)info.kp_proc.p_starttime.tv_usec;
+    return identity;
 #else
     (void)pid;
     return 0;
@@ -463,35 +560,70 @@ static void owned_release(uint32_t index, uint64_t generation) {
 }
 
 /* A live pidfd pins the leader PID, so the process-group id cannot be reused
- * between this validation and kill(-pgid).  Platforms without pidfds fail
- * closed rather than relying on a racy /proc identity check. */
-static int owned_signal_group(pid_t pid, pid_t pgid, int pidfd, int sig) {
-    if (pid <= 0 || pgid != pid || pidfd < 0 || !owned_pidfd_live(pidfd)) {
-        errno = ESTALE;
-        return 0;
+ * between this validation and kill(-pgid).  Platforms without pidfds (macOS)
+ * re-validate the recorded start identity instead: p_starttime is unique per
+ * live process for a whole boot session, so a mismatch (or a vanished pid)
+ * proves the slot is stale.  That validate-then-kill pair is not atomic — a
+ * PID could in theory exit and be re-used between the sysctl and kill(-pgid)
+ * — which is precisely why macOS tree evidence is receipted as SampledTree
+ * and direct-child counters as process-only, never ExactTree.  Linux keeps
+ * the fail-closed pidfd gate byte-identical. */
+static int owned_signal_group(pid_t pid, pid_t pgid, int pidfd, uint64_t identity, int sig) {
+    if (pid <= 0 || pgid != pid) { errno = ESTALE; return 0; }
+#if defined(__linux__)
+    (void)identity;
+    if (pidfd < 0 || !owned_pidfd_live(pidfd)) { errno = ESTALE; return 0; }
+#else
+    if (pidfd >= 0) {
+        if (!owned_pidfd_live(pidfd)) { errno = ESTALE; return 0; }
+    } else if (identity == 0 || owned_start_identity(pid) != identity) {
+        errno = ESTALE; return 0;
     }
+#endif
     if (getpgid(pid) != pgid) { errno = ESTALE; return 0; }
     if (kill(-pgid, sig) == 0 || errno == ESRCH) return 1;
+#if !defined(__linux__)
+    /* Darwin also answers EPERM when the group has no live member (a zombie
+     * leader with no descendants); owned groups are same-user, so that is the
+     * "nothing left to signal" condition rather than a permission failure. */
+    if (errno == EPERM) return 1;
+#endif
     return 0;
 }
 
 /* Internal callers retain an unreaped direct child.  That zombie pins both its
  * PID and the process-group id even after the pidfd becomes readable, so group
- * cleanup remains safe until waitpid consumes the leader. */
-static int owned_signal_group_pinned(pid_t pid, pid_t pgid, int pidfd, int sig) {
-    if (pid <= 0 || pgid != pid || pidfd < 0 || !owned_pidfd_valid(pidfd)) {
-        errno = ESTALE;
-        return 0;
+ * cleanup remains safe until waitpid consumes the leader.  macOS differences
+ * (probed 2026-09-17 on Darwin 25): getpgid(2) refuses a zombie (ESRCH) and
+ * kill(-pg) answers EPERM when the group has no live member, so the zombie
+ * case is validated through the start-identity read (which still works on
+ * zombies) and EPERM is treated as "group already empty", same as ESRCH.
+ * Owned groups are always same-user, so a permission EPERM cannot occur. */
+static int owned_signal_group_pinned(pid_t pid, pid_t pgid, int pidfd, uint64_t identity, int sig) {
+    if (pid <= 0 || pgid != pid) { errno = ESTALE; return 0; }
+#if defined(__linux__)
+    (void)identity;
+    if (pidfd < 0 || !owned_pidfd_valid(pidfd)) { errno = ESTALE; return 0; }
+#else
+    if (pidfd >= 0) {
+        if (!owned_pidfd_valid(pidfd)) { errno = ESTALE; return 0; }
+    } else if (identity != 0 && owned_start_identity(pid) != identity) {
+        errno = ESTALE; return 0;
     }
+#endif
     if (kill(-pgid, sig) == 0 || errno == ESRCH) return 1;
+#if !defined(__linux__)
+    if (errno == EPERM) return 1;
+#endif
     return 0;
 }
 
-static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
+static int owned_signal_leader_pinned(pid_t pid, int pidfd, uint64_t identity, int sig) {
 #ifdef __linux__
     if (pid <= 0 || pidfd < 0 || !owned_pidfd_valid(pidfd)) {
         errno = ESTALE; return 0;
     }
+    (void)identity;
 #ifdef SYS_pidfd_send_signal
     if (syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0 || errno == ESRCH)
         return 1;
@@ -499,9 +631,29 @@ static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
     (void)sig; errno = ENOTSUP;
 #endif
 #else
-    (void)pid; (void)pidfd; (void)sig; errno = ENOTSUP;
+    if (pid <= 0) { errno = ESTALE; return 0; }
+    (void)pidfd;
+    /* macOS has no pidfd_send_signal: re-validate the start identity, then
+     * signal the leader directly (same validate-then-kill race note as
+     * owned_signal_group). */
+    if (identity == 0 || owned_start_identity(pid) != identity) { errno = ESTALE; return 0; }
+    if (kill(pid, sig) == 0 || errno == ESRCH) return 1;
 #endif
     return 0;
+}
+
+/* Timeout/cancel revalidation immediately before the TERM.  Linux: a live
+ * pidfd plus the process-group match.  macOS: the process-group match plus a
+ * fresh start-identity read against the value captured at spawn. */
+static int owned_identity_revalidated(pid_t pid, pid_t pgid, int pidfd, uint64_t identity) {
+#if defined(__linux__)
+    (void)identity;
+    return owned_pidfd_live(pidfd) && getpgid(pid) == pgid;
+#else
+    (void)pidfd;
+    return getpgid(pid) == pgid && identity != 0 &&
+           owned_start_identity(pid) == identity;
+#endif
 }
 
 bool rt_process_owned_cancel(uint64_t requested_slot, uint64_t requested_generation,
@@ -526,7 +678,17 @@ bool rt_process_owned_cancel(uint64_t requested_slot, uint64_t requested_generat
     if (matched) {
         pidfd = slot->pidfd;
     }
-    int ok = matched && pidfd >= 0;
+    /* The registry match above already pins pid + generation + start_identity.
+     * Linux additionally requires a live pidfd slot handle (byte-identical
+     * gate); macOS has no pidfd, so the start-identity match is the whole
+     * authorization and the async/sync loops re-validate it again at every
+     * kill site. */
+    int ok = matched;
+#if defined(__linux__)
+    ok = ok && pidfd >= 0;
+#else
+    (void)pidfd;
+#endif
     if (ok) {
         slot->cancel_requested = 1;
         receipt->accepted = 1;
@@ -589,7 +751,7 @@ static void owned_capture(int fd, char* dst, uint64_t capacity, uint64_t limit,
 static void owned_cleanup(void* opaque) {
     RtOwnedCleanup* c = (RtOwnedCleanup*)opaque;
     if (c->pid > 0 && !c->reaped) {
-        (void)owned_signal_group_pinned(c->pid, c->pgid, c->pidfd, SIGKILL);
+        (void)owned_signal_group_pinned(c->pid, c->pgid, c->pidfd, c->start_identity, SIGKILL);
         int status;
         pid_t rc;
         do rc = waitpid(c->pid, &status, 0); while (rc < 0 && errno == EINTR);
@@ -703,8 +865,21 @@ static ssize_t owned_write_no_sigpipe(int fd, const uint8_t* data, size_t len) {
     ssize_t result = write(fd, data, len);
     int saved = errno;
     if (result < 0 && saved == EPIPE && !sigismember(&prior, SIGPIPE)) {
+#if defined(__APPLE__)
+        /* Darwin has no sigtimedwait(2). The async input path is unreachable
+         * on macOS (start_v2/v3 fail closed with ENOTSUP before any slot
+         * exists), so a sigpending-guarded sigwait is sufficient here; a
+         * racing peer drain could in theory make sigwait block, which is one
+         * more reason the async family stays Linux-only. */
+        sigset_t pending;
+        if (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE)) {
+            int drained;
+            (void)sigwait(&block, &drained);
+        }
+#else
         struct timespec zero = {0, 0};
         while (sigtimedwait(&block, NULL, &zero) < 0 && errno == EINTR) {}
+#endif
     }
     (void)pthread_sigmask(SIG_SETMASK, &prior, NULL);
     errno = saved;
@@ -874,9 +1049,9 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
     int signalled;
 #if defined(RT_PROCESS_OWNED_TESTING) || defined(RT_PROCESS_OWNED_CORE_ONLY)
     if (rt_owned_test_signal_fail_count > 0) { rt_owned_test_signal_fail_count--; signalled = 0; errno = ESRCH; }
-    else signalled = RT_OWNED_SIGNAL_GROUP(slot->pid, slot->pgid, slot->pidfd, sig);
+    else signalled = RT_OWNED_SIGNAL_GROUP(slot->pid, slot->pgid, slot->pidfd, slot->start_identity, sig);
 #else
-    signalled = RT_OWNED_SIGNAL_GROUP(slot->pid, slot->pgid, slot->pidfd, sig);
+    signalled = RT_OWNED_SIGNAL_GROUP(slot->pid, slot->pgid, slot->pidfd, slot->start_identity, sig);
 #endif
     if (signalled) return OWNED_SIGNAL_SENT;
     siginfo_t info; memset(&info, 0, sizeof(info));
@@ -884,7 +1059,7 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
     while (rc < 0 && errno == EINTR);
     if (rc == 0 && info.si_pid == slot->pid) {
         if (slot->request_started_ns < 0)
-            (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
+            (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, slot->start_identity, SIGKILL);
         memset(&slot->child_usage, 0, sizeof(slot->child_usage));
         pid_t waited; do waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage);
         while (waited < 0 && errno == EINTR);
@@ -1129,7 +1304,8 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
 #ifndef __linux__
-    (void)cmd; (void)argv; (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
+    (void)cmd; (void)argv; (void)input; (void)input_len; (void)pipe_stdin;
+    (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
     if (pinned_executable_fd >= 0) close(pinned_executable_fd);
     if (configured_cwd_fd >= 0) close(configured_cwd_fd);
     receipt->runtime_error = ENOTSUP; return false;
@@ -1264,7 +1440,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
     if (!error && (pidfd = owned_pidfd_open(pid)) < 0) error = errno ? errno : ENOTSUP;
     if (!error && (identity = owned_start_identity(pid)) == 0) error = ESRCH;
     if (error) {
-        if (pidfd >= 0) (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
+        if (pidfd >= 0) (void)owned_signal_group_pinned(pid, pid, pidfd, identity, SIGKILL);
         else (void)kill(-pid, SIGKILL);
         int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
         close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
@@ -1288,7 +1464,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
         close(exec_pipe[0]);
         if (!confirmed) {
             if (!child_reaped) {
-                (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
+                (void)owned_signal_group_pinned(pid, pid, pidfd, identity, SIGKILL);
                 int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
             }
             close(out_pipe[0]); close(err_pipe[0]);
@@ -1324,7 +1500,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
     if (!error && (!owned_set_nonblocking(out_pipe[0]) || !owned_set_nonblocking(err_pipe[0]) ||
                    (pipe_stdin && !owned_set_nonblocking(in_pipe[1])))) error = errno ? errno : EIO;
     if (error) {
-        if (pidfd >= 0) (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
+        if (pidfd >= 0) (void)owned_signal_group_pinned(pid, pid, pidfd, identity, SIGKILL);
         else (void)kill(-pid, SIGKILL);
         int status; pid_t reaped; do reaped = waitpid(pid, &status, 0); while (reaped < 0 && errno == EINTR);
         (void)reaped;
@@ -1336,7 +1512,7 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
     RtOwnedSlot* slot = &rt_owned_slots[index];
     if (slot->generation != generation || slot->pid != -1) {
         pthread_mutex_unlock(&rt_owned_lock);
-        (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
+        (void)owned_signal_group_pinned(pid, pid, pidfd, identity, SIGKILL);
         int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
         close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]); close(pidfd);
         RT_OWNED_HOST_FREE(retained); RT_OWNED_HOST_FREE(input_copy);
@@ -1528,7 +1704,7 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         /* waitid observed the same pidfd-pinned leader before exact reap. */
         slot->identity_revalidated = 1;
         if (slot->request_started_ns < 0)
-            (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
+            (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, slot->start_identity, SIGKILL);
         memset(&slot->child_usage, 0, sizeof(slot->child_usage));
         pid_t waited;
         for (;;) {
@@ -3900,12 +4076,12 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
     }
     if (out_cap) out[0] = '\0';
     if (err_cap) err[0] = '\0';
-#ifndef __linux__
-    receipt->runtime_error = ENOTSUP;
-    if (observation) observation->runtime_error = ENOTSUP;
-    return false;
-#else
-    RtOwnedCleanup cleanup = {0, 0, 0, 0, -1, -1, -1, 0, 0};
+    /* The lifecycle is portable Unix: Linux pins children with pidfds; macOS
+     * (no pidfd) runs the same state machine on start-identity + killpg/wait4
+     * with the validate-then-kill race documented at owned_signal_group.
+     * Platforms with neither pidfds nor a KERN_PROC start identity still fail
+     * closed: identity == 0 is rejected immediately after fork. */
+    RtOwnedCleanup cleanup = {0, 0, 0, 0, -1, -1, -1, 0, 0, 0};
     struct rusage child_usage;
     memset(&child_usage, 0, sizeof(child_usage));
     volatile int child_usage_available = 0;
@@ -3947,9 +4123,16 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
     pid_t actual_pgid = getpgid(pid);
     if (actual_pgid != pid) { receipt->runtime_error = actual_pgid < 0 ? errno : EPERM; goto done; }
     cleanup.pidfd = owned_pidfd_open(pid);
-    if (cleanup.pidfd < 0) { receipt->runtime_error = errno ? errno : ENOTSUP; goto done; }
+    /* Linux keeps the pidfd-pinned lifecycle: any real open failure is fatal.
+     * Platforms that answer ENOTSUP/EOPNOTSUPP (macOS) simply have no pidfd,
+     * so the slot proceeds on start-identity alone — which is why the
+     * identity read below is mandatory there. */
+    if (cleanup.pidfd < 0 && errno != ENOTSUP && errno != EOPNOTSUPP) {
+        receipt->runtime_error = errno ? errno : ENOTSUP; goto done;
+    }
     uint64_t identity = owned_start_identity(pid);
     if (identity == 0) { receipt->runtime_error = ESRCH; goto done; }
+    cleanup.start_identity = identity;
     if (!owned_set_nonblocking(cleanup.out_fd) || !owned_set_nonblocking(cleanup.err_fd)) {
         receipt->runtime_error = errno ? errno : EIO; goto done;
     }
@@ -4022,7 +4205,7 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
             if (wait_rc == 0 && info.si_pid == pid) {
                 /* Keep the leader unreaped while terminating descendants: the
                  * retained child pins pgid against reuse. */
-                if (!owned_signal_group_pinned(pid, pid, cleanup.pidfd, SIGKILL)) {
+                if (!owned_signal_group_pinned(pid, pid, cleanup.pidfd, identity, SIGKILL)) {
                     receipt->runtime_error = ESTALE;
                     break;
                 }
@@ -4045,20 +4228,20 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
         pthread_mutex_unlock(&rt_owned_lock);
         if (!child_done && (cancel_requested || (timeout_ms > 0 && now - started >= timeout_ms)) && !receipt->term_sent) {
             receipt->timed_out = cancel_requested ? 0 : 1;
-            receipt->identity_revalidated = owned_pidfd_live(cleanup.pidfd) && getpgid(pid) == pid;
-            if (!receipt->identity_revalidated || !owned_signal_group(pid, pid, cleanup.pidfd, SIGTERM)) {
+            receipt->identity_revalidated = owned_identity_revalidated(pid, pid, cleanup.pidfd, identity);
+            if (!receipt->identity_revalidated || !owned_signal_group(pid, pid, cleanup.pidfd, identity, SIGTERM)) {
                 receipt->runtime_error = ESTALE; break;
             }
             receipt->term_sent = 1; term_at = now;
         }
         if (!child_done && receipt->term_sent && now - term_at >= RT_OWNED_TERM_GRACE_MS && !receipt->kill_sent) {
-            if (!owned_signal_group(pid, pid, cleanup.pidfd, SIGKILL)) { receipt->runtime_error = ESTALE; break; }
+            if (!owned_signal_group(pid, pid, cleanup.pidfd, identity, SIGKILL)) { receipt->runtime_error = ESTALE; break; }
             receipt->kill_sent = 1;
         }
     }
 
     if (!cleanup.reaped) {
-        (void)owned_signal_group(pid, pid, cleanup.pidfd, SIGKILL);
+        (void)owned_signal_group(pid, pid, cleanup.pidfd, identity, SIGKILL);
         pid_t waited;
         do waited = wait4(pid, &status, 0, &child_usage); while (waited < 0 && errno == EINTR);
         if (waited == pid) { cleanup.reaped = 1; receipt->reaped = 1; child_usage_available = 1; }
@@ -4068,6 +4251,12 @@ static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
         if (WIFEXITED(status)) receipt->exit_code = WEXITSTATUS(status);
         else if (WIFSIGNALED(status)) receipt->exit_code = 128 + WTERMSIG(status);
     }
+    /* Direct-child evidence from the wait4 rusage collected above: exact
+     * process-only counters for the leader (user/system CPU, peak RSS; macOS
+     * ru_maxrss is already bytes).  Descendant coverage on every platform is
+     * only the sampled process-group sweep recorded as SAMPLED_TREE — a
+     * point-in-time sum, never an exact tree; io counters stay 0 where the
+     * platform cannot report them without relabelling (macOS). */
     if (observation && child_usage_available) {
         observation->evidence_flags |= RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE;
         observation->user_cpu_ms = owned_timeval_ms(child_usage.ru_utime);
@@ -4089,7 +4278,6 @@ done:
     (void)pthread_setcancelstate(old_cancel_state, NULL);
     if (old_cancel_state == PTHREAD_CANCEL_ENABLE) pthread_testcancel();
     return receipt->runtime_error == 0;
-#endif
 }
 
 bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,

@@ -62,9 +62,118 @@ sub proc_stat_snapshot {
     return ($start, $pgid);
 }
 
+# --- Darwin start-time identity -------------------------------------------
+#
+# Darwin has no /proc, and Apple Silicon macOS refuses raw sysctl(2) syscalls:
+# measured 2026-09-16 on this host, syscall(202) returns ENOENT for every mib,
+# including CTL_KERN/KERN_OSTYPE -- only the fork-safety list (getpid, ...)
+# survives, and sysctl(8) does not expose kern.proc.* either. The remaining
+# in-box source with sub-second resolution is libproc's proc_pidinfo(3) with
+# PROC_PIDTBSDINFO: pbi_start_tvsec/pbi_start_tvusec, the same p_starttime the
+# Linux table reads as clock ticks, at microsecond resolution. That is a
+# strictly stronger recycled-pid discriminator than ps lstart's whole seconds,
+# which the 2026-09-12 bug record measured as unsafe for this refinement.
+#
+# A tiny python3 ctypes probe reads the fixed fields (measured layout on this
+# host, flavor 3, 136 bytes returned: pid@12 ppid@16 start_tvsec@120
+# start_tvusec@128; this struct variant carries NO pbi_pgid field -- pgid is
+# an exact integer attribute and keeps coming from ps). When python3, the
+# libproc call, or the sanity check is unavailable, everything below returns
+# undef and the callers keep the pre-port behaviour: ps lstart identities and
+# no darwin reclaim refinement. That fallback is deliberate and fail-closed.
+my $DARWIN_BSDINFO_PY = q{
+import ctypes, sys, time
+pid = int(sys.argv[1])
+lib = ctypes.CDLL("libSystem.B.dylib")
+lib.proc_pidinfo.restype = ctypes.c_int
+lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                             ctypes.c_void_p, ctypes.c_int]
+buf = (ctypes.c_byte * 256)()
+n = lib.proc_pidinfo(pid, 3, 0, buf, len(buf))
+if n < 136:
+    sys.exit(1)
+b = bytes(buf)
+got = int.from_bytes(b[12:16], "little")
+ppid = int.from_bytes(b[16:20], "little")
+sec = int.from_bytes(b[120:128], "little")
+usec = int.from_bytes(b[128:136], "little")
+now = time.time()
+if got != pid or sec < 1000000000 or sec > now + 120 or usec >= 1000000:
+    sys.exit(1)
+print("%d %d %d %d" % (got, ppid, sec, usec))
+};
+
+# Returns the kinfo start identity for one pid: exactly 32 lowercase hex
+# chars (two packed 64-bit little-endian integers: tv_sec, tv_usec), or undef.
+sub darwin_bsd_start {
+    my ($pid) = @_;
+    return unless $^O eq 'darwin' && defined($pid) &&
+        $pid =~ /\A[1-9][0-9]*\z/;
+    my $child = open(my $fh, '-|');
+    return unless defined($child);
+    if (!$child) {
+        open(STDERR, '>', '/dev/null');
+        exec('python3', '-c', $DARWIN_BSDINFO_PY, $pid);
+        exit 127;
+    }
+    my $line = <$fh>;
+    close($fh) or return;
+    return unless defined($line);
+    chomp($line);
+    my ($got, $ppid, $sec, $usec) = split(/ /, $line);
+    return unless defined($got) && "$got" eq "$pid";
+    return unpack('H*', pack('Q<Q<', $sec + 0, $usec + 0));
+}
+
+# The kinfo identity format is recognizable: exactly 32 lowercase hex chars.
+# Legacy identities (hex of an lstart string, or of /proc clock-tick digits)
+# never match that shape. The two formats must never be positively compared:
+# a legacy claim checked against a kinfo table would demote a LIVE owner as a
+# recycled leader. Mixed formats therefore fail closed (lock stays held).
+sub kinfo_start_hex_p {
+    my ($hex) = @_;
+    return defined($hex) && $hex =~ /\A[0-9a-f]{32}\z/;
+}
+
+# (pid, ppid, pgid) rows for every process from one ps call. These are exact
+# integer attributes of ps; only lstart had the whole-second problem, and the
+# leader start time is deliberately NOT taken here -- it comes from
+# darwin_bsd_start, the same source process_snapshot records, per the bug
+# record's same-source rule.
+sub darwin_ps_table {
+    my $child = open(my $fh, '-|');
+    return unless defined($child);
+    if (!$child) {
+        open(STDERR, '>', '/dev/null');
+        exec('ps', '-axo', 'pid=,ppid=,pgid=');
+        exit 127;
+    }
+    my @rows;
+    while (my $line = <$fh>) {
+        my ($pid, $ppid, $pgid) =
+            $line =~ /^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*$/;
+        next unless defined($pid);
+        push(@rows, [$pid + 0, $ppid + 0, $pgid + 0, undef]);
+    }
+    close($fh) or return;
+    return @rows;
+}
+
 sub process_snapshot {
     my ($pid) = @_;
     return unless defined($pid) && $pid =~ /\A[1-9][0-9]*\z/;
+    if ($^O eq 'darwin') {
+        # Prefer the kinfo identity; on any failure fall through to the
+        # legacy ps path, which keeps minting/checking comparable claims.
+        my $start_one = darwin_bsd_start($pid);
+        if (defined($start_one)) {
+            my $pgid = ps_value('pgid', $pid);
+            return unless defined($pgid) && $pgid =~ /\A[1-9][0-9]*\z/;
+            my $start_two = darwin_bsd_start($pid);
+            return unless defined($start_two) && $start_one eq $start_two;
+            return ($start_one, $pgid);
+        }
+    }
     my $start_one = ps_value('lstart', $pid);
     if (defined($start_one)) {
         my $pgid = ps_value('pgid', $pid);
@@ -145,11 +254,16 @@ sub proc_table {
 # returned byte-identically:
 #   - the recorded claim has pid == pgid (the shape our own create path
 #     produces via the session wrapper; foreign shapes keep old semantics),
-#   - kill(0, -pgid) SUCCEEDED (same-uid group, so /proc shows every
-#     member; the EPERM path is never refined -- under hidepid another
-#     user's members are invisible and demoting EPERM to dead would be the
-#     false-dead two-writers corruption this lock exists to prevent),
-#   - a /proc scan is available (Linux, MSYS/Cygwin; macOS opts out).
+#   - kill(0, -pgid) SUCCEEDED (same-uid group; the EPERM path is never
+#     refined -- under hidepid another user's members are invisible and
+#     demoting EPERM to dead would be the false-dead two-writers corruption
+#     this lock exists to prevent),
+#   - a process table is available. On Linux/MSYS/Cygwin that is the /proc
+#     scan (field-22 clock ticks). On Darwin it is now a ps(1) pid/ppid/pgid
+#     table plus a libproc kinfo start-time for the leader only -- never ps
+#     lstart, whose whole-second resolution the 2026-09-12 bug record
+#     measured as reclaiming live owners. Without either table the function
+#     opts out and the kill()-based verdict stands (macOS before this port).
 # It demotes "live" to "dead" in exactly two positively-verified cases:
 #   (a) no process holds the pgid AND a re-check of kill(0, -pgid) now
 #       reports ESRCH (closes the scan-vs-kill race), or
@@ -162,9 +276,13 @@ sub proc_table {
 # reparented to pid 1, an unreadable row, a broken or over-long chain --
 # keeps the group "live" (fail closed), and the surviving member pids are
 # reported on stderr so an operator can act on a genuinely wedged group.
+# Recorded and table start identities must share a FORMAT before case (b)
+# can fire: a legacy claim (lstart-string or clock-tick hex) checked against
+# a kinfo identity is incomparable and keeps the lock held (fail closed).
 sub refine_leader_group_state {
     my ($pgid, $expected_start_hex) = @_;
-    my @rows = proc_table();
+    my $darwin = ($^O eq 'darwin');
+    my @rows = $darwin ? darwin_ps_table() : proc_table();
     return 'live' unless @rows;
     my %row_by_pid;
     my @members;
@@ -186,7 +304,29 @@ sub refine_leader_group_state {
             "); lock stays held until they exit or are killed\n";
         return 'live';
     }
-    my $leader_start_hex = unpack('H*', $leader->[3]);
+    my $leader_start_hex;
+    my $table_start_again;
+    if ($darwin) {
+        # The table row carries no start time (ps lstart is measured-unsafe);
+        # read the leader's kinfo identity from the same source
+        # process_snapshot records.
+        $leader_start_hex = darwin_bsd_start($pgid);
+        return 'live' unless defined($leader_start_hex);
+        if (!kinfo_start_hex_p($expected_start_hex)) {
+            print STDERR "portable-lock: recorded pgid $pgid claim carries " .
+                "a legacy start identity that the kinfo start-time cannot " .
+                "be compared against; keeping the lock held (fail closed)\n";
+            return 'live';
+        }
+        $table_start_again = \&darwin_bsd_start;
+    } else {
+        $leader_start_hex = unpack('H*', $leader->[3]);
+        $table_start_again = sub {
+            my ($pid) = @_;
+            my ($start) = proc_stat_snapshot($pid);
+            return defined($start) ? unpack('H*', $start) : undef;
+        };
+    }
     return 'live' if $leader_start_hex eq $expected_start_hex;
     my %impostor = ($pgid => 1);
     for my $member (@members) {
@@ -215,9 +355,12 @@ sub refine_leader_group_state {
             "the recycled leader; keeping the lock held (fail closed)\n";
         return 'live';
     }
-    my ($leader_start_again) = proc_stat_snapshot($pgid);
+    # Re-read the leader's start-time through the SAME source the table used
+    # (the bug record's trap: routing this through process_snapshot would mix
+    # lstart with clock ticks and silently disable the reclaim on Linux).
+    my $leader_start_again = $table_start_again->($pgid);
     return 'live' unless defined($leader_start_again) &&
-        unpack('H*', $leader_start_again) eq $leader_start_hex;
+        $leader_start_again eq $leader_start_hex;
     print STDERR "portable-lock: recorded pgid $pgid was recycled by an " .
         "unrelated process (start-time mismatch); the recorded owner group " .
         "is positively absent, allowing stale-lock reclaim\n";
