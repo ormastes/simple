@@ -1830,7 +1830,18 @@ bootstrap_stage_sanity() (
   candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
   frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
-  CANDIDATE_FRONTEND_BACKEND="${backend}" \
+  # The smoke exercises the FRONTEND through whichever worker binary the lane
+  # admits. When the Rust seed was built without the llvm cargo feature (the
+  # decoupled lane: SIMPLE_BOOTSTRAP_RUST_LLVM=0, LLVM served to the
+  # pure-Simple backends via LLVM-C.dll), the seed-side worker cannot honour
+  # --backend llvm, so the smoke drives it with cranelift. The llvm backend
+  # admission itself is the K1 composition gate downstream, unaffected here.
+  if [ "${llvm_features}" = "" ]; then
+    frontend_smoke_backend=cranelift
+  else
+    frontend_smoke_backend=${backend}
+  fi
+  CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
     CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
@@ -1847,7 +1858,7 @@ bootstrap_stage_sanity() (
   frontend_bootstrap_ran=false
   if [ "${frontend_status}" -eq 0 ]; then
     frontend_bootstrap_ran=true
-    CANDIDATE_FRONTEND_BACKEND="${backend}" \
+    CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
       CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
@@ -3021,7 +3032,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
-      "SIMPLE_FRONTEND_CACHE=1" \
+      "SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0)" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
@@ -3081,7 +3092,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
       "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
-      "SIMPLE_FRONTEND_CACHE=1" \
+      "SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0)" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
@@ -3133,6 +3144,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_run_stage2_native() {
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
+      "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
       "LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -3148,7 +3160,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       SIMPLE_NATIVE_BUILD_RUST=1 \
       SIMPLE_NO_STUB_FALLBACK=1 \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
-      SIMPLE_FRONTEND_CACHE=1 \
+      SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0) \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
@@ -3646,7 +3658,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_STAGE3_STREAMING_SURFACES=1 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
-    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0) \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
     SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ="${stage2_compatibility_manifest_absolute}" \
     SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="${stage3_cache_absolute}" \

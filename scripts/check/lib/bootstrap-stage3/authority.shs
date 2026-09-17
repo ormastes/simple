@@ -492,7 +492,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # LLVM object stage returned 'llc not found' -- which surfaced only as
     # 'backend object-path status 1'. The mechanism already existed; it just
     # could not see its own configuration.
-    printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *windows-gnu*)
             printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC'
@@ -1780,6 +1780,55 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 bootstrap_stage3_llvm_msvc_found=$(
                     bootstrap_stage3_llvm_msvc_find_lib                         "$bootstrap_stage3_llvm_system_token"                         "$bootstrap_stage3_llvm_libdir"
                 )
+                if [ -z "$bootstrap_stage3_llvm_msvc_found" ]; then
+                    # GNU toolchains keep the same system libraries as
+                    # lib<name>.a in the compiler driver search path (MinGW
+                    # resolves psapi.lib to libpsapi.a). Bind the exact
+                    # archive the linker will select, so the record names
+                    # what actually linked -- the same guarantee as the
+                    # MSVC/LIB branch, for hosts without an MSVC SDK.
+                    bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
+                    bootstrap_stage3_llvm_gnu_resolved=$(gcc -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    case "$bootstrap_stage3_llvm_gnu_resolved" in
+                        /*|[A-Za-z]:[\\/]*)
+                            # gcc answers with a native Windows path, which
+                            # the MSYS filesystem tests cannot see; convert
+                            # before testing and before recording.
+                            bootstrap_stage3_llvm_gnu_unix=$(cygpath -u "$bootstrap_stage3_llvm_gnu_resolved" 2>/dev/null || printf '%s' "$bootstrap_stage3_llvm_gnu_resolved")
+                            [ -f "$bootstrap_stage3_llvm_gnu_unix" ] &&
+                                bootstrap_stage3_llvm_msvc_found=$bootstrap_stage3_llvm_gnu_unix
+                            ;;
+                    esac
+                fi
+                if [ -z "$bootstrap_stage3_llvm_msvc_found" ]; then
+                    # A token nobody provides may be statically absorbed into
+                    # the runtime library itself: LLVM 18 links libxml2 in,
+                    # yet llvm-config --system-libs still names libxml2s.lib
+                    # for static consumers. Prove absorption from the runtime
+                    # library's import table -- when no DLL carrying the base
+                    # name is imported, the runtime is self-contained for this
+                    # token and a dynamic link cannot miss it.
+                    bootstrap_stage3_llvm_absorb_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
+                    bootstrap_stage3_llvm_absorb_dll=$(printf '%s' "$bootstrap_stage3_llvm_absorb_base" | sed 's/s$//')
+                    # LLVM-C.dll sits in bin/ on Windows, while libdir names
+                    # the static-library directory; check both spellings.
+                    bootstrap_stage3_llvm_runtime_dll=
+                    for bootstrap_stage3_llvm_rt_candidate in \
+                        "$bootstrap_stage3_llvm_libdir/LLVM-C.dll" \
+                        "$bootstrap_stage3_llvm_libdir/../bin/LLVM-C.dll"; do
+                        if [ -f "$bootstrap_stage3_llvm_rt_candidate" ]; then
+                            bootstrap_stage3_llvm_runtime_dll=$bootstrap_stage3_llvm_rt_candidate
+                            break
+                        fi
+                    done
+                    if [ -f "$bootstrap_stage3_llvm_runtime_dll" ] &&
+                        ! objdump -p "$bootstrap_stage3_llvm_runtime_dll" 2>/dev/null |
+                            grep -qi "DLL Name: ${bootstrap_stage3_llvm_absorb_dll}[-0-9]*\.dll"; then
+                        printf 'llvm-system-lib-%s-absorbed-by-runtime=%s\n' \
+                            "$bootstrap_stage3_llvm_key" "$bootstrap_stage3_llvm_absorb_base"
+                        continue
+                    fi
+                fi
                 [ -n "$bootstrap_stage3_llvm_msvc_found" ] || {
                     echo "llvm authority: llvm-config --system-libs named '${bootstrap_stage3_llvm_system_token}', which is in neither the LLVM libdir (${bootstrap_stage3_llvm_libdir}) nor any LIB entry; is the MSVC environment set?" >&2
                     return 1
