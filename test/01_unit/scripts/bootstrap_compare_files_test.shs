@@ -5,17 +5,77 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 mkdir_path=$(command -v mkdir)
 rm_path=$(command -v rm)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-compare-files.XXXXXX")
+# Physical path only: the binder canonicalises with pwd -P, so on hosts where
+# TMPDIR is a symlink (macOS /var -> /private/var) fixture paths must be too,
+# or the bound-path equality assertions compare different spellings.
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
 trap '"$rm_path" -rf -- "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin"
-cat >"$tmp/bin/cmp" <<'EOF'
-#!/bin/sh
-[ -f "${CMP_MODE_FILE:-}" ] && exit "$(cat "$CMP_MODE_FILE")"
-[ "$1" = -s ] && shift
-[ "$#" -eq 2 ] || exit 2
-left=$(sha256sum "$1") || exit 2
-right=$(sha256sum "$2") || exit 2
-[ "${left%% *}" = "${right%% *}" ]
+
+# Controllable comparator fixture. The binder refuses `#!` script wrappers —
+# a wrapper's own bytes do not determine what runs, so hashing one pins
+# nothing — which is why the original shell-script fixture here could never
+# bind and this whole test failed before running a single assertion (the
+# test PATH fixture issue named in
+# doc/08_tracking/bug/windows_bootstrap_cmp_authority_missing_2026-09-09.md).
+# Compile a real binary whose exit status can still be forced through
+# CMP_MODE_FILE; without a C compiler, fall back to the host's real cmp and
+# skip only the status-forcing cases.
+fixture_c="$tmp/cmp-fixture.c"
+cat >"$fixture_c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+    const char *mode_file = getenv("CMP_MODE_FILE");
+    if (mode_file != NULL && mode_file[0] != '\0') {
+        FILE *f = fopen(mode_file, "r");
+        int mode = 2;
+        if (f == NULL) return 2;
+        if (fscanf(f, "%d", &mode) != 1) mode = 2;
+        fclose(f);
+        return mode;
+    }
+    /* Operands are the final two arguments, so both `cmp a b` and
+     * `cmp -s a b` dispatch here. */
+    if (argc < 3) return 2;
+    FILE *fa = fopen(argv[argc - 2], "rb");
+    if (fa == NULL) return 2;
+    FILE *fb = fopen(argv[argc - 1], "rb");
+    if (fb == NULL) { fclose(fa); return 2; }
+    int rc = 0;
+    for (;;) {
+        int ca = fgetc(fa);
+        int cb = fgetc(fb);
+        if (ca != cb) { rc = 1; break; }
+        if (ca == EOF) break;
+    }
+    fclose(fa);
+    fclose(fb);
+    return rc;
+}
 EOF
+cc_bin=
+for cc_candidate in "${CC:-}" cc gcc clang; do
+    [ -n "$cc_candidate" ] || continue
+    if command -v "$cc_candidate" >/dev/null 2>&1; then
+        cc_bin=$cc_candidate
+        break
+    fi
+done
+have_mode_fixture=0
+if [ -n "$cc_bin" ] &&
+   "$cc_bin" -O0 -w -o "$tmp/bin/cmp" "$fixture_c" 2>/dev/null; then
+    have_mode_fixture=1
+else
+    real_cmp=$(command -v cmp 2>/dev/null || true)
+    [ -n "$real_cmp" ] || {
+        echo 'FAIL: neither a C compiler nor a host cmp is available' >&2
+        exit 1
+    }
+    real_cmp=$(bootstrap_stage3_resolve_symlinks "$real_cmp")
+    cp "$real_cmp" "$tmp/bin/cmp"
+    echo 'SKIP: no C compiler; status-forcing comparator cases not exercised' >&2
+fi
 chmod +x "$tmp/bin/cmp"
 ln_path=$(command -v ln)
 printf 'same\n' >"$tmp/one"
@@ -41,31 +101,33 @@ elif [ "$?" -le 1 ]; then
     echo 'FAIL: missing file did not return unavailable status' >&2
     exit 1
 fi
-for mode in 2 126 127; do
-    printf '%s\n' "$mode" >"$tmp/mode"
-    CMP_MODE_FILE="$tmp/mode"
-    export CMP_MODE_FILE
-    if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
-        echo "FAIL: comparator status $mode admitted" >&2
-        exit 1
-    elif [ "$?" -ne "$mode" ]; then
-        echo "FAIL: comparator status $mode was not preserved" >&2
-        exit 1
-    fi
-done
-for mode in 0 1 2 126 127; do
-    printf '%s\n' "$mode" >"$tmp/mode"
-    CMP_MODE_FILE="$tmp/mode"
-    export CMP_MODE_FILE
-    if bootstrap_stage3_require_equal "set-e status $mode" \
-        "$tmp/one" "$tmp/two"; then
-        require_status=0
-    else
-        require_status=$?
-    fi
-    test "$require_status" -eq "$mode"
-done
-unset CMP_MODE_FILE
+if [ "$have_mode_fixture" -eq 1 ]; then
+    for mode in 2 126 127; do
+        printf '%s\n' "$mode" >"$tmp/mode"
+        CMP_MODE_FILE="$tmp/mode"
+        export CMP_MODE_FILE
+        if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+            echo "FAIL: comparator status $mode admitted" >&2
+            exit 1
+        elif [ "$?" -ne "$mode" ]; then
+            echo "FAIL: comparator status $mode was not preserved" >&2
+            exit 1
+        fi
+    done
+    for mode in 0 1 2 126 127; do
+        printf '%s\n' "$mode" >"$tmp/mode"
+        CMP_MODE_FILE="$tmp/mode"
+        export CMP_MODE_FILE
+        if bootstrap_stage3_require_equal "set-e status $mode" \
+            "$tmp/one" "$tmp/two"; then
+            require_status=0
+        else
+            require_status=$?
+        fi
+        test "$require_status" -eq "$mode"
+    done
+    unset CMP_MODE_FILE
+fi
 unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
 "$mkdir_path" -p "$tmp/empty"
 PATH="$tmp/empty"
@@ -77,17 +139,25 @@ elif [ "$?" -le 1 ]; then
     echo 'FAIL: unavailable cmp did not return unavailable status' >&2
     exit 1
 fi
+# A symlinked comparator must BIND, resolving to its physical target:
+# refusing package-manager cmp shims broke every stock Homebrew macOS host
+# (see doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_symlinked_cmp_on_macos_2026-09-12.md).
 "$mkdir_path" -p "$tmp/shadow-dir"
 if "$ln_path" -s "$tmp/bin/cmp" "$tmp/shadow-dir/cmp" 2>/dev/null; then
-    PATH="$tmp/shadow-dir"
+    # The fixture directory must stay first, but the bind itself needs the
+    # system utilities (readlink, dirname, shasum), so this PATH is not
+    # single-entry like the unavailable-comparator case above.
+    PATH="$tmp/shadow-dir:/usr/bin:/bin"
     export PATH
-    if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
-        echo 'FAIL: initial symlink comparator admitted' >&2
+    unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+    bootstrap_stage3_compare_files "$tmp/one" "$tmp/two" || {
+        echo 'FAIL: symlinked comparator did not bind' >&2
         exit 1
-    elif [ "$?" -le 1 ]; then
-        echo 'FAIL: initial symlink comparator was not rejected' >&2
+    }
+    test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$tmp/bin/cmp" || {
+        echo 'FAIL: symlinked comparator did not bind to the physical target' >&2
         exit 1
-    fi
+    }
 fi
 PATH="$tmp/bin:/usr/bin:/bin"
 export PATH
@@ -117,17 +187,24 @@ unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
 PATH="$tmp/bin:/usr/bin:/bin"
 export PATH
 bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
+# Shadowing is decided once at bind time: after binding, a different ambient
+# cmp must NOT be re-resolved per comparison — re-reading PATH is what made
+# the documented BOOTSTRAP_STAGE3_COMPARE_TOOL pin useless. The ambient
+# script wrapper is the canary: any re-resolution would refuse or run it,
+# and equal files would stop comparing equal.
 "$mkdir_path" -p "$tmp/alternate-dir"
-cp "$tmp/bin/cmp" "$tmp/alternate-dir/cmp"
+printf '#!/bin/sh\nexit 2\n' >"$tmp/alternate-dir/cmp"
+chmod +x "$tmp/alternate-dir/cmp"
 PATH="$tmp/alternate-dir:/usr/bin:/bin"
 export PATH
-if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
-    echo 'FAIL: alternate PATH comparator shadow admitted' >&2
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two" || {
+    echo 'FAIL: bound comparator was re-resolved against ambient PATH' >&2
     exit 1
-elif [ "$?" -le 1 ]; then
-    echo 'FAIL: alternate PATH comparator shadow was not rejected' >&2
+}
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$tmp/bin/cmp" || {
+    echo 'FAIL: bound comparator path changed under ambient shadow' >&2
     exit 1
-fi
+}
 grep -Fq 'file cmp' "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 grep -Fq 'BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256' \
     "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
