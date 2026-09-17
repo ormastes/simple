@@ -38,11 +38,27 @@ test/fixture/image_to_markdown/{audited_document.v2.json,
 chart_missing_x_value.v2.json} via file_read; runtime-read strings measure
 correctly. Inline the literals again once the lexer is fixed.
 
-## Suggested direction
+## Runtime manifestation (2026-09-18, same day): concatenation-built strings
 
-Seed lexer string-literal scan: when the closing quote is immediately
-followed by `}}` at end of literal, the recorded length/pointer is one
-short. Inspect the literal-length computation in the seed's
-lexer/parser (src/compiler_rust/compiler/src lexer string arm) for an
-off-by-one in the escape-aware closing scan that only manifests with that
-two-brace tail (a single trailing `}` or a space before it is fine).
+The defect is not lexer-only. A string BUILT at runtime by concatenation
+miscounts the same way when the result contains the sequence: the forward
+OpenAI->Anthropic converter's output
+
+```
+[{"role":"user","content":[{"type":"image","source":{"type":"base64",
+  "media_type":"image/png","data":"AA=="}}]}]
+```
+
+reports text.len() 111 where the true length is 112, and json_parse of it
+fails with "Expected comma in object" -- the '}}' in the payload collides
+with whatever the seed's text layer uses there. File-read strings carrying
+the same bytes parse fine, so the corruption is specific to the
+concat/join-built path. This blocks the openai->anthropic->openai round
+-trip example in test/01_unit/app/llm_caret/multimodal_proxy_spec.spl
+(10/11; the other ten were fixed by splitting literals at the sequence and
+by replacing a corrupt inline PNG payload).
+
+The common thread -- literals, concatenation results, but not file-read
+strings -- points at the seed's text construction/flattening layer rather
+than storage. Any fix should start there (text rope / escape handling for
+adjacent closing braces).
