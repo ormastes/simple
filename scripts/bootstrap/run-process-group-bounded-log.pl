@@ -17,7 +17,8 @@ $SIG{__DIE__} = sub {
 
 my $IS_LINUX = $^O eq 'linux';
 my $IS_DARWIN = $^O eq 'darwin';
-$IS_LINUX || $IS_DARWIN or die "bounded-log-error: unsupported platform\n";
+my $IS_FREEBSD = $^O eq 'freebsd';
+$IS_LINUX || $IS_DARWIN || $IS_FREEBSD or die "bounded-log-error: unsupported platform\n";
 my $SYS_RENAMEAT2 = $IS_LINUX ? (
     $Config{archname} =~ /aarch64/ ? 276 :
     $Config{archname} =~ /x86_64/ ? 316 : undef
@@ -45,6 +46,13 @@ if ($IS_DARWIN) {
     $option{'output-parent'} =~ m{\A/dev/fd/([1-9][0-9]*)\z} or
         die "bounded-log-error: output parent is not a devfd descriptor\n";
     $output_parent_fd = 0 + $1;
+} elsif ($IS_FREEBSD) {
+    # FreeBSD has no /proc/$pid/fd filesystem by default and no fdescfs mount
+    # guarantee; the caller pins the parent by plain absolute path (sha256
+    # pins the collector itself), like the windows-job kind.
+    $option{'output-parent'} =~ m{\A/[A-Za-z0-9_./-]*\z} &&
+        $option{'output-parent'} !~ m{(?:\A|/)\.\.?(?:/|\z)} or
+        die "bounded-log-error: output parent is not an absolute directory\n";
 } else {
     $option{'output-parent'} =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z} or
         die "bounded-log-error: output parent is not a procfd descriptor\n";
@@ -80,7 +88,9 @@ if ($IS_DARWIN) {
 my @parent_identity = stat($parent);
 @parent_identity && -d _ or die "bounded-log-error: invalid output parent\n";
 chdir($parent) or die "bounded-log-error: pin output parent cwd: $!\n" if $IS_DARWIN;
-my $parent_ref = $IS_DARWIN ? '' : '/proc/self/fd/' . fileno($parent);
+my $parent_ref = $IS_DARWIN ? '' :
+    $IS_LINUX ? '/proc/self/fd/' . fileno($parent) :
+    $option{'output-parent'};
 my $log_tmp_leaf = ".$option{'log-leaf'}.tmp.$$";
 my $receipt_tmp_leaf = ".$option{'receipt-leaf'}.tmp.$$";
 my $log_tmp_ref = $IS_DARWIN ? $log_tmp_leaf : "$parent_ref/$log_tmp_leaf";
@@ -323,10 +333,10 @@ if (defined($ENV{BOUNDED_LOG_TEST_LATE_SIGNAL_READY_FD}) ||
     close($late_ready) or die "bounded-log-error: close late-signal ready hook: $!\n";
     close($late_ack) or die "bounded-log-error: close late-signal ack hook: $!\n";
 }
-my $log_publish_failed = $IS_DARWIN ?
-    !link($log_tmp_leaf, $option{'log-leaf'}) :
+my $log_publish_failed = $IS_LINUX ?
     syscall($SYS_RENAMEAT2, fileno($parent), $log_tmp_leaf,
-        fileno($parent), $option{'log-leaf'}, $RENAME_NOREPLACE) != 0;
+        fileno($parent), $option{'log-leaf'}, $RENAME_NOREPLACE) != 0 :
+    !link($log_tmp_ref, $IS_DARWIN ? $option{'log-leaf'} : "$parent_ref/$option{'log-leaf'}");
 if ($log_publish_failed) {
     my $error = "$!";
     my $collision = $! == EEXIST;
@@ -335,8 +345,8 @@ if ($log_publish_failed) {
     die($collision ? "bounded-log-error: log output collision\n" :
         "bounded-log-error: publish log: $error\n");
 }
-if ($IS_DARWIN) {
-    unlink($log_tmp_leaf) or die "bounded-log-error: unlink published log temporary: $!\n";
+if (!$IS_LINUX) {
+    unlink($log_tmp_ref) or die "bounded-log-error: unlink published log temporary: $!\n";
     $log_tmp_created = 0;
 }
 $log_published = 1;
@@ -358,10 +368,10 @@ $receipt_tmp_created = 1;
 write_all($receipt, $receipt_text);
 $receipt->sync or die "bounded-log-error: fsync receipt: $!\n";
 close($receipt) or die "bounded-log-error: close receipt: $!\n";
-my $receipt_publish_failed = $IS_DARWIN ?
-    !link($receipt_tmp_leaf, $option{'receipt-leaf'}) :
+my $receipt_publish_failed = $IS_LINUX ?
     syscall($SYS_RENAMEAT2, fileno($parent), $receipt_tmp_leaf,
-        fileno($parent), $option{'receipt-leaf'}, $RENAME_NOREPLACE) != 0;
+        fileno($parent), $option{'receipt-leaf'}, $RENAME_NOREPLACE) != 0 :
+    !link($receipt_tmp_ref, $IS_DARWIN ? $option{'receipt-leaf'} : "$parent_ref/$option{'receipt-leaf'}");
 if ($receipt_publish_failed) {
     my $error = "$!";
     my $collision = $! == EEXIST;
@@ -370,8 +380,8 @@ if ($receipt_publish_failed) {
     die($collision ? "bounded-log-error: receipt output collision; log retained without authoritative receipt\n" :
         "bounded-log-error: publish receipt: $error\n");
 }
-if ($IS_DARWIN) {
-    unlink($receipt_tmp_leaf) or die "bounded-log-error: unlink published receipt temporary: $!\n";
+if (!$IS_LINUX) {
+    unlink($receipt_tmp_ref) or die "bounded-log-error: unlink published receipt temporary: $!\n";
     $receipt_tmp_created = 0;
 }
 $receipt_published = 1;
