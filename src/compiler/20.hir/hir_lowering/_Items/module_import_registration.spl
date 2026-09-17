@@ -13,6 +13,7 @@ use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE, HIR_PROF_RIS_SCAN, HIR_PROF_RIS_FIELDS, HIR_PROF_RIS_PROJECT}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -135,16 +136,60 @@ impl HirLowering:
             val fresh_registered_import_memo: {text: bool} = {}
             self.registered_import_memo = fresh_registered_import_memo
             self.registered_import_memo_owner = self.module_filename
+            self.registered_import_memo_keys = []
+            self.registered_import_memo_hash_buckets = []
+            self.registered_import_memo_hash_next = []
+            self.registered_import_memo_hash_mask = 0
         val registered_enum_tag = if materialize_enum: " E" else: " -"
         val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag
-        if self.registered_import_memo.contains_key(registered_key):
+        if self.registered_import_memo_lookup(registered_key):
             self.registered_import_skip_count = self.registered_import_skip_count + 1
             hir_phase_profile_count_imported_symbol_skip()
             return
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
-        self.registered_import_memo[registered_key] = true
+        # The write is UNCONDITIONAL and that is a pinned contract: a MISS
+        # must be cached too (hir_import_registration_cost_spec: "does not
+        # repeat a MISS -- the negative result is cached too"), and the
+        # skip-count oracle pins one descent per distinct tuple. Retry of a
+        # no-op arm is safe: every branch of inner re-checks already_bound
+        # before writing, so a repeat is idempotent.
+        self.registered_import_memo_record(registered_key)
+
+    me registered_import_memo_lookup(key: text) -> bool:
+        """Scalar-chain membership probe for the idempotency memo. Never reads
+        the {text: bool} Dict: contains_key on it mis-reports both ways under
+        Stage-2 native codegen (see the field comment in types.spl)."""
+        if self.registered_import_memo_hash_buckets.len() == 0:
+            return false
+        val bucket = hash_text(key) & self.registered_import_memo_hash_mask
+        var index = self.registered_import_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.registered_import_memo_keys[index] == key:
+                return true
+            index = self.registered_import_memo_hash_next[index]
+        false
+
+    me registered_import_memo_record(key: text):
+        """Append `key` to the scalar memo with incremental hash-chain insert.
+        The legacy Dict is written in lockstep so its len() stays the oracle
+        hir_import_registration_cost_spec pins (memo wipe on begin_module)."""
+        if self.registered_import_memo_hash_buckets.len() == 0:
+            # 4096 buckets: one allocation per importer, chains absorb the
+            # (tens of thousands) key volume of the largest driver modules.
+            val memo_bucket_count: i64 = 4096
+            self.registered_import_memo_hash_mask = memo_bucket_count - 1
+            var fill = 0
+            while fill < memo_bucket_count:
+                self.registered_import_memo_hash_buckets = self.registered_import_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.registered_import_memo_hash_mask
+        self.registered_import_memo_hash_next = self.registered_import_memo_hash_next.push(
+            self.registered_import_memo_hash_buckets[bucket])
+        self.registered_import_memo_hash_buckets[bucket] = self.registered_import_memo_keys.len()
+        self.registered_import_memo_keys = self.registered_import_memo_keys.push(key)
+        self.registered_import_memo[key] = true
 
     me ensure_surface_name_index(imported_mod: ModuleSurface) -> text:
         """NAMEIDX: build the name -> position index of one frozen surface on
