@@ -1,3 +1,19 @@
+## [1.0.0-beta.9] - 2026-09-17
+Sixth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Parser recovery pass flagged any identifier named `namespace` as the C++
+  mistake unconditionally; the seed-run release compile aborted on
+  action_identity.spl et al (beta.8 windows-x86_64 leg). Now only the
+  declaration shape `namespace <ident>` is flagged.
+- build-binaries Stage 2 legs now set SIMPLE_SCV_INVENTORY_COLD_INIT=1
+  (main was red with compile-event-journal-missing since the SCV gate
+  rollout).
+
+### Release
+- Product version is `1.0.0-beta.9`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.9`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.8] - 2026-09-17
 Fifth corrected beta of the **1.0.0 line**.
 
