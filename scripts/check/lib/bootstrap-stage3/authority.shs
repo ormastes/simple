@@ -3462,6 +3462,16 @@ public static class Stage3MaterializedConsumer {
         var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
         all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
     }
+    // git check-ignore exits 0 when the path IS ignored (printing it) and 1
+    // when it is not; Command surfaces the non-zero exit as an IOException,
+    // so "failed:1" is the not-ignored answer and anything else still fails.
+    static bool IsGitIgnored(string root, string relative) {
+        try { Git(root, "check-ignore", "--", relative); return true; }
+        catch (IOException e) {
+            if (e.Message != null && e.Message.StartsWith("command.failed:1")) return false;
+            throw;
+        }
+    }
     static string[] Nul(byte[] b) {
         string s = Text(b); if (s.Length == 0) return new string[0];
         if (!s.EndsWith("\0")) throw new IOException("git.nul-format");
@@ -3526,7 +3536,15 @@ public static class Stage3MaterializedConsumer {
                 if (relative == ".git") continue;
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
-                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
+                    // A nested repository inside a git-IGNORED subtree is
+                    // foreign content (an experiment clone under a scratch or
+                    // output directory), not smuggling of the source tree;
+                    // ignored locations are excused, everything else still
+                    // fails closed.
+                    if (IsGitIgnored(root, relative)) continue;
+                    throw new IOException("path.nested-repository");
+                }
                 var raw = Open(item, true, 0); held.Add(raw);
                 {
                     var tag = Tag(raw);
