@@ -1,3 +1,22 @@
+## [1.0.0-beta.7] - 2026-09-17
+Fourth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Windows seed-runtime SFFI rt_file_lock/rt_file_unlock were unconditional
+  cfg(not(unix)) stubs returning -1/false, so compiled-code file_lock always
+  failed on Windows; SCV inventory publication failed with
+  SCV-E-ADMISSION git-event-apply:inventory-publication-failed, blocking the
+  seed native-build legs. Implemented CreateFileA + LockFileEx, mirroring
+  src/runtime/platform/platform_win.h.
+- Release workflows passed --source-dir src to native-build, which only
+  accepts --source <dir> or positional source dirs; would have failed arg
+  parse on every seed leg after SCV admission. Fixed release.yml and
+  build-binaries.yml.
+
+### Release
+- Product version is `1.0.0-beta.7`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.7`. The 1.0.1 line remains withdrawn.
+
 # Changelog
 
 All notable changes to Simple Language will be documented in this file.
