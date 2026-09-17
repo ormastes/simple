@@ -57,15 +57,41 @@ literal contains `}}`/`{{` in a context that is not an f-string, or
 recommending triple-quoted/raw strings for embedded JSON. Raw strings
 (r"...") and file-read text are the safe carriers today.
 
-## Follow-up audit (2026-09-18)
+## Follow-up audit (2026-09-18) — VERDICTS
 
 `git grep -c '\\"}}' -- src/` finds 71 literals containing the sequence.
-Most are likely intentional f-string/`${...}}` closures, but every literal
-that assembles JSON or brace-delimited foreign syntax is a latent instance
-of the converter bug fixed in server.spl. Notable files to review first:
-src/app/sffi_gen.templates/bootstrap_sffi.txt (10), src/app/devhub/
-cmd_{minio,storage}.spl (2 each), src/app/editor/debug_process_*.spl,
-src/app/itf/cmd_minio.spl, src/app/llm_caret/messaging/adapter/**,
-src/app/semihost/reader.spl, src/app/sspec_maintain/main.spl. Each needs
-context judgment (collapse intended vs silent corruption); a mechanical
-sweep would break legitimate f-strings.
+Per-site classification:
+
+INTENDED (correct `{{` ... `{expr}` ... `}}` f-string wrapping, emits one
+literal brace each side):
+- src/app/devhub/cmd_minio.spl:230,345, src/app/devhub/cmd_storage.spl:196,913
+- src/app/itf/cmd_minio.spl:220, src/app/semihost/reader.spl:395
+
+FALSE POSITIVE (Rust format! escaping inside a .txt codegen template, never
+lexed as a Simple literal):
+- src/app/sffi_gen.templates/bootstrap_sffi.txt (all 10)
+
+BUG PATTERN (single `{` open, bare `\"}}` close building JSON/DAP/SARIF --
+the close collapses to one brace and the emitted document is malformed;
+same defect as the llm_caret converters fixed in this PR):
+- src/app/llm_caret/messaging/adapter/agent/hook_response.spl:17
+  (additionalContext JSON)
+- src/app/llm_caret/messaging/adapter/chat/kakao.spl:57
+  (Kakao link JSON)
+- src/app/llm_caret/messaging/adapter/chat/teams.spl:55
+  (Teams channelData JSON)
+- src/app/editor/debug_process_launch_smoke.spl:23,24
+  (DAP initialize/launch payloads)
+- src/app/editor/debug_process_smoke.spl:16
+  (DAP frame; ALSO hardcodes Content-Length: 84, so the collapse desyncs
+  the frame length from the payload -- double corruption)
+- src/app/editor/editor_ctrl_debug.spl:87
+  (DAP initialize payload)
+- src/app/sspec_maintain/main.spl:61
+  (SARIF runs[0].invocations[0].toolExecutionNotifications JSON)
+
+Fix per site: split the literal at the sequence (`\"}" + "}"`), as in
+server.spl. Left for a follow-up lane: these are pre-existing main defects
+outside the image-memory PR's scope; folding them in would mix concerns.
+The remaining ~50 occurrences are f-string closures in llm_caret/messaging
+and plugins (pattern `...{x}}` ending an interpolation) and are intended.
