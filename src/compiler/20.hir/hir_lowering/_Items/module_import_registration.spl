@@ -488,6 +488,19 @@ impl HirLowering:
             val define_started = hir_phase_profile_now()
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             hir_phase_profile_add(HIR_PROF_RIS_DEFINE, define_started)
+            # Preserve the physical declaration name in the symbol while
+            # retaining local_name as the scope lookup key — the same policy
+            # the composite / enum / trait / type-alias branches apply above.
+            # Without it, an aliased import (`use m.{f as g}`) kept the alias
+            # as the stored/emitted name, so the call site referenced a callee
+            # no module defines (`read_env` vs the real `env_get` definition)
+            # and MIR/LLVM saw an undeclared symbol. Renaming under
+            # `not already_bound` matches the enum branch's guard exactly;
+            # skipped outright when the local name already IS the physical
+            # name (the common glob/selective path — this is a hot
+            # registration path and the rename would be a pure no-op).
+            if not existing_id.is_valid() and local_name != imported_name:
+                self.symbols.rename_symbol(imported_fn_sym, imported_name)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif constant_position >= 0:
             val imported_constant = imported_mod.constant_values[constant_position]
