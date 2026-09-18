@@ -35,7 +35,7 @@ forward below as G-P0).
 | Lane | Work | Owns | Depends | Evidence |
 |---|---|---|---|---|
 | **L0** P0 parity census | Execution specs for `map`/`filter`/`any`/`all`/closure calls across interpreter, JIT, native; confirm `rt_array_map` defined + called. Report each P0 item green/red. | `test/01_unit/compiler/collection/p0_parity_spec.spl` *(new)* | — | spec output per engine; red items filed under `doc/08_tracking/bug/` |
-| **L1** stdlib `group_by` | Replace linear slot scan with `Dict<K, i64>` key→slot, keeping first-encounter order; use only `d[k] = v` + `contains_key` (native Dict pitfalls). Remove the `# ponytail:` note. | `src/lib/gc_async_mut/pure/collections.spl` | — | order-preservation spec + 1K→16K scaling spec |
+| **L1** → folded into **L12** (Fable review 2026-09-18) | pure `group_by` re-pointed at `std.common.frame.group_by_key` | — | — | see L12 |
 | **L2** `std.df` unique | `unique_f64`/`unique_i64` (`df/mod.spl:194,214`) and `nunique` → Dict-backed seen set, missing handling unchanged. | `src/lib/nogc_sync_mut/df/mod.spl` | — | existing df specs green + new scaling spec |
 | **L3** `Map<K,V>` audit | Audit `nogc_sync_mut/src/map.spl` for interp/native parity (insert, overwrite, remove, collisions, text/int keys). Tests only; file bugs. No API change. | `test/01_unit/lib/map_parity_spec.spl` *(new)* | — | parity table; bugs filed |
 | **L4** contract + registry | `CollectionSemanticContractV1` + `collection_operations.sdn` + loader; mapping for Array, Dict, `Map`, text HashMap/HashSet. | `src/lib/common/collections/semantic_contract.spl`, `config/compiler/collection_operations.sdn` *(new)* | — | loader spec; every registry op has one family |
@@ -43,11 +43,11 @@ forward below as G-P0).
 | **L6** `.sprof` v2 codec | `ProfileSessionV2` DTO/codec/query in common; v1 reader untouched; `CollectionSummaryV1`; dedup/saturation/missing mask; bounds. | `src/lib/common/profile/` *(new)*; adapter edit in `src/app/optimize/sprof_loader.spl` | L5 (origin shape) — may start on a stub | v1 fixtures byte-identical; v2 corruption specs |
 | **L7** `basic` counters + off proof | Numeric per-thread slots for collection ops; `off` mode proven absent from binary by symbol scan. | `src/app/compile/native_profile_counter_runtime.spl`, `scripts/check/check-collection-telemetry-off.shs` *(new, --selftest)* | L5, L6 | accounting-oracle spec; off-mode gate PASS |
 | **L8** report-only planner | `CollectionPlanReport` + `remark[COLL-PLAN]` + explain CLI; status always `AnalysisOnly`; no IR mutation. | `src/compiler/60.mir_opt/mir_opt/collection_opt_report.spl` *(new)* | L4, L6 | no-IR-diff spec; deterministic report spec |
-| **L9** COLL complexity rules | Registry-driven rules for nested membership / nested equality find / repeated sort (07-31 COLL009–012, 018). Warnings only, no auto-fix. | `src/compiler/35.semantics/lint/collection_patterns.spl` | L4 | fixture fires + clean fixture silent |
+| **L9** → folded into **L9'** (Fable review: same file, same codes) | — | — | — | see L9' |
 | **L10** lexer regression corpus | Tests pinning `t.0`, `n.0.1`, `0.5`, `1..2`, `1..=2`, `1...` in seed + self-hosted lexers, ahead of `.field` grammar. | `test/01_unit/compiler/lexer/dot_number_corpus_spec.spl` *(new)* | — | spec green on both lexers |
 | **L11** optimizer cost baseline | Compile-time + RSS per O-level on a small corpus (tiny fns, long chains, wide records). Measurement only; results to `doc/10_metrics/`. | `scripts/check/collection-opt-baseline.shs` *(new)* | — | recorded numbers with binary identity (`readlink -f bin/simple`) |
 
-Critical path: L4 → L5 → L6 → L7/L8. L0–L3, L10, L11 start immediately; L9 after L4.
+Critical path: L4 → L5 → L6 → L7/L8. Wave G lanes (L12, L6', L9', L13, L2) start immediately.
 Max parallel at start: 7 lanes (L0, L1, L2, L3, L4, L10, L11).
 
 ```
@@ -66,10 +66,10 @@ rule: Fable reviews every lane before landing).
 
 | Lane | Work | Owns | Depends | Evidence |
 |---|---|---|---|---|
-| **L12** `std.common.frame` | The 8 functions of design §10.1, Dict-safe subset only | `src/lib/common/frame.spl`, `test/01_unit/lib/common/frame_spec.spl` *(new)* | — | order + duplicate specs; 1K→16K scaling spec |
+| **L12** `std.common.frame` | The 8 functions of design §10.1, Dict-safe subset only; re-point pure `group_by` (old L1) | `src/lib/common/frame.spl`, `test/01_unit/lib/common/frame_spec.spl` *(new)*, `src/lib/gc_async_mut/pure/collections.spl` | — | order + duplicate specs; 1K→16K scaling spec |
 | **L6'** collection profiler | Design §10.2 counters, report and advice | `src/lib/common/collection_profile.spl`, `test/01_unit/lib/common/collection_profile_spec.spl` *(new)* | — | advice fires on a linear-lookup-heavy fixture and stays silent on an indexed one |
-| **L9'** lint + auto-fix | Design §10.3: COLL002 upgrade + fix; COLL009–012, COLL018; COLL011 fix; diagnose the 2 baseline failures | `src/compiler/35.semantics/lint/collection_patterns.spl`, `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`, `test/01_unit/compiler/lint/collection_frame_rules_spec.spl` *(new)* | names from L12 (fixed in design, so it can run in parallel) | fires-on-dirty + silent-on-clean fixture per rule; fix output re-lints clean |
-| **L13** apply to compiler / loader / interpreter | Find O(n·m) collection patterns in `src/compiler/99.loader`, `src/compiler/95.interp`, `src/app/interpreter` and rewrite the confirmed ones to the **inline Dict-index form** (design §10.1 closure caveat). Output must not change. | only the files it rewrites (listed in its patch) | — (uses the inline form, not L12) | per-site before/after spec, or an existing spec green before and after |
+| **L9'** lint + auto-fix | Design §10.3: COLL002 upgrade + fix; COLL015, COLL016 (reserved meanings); new COLL020 (+fix), COLL021, COLL022; update `query_lint.spl` code list; move the 2 hint-only baseline examples to the per-rule policy | `collection_patterns.spl`, `entry_and_fixes.spl`, `src/app/cli/query_lint.spl`, `test/01_unit/compiler/lint/collection_easy_fix_spec.spl`, `collection_frame_rules_spec.spl` *(new)* | names from L12 (fixed in design, so it can run in parallel) | fires-on-dirty + silent-on-clean fixture per rule; fix output re-lints clean |
+| **L13** apply to compiler / loader / interpreter | Find O(n·m) collection patterns in `src/compiler/99.loader`, `src/compiler/95.interp`, `src/app/interpreter` and rewrite the confirmed ones to the **inline Dict-index form** (design §10.1 closure caveat). Output must not change. Excludes `95.interp/execution/sprof_hotspot_bridge.spl` (owned by design §1). Local Dicts only, `contains_key` before `d[k]`. | only the files it rewrites (listed in its patch) | — (uses the inline form, not L12) | per-site before/after spec, or an existing spec green before and after |
 | **L14** README + guide | README "Distinctive Features" entry: LLM-written collection code is often O(n²); Simple flags it, names the dataframe-way call, and auto-fixes it. Plus a short guide page. | `README.md`, `doc/07_guide/language/collections/dataframe_way.md` *(new)* | L9' codes | links resolve |
 
 Evidence command for every lane (aarch64 host; one positional per run):

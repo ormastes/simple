@@ -215,32 +215,40 @@ asked for.
 
 ### 10.1 `std.common.frame` — `src/lib/common/frame.spl` *(new)*
 
-`common` family, so compiler, loader and interpreter code may import it (they
-import only `std.common.*` / `std.nogc_sync_mut.*`, never `gc_async_mut`). It uses
-only the verified-safe Dict subset: `d[k] = v` and `contains_key`. It never
-calls `.set()`, and never calls `.get()` on the hit path
-(`doc/07_guide/language/dict_native_pitfalls.md`).
+
+The module lives in the `common` family: pure code, no I/O, importable from
+every family. Compiler, loader and interpreter code mostly import
+`std.common.*` / `std.nogc_sync_mut.*`. The code uses only the Dict subset shown
+safe in `gc_async_mut/pure/collections.spl:55-68`: `d[k] = v` and `contains_key`.
+It never calls `.set()` (which silently drops inserts under native codegen) and
+never calls `.get()`. Dicts are always **locals**, never class fields: a
+class-field Dict bracket-read of an array value SEGVs natively
+(`dict_native_pitfalls.md`).
 
 | Function | Semantics | Cost |
 |---|---|---|
 | `key_set<T,K>(xs: [T], key: fn(T) -> K) -> Dict<K, bool>` | membership index | O(n) expected |
-| `index_by<T,K>(xs: [T], key: fn(T) -> K) -> Dict<K, i64>` | key → **first** row position | O(n) |
+| `index_by<T,K>(xs: [T], key: fn(T) -> K) -> Dict<K, i64>` | key → **first** row position. **Caller contract:** call `contains_key(k)` before `d[k]`, because a missed `d[k]` returns `0` silently, which is indistinguishable from row 0 | O(n) |
 | `distinct_by<T,K>(xs: [T], key: fn(T) -> K) -> [T]` | first occurrence per key, input order | O(n) |
-| `group_by_key<T,K>(xs: [T], key: fn(T) -> K) -> [(K, [T])]` | first-encounter group order, members in input order | O(n) |
-| `count_by<T,K>(xs: [T], key: fn(T) -> K) -> [(K, i64)]` | first-encounter order | O(n) |
-| `semi_join<L,R,K>(l: [L], r: [R], lk: fn(L) -> K, rk: fn(R) -> K) -> [L]` | rows of `l` with a match, `l` order, duplicates kept | O(l + r) |
-| `anti_join<L,R,K>(...)` | rows of `l` with no match | O(l + r) |
-| `top_k_by<T>(xs: [T], k: i64, score: fn(T) -> i64) -> [T]` | k largest scores, ties by input order | O(n·k) worst for small k, never a full sort |
+| `group_by_key<T,K>(xs: [T], key: fn(T) -> K) -> [(K, [T])]` | first-encounter group order, members in input order. **Implementation idiom required:** `Dict<K, i64>` key→slot plus parallel `keys: [K]` / `members: [[T]]`, zipped at the end. `groups[j].1.push(x)` mutates a discarded tuple copy and drops members (`pure/collections.spl:72-76`) | O(n) |
+| `count_by<T,K>(xs: [T], key: fn(T) -> K) -> [(K, i64)]` | first-encounter order, same slot idiom | O(n) |
+| `semi_join<L,R,K>(l: [L], r: [R], lk: fn(L) -> K, rk: fn(R) -> K) -> [L]` | rows of `l` with a match, in `l` order, duplicates kept | O(l + r) |
+| `anti_join<L,R,K>(l: [L], r: [R], lk: fn(L) -> K, rk: fn(R) -> K) -> [L]` | rows of `l` with no match | O(l + r) |
+| `top_k_by<T>(xs: [T], k: i64, score: fn(T) -> i64) -> [T]` | k highest scores, **output in descending score**, ties keep input order. `k <= 0` → `[]`; `k >= len` → all rows, sorted the same way | O(n·k) using a sorted k-buffer, never a full sort |
+
+`group_by_key` is the canonical O(n) grouping. L12 also re-points
+`gc_async_mut/pure/collections.spl` `group_by` at it, so the pure `group_by`
+becomes O(n) with identical output. That is why the old L1 is folded into L12.
 
 Order and duplicate behaviour are part of the contract, so every function has
 an order-preservation spec. Every function also has a 1K→16K scaling spec.
 
-**Closure caveat (G-P0):** lambdas are fine in interpreter code and in library
-code. Compiler, loader and interpreter sources that are natively compiled by
-bootstrap must use the **inline Dict-index form** instead (a `Dict<K, bool>` or
-`Dict<K, i64>` built before the loop), not a lambda helper, until the
-closure/indirect-call ABI gate is green. The lint suggestion always shows both
-forms.
+**Closure caveat (G-P0):** lambdas are fine in library code and in interpreted
+code. Compiler, loader and interpreter sources that bootstrap compiles
+natively must use the **inline Dict-index form** instead: a local
+`Dict<K, bool>` or `Dict<K, i64>` built before the loop, not a lambda helper.
+This holds until the closure/indirect-call ABI gate is green. Lint messages
+always show both forms.
 
 ### 10.2 Collection profiler — `src/lib/common/collection_profile.spl` *(new)*
 
@@ -273,18 +281,51 @@ Advice text always names the evidence counts. It is cost evidence, never proof.
 
 ### 10.3 Lint rules + auto-fix (extends `collection_patterns.spl`)
 
+COLL009–018 are **reserved** with fixed meanings (07-31 research §7 table,
+`src/app/cli/query_lint.spl:39-40`). COLL010 is lambda-only and already has a
+message contract (`test/01_unit/compiler/lint/perf_diagnostic_record_spec.spl:85`).
+This lane uses the reserved codes with their reserved meanings and adds
+**COLL020–022** for the new patterns. It updates the header comment in
+`collection_patterns.spl` and the list in `query_lint.spl`.
+
 | Code | Pattern | Message names | Auto-fix |
 |---|---|---|---|
-| COLL002 (upgrade) | `arr.contains(x)` in loop, `arr` loop-invariant | `key_set` / inline `Dict<K,bool>` | yes, when `arr` is a local not mutated in the loop: insert `var <arr>_set: Dict<T,bool> = {}` + fill before the loop, rewrite the call to `<arr>_set.contains_key(x)` |
-| COLL009 | nested `for a in A: for b in B: if key(a) == key(b)` | `semi_join` / `index_by` | no (suggest only) |
-| COLL010 | `.find`/`.filter` with equality on a loop variable, inside a loop | `index_by` / `group_by_key` | no |
-| COLL011 | growing `seen` array + `.contains` guard + `.push` (manual distinct) | `distinct_by` / `unique` | yes, when the loop body is exactly guard + push |
-| COLL012 | manual group: scan a `keys` array for a slot, then push | `group_by_key` | no |
-| COLL018 | `.sort…()` followed by `take(k)` / `[0:k]` | `top_k_by` | no (tie order differs from a stable sort unless proven) |
+| COLL002 (upgrade) | `arr.contains(x)` in a loop, `arr` loop-invariant | `key_set` / inline `Dict<T,bool>` | yes, only if **all** preconditions hold (below) |
+| COLL015 accidental_cartesian_product | nested `for a in A: for b in B:` with an `==` between an `a`-expression and a `b`-expression | `semi_join` / `index_by` | no, suggestion only |
+| COLL016 missing_index | `.find`/`.filter`/linear scan whose predicate compares to the outer loop variable | `index_by` / `group_by_key` | no |
+| COLL020 manual_distinct *(new)* | growing `seen`/result array, `.contains` guard, `.push` | `distinct_by` / `unique` | yes, only if the loop body is exactly guard + push of the same value and the result array is a fresh local `[]` |
+| COLL021 manual_group *(new)* | scan a `keys` array for a slot index, then push into a parallel bucket | `group_by_key` | no |
+| COLL022 sort_then_take *(new)* | `.sort…()` then `take(k)` / `[0:k]` | `top_k_by` (descending sort only; ascending + take = k-smallest, so negate the score) | no: tie order vs a stable sort is not proven |
 
-Every message has the form: `COLLnnn: <pattern> is O(n*m); switch to <call>
-(std.common.frame) — dataframe-able`. An auto-fix is emitted only as a
-`Certain` EasyFix when the listed precondition is checked. Otherwise the
-diagnostic is advisory. The pre-existing baseline has 2 failures in
-`collection_easy_fix_spec.spl` (`replacements` not found; the array-rebuild hint
-`arr.pop()` is missing). They are owned by the lint lane: fix them or file them.
+**COLL002 fix preconditions.** Otherwise the diagnostic stays hint-only.
+`is_contains_call` has no receiver type, and a `text` receiver is a substring
+search.
+
+1. `arr` is declared in the same file on a file-unique line, with an explicit
+   `[T]` annotation or an array-literal initializer (which gives `T`; never
+   `text`).
+2. `arr` is not assigned, pushed or removed inside the loop body.
+3. The `.contains(` line is file-unique.
+4. The enclosing `for`/`while` line is found by an upward text scan with
+   decreasing indentation, the same approach COLL001 uses
+   (`entry_and_fixes.spl:413-450`).
+
+The fix is two Replacements. Replacements support multiple spans, with
+insertion as `start == end` (`easy_fix/types.spl:29-45`). The first inserts
+`var <arr>_set: Dict<T, bool> = {}` and `for _v in <arr>: <arr>_set[_v] = true`
+before the loop, at loop indentation. The second rewrites the call to
+`<arr>_set.contains_key(x)`.
+
+**Confidence policy.** Commit `7ab671e7813` removed `Certain` COLL fixes from
+the AST-fallback path because it had no location proof, so COLL findings became
+hint-only. This lane re-enables `Certain` **only** for COLL002 and COLL020, and
+only when every textual precondition above is verified. The justification is
+that each precondition is exactly the location proof whose absence motivated
+that removal. Every other rule stays hint-only. The 2 failing examples in
+`collection_easy_fix_spec.spl` encode that hint-only policy. Update them to the
+new rule-by-rule policy and add a precondition-negative case for each fix
+(for example a `text` receiver, or an array mutated in the loop). Such a case
+must yield no fix.
+
+Message form: `COLLnnn: <pattern> is O(n*m); switch to <call> (std.common.frame)
+— dataframe-able. Inline form: <Dict snippet>`.
