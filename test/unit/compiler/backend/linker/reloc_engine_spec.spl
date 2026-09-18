@@ -389,3 +389,49 @@ describe "reloc_engine - AArch64 LDST64_ABS_LO12_NC (imm12 lo12 >> 3)":
         val insn = read_u32_le(base, 0)
         val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
         expect(patched_word).to_equal(0xf9401c00)
+
+# ============================================================================
+# Range/alignment rejects added after Fable review (blocking findings):
+# ADR_PREL_PG_HI21 must reject an out-of-signed-21-bit page delta instead of
+# silently masking immlo/immhi, and LDST64_ABS_LO12_NC must reject a target
+# that is not 8-byte aligned.
+# ============================================================================
+
+describe "reloc_engine - AArch64 ADR_PREL_PG_HI21 range reject":
+    it "accepts the exact positive boundary: page_delta_pages = 1048575 (2^20 - 1)":
+        # @req REQ-SSPEC-COMPILER
+        step("ADR_PREL_PG_HI21 accepts the exact positive boundary page count")
+        # S+A = 0xFFFFF000 (page-aligned, = 1048575 * 4096), P = 0 (Page(P) = 0).
+        # page_delta_pages = 0xFFFFF000 >> 12 = 1048575 = 2^20 - 1 (max signed 21-bit).
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_ADR_PREL_PG_HI21, 4294963200, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(1048575)
+
+    it "rejects one page past the boundary: page_delta_pages = 1048576 (2^20)":
+        # @req REQ-SSPEC-COMPILER
+        step("ADR_PREL_PG_HI21 rejects page delta one past the signed 21-bit boundary")
+        # S+A = 0x100000000 (page-aligned, = 1048576 * 4096), P = 0.
+        # page_delta_pages = 0x100000000 >> 12 = 1048576, one past the max.
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_ADR_PREL_PG_HI21, 4294967296, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+describe "reloc_engine - AArch64 LDST64_ABS_LO12_NC alignment reject":
+    it "rejects an unaligned target: S+A=0x420039 (lo12=0x039, not a multiple of 8)":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST64_ABS_LO12_NC rejects a target that is not 8-byte aligned")
+        # lo12 = 0x420039 & 0xfff = 0x039 = 57; 57 & 0x7 = 1 != 0 -> misaligned.
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST64_ABS_LO12_NC, 0x420039, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "still accepts the existing aligned case: S+A=0x420038 (lo12=0x038, multiple of 8)":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST64_ABS_LO12_NC still accepts an 8-byte aligned target")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST64_ABS_LO12_NC, 0x420038, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(7)

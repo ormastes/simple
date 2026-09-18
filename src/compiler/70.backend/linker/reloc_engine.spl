@@ -218,6 +218,11 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val target_page = (s + a) - ((s + a) & 0xfff)
         val place_page = p - (p & 0xfff)
         val page_delta_pages = (target_page - place_page) >> 12
+        # AAELF64: the field is a signed 21-bit page count (raw byte delta
+        # Page(S+A)-Page(P) in [-2^32, 2^32)). Reject rather than silently
+        # mask immlo/immhi on overflow.
+        if page_delta_pages < -1048576 or page_delta_pages > 1048575:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ADR_PREL_PG_HI21 page delta out of signed 21-bit range (Page(S+A) - Page(P)) >> 12")
         return RelocResult(success: true, offset: offset, value: page_delta_pages, error: "")
 
     if rtype == R_AARCH64_ADD_ABS_LO12_NC:
@@ -225,6 +230,10 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         return RelocResult(success: true, offset: offset, value: lo12, error: "")
 
     if rtype == R_AARCH64_LDST64_ABS_LO12_NC:
+        # 64-bit LDR/STR (unsigned offset) requires 8-byte alignment; the
+        # AAELF64 relocation is only valid when (S+A) is 8-byte aligned.
+        if (s + a) & 0x7 != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_LDST64_ABS_LO12_NC target not 8-byte aligned: (S + A) & 0x7 != 0")
         val lo12 = (s + a) & 0xfff
         return RelocResult(success: true, offset: offset, value: lo12 >> 3, error: "")
 
