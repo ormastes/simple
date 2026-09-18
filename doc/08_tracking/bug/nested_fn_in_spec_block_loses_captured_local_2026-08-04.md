@@ -1,4 +1,4 @@
-# BUG: a nested `fn` declared inside a spec `it` block does not capture the block's locals — silently reads zero, or dies with "variable not found"
+# BUG: a nested `fn` declared inside a LAMBDA body does not capture the lambda's locals — silently reads zero, or dies with "variable not found" (spec `it` blocks are just the common case)
 
 **Status: OPEN — re-verified 2026-09-18 on a freshly redeployed seed. Not a stale-binary artifact.**
 
@@ -74,6 +74,62 @@ So the two arms are one defect seen through two call shapes: calling the nested
 function as a callback yields the dangerous silent zero. Any fix must be checked
 against both, and the three-line repro above is the cheaper of the two to iterate
 on.
+
+## Root cause, localised 2026-09-18 — it is NOT about spec blocks
+
+The title and every repro in this record put the defect inside a spec `it`
+block. That framing is wrong and has kept the search in the spec runner. Three
+probes, each 12 lines and none of them using `std.spec` at all:
+
+| where the nested `fn` is declared | what it reads | result |
+|---|---|---|
+| inside a plain `fn` body | that fn's `val` | **42, correct**, both lanes |
+| inside a lambda body | that lambda's `val` | **`semantic: variable ... not found`** |
+| inside a lambda body | a module-level `var` | **99, correct** |
+
+So a `fn` nested in a **plain function** captures correctly, and the same `fn`
+nested in a **lambda** resolves against module scope only. A spec `it` block is
+simply a lambda, which is the whole of its involvement. Anything that nests a
+`fn` inside any closure hits this, spec or not.
+
+```simple
+fn call_it(f: () -> i64) -> i64:
+    f()
+
+fn main() -> i64:
+    val blk = \:
+        val inner_local = 7
+        fn nested() -> i64:
+            inner_local          # semantic: variable `inner_local` not found
+        nested()
+    print call_it(blk).to_text()
+    0
+```
+
+Read together, the three rows say the nested `fn` is lowered as a FREE,
+top-level function: it keeps module scope and is handed no enclosing-lambda
+environment. The lowering path for a `fn` inside a function body clearly does
+thread the enclosing scope; the path for a `fn` inside a lambda body does not.
+That is the fix site, and it is narrower than "closure capture" as a whole.
+
+### A second, silent cost nobody had noticed
+
+Both lambda probes also print this before the interpreter ever runs:
+
+```
+[jit-fallback] unresolved external symbol 'nested': whole module dropped to the
+interpreter (expect ~100-1000x slowdown).
+[INFO] JIT compilation failed, falling back to interpreter: ... would NULL-jump
+in JIT; deferring to interpreter
+
+```
+
+The nested `fn` is not in the module symbol table either, so the JIT cannot
+resolve it and **drops the entire module to the interpreter**. That happens even
+in the module-scope probe, which returns the RIGHT answer — so a file carrying
+one nested `fn` inside one lambda silently loses JIT for everything in it, with
+the correct result masking the cliff. Every spec file using this shape has been
+paying that.
 
 ## Scope note on the earlier "out of scope for this lane" verdict
 
