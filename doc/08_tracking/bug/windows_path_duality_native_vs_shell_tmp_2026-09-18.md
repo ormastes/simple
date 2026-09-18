@@ -48,3 +48,16 @@ line 230 was verified to map) must be audited first.
   or specs use a repo-local fixture dir and never /tmp).
 - Until then, specs must read and write through the SAME layer (native
   file_ops or shell, not both).
+
+## Related triage notes (2026-09-19, whole-suite run)
+
+- ui.chromium text_metrics family (13/14 fail, "expected 0 to be greater
+  than 0"): FontRenderer.browser_serif_default() finds no loadable font.
+  The seed DOES export spl_fonts_call_init_blob/init_path/layout_text, so
+  the SFFI backend exists; the failure is candidate-path resolution. The
+  spec imports browser_serif_font_candidates from common.text_layout
+  (a THIRD provider copy beside the nogc_sync_mut and gc_async_mut ones) —
+  check that copy's candidates include the bundled
+  assets/fonts/google-fonts paths and Windows C:/Windows/Faces before
+  touching the loader. Serif candidates also lack the
+  browser_platform_sans_faces()-style Windows hook that sans has.
