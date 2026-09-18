@@ -35,6 +35,16 @@ fn source_between(source: text, start_marker: text, end_marker: text) -> text:
         return ""
     source.substring(start, finish)
 
+fn strip_comment_lines(source: text) -> text:
+    # Substring oracles must not match prose inside `#` comments -- several
+    # banned tokens (rt_process_run, extern fn names) appear in explanatory
+    # comments, and pinning against comments makes the census brittle.
+    var code_only = ""
+    for line in source.split("\n"):
+        if not line.trim().starts_with("#"):
+            code_only = code_only + line + "\n"
+    code_only
+
 describe "CLI process calls use app-owned exact-semantics facades":
     it "keeps cli_ops command lookup on the direct process contract":
         # @req REQ-APP-IO-FACADE-001
@@ -42,16 +52,16 @@ describe "CLI process calls use app-owned exact-semantics facades":
         step("Read the shipped cli_ops source and census its process facades")
         val source = file_read("src/app/io/cli_ops.spl")
         val imports_direct_contract = source.contains(
-            "use app.io.process_ops.{process_run_direct, process_run_inherit}")
+            "use app.io.process_ops.{process_run_direct, process_run_inherit")
         expect(imports_direct_contract).to_equal(true)  # oracle: the facade import line is the wiring contract this spec pins
         val direct_call_sites = source.split("process_run_direct(").len() - 1
-        expect(direct_call_sites).to_equal(5)  # oracle: cli_ops reaches process_run_direct at exactly five call sites
+        expect(direct_call_sites).to_equal(6)  # oracle: cli_ops reaches process_run_direct at six call sites (unix which, windows where, ps probe, lookup, shell, inherit-delegate path)
         val inherits_parent_streams = source.contains(
             "process_run_direct(resolved_cmd, args)")
         expect(inherits_parent_streams).to_equal(true)  # oracle: command lookup passes the resolved command and args unchanged
-        val bans_io_runtime_import = source.contains("use std.io_runtime.{process_run}")
+        val bans_io_runtime_import = strip_comment_lines(source).contains("use std.io_runtime.{process_run}")
         expect(bans_io_runtime_import).to_equal(false)  # oracle: the io_runtime process import must stay out of cli_ops
-        val bans_runtime_externs = source.contains("rt_process_run")
+        val bans_runtime_externs = strip_comment_lines(source).contains("rt_process_run")
         expect(bans_runtime_externs).to_equal(false)  # oracle: no raw rt_process_run extern call may bypass the facade
 
     it "routes arbitrary-PID status through the distinct existence facade":
@@ -91,7 +101,7 @@ describe "CLI process calls use app-owned exact-semantics facades":
         expect(raw_call_count).to_equal(1)  # oracle: the direct facade reaches the raw runner exactly once
         val bans_slot_plumbing = direct_body.contains("proc_slot_")
         expect(bans_slot_plumbing).to_equal(false)  # oracle: the direct facade must not touch bounded-slot plumbing
-        val direct_recursion_count = direct_body.split("process_run_direct(").len() - 1
+        val direct_recursion_count = strip_comment_lines(direct_body).split("process_run_direct(").len() - 1
         expect(direct_recursion_count).to_equal(1)  # oracle: the only occurrence is the signature, so the facade is non-recursive
 
         val exists_signature_present = exists_body.contains("fn process_exists(pid: i64) -> bool:")
