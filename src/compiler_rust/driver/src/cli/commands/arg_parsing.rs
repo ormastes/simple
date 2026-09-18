@@ -110,8 +110,19 @@ pub fn parse_lang_flag(args: &[String]) {
     }
 }
 
+fn is_fix_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--fix" | "--fix-all" | "--fix-warnings" | "--fix-errors" | "--fix-info" | "--fix-interactive" | "--fix-dry-run"
+    ) || arg.starts_with("--fix-id=")
+        || arg.starts_with("--fix-code=")
+        || arg.starts_with("--fix-nth=")
+}
+
 /// Filter out internal flags (GC, sandbox, etc.) from arguments
 pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
+    // `lint` and `fix` are pure-Simple subcommands that parse their own --fix* flags.
+    let keep_fix_flags = matches!(args.first().map(String::as_str), Some("lint") | Some("fix"));
     let mut filtered_args = Vec::new();
     let mut skip_next = false;
 
@@ -129,16 +140,7 @@ pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
             || arg == "--debug"
             || arg == "--sandbox"
             || arg == "--no-network"
-            || arg == "--fix"
-            || arg == "--fix-all"
-            || arg == "--fix-warnings"
-            || arg == "--fix-errors"
-            || arg == "--fix-info"
-            || arg == "--fix-interactive"
-            || arg == "--fix-dry-run"
-            || arg.starts_with("--fix-id=")
-            || arg.starts_with("--fix-code=")
-            || arg.starts_with("--fix-nth=")
+            || (!keep_fix_flags && is_fix_flag(arg))
         {
             continue;
         }
@@ -188,6 +190,16 @@ mod tests {
         ];
         let filtered = filter_internal_flags(&args);
         assert_eq!(filtered, vec!["test.spl", "arg1"]);
+    }
+
+    #[test]
+    fn test_filter_keeps_fix_flags_for_lint_and_fix() {
+        let lint: Vec<String> = ["lint", "--fix", "a.spl"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(filter_internal_flags(&lint), lint);
+        let fix: Vec<String> = ["fix", "--fix-dry-run", "a.spl"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(filter_internal_flags(&fix), fix);
+        let run: Vec<String> = ["run", "--fix", "a.spl"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(filter_internal_flags(&run), vec!["run", "a.spl"]);
     }
 
     #[test]

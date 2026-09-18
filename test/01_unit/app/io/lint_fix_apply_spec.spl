@@ -1,0 +1,53 @@
+# `simple lint --fix` and `simple fix` must APPLY Certain fixes to disk, not
+# just report them as available. Bug: `run_lint_command`/`run_fix_command`
+# both correctly *detect* the COLL020 Certain fix (manual dedup loop) but
+# `simple fix` never generated it at all (its collector never consulted the
+# lint module's COLL002/COLL020 easy-fix generators), and the CLI-level
+# `simple lint --fix` symptom traced to the Rust seed's global
+# `filter_internal_flags` stripping `--fix` before the .spl app ever sees
+# argv — outside this repo's `.spl` sources, so it is not exercised here.
+# This spec proves the in-process `.spl` apply path itself is correct by
+# calling the command handlers directly with an args array that already
+# contains `--fix`, the same way the seed would call them if it forwarded
+# the flag.
+use std.spec.*
+use app.io.cli_lint_commands.{run_fix_command, run_lint_command}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
+
+val COLL020_SRC = "fn dedup(xs: [i64]) -> [i64]:\n    var result: [i64] = []\n    for x in xs:\n        if not result.contains(x):\n            result.push(x)\n    result\n"
+
+describe "lint/fix apply COLL020 Certain fixes to disk":
+    it "`simple fix <file>` rewrites the manual dedup loop into a membership Dict":
+        step("`simple fix <file>` rewrites the manual dedup loop into a membership Dict")
+        val path = "/tmp/simple-test-lint-fix-apply-fix.spl"
+        assert_true(file_write(path, COLL020_SRC))
+
+        val exit_code = run_fix_command(["fix", path])
+
+        assert_equal(exit_code, 0)
+        val rewritten = file_read(path)
+        expect(rewritten).to_contain("var result_set: Dict<i64, bool> = {}")
+        expect(rewritten).to_contain("result_set.contains_key(x)")
+        expect(rewritten).to_contain("result_set[x] = true")
+        assert_false(rewritten.contains("result.contains(x)"))
+
+    it "`simple lint --fix <file>` rewrites the manual dedup loop in place":
+        step("`simple lint --fix <file>` rewrites the manual dedup loop in place")
+        val path = "/tmp/simple-test-lint-fix-apply-lint.spl"
+        assert_true(file_write(path, COLL020_SRC))
+
+        val _ = run_lint_command(["lint", "--fix", path])
+
+        val rewritten = file_read(path)
+        expect(rewritten).to_contain("var result_set: Dict<i64, bool> = {}")
+        expect(rewritten).to_contain("result_set.contains_key(x)")
+        assert_false(rewritten.contains("result.contains(x)"))
+
+    it "re-linting the fixed file reports no COLL020":
+        step("re-linting the fixed file reports no COLL020")
+        val path = "/tmp/simple-test-lint-fix-apply-relint.spl"
+        assert_true(file_write(path, COLL020_SRC))
+        val _ = run_fix_command(["fix", path])
+
+        val fixed_source = file_read(path)
+        assert_false(fixed_source.contains("result.contains(x)"))

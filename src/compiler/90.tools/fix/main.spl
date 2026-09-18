@@ -13,6 +13,12 @@ use std.tooling.easy_fix.types.{easyfix_replacements, easyfix_id, easyfix_descri
 use compiler.tools.fix.rules.registry.{check_all_rules}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
+# Certain-confidence collection fixes (COLL002/COLL020) live with the lint
+# rules that detect them (compiler.tools.lint._LintMain.entry_and_fixes) so
+# `simple lint --fix` and `simple fix` share one fix generator instead of two
+# drifting copies. `lazy` avoids pulling the full lint/parser frontend into
+# every `simple fix` invocation that never hits a COLL002/COLL020 file.
+use lazy compiler.tools.lint.main.{collection_002_fix, collection_020_fix}
 
 # `stdin_read_char` is an always-linked runtime primitive (see
 # std.mcp_sdk.transport.stdio.stdio_read_line for the reference pattern).
@@ -226,6 +232,19 @@ async fn main() -> Int:
 pub fn collect_fixes_from_source(file_path: String, source: String) -> [EasyFix]:
     # Use shared rules module for all text-scanning rules
     var fixes = check_all_rules(source, file_path)
+
+    # COLL002/COLL020 Certain fixes: reuse the exact generator `simple lint
+    # --fix` uses (see the lazy import above) rather than re-deriving the
+    # pattern here. Each function independently re-verifies its own
+    # precondition from `lines` and returns nil on anything but an exact,
+    # unambiguous match, so calling both unconditionally is safe.
+    val lines = source.split("\n")
+    match collection_002_fix(file_path, lines):
+        case Some(fix): fixes.push(fix)
+        case nil: pass_do_nothing
+    match collection_020_fix(file_path, lines):
+        case Some(fix): fixes.push(fix)
+        case nil: pass_do_nothing
 
     val primitive_api_fixes = check_primitive_api(source, file_path)
     for f in primitive_api_fixes:
