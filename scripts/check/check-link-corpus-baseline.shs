@@ -22,11 +22,17 @@
 #       missing any of them is a named offender.
 #
 #   --selftest
-#       Runs before any real scan and is fatal. Exercises: 0 objects -> ERROR;
-#       a real relocatable object (built with the C compiler already required
-#       elsewhere in this repo's toolchain) is censused correctly; a clean
-#       recipe dir passes; a recipe missing one required key fails, naming it
-#       and the key.
+#       Runs unconditionally and fatally before every --census/--recipes scan
+#       (not just when passed explicitly) — see the dispatch section at the
+#       bottom, which invokes it before entering either mode regardless of
+#       which flags were given, using an internal env guard to avoid
+#       recursing into itself when its own fixtures shell out to `sh "$0"`.
+#       Exercises: 0 objects -> ERROR; a real relocatable object (built with
+#       the C compiler already required elsewhere in this repo's toolchain)
+#       is censused correctly and finds at least one real relocation type; a
+#       garbage non-object file must NOT pass (reader fails on it -> ERROR);
+#       a clean recipe dir passes; a recipe missing one required key fails,
+#       naming it and the key.
 #
 # Verdict is the last line of stdout:
 #   PASS — <n> ... checked, ...                exit 0
@@ -68,13 +74,26 @@ resolve_object_files() {
     done
 }
 
-# $1 = reader command name. $2 = one object file path.
-# Prints one "ARCH TYPE" pair per relocation entry found (unsorted).
+# $1 = reader command name. $2 = one object file path. $3 = scratch file to
+# receive the reader's raw stdout (caller-owned; not cleaned up here).
+# Returns the READER's own exit status — 0 only if the reader itself
+# considered the file a valid object, whatever it printed. A non-zero return
+# means the file could not be read as an object at all (garbage, truncated,
+# wrong format) and the caller must treat it as an offender, never as "0
+# relocations found".
 census_one() {
     reader=$1
     file=$2
-    out=$("$reader" -r "$file" 2>/dev/null) || return 0
-    printf '%s\n' "$out" | awk '
+    outfile=$3
+    "$reader" -r "$file" >"$outfile" 2>/dev/null
+    return $?
+}
+
+# Prints one "ARCH TYPE" pair per relocation entry found in $1 (a file holding
+# a reader's raw stdout), unsorted. Prints nothing if the object legitimately
+# carries no relocations.
+extract_relocs() {
+    awk '
         /^[0-9a-fA-F]+  +[0-9a-fA-F]+ +R_/ {
             for (i = 1; i <= NF; i++) {
                 if ($i ~ /^R_[A-Za-z0-9]+_/) {
@@ -90,7 +109,7 @@ census_one() {
                 }
             }
         }
-    '
+    ' "$1"
 }
 
 do_census() {
@@ -104,28 +123,60 @@ do_census() {
     if [ "$n" -eq 0 ]; then
         die_error "0 relocatable object(s) found under: $*"
     fi
+
+    census_tmp=$(mktemp -d) || die_error "mktemp failed"
+    ok_count=0
+    fail_count=0
+    failed_files=""
     lines=""
+    idx=0
     IFS='
 '
     for f in $objects; do
-        one=$(census_one "$reader" "$f")
-        [ -n "$one" ] && lines="$lines
+        idx=$((idx + 1))
+        one_out="$census_tmp/$idx.out"
+        if census_one "$reader" "$f" "$one_out"; then
+            ok_count=$((ok_count + 1))
+            one=$(extract_relocs "$one_out")
+            [ -n "$one" ] && lines="$lines
 $one"
+        else
+            fail_count=$((fail_count + 1))
+            failed_files="$failed_files $f"
+        fi
     done
     unset IFS
+    rm -rf "$census_tmp"
     lines=$(printf '%s\n' "$lines" | sed '/^$/d')
-    if [ -z "$lines" ]; then
-        echo "PASS — $n object(s) checked via $reader, 0 relocation(s) found"
-        exit 0
+
+    # A reader failure on EVERY input means no evidence was ever produced —
+    # that is ERROR, not FAIL: there is nothing to report a verdict about.
+    if [ "$ok_count" -eq 0 ]; then
+        die_error "$reader could not read any of $n object(s) as valid objects (not ELF / truncated / wrong format):$failed_files"
     fi
-    printf '%s\n' "$lines" | awk '{ key = $1 "|" $2; count[key]++ } END { for (k in count) { split(k, parts, "|"); print parts[1], parts[2], count[k] } }' \
+    # Zero relocation RECORDS across every successfully-read object is never a
+    # clean pass — either every object genuinely carries none (unusual enough
+    # for a census to be worth re-checking, not rubber-stamping) or the reader
+    # silently produced no usable output. Either way: ERROR, never PASS.
+    if [ -z "$lines" ]; then
+        die_error "$ok_count object(s) read via $reader but 0 relocation record(s) were found across any of them"
+    fi
+
+    table=$(printf '%s\n' "$lines" | awk '{ key = $1 "|" $2; count[key]++ } END { for (k in count) { split(k, parts, "|"); print parts[1], parts[2], count[k] } }' \
         | sort | awk '
             {
                 if ($1 != prev) { if (prev != "") print ""; print $1 ":"; prev = $1 }
                 printf "  %s=%s\n", $2, $3
-            }'
+            }')
+    printf '%s\n' "$table"
     ntypes=$(printf '%s\n' "$lines" | awk '{print $1"|"$2}' | sort -u | wc -l)
-    echo "PASS — $n object(s) checked via $reader, $ntypes distinct relocation type(s) across $(printf '%s\n' "$lines" | awk '{print $1}' | sort -u | wc -l) arch(es)"
+    narches=$(printf '%s\n' "$lines" | awk '{print $1}' | sort -u | wc -l)
+
+    if [ "$fail_count" -gt 0 ]; then
+        echo "FAIL — $n object(s) checked via $reader, $fail_count unreadable offender(s) (not counted in the $ntypes relocation type(s) found across $narches arch(es)):$failed_files"
+        exit 1
+    fi
+    echo "PASS — $n object(s) checked via $reader, $ntypes distinct relocation type(s) across $narches arch(es)"
     exit 0
 }
 
@@ -166,9 +217,13 @@ run_selftest() {
     td=$(mktemp -d) || die_error "mktemp failed"
     trap 'rm -rf "$td"' EXIT
 
+    # Recursive fixtures below shell out to this same script; guard them so
+    # they don't re-enter run_selftest (see the dispatch section).
+    self_nested="env LINK_CORPUS_BASELINE_SKIP_SELFTEST=1 sh"
+
     # 1. 0 objects -> ERROR
     mkdir -p "$td/empty"
-    out=$(sh "$0" --census "$td/empty" 2>&1); rc=$?
+    out=$($self_nested "$0" --census "$td/empty" 2>&1); rc=$?
     case "$out" in
         *"ERROR"*) : ;;
         *) echo "SELFTEST FAIL: empty dir census did not ERROR: $out"; exit 2 ;;
@@ -191,12 +246,28 @@ int main(void) { return helper(1); }
 EOF
     "$cc_bin" -c -O0 -fPIC "$td/probe.c" -o "$td/probe.o" 2>/dev/null \
         || die_error "selftest: $cc_bin failed to build the fixture object"
-    out=$(sh "$0" --census "$td/probe.o" 2>&1); rc=$?
+    out=$($self_nested "$0" --census "$td/probe.o" 2>&1); rc=$?
     case "$out" in
         *"PASS"*) : ;;
         *) echo "SELFTEST FAIL: real object census did not PASS: $out"; exit 2 ;;
     esac
     [ "$rc" -eq 0 ] || { echo "SELFTEST FAIL: real object census exit=$rc, want 0"; exit 2; }
+    case "$out" in
+        *"R_"*) : ;;
+        *) echo "SELFTEST FAIL: real object census PASSed but found no R_* relocation type: $out"; exit 2 ;;
+    esac
+
+    # 2b. a garbage non-object file must NEVER pass: the reader fails on it
+    #     outright, so this must ERROR (every input failed), not PASS with 0
+    #     relocations found.
+    printf 'this is not an object file\n' > "$td/junk.o"
+    out=$($self_nested "$0" --census "$td/junk.o" 2>&1); rc=$?
+    case "$out" in
+        *"PASS"*) echo "SELFTEST FAIL: garbage .o census incorrectly PASSed: $out"; exit 2 ;;
+        *"ERROR"*) : ;;
+        *) echo "SELFTEST FAIL: garbage .o census gave neither PASS nor ERROR: $out"; exit 2 ;;
+    esac
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: garbage .o census exit=$rc, want 2"; exit 2; }
 
     # 3. recipes: clean dir passes
     mkdir -p "$td/recipes_ok"
@@ -209,7 +280,7 @@ corpus:
   expected_outcome: "links"
   status: "runnable-here"
 EOF
-    out=$(sh "$0" --recipes "$td/recipes_ok" 2>&1); rc=$?
+    out=$($self_nested "$0" --recipes "$td/recipes_ok" 2>&1); rc=$?
     case "$out" in
         *"PASS"*) : ;;
         *) echo "SELFTEST FAIL: clean recipe dir did not PASS: $out"; exit 2 ;;
@@ -226,7 +297,7 @@ corpus:
   target_triple: "x86_64-unknown-linux-gnu"
   expected_outcome: "links"
 EOF
-    out=$(sh "$0" --recipes "$td/recipes_bad" 2>&1); rc=$?
+    out=$($self_nested "$0" --recipes "$td/recipes_bad" 2>&1); rc=$?
     case "$out" in
         *"FAIL"*"status"*) : ;;
         *) echo "SELFTEST FAIL: missing-key recipe did not FAIL naming 'status': $out"; exit 2 ;;
@@ -235,26 +306,39 @@ EOF
 
     rm -rf "$td"
     trap - EXIT
-    echo "SELFTEST PASS — 4 fixture(s) checked"
+    echo "SELFTEST PASS — 5 fixture(s) checked"
 }
 
 # --- dispatch -----------------------------------------------------------------
+# --selftest is tracked but NOT trusted to be the whole story: census and
+# recipes modes below run the selftest unconditionally regardless of whether
+# --selftest was actually passed, so `--selftest --recipes DIR` cannot ever
+# silently skip it again by one flag clobbering mode's tracking of the other.
 mode=""
 args=""
 for a in "$@"; do
     case "$a" in
-        --selftest) mode=selftest ;;
+        --selftest) [ -z "$mode" ] && mode=selftest ;;
         --census) mode=census ;;
         --recipes) mode=recipes ;;
         *) args="$args $a" ;;
     esac
 done
 
-if [ "$mode" = selftest ]; then
-    run_selftest
-    rc=$?
-    [ "$rc" -eq 0 ] || exit 2
-fi
+# LINK_CORPUS_BASELINE_SKIP_SELFTEST=1 is set only by run_selftest's own
+# nested `sh "$0" --census/--recipes ...` fixture calls, so this guard never
+# suppresses a real, top-level invocation — only the recursion that would
+# otherwise happen the instant a census/recipes mode auto-runs the selftest
+# that itself calls census/recipes.
+case "$mode" in
+    census|recipes)
+        if [ "${LINK_CORPUS_BASELINE_SKIP_SELFTEST:-0}" != 1 ]; then
+            run_selftest
+            rc=$?
+            [ "$rc" -eq 0 ] || exit 2
+        fi
+        ;;
+esac
 
 case "$mode" in
     census)
@@ -270,6 +354,9 @@ case "$mode" in
         do_recipes "$1"
         ;;
     selftest)
+        run_selftest
+        rc=$?
+        [ "$rc" -eq 0 ] || exit 2
         exit 0
         ;;
     "")
