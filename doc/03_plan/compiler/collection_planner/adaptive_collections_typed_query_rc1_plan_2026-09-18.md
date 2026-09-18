@@ -56,6 +56,38 @@ t0 ─┬─ L0 | L1 | L2 | L3 | L10 | L11      (independent, parallel)
            └─ L9       └─ L8                ─── G-RC1
 ```
 
+
+## Wave G — goal extension (2026-09-18): frame API, profiler, lint + auto-fix, apply, README
+
+Design: §10 of the design doc. These lanes run **in parallel** with Wave R. Each
+lane works in its own worktree off this branch and returns a patch. It does not
+commit. Fable reviews every patch before the orchestrator applies it (memory
+rule: Fable reviews every lane before landing).
+
+| Lane | Work | Owns | Depends | Evidence |
+|---|---|---|---|---|
+| **L12** `std.common.frame` | The 8 functions of design §10.1, Dict-safe subset only | `src/lib/common/frame.spl`, `test/01_unit/lib/common/frame_spec.spl` *(new)* | — | order + duplicate specs; 1K→16K scaling spec |
+| **L6'** collection profiler | Design §10.2 counters, report and advice | `src/lib/common/collection_profile.spl`, `test/01_unit/lib/common/collection_profile_spec.spl` *(new)* | — | advice fires on a linear-lookup-heavy fixture and stays silent on an indexed one |
+| **L9'** lint + auto-fix | Design §10.3: COLL002 upgrade + fix; COLL009–012, COLL018; COLL011 fix; diagnose the 2 baseline failures | `src/compiler/35.semantics/lint/collection_patterns.spl`, `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`, `test/01_unit/compiler/lint/collection_frame_rules_spec.spl` *(new)* | names from L12 (fixed in design, so it can run in parallel) | fires-on-dirty + silent-on-clean fixture per rule; fix output re-lints clean |
+| **L13** apply to compiler / loader / interpreter | Find O(n·m) collection patterns in `src/compiler/99.loader`, `src/compiler/95.interp`, `src/app/interpreter` and rewrite the confirmed ones to the **inline Dict-index form** (design §10.1 closure caveat). Output must not change. | only the files it rewrites (listed in its patch) | — (uses the inline form, not L12) | per-site before/after spec, or an existing spec green before and after |
+| **L14** README + guide | README "Distinctive Features" entry: LLM-written collection code is often O(n²); Simple flags it, names the dataframe-way call, and auto-fixes it. Plus a short guide page. | `README.md`, `doc/07_guide/language/collections/dataframe_way.md` *(new)* | L9' codes | links resolve |
+
+Evidence command for every lane (aarch64 host; one positional per run):
+
+```bash
+B=$(readlink -f /home/yoon/dev/simple/bin/simple)
+$B test --no-session-daemon <one spec path>
+```
+
+**Done for this goal:**
+
+1. Plan and design updated and Fable-reviewed.
+2. L12, L6', L9', L13 and L14 each end `pass` or `filed`.
+3. The README section is in.
+4. Everything is committed on `work/adaptive-collections-typed-query`.
+
+Landing via PR is a separate step.
+
 ## Wave P — post-RC1 (planned, not scheduled)
 
 | Lane | Work | Gate |

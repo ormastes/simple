@@ -204,3 +204,87 @@ through a versioned wrapper.
 Post-RC1 groups (literal/attribute parity, policy DAG, switching fault
 injection, layout oracle, device fences, JIT deopt) follow research §5 and are
 out of scope here.
+
+## 10. Goal extension (2026-09-18): typed frame API, profiler, lint + auto-fix
+
+Scope decision: in RC1 "the dataframe way" means a **typed library API over
+`[Record]`**, reached through key lambdas. The `.field` / `{a, b}` grammar stays
+post-RC1 (P1/P3) because it needs seed-Rust, self-hosted and GPU-lexer parity.
+The lint names the library call to switch to. That is the fast path the user
+asked for.
+
+### 10.1 `std.common.frame` — `src/lib/common/frame.spl` *(new)*
+
+`common` family, so compiler, loader and interpreter code may import it (they
+import only `std.common.*` / `std.nogc_sync_mut.*`, never `gc_async_mut`). It uses
+only the verified-safe Dict subset: `d[k] = v` and `contains_key`. It never
+calls `.set()`, and never calls `.get()` on the hit path
+(`doc/07_guide/language/dict_native_pitfalls.md`).
+
+| Function | Semantics | Cost |
+|---|---|---|
+| `key_set<T,K>(xs: [T], key: fn(T) -> K) -> Dict<K, bool>` | membership index | O(n) expected |
+| `index_by<T,K>(xs: [T], key: fn(T) -> K) -> Dict<K, i64>` | key → **first** row position | O(n) |
+| `distinct_by<T,K>(xs: [T], key: fn(T) -> K) -> [T]` | first occurrence per key, input order | O(n) |
+| `group_by_key<T,K>(xs: [T], key: fn(T) -> K) -> [(K, [T])]` | first-encounter group order, members in input order | O(n) |
+| `count_by<T,K>(xs: [T], key: fn(T) -> K) -> [(K, i64)]` | first-encounter order | O(n) |
+| `semi_join<L,R,K>(l: [L], r: [R], lk: fn(L) -> K, rk: fn(R) -> K) -> [L]` | rows of `l` with a match, `l` order, duplicates kept | O(l + r) |
+| `anti_join<L,R,K>(...)` | rows of `l` with no match | O(l + r) |
+| `top_k_by<T>(xs: [T], k: i64, score: fn(T) -> i64) -> [T]` | k largest scores, ties by input order | O(n·k) worst for small k, never a full sort |
+
+Order and duplicate behaviour are part of the contract, so every function has
+an order-preservation spec. Every function also has a 1K→16K scaling spec.
+
+**Closure caveat (G-P0):** lambdas are fine in interpreter code and in library
+code. Compiler, loader and interpreter sources that are natively compiled by
+bootstrap must use the **inline Dict-index form** instead (a `Dict<K, bool>` or
+`Dict<K, i64>` built before the loop), not a lambda helper, until the
+closure/indirect-call ABI gate is green. The lint suggestion always shows both
+forms.
+
+### 10.2 Collection profiler — `src/lib/common/collection_profile.spl` *(new)*
+
+This is opt-in and explicit: nothing is instrumented automatically in RC1
+(`off` = the module is not imported). It uses numeric site slots. The hot path
+has no text keys, no clock and no allocation.
+
+```simple
+struct CollectionSiteStats:
+    name: text
+    lookups: i64          # membership/find calls
+    lookup_hits: i64
+    scanned: i64          # elements visited by linear lookups/scans
+    inserts: i64
+    max_len: i64
+
+# profiler state: stats: [CollectionSiteStats]
+fn coll_site(p, name: text) -> i64                  # cold, once per site
+fn coll_on_lookup(p, site: i64, hit: bool, scanned: i64, len: i64)
+fn coll_on_insert(p, site: i64, len: i64)
+fn coll_report(p) -> [text]                         # one row per site
+fn coll_advice(p) -> [text]                         # switch recommendations
+```
+
+`coll_advice` rules match the lint vocabulary. Linear lookups with
+`scanned / lookups > 32` and `lookups > 64` produce `use key_set/index_by`. A
+site whose `inserts` stay near 0 after build produces `build once, then index`.
+Advice text always names the evidence counts. It is cost evidence, never proof.
+`CollectionSummaryV1` (§5) serialises these counters; that is L6 follow-up.
+
+### 10.3 Lint rules + auto-fix (extends `collection_patterns.spl`)
+
+| Code | Pattern | Message names | Auto-fix |
+|---|---|---|---|
+| COLL002 (upgrade) | `arr.contains(x)` in loop, `arr` loop-invariant | `key_set` / inline `Dict<K,bool>` | yes, when `arr` is a local not mutated in the loop: insert `var <arr>_set: Dict<T,bool> = {}` + fill before the loop, rewrite the call to `<arr>_set.contains_key(x)` |
+| COLL009 | nested `for a in A: for b in B: if key(a) == key(b)` | `semi_join` / `index_by` | no (suggest only) |
+| COLL010 | `.find`/`.filter` with equality on a loop variable, inside a loop | `index_by` / `group_by_key` | no |
+| COLL011 | growing `seen` array + `.contains` guard + `.push` (manual distinct) | `distinct_by` / `unique` | yes, when the loop body is exactly guard + push |
+| COLL012 | manual group: scan a `keys` array for a slot, then push | `group_by_key` | no |
+| COLL018 | `.sort…()` followed by `take(k)` / `[0:k]` | `top_k_by` | no (tie order differs from a stable sort unless proven) |
+
+Every message has the form: `COLLnnn: <pattern> is O(n*m); switch to <call>
+(std.common.frame) — dataframe-able`. An auto-fix is emitted only as a
+`Certain` EasyFix when the listed precondition is checked. Otherwise the
+diagnostic is advisory. The pre-existing baseline has 2 failures in
+`collection_easy_fix_spec.spl` (`replacements` not found; the array-rebuild hint
+`arr.pop()` is missing). They are owned by the lint lane: fix them or file them.
