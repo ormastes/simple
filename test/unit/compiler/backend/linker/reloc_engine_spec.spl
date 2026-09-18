@@ -19,8 +19,9 @@ use compiler.backend.linker.reloc_engine.{
     patch_u32_le, patch_u64_le, read_u32_le,
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32,
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
-    R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26,
+    R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26, R_AARCH64_JUMP26,
     R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC,
+    R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC,
     R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_HI20, R_RISCV_LO12_I
 }
 
@@ -435,3 +436,222 @@ describe "reloc_engine - AArch64 LDST64_ABS_LO12_NC alignment reject":
         val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST64_ABS_LO12_NC, 0x420038, 0, 0)
         expect(result.success).to_equal(true)
         expect(result.value).to_equal(7)
+
+# ============================================================================
+# AArch64 CALL26 / JUMP26 (branch): reject range/alignment, don't mask.
+# Hand-derived per AAELF64: imm26 = (S+A-P) >> 2, into bits 25:0 (keep-mask
+# 0xfc000000 preserves the fixed BL/B opcode bits). The raw byte offset
+# (S+A-P) must be 4-byte aligned and fit the signed-26-bit x4-scaled field,
+# i.e. lie in [-2^27, 2^27) = [-134217728, 134217728).
+# ============================================================================
+
+describe "reloc_engine - AArch64 CALL26 range/alignment reject":
+    it "accepts an in-range aligned offset: S+A-P=0x1000 -> imm26=0x400":
+        # @req REQ-SSPEC-COMPILER
+        step("CALL26 accepts an in-range aligned offset")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, 0x1000, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x400)
+
+    it "accepts the exact positive boundary: S+A-P=134217724 (2^27-4)":
+        # @req REQ-SSPEC-COMPILER
+        step("CALL26 accepts the exact positive boundary offset")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, 134217724, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(33554431)
+
+    it "rejects one past the positive boundary: S+A-P=134217728 (2^27)":
+        # @req REQ-SSPEC-COMPILER
+        step("CALL26 rejects an offset one past the positive boundary")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, 134217728, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "accepts the exact negative boundary: S+A-P=-134217728 (-2^27)":
+        # @req REQ-SSPEC-COMPILER
+        step("CALL26 accepts the exact negative boundary offset")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, -134217728, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x2000000)
+
+    it "rejects one past the negative boundary: S+A-P=-134217732 (-2^27-4)":
+        # @req REQ-SSPEC-COMPILER
+        step("CALL26 rejects an offset one past the negative boundary")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, -134217732, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "rejects a misaligned offset: S+A-P=5 (not a multiple of 4)":
+        # @req REQ-SSPEC-COMPILER
+        step("CALL26 rejects a misaligned branch offset")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, 5, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+describe "reloc_engine - AArch64 JUMP26 (real relocation, same formula as CALL26)":
+    it "R_AARCH64_JUMP26 computes the same value as R_AARCH64_CALL26 for the same inputs":
+        # @req REQ-SSPEC-COMPILER
+        step("JUMP26 matches CALL26's formula and encoding")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val call26 = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, 0x1000, 0, 0)
+        val jump26 = reloc_apply_aarch64(bytes, 0, R_AARCH64_JUMP26, 0x1000, 0, 0)
+        expect(jump26.success).to_equal(call26.success)
+        expect(jump26.value).to_equal(call26.value)
+
+    it "R_AARCH64_JUMP26 rejects out-of-range offsets exactly like CALL26":
+        # @req REQ-SSPEC-COMPILER
+        step("JUMP26 rejects out-of-range branch offsets")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_JUMP26, 134217728, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "R_AARCH64_JUMP26 rejects a misaligned offset exactly like CALL26":
+        # @req REQ-SSPEC-COMPILER
+        step("JUMP26 rejects a misaligned branch offset")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_JUMP26, 5, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "packs the imm26 into a B/BL instruction word identically to CALL26":
+        # @req REQ-SSPEC-COMPILER
+        step("JUMP26 packs imm26 into insn[25:0]")
+        # Base: 0x14000000 = "b #0" (op=000101, imm26=0). Keep-mask 0xfc000000
+        # preserves the fixed opcode bits; imm26 = 0x1000 >> 2 = 0x400.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0x14000000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_JUMP26, 0x1000, 0, 0)
+        expect(result.success).to_equal(true)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xfc000000) | (result.value & 0x3ffffff)
+        expect(patched_word).to_equal(0x14000400)
+
+# ============================================================================
+# AArch64 LDST8/16/32/128_ABS_LO12_NC: same imm12/read-modify-write shape as
+# LDST64_ABS_LO12_NC, scaled by the access size (1/2/4/16 bytes). Only the
+# 8-bit variant has no alignment constraint — every byte offset is valid.
+# Hand-derived per AAELF64: imm12 = ((S+A) & 0xfff) >> {0,1,2,4}, into
+# insn[21:10] (keep-mask 0xffc003ff).
+# ============================================================================
+
+describe "reloc_engine - AArch64 LDST8_ABS_LO12_NC (imm12 lo12, unscaled)":
+    it "encodes lo12 with no scaling: S+A=0x420034 -> imm12=0x034":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST8_ABS_LO12_NC encodes lo12 unscaled")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST8_ABS_LO12_NC, 0x420034, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x034)
+
+    it "accepts an odd (non-power-of-2-aligned) offset — byte access has no alignment reject":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST8_ABS_LO12_NC has no alignment reject")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST8_ABS_LO12_NC, 0x420035, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x035)
+
+    it "packs lo12 into an LDRB (unsigned offset) instruction word":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST8_ABS_LO12_NC packs imm12 into insn[21:10]")
+        # Base: 0x39400000 = "ldrb w0, [x0]" (size=00, opc=01, imm12=0).
+        # lo12 = 0x420034 & 0xfff = 0x034 = 52. patched = 0x39400000 | (52<<10)
+        #      = 0x39400000 | 0xd000 = 0x3940d000.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0x39400000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_LDST8_ABS_LO12_NC, 0x420034, 0, 0)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
+        expect(patched_word).to_equal(0x3940d000)
+
+describe "reloc_engine - AArch64 LDST16_ABS_LO12_NC (imm12 lo12 >> 1)":
+    it "encodes lo12 scaled by 2: S+A=0x420036 (lo12=0x036) -> imm12=27":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST16_ABS_LO12_NC encodes lo12 >> 1 into imm12")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST16_ABS_LO12_NC, 0x420036, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(27)
+
+    it "rejects an unaligned target: S+A=0x420037 (lo12=0x037, not a multiple of 2)":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST16_ABS_LO12_NC rejects a target that is not 2-byte aligned")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST16_ABS_LO12_NC, 0x420037, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "packs the scaled lo12 into an LDRH instruction word":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST16_ABS_LO12_NC packs scaled imm12 into insn[21:10]")
+        # Base: 0x79400000 = "ldrh w0, [x0]" (size=01, opc=01, imm12=0).
+        # lo12 = 0x420036 & 0xfff = 0x036 = 54; imm12 = 54 >> 1 = 27.
+        # patched = 0x79400000 | (27<<10) = 0x79400000 | 0x6c00 = 0x79406c00.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0x79400000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_LDST16_ABS_LO12_NC, 0x420036, 0, 0)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
+        expect(patched_word).to_equal(0x79406c00)
+
+describe "reloc_engine - AArch64 LDST32_ABS_LO12_NC (imm12 lo12 >> 2)":
+    it "encodes lo12 scaled by 4: S+A=0x420034 (lo12=0x034) -> imm12=13":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST32_ABS_LO12_NC encodes lo12 >> 2 into imm12")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST32_ABS_LO12_NC, 0x420034, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(13)
+
+    it "rejects an unaligned target: S+A=0x420035 (lo12=0x035, not a multiple of 4)":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST32_ABS_LO12_NC rejects a target that is not 4-byte aligned")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST32_ABS_LO12_NC, 0x420035, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "packs the scaled lo12 into an LDR (32-bit, unsigned offset) instruction word":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST32_ABS_LO12_NC packs scaled imm12 into insn[21:10]")
+        # Base: 0xb9400000 = "ldr w0, [x0]" (size=10, opc=01, imm12=0).
+        # lo12 = 0x420034 & 0xfff = 0x034 = 52; imm12 = 52 >> 2 = 13.
+        # patched = 0xb9400000 | (13<<10) = 0xb9400000 | 0x3400 = 0xb9403400.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0xb9400000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_LDST32_ABS_LO12_NC, 0x420034, 0, 0)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
+        expect(patched_word).to_equal(0xb9403400)
+
+describe "reloc_engine - AArch64 LDST128_ABS_LO12_NC (imm12 lo12 >> 4)":
+    it "encodes lo12 scaled by 16: S+A=0x420030 (lo12=0x030) -> imm12=3":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST128_ABS_LO12_NC encodes lo12 >> 4 into imm12")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST128_ABS_LO12_NC, 0x420030, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(3)
+
+    it "rejects an unaligned target: S+A=0x420031 (lo12=0x031, not a multiple of 16)":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST128_ABS_LO12_NC rejects a target that is not 16-byte aligned")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST128_ABS_LO12_NC, 0x420031, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "packs the scaled lo12 into an LDR (128-bit SIMD, unsigned offset) instruction word":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST128_ABS_LO12_NC packs scaled imm12 into insn[21:10]")
+        # Base: 0x3dc00000 = "ldr q0, [x0]" (size=00, V=1, opc=11, imm12=0).
+        # lo12 = 0x420030 & 0xfff = 0x030 = 48; imm12 = 48 >> 4 = 3.
+        # patched = 0x3dc00000 | (3<<10) = 0x3dc00000 | 0xc00 = 0x3dc00c00.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0x3dc00000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_LDST128_ABS_LO12_NC, 0x420030, 0, 0)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
+        expect(patched_word).to_equal(0x3dc00c00)
