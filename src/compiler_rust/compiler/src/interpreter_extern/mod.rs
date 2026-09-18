@@ -2331,6 +2331,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_local_set", concurrency::rt_thread_local_set);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
+    insert_simple!("rt_time_format", time::rt_time_format);
     insert_simple!("rt_time_monotonic_ns", time::rt_time_monotonic_ns);
     insert_simple!("rt_time_ms", time::rt_time_ms_fn);
     insert_simple!("rt_time_now_micros", time::rt_time_now_micros);

@@ -107,6 +107,58 @@ pub fn rt_timestamp_get_minute(micros: i64) -> i32 {
 pub fn rt_timestamp_get_second(micros: i64) -> i32 {
     unsafe { c_sffi::rt_timestamp_get_second(micros) }
 }
+
+/// strftime-subset UTC formatter over whole epoch seconds — interpreter-lane
+/// twin of `rt_time_format` in runtime_core_host_services.c (core-C capsule).
+/// Composes the same C civil getters above, so both lanes agree exactly.
+/// Supported: %Y %m %d %H %M %S %F %T %%. Fails closed to "" on an unknown
+/// specifier, a trailing '%', fmt longer than 255 bytes, or output that
+/// would reach 512 bytes.
+///
+/// Deliberately NOT named `rt_*`: the rt-dual-implementation ratchet
+/// (check-rt-dual-implementation-ratchet.shs) freezes the single-lane rt_*
+/// population and forbids new ones. This helper backs the existing
+/// dual-lane `rt_time_format`; it is not a new runtime primitive.
+pub fn format_time_utc_strftime(ts_seconds: i64, fmt: &str) -> String {
+    if ts_seconds > i64::MAX / 1_000_000 || ts_seconds < i64::MIN / 1_000_000 {
+        return String::new();
+    }
+    if fmt.len() > 255 {
+        return String::new();
+    }
+    let micros = ts_seconds * 1_000_000;
+    let year = rt_timestamp_get_year(micros) as i64;
+    let month = rt_timestamp_get_month(micros) as i64;
+    let day = rt_timestamp_get_day(micros) as i64;
+    let hour = rt_timestamp_get_hour(micros) as i64;
+    let minute = rt_timestamp_get_minute(micros) as i64;
+    let second = rt_timestamp_get_second(micros) as i64;
+    let mut out = String::new();
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        let piece = if c == '%' {
+            match chars.next() {
+                Some('Y') => format!("{year:04}"),
+                Some('m') => format!("{month:02}"),
+                Some('d') => format!("{day:02}"),
+                Some('H') => format!("{hour:02}"),
+                Some('M') => format!("{minute:02}"),
+                Some('S') => format!("{second:02}"),
+                Some('F') => format!("{year:04}-{month:02}-{day:02}"),
+                Some('T') => format!("{hour:02}:{minute:02}:{second:02}"),
+                Some('%') => "%".to_string(),
+                _ => return String::new(),
+            }
+        } else {
+            c.to_string()
+        };
+        if out.len() + piece.len() >= 512 {
+            return String::new();
+        }
+        out.push_str(&piece);
+    }
+    out
+}
 #[inline(always)]
 pub fn rt_timestamp_get_microsecond(micros: i64) -> i32 {
     unsafe { c_sffi::rt_timestamp_get_microsecond(micros) }
