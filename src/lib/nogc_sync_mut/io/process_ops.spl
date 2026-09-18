@@ -1606,9 +1606,33 @@ pub fn process_output(cmd: text, args: [text]) -> text:
 # Shell Functions
 # ============================================================================
 
+fn _windows_posix_shell_path() -> text:
+    # Specs and drivers issue POSIX shell commands (test/grep/awk/rm -rf,
+    # VAR=val command prefixes) but Windows routed shell() to cmd.exe, which
+    # cannot run them -- every such spec failed on Windows with empty output
+    # while passing on Linux CI. Prefer a real POSIX sh (Git Bash / MSYS /
+    # Cygwin) when present; fall back to cmd.exe only as a last resort.
+    val candidates: [text] = [
+        env_get("SIMPLE_POSIX_SHELL") ?? "",
+        env_get("BASH") ?? "",
+        "C:/Program Files/Git/bin/sh.exe",
+        "C:/Program Files (x86)/Git/bin/sh.exe",
+        "C:/Program Files/Git/usr/bin/sh.exe",
+        "C:/msys64/usr/bin/sh.exe",
+        "C:/cygwin64/bin/sh.exe"
+    ]
+    for candidate in candidates:
+        if candidate != "" and file_exists(candidate):
+            return candidate
+    "cmd.exe"
+
 fn _shell_command_args(command: text) -> (text, [text]):
     if _is_windows_platform():
-        ("cmd.exe", ["/c", command])
+        val sh = _windows_posix_shell_path()
+        if sh != "cmd.exe":
+            (sh, ["-c", command])
+        else:
+            ("cmd.exe", ["/c", command])
     else:
         ("/bin/sh", ["-c", command])
 
