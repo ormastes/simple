@@ -128,3 +128,51 @@ c["k"].push(2)
   dict-value and tuple/struct-field access, not at every array index
 - `doc/07_guide/language/dict_native_pitfalls.md`
 
+
+## Re-measurement 2026-09-18 — the audit table is stale; one shape is fixed, one is a LANE SPLIT
+
+Binaries: a seed built from `origin/main` `c8fa65bf714` today (51,645,288 B,
+sha256 `308de6af84db5c26e2c0`) and, for contrast, the binary deployed at
+`bin/simple` (built 2026-09-06).
+
+Same four shapes as the original table, both lanes, fresh seed:
+
+| shape | example | interpret | JIT |
+|---|---|---|---|
+| array of arrays | `b[0].push(x)` | keeps | keeps |
+| **dict value** | `c["k"].push(x)` | **keeps** | keeps |
+| write-back | `d["k"] = d["k"].push(x)` | keeps | keeps |
+| **tuple field** | `a[0].1.push(x)` | **LOSES** | **keeps** |
+
+Three corrections to the record above:
+
+1. **The dict-value shape is fixed.** It lost the write when this was filed and
+   keeps it now. Four of the seven "broken" sites in the audit table were
+   dict-value sites, so they are no longer broken by this defect.
+2. **The tuple-field shape is now a LANE SPLIT, not a flat failure.** The
+   interpret lane still discards the write; the JIT lane keeps it. The original
+   entry says "JIT/native unverified" — it is verified now, and the two engines
+   disagree, which is the part that still needs an owner.
+3. **Both non-dict sites the table lists are already remediated in-tree**, so no
+   live stdlib site is known to lose a write today:
+   - `gc_async_mut/pure/collections.spl` keeps two parallel arrays
+     (`keys: [K]`, `members: [[T]]`) precisely to avoid the tuple-field shape,
+     and says so in a comment.
+   - `common/encoding/font_cldr_rank.spl` uses the read-modify-write form with a
+     comment citing this bug id.
+
+**Anyone re-running this must check their binary first.** On the deployed
+2026-09-06 seed the dict-value shape still fails, so measuring with it reproduces
+the original table and would lead to "fixing" code that is already correct. That
+binary carries a separate defect
+(`seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`);
+`scripts/check/check-deployed-binary-optional-unwrap.shs` tells the two apart in
+about a second.
+
+Pinned by `test/01_unit/interpreter/mutate_through_index_shapes_spec.spl`
+(7 examples): the three working shapes are now guarded, since the dict-value one
+is recently-fixed behaviour with production callers and nothing else covered it.
+The tuple-field shape is deliberately left unasserted there — asserting either
+lane's answer would add a red or bless a defect — so it remains this record's one
+live item. Measured: 7/7 on the fresh seed; the three dict examples fail on the
+deployed seed.
