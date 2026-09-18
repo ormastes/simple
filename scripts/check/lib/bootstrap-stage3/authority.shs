@@ -3441,6 +3441,11 @@ public static class Stage3MaterializedConsumer {
     // to the measured requirement. Both remain env-overridable.
     static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 1000000);
     const int MaxOutput = 16 * 1024 * 1024;
+    // The tracked HEAD diff is hashed, never parsed, and on a dirty tree with
+    // rebuilt binaries it far exceeds any memory buffer (a full-index binary
+    // diff of a ~100 MB seed is ~130 MB). Stream it through the hasher; this
+    // bound is a runaway guard only, not a buffer size.
+    static readonly long MaxDiffBytes = (long)Budget("BOOTSTRAP_STAGE3_GIT_MAX_DIFF_BYTES", 1024UL * 1024 * 1024);
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
     static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
     static ulong bytes;
@@ -3510,6 +3515,44 @@ public static class Stage3MaterializedConsumer {
     static byte[] Git(string root, params string[] args) {
         var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
         all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
+    }
+    // The tracked HEAD diff can exceed any memory buffer on a dirty tree
+    // (rebuilt seed binaries produce 100+ MB full-index binary diffs); only
+    // its digest is consumed downstream, so stream stdout through SHA-256
+    // instead of buffering. The digest still binds Git's exact diff bytes;
+    // stderr stays bounded and stdin closes immediately.
+    static string GitHash(string root, params string[] args) {
+        var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
+        all.AddRange(args);
+        Tick(); var start = new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("STAGE3_GIT"));
+        start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true;
+        start.RedirectStandardOutput = true; start.RedirectStandardError = true; start.RedirectStandardInput = true;
+        start.EnvironmentVariables["GIT_OPTIONAL_LOCKS"] = "0";
+        start.EnvironmentVariables["LC_ALL"] = "C";
+        start.EnvironmentVariables["GIT_CONFIG_NOSYSTEM"] = "1";
+        var argv = new List<string>(); foreach (string arg in all) argv.Add(Quote(arg));
+        start.Arguments = String.Join(" ", argv.ToArray());
+        using (var process = System.Diagnostics.Process.Start(start)) {
+            ActiveChild = process;
+            try {
+                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => {
+                    var hasher = System.Security.Cryptography.SHA256.Create();
+                    var buffer = new byte[65536]; int n; long total = 0;
+                    while ((n = process.StandardOutput.BaseStream.Read(buffer, 0, buffer.Length)) > 0) {
+                        if ((total += n) > MaxDiffBytes) throw new IOException("bound.command-output");
+                        hasher.TransformBlock(buffer, 0, n, null, 0);
+                    }
+                    hasher.TransformFinalBlock(new byte[0], 0, 0);
+                    return Hex(hasher.Hash);
+                });
+                var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
+                var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { process.StandardInput.Close(); });
+                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
+                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
+                return stdout.Result;
+            } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
+        }
     }
     // git check-ignore exits 0 when the path IS ignored (printing it) and 1
     // when it is not; Command surfaces the non-zero exit as an IOException,
@@ -3619,7 +3662,7 @@ public static class Stage3MaterializedConsumer {
         }
     }
     static string Inventory(string root, string head, Dictionary<string,string> aliases) {
-        byte[] diff = Git(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
+        string diff_sha = GitHash(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
         var args = new List<string>(new string[] {"ls-files", "--others", "--exclude-standard", "-z", "--", "."});
         var collapsed = new List<string>();
         foreach (var pair in aliases) if (pair.Value == "directory") collapsed.Add(pair.Key);
@@ -3639,7 +3682,7 @@ public static class Stage3MaterializedConsumer {
         }
         byte[] flags = Command(root, Environment.GetEnvironmentVariable("STAGE3_SH"), Utf8.GetBytes(paths.Length == 0 ? "" : String.Join("\0", paths) + "\0"), "-c", "while IFS= read -r -d '' p; do if test -x \"$p\"; then printf 1; else printf 0; fi; done");
         if (flags.Length != paths.Length) throw new IOException("untracked.mode-count");
-        var records = new StringBuilder("tracked-diff-sha256=" + Hash(diff) + "\n");
+        var records = new StringBuilder("tracked-diff-sha256=" + diff_sha + "\n");
         var held = new List<SafeFileHandle>();
         try {
             for (int n=0; n<paths.Length; n++) {
