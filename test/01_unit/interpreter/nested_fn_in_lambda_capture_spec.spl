@@ -1,0 +1,83 @@
+# A `fn` declared inside a LAMBDA body must see that lambda's locals.
+#
+# Bug: doc/08_tracking/bug/nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
+#
+# `exec_block_closure_into` registers a nested `fn` twice: in the flat `functions`
+# map so the body can recurse, and in the block scope as a closure over the
+# block's locals. Call dispatch reached the flat entry first and ran it against
+# the CALLER's environment, discarding the capture -- so the block's own `val`s
+# were simply not there. A `fn` nested in a plain function body never hit this,
+# because that path binds only the environment.
+#
+# Every example below is a `describe`/`it` block, which means each one is itself
+# a lambda body -- the construct under test is the construct the spec runner
+# uses, so these examples exercise it directly rather than simulating it.
+#
+# Measured before the fix: the first two examples failed with
+# `semantic: variable ... not found`; the rest already passed and are kept as
+# controls, because a probe of only the working shapes reports green on a broken
+# binary. That is exactly how this survived six weeks: the callback shape works,
+# and the callback shape is what the original repro used.
+
+use std.spec
+
+var module_counter: i64 = 99
+
+fn call_thunk(f: () -> i64) -> i64:
+    f()
+
+fn apply_reader(f: (i64) -> i64, at: i64) -> i64:
+    f(at)
+
+describe "a nested fn sees the enclosing lambda's locals":
+    it "reads a scalar local declared before it":
+        val n = 42
+        fn get() -> i64:
+            n
+        expect(get()).to_equal(42)
+
+    it "reads an array local declared before it":
+        val buf: [i64] = [7, 8, 9]
+        fn at(i: i64) -> i64:
+            buf[i]
+        expect(at(1)).to_equal(8)
+
+    it "recurses while still reading the enclosing local":
+        val base = 10
+        fn fact(n: i64) -> i64:
+            if n <= 1:
+                return base
+            n * fact(n - 1)
+        expect(fact(4)).to_equal(240)
+
+# DELIBERATELY NOT ASSERTED: whether a nested `fn` sees a local REBOUND after
+# the `fn` was declared. Measured on the fixed binary, it does not -- the
+# closure captures the block scope by value at the declaration point, so a
+# later `total = 5` is invisible to it. Whether that snapshot is the intended
+# semantics or a second defect is an open question this change does not
+# settle, and asserting either answer here would bless one without deciding
+# it. Recorded in the bug record instead.
+
+describe "shapes that already worked stay working":
+    it "still reads a module-level var from inside a nested fn":
+        fn sees_module() -> i64:
+            module_counter
+        expect(sees_module()).to_equal(99)
+
+    it "still works when the nested fn is passed as a callback":
+        val buf: [i64] = [11, 22, 33]
+        fn at(i: i64) -> i64:
+            buf[i]
+        expect(apply_reader(at, 2)).to_equal(33)
+
+    it "still works when the nested fn is passed as a thunk":
+        val n = 4
+        fn thunk() -> i64:
+            n * 2
+        expect(call_thunk(thunk)).to_equal(8)
+
+    it "prefers an outer binding of the same name over the nested fn's own":
+        val shadowed = 3
+        fn reads_shadowed() -> i64:
+            shadowed
+        expect(reads_shadowed()).to_equal(3)
