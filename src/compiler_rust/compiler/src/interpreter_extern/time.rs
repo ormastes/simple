@@ -701,6 +701,22 @@ pub fn rt_perf_clear_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Format whole epoch seconds as UTC text (strftime subset) for the
+/// interpreter lane. Mirrors the native core-C capsule's `rt_time_format`.
+///
+/// Callable from Simple as: `rt_time_format(ts_seconds, fmt)`
+pub fn rt_time_format(args: &[Value]) -> Result<Value, CompileError> {
+    let (ts_seconds, fmt) = match (args.first(), args.get(1)) {
+        (Some(Value::Int(ts)), Some(Value::Str(f))) => (*ts, f.as_str().to_string()),
+        _ => return Err(CompileError::semantic(
+            "rt_time_format requires (i64, text) arguments",
+        )),
+    };
+    Ok(Value::text(
+        simple_runtime::value::sffi::time::format_time_utc_strftime(ts_seconds, &fmt),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,5 +754,30 @@ mod tests {
             other => panic!("Expected Float value, got {other:?}"),
         }
         assert_eq!(rt_progress_reset(&[]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_rt_time_format_matches_capsule_semantics() {
+        let fmt = |ts: i64, f: &str| {
+            rt_time_format(&[Value::Int(ts), Value::text(f.to_string())]).unwrap()
+        };
+        // Epoch 0 is 1970-01-01T00:00:00Z.
+        assert_eq!(fmt(0, "%F"), Value::text("1970-01-01".to_string()));
+        assert_eq!(fmt(0, "%T"), Value::text("00:00:00".to_string()));
+        assert_eq!(
+            fmt(1_735_689_600, "%Y-%m-%d %H:%M:%S"),
+            Value::text("2025-01-01 00:00:00".to_string())
+        );
+        assert_eq!(fmt(0, "100%%"), Value::text("100%".to_string()));
+        // Unknown specifier and trailing '%' fail closed.
+        assert_eq!(fmt(0, "%Q"), Value::text(String::new()));
+        assert_eq!(fmt(0, "%Y-%"), Value::text(String::new()));
+        assert_eq!(
+            fmt(0, &"%Y".repeat(100)),
+            Value::text("1970".repeat(100))
+        );
+        // 104-byte fmt whose 520-byte output reaches the capsule's 512-byte
+        // buffer: the copy guard fires and both lanes fail closed.
+        assert_eq!(fmt(0, &"%F".repeat(52)), Value::text(String::new()));
     }
 }
