@@ -25,8 +25,10 @@
 #       Runs unconditionally and fatally before every --census/--recipes scan
 #       (not just when passed explicitly) — see the dispatch section at the
 #       bottom, which invokes it before entering either mode regardless of
-#       which flags were given, using an internal env guard to avoid
-#       recursing into itself when its own fixtures shell out to `sh "$0"`.
+#       which flags were given. Its fixtures call do_census/do_recipes
+#       directly as in-script functions inside `( ... )` subshells (never a
+#       nested `sh "$0"` re-exec), so there is no recursion to guard against
+#       and no environment variable that a caller could set to bypass it.
 #       Exercises: 0 objects -> ERROR; a real relocatable object (built with
 #       the C compiler already required elsewhere in this repo's toolchain)
 #       is censused correctly and finds at least one real relocation type; a
@@ -217,13 +219,15 @@ run_selftest() {
     td=$(mktemp -d) || die_error "mktemp failed"
     trap 'rm -rf "$td"' EXIT
 
-    # Recursive fixtures below shell out to this same script; guard them so
-    # they don't re-enter run_selftest (see the dispatch section).
-    self_nested="env LINK_CORPUS_BASELINE_SKIP_SELFTEST=1 sh"
+    # Fixtures below call do_census/do_recipes directly, each inside its own
+    # `( ... )` subshell: the subshell isolates their `exit` calls (an exit
+    # inside `( ... )` only ends the subshell, captured here as $rc) and their
+    # variable mutations, exactly like a nested process would, but with no
+    # re-exec and therefore nothing to bypass via the environment.
 
     # 1. 0 objects -> ERROR
     mkdir -p "$td/empty"
-    out=$($self_nested "$0" --census "$td/empty" 2>&1); rc=$?
+    out=$( do_census "$td/empty" 2>&1 ); rc=$?
     case "$out" in
         *"ERROR"*) : ;;
         *) echo "SELFTEST FAIL: empty dir census did not ERROR: $out"; exit 2 ;;
@@ -246,7 +250,7 @@ int main(void) { return helper(1); }
 EOF
     "$cc_bin" -c -O0 -fPIC "$td/probe.c" -o "$td/probe.o" 2>/dev/null \
         || die_error "selftest: $cc_bin failed to build the fixture object"
-    out=$($self_nested "$0" --census "$td/probe.o" 2>&1); rc=$?
+    out=$( do_census "$td/probe.o" 2>&1 ); rc=$?
     case "$out" in
         *"PASS"*) : ;;
         *) echo "SELFTEST FAIL: real object census did not PASS: $out"; exit 2 ;;
@@ -261,7 +265,7 @@ EOF
     #     outright, so this must ERROR (every input failed), not PASS with 0
     #     relocations found.
     printf 'this is not an object file\n' > "$td/junk.o"
-    out=$($self_nested "$0" --census "$td/junk.o" 2>&1); rc=$?
+    out=$( do_census "$td/junk.o" 2>&1 ); rc=$?
     case "$out" in
         *"PASS"*) echo "SELFTEST FAIL: garbage .o census incorrectly PASSed: $out"; exit 2 ;;
         *"ERROR"*) : ;;
@@ -280,7 +284,7 @@ corpus:
   expected_outcome: "links"
   status: "runnable-here"
 EOF
-    out=$($self_nested "$0" --recipes "$td/recipes_ok" 2>&1); rc=$?
+    out=$( do_recipes "$td/recipes_ok" 2>&1 ); rc=$?
     case "$out" in
         *"PASS"*) : ;;
         *) echo "SELFTEST FAIL: clean recipe dir did not PASS: $out"; exit 2 ;;
@@ -297,7 +301,7 @@ corpus:
   target_triple: "x86_64-unknown-linux-gnu"
   expected_outcome: "links"
 EOF
-    out=$($self_nested "$0" --recipes "$td/recipes_bad" 2>&1); rc=$?
+    out=$( do_recipes "$td/recipes_bad" 2>&1 ); rc=$?
     case "$out" in
         *"FAIL"*"status"*) : ;;
         *) echo "SELFTEST FAIL: missing-key recipe did not FAIL naming 'status': $out"; exit 2 ;;
@@ -325,18 +329,15 @@ for a in "$@"; do
     esac
 done
 
-# LINK_CORPUS_BASELINE_SKIP_SELFTEST=1 is set only by run_selftest's own
-# nested `sh "$0" --census/--recipes ...` fixture calls, so this guard never
-# suppresses a real, top-level invocation — only the recursion that would
-# otherwise happen the instant a census/recipes mode auto-runs the selftest
-# that itself calls census/recipes.
+# No environment variable gates this: run_selftest's own fixtures call
+# do_census/do_recipes as in-script functions inside subshells, never a
+# nested re-exec of this script, so there is nothing for a caller to bypass
+# and this unconditionally runs on every real census/recipes invocation.
 case "$mode" in
     census|recipes)
-        if [ "${LINK_CORPUS_BASELINE_SKIP_SELFTEST:-0}" != 1 ]; then
-            run_selftest
-            rc=$?
-            [ "$rc" -eq 0 ] || exit 2
-        fi
+        run_selftest
+        rc=$?
+        [ "$rc" -eq 0 ] || exit 2
         ;;
 esac
 
