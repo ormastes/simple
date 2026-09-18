@@ -15,9 +15,20 @@ use compiler.hir.hir_types.{Effect}
 # `SmfReaderMemory`.
 #
 # `objtaker_take_object` and every other caller keep exactly the results they
-# had before the swap -- including one pre-existing, deliberately preserved
-# defect (see `compat_symbol` below) -- pinned by
-# test/01_unit/compiler/linker/smf_reader_obj_taker_pin_spec.spl.
+# had before the swap, pinned by
+# test/01_unit/compiler/linker/smf_reader_obj_taker_pin_spec.spl -- with one
+# EXCEPTION found and fixed during Fable review (2026-09-19): the pre-swap
+# file had its own `parse_symbol_type` that always decoded `ty` as Unknown
+# (a `match`-on-raw-`u8` defect), and the first version of this shim
+# preserved that via a `compat_symbol` wrapper. That was the wrong call: the
+# SAME defect class also existed in `_SmfReaderMemory/symbol_parser.spl`'s
+# `parse_sym_type`/`derive_section_index` (masked because every symbol this
+# tree writes is sym_type=0/Function) and is load-bearing there --
+# `module_loader_compat.spl:1305` consumes `.ty` live. Both are now fixed at
+# the one real owner (widened to i64, same pattern as `parse_binding`) and
+# `compat_symbol` is gone: `ty` now decodes correctly through this shim too.
+# See doc/08_tracking/bug/smf_reader_memory_binding_decode_changes_exported_set_2026-09-19.md
+# for the related, still-live behaviour change from the `parse_binding` fix.
 #
 # The SmfReaderImpl implements the SmfReader trait from obj_taker.spl.
 
@@ -194,38 +205,6 @@ impl SmfReaderHeader:
         major >= 1 and minor >= 1
 
 # ============================================================================
-# Compatibility shim for one preserved defect
-# ============================================================================
-
-fn compat_symbol(sym: SmfSymbol) -> SmfSymbol:
-    """Force `ty` to Unknown, reproducing this reader's own long-standing
-    `parse_symbol_type` defect: before this swap, that function matched a raw
-    u8 with `case N:` arms that never equality-matched a literal, so
-    `case _: SymbolType.Unknown` won for EVERY symbol regardless of its real
-    type byte (measured: byte 0 / Function still decoded as Unknown). This is
-    the same defect class already fixed for `parse_symbol_binding` (see the
-    comment that used to sit above it) -- but `ty` was never fixed, so binding
-    decodes correctly while ty never has.
-
-    `SmfReaderMemory.lookup_symbol`/`exported_symbols` decode `ty` CORRECTLY
-    (verified directly against the same fixture), so calling them and passing
-    the result straight through would silently fix the bug mid-refactor. Not
-    fixed here: this lane only dedups the reader, not its callers' observed
-    behaviour. Pinned by smf_reader_obj_taker_pin_spec.spl.
-    """
-    SmfSymbol(
-        name: sym.name,
-        section_index: sym.section_index,
-        offset: sym.offset,
-        size: sym.size,
-        ty: SymbolType.Unknown,
-        binding: sym.binding,
-        is_generic_template: sym.is_generic_template,
-        template_param_count: sym.template_param_count,
-        template_offset: sym.template_offset
-    )
-
-# ============================================================================
 # SMF Reader Implementation
 # ============================================================================
 
@@ -248,14 +227,14 @@ impl SmfReader for SmfReaderImpl:
         val sffi = SmfReaderFfi.open(path)?
         val header = SmfReaderHeader.from_memory_header(sffi.mem.get_header())
 
+        # Propagate a corrupt/truncated symbol table as Err rather than
+        # silently opening with an empty `symbols` dict: link.spl's
+        # `find_unresolved()` reads that dict directly, so a swallowed error
+        # here used to look identical to "this module defines no symbols".
+        val all_symbols = sffi.mem.symbols_in_table_order()?
         var symbols: Dict<text, SmfSymbol> = {}
-        val ordered_result = sffi.mem.symbols_in_table_order()
-        match ordered_result:
-            Ok(all_symbols):
-                for sym in all_symbols:
-                    symbols[sym.name] = compat_symbol(sym)
-            Err(_):
-                pass_do_nothing
+        for sym in all_symbols:
+            symbols[sym.name] = sym
 
         Ok(SmfReaderImpl(
             sffi: sffi,
@@ -271,13 +250,10 @@ impl SmfReader for SmfReaderImpl:
 
     fn lookup_symbol(name: text) -> Result<SmfSymbol, text>:
         # Look up a symbol by name.
-        match self.sffi.mem.lookup_symbol(name):
-            Ok(sym): Ok(compat_symbol(sym))
-            Err(e): Err(e)
+        self.sffi.mem.lookup_symbol(name)
 
     fn read_code(symbol: SmfSymbol) -> Result<[u8], text>:
-        # Read code bytes for a symbol. `ty` plays no part in this decode, so
-        # the compat-patched symbol passes through unchanged.
+        # Read code bytes for a symbol.
         self.sffi.mem.read_code(symbol)
 
     fn read_template_section(symbol: SmfSymbol) -> Result<[u8], text>:
@@ -370,23 +346,18 @@ impl SmfReader for SmfReaderImpl:
 
     fn exported_symbols() -> [SmfSymbol]:
         # Get all exported (global/weak) symbols.
-        var exported: [SmfSymbol] = []
-        for sym in self.sffi.mem.exported_symbols():
-            exported.push(compat_symbol(sym))
-        exported
+        self.sffi.mem.exported_symbols()
 
-    fn template_symbols() -> [SmfSymbol]:
-        # Get all generic template symbols.
+    fn template_symbols() -> Result<[SmfSymbol], text>:
+        # Get all generic template symbols. A corrupt/truncated symbol table
+        # is reported as Err rather than silently answering "no templates" --
+        # the same silent-empty hazard `open()` guards against above.
+        val all_symbols = self.sffi.mem.symbols_in_table_order()?
         var templates: [SmfSymbol] = []
-        val ordered_result = self.sffi.mem.symbols_in_table_order()
-        match ordered_result:
-            Ok(all_symbols):
-                for sym in all_symbols:
-                    if sym.is_generic_template:
-                        templates.push(compat_symbol(sym))
-            Err(_):
-                pass_do_nothing
-        templates
+        for sym in all_symbols:
+            if sym.is_generic_template:
+                templates.push(sym)
+        Ok(templates)
 
     fn close():
         # Close the reader and release resources.
