@@ -114,7 +114,12 @@ pub fn rt_timestamp_get_second(micros: i64) -> i32 {
 /// Supported: %Y %m %d %H %M %S %F %T %%. Fails closed to "" on an unknown
 /// specifier, a trailing '%', fmt longer than 255 bytes, or output that
 /// would reach 512 bytes.
-pub fn rt_time_format_str(ts_seconds: i64, fmt: &str) -> String {
+///
+/// Deliberately NOT named `rt_*`: the rt-dual-implementation ratchet
+/// (check-rt-dual-implementation-ratchet.shs) freezes the single-lane rt_*
+/// population and forbids new ones. This helper backs the existing
+/// dual-lane `rt_time_format`; it is not a new runtime primitive.
+pub fn format_time_utc_strftime(ts_seconds: i64, fmt: &str) -> String {
     if ts_seconds > i64::MAX / 1_000_000 || ts_seconds < i64::MIN / 1_000_000 {
         return String::new();
     }

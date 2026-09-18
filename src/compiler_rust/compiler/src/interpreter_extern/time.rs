@@ -713,7 +713,7 @@ pub fn rt_time_format(args: &[Value]) -> Result<Value, CompileError> {
         )),
     };
     Ok(Value::text(
-        simple_runtime::value::sffi::time::rt_time_format_str(ts_seconds, &fmt),
+        simple_runtime::value::sffi::time::format_time_utc_strftime(ts_seconds, &fmt),
     ))
 }
 
@@ -769,9 +769,15 @@ mod tests {
             Value::text("2025-01-01 00:00:00".to_string())
         );
         assert_eq!(fmt(0, "100%%"), Value::text("100%".to_string()));
-        // Unknown specifier, trailing '%', and oversized fmt fail closed.
+        // Unknown specifier and trailing '%' fail closed.
         assert_eq!(fmt(0, "%Q"), Value::text(String::new()));
         assert_eq!(fmt(0, "%Y-%"), Value::text(String::new()));
-        assert_eq!(fmt(0, &"%Y".repeat(100)), Value::text(String::new()));
+        assert_eq!(
+            fmt(0, &"%Y".repeat(100)),
+            Value::text("1970".repeat(100))
+        );
+        // 104-byte fmt whose 520-byte output reaches the capsule's 512-byte
+        // buffer: the copy guard fires and both lanes fail closed.
+        assert_eq!(fmt(0, &"%F".repeat(52)), Value::text(String::new()));
     }
 }
