@@ -188,3 +188,7 @@ mis-dispatch case. `mod_a/b/c.spl` + `main.spl`/`main2.spl` and
 and plain (`use m`) imports do not flatten**, emit no warning, and dispatch
 correctly on both engines. Only wildcard `use m.*` (and the spec harness's
 equivalent) triggers the flattening that exposes the bug.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

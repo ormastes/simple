@@ -67,3 +67,7 @@ item — this fix only closes the test-runner critical path.
 Retracts `named_arg_self_field_value_parse_regression_2026-07-24.md` (the
 `self.field` parse-regression theory was wrong — a red herring).
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

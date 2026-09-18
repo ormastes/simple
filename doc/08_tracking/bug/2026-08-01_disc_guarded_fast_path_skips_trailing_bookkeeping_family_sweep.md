@@ -158,3 +158,19 @@ Both existing level-gated probes were used rather than adding new ones:
 `SIMPLE_MIR_RET_TRACE=1`, `SIMPLE_LLVM_RET_TRACE=1`. All temporary
 instrumentation was removed; the scratch tree was verified byte-identical to
 pristine origin afterwards.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: linux-lane** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked (deployed-binary/hardware)** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked (deployed-binary/hardware)** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

@@ -307,3 +307,7 @@ the index-read half (`d[k]`) is what this change fixes.
   struct name) and `[field-idx-fallback0]` in `function_lowering.spl` (every time
   `resolve_field_index` silently defaults a field to index 0 — the exact silent
   failure mode of this bug).
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
