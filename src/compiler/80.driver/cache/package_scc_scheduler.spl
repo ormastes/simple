@@ -82,16 +82,18 @@ fn package_scc_package_reaches_v1(
 ) -> bool:
     var pending: [text] = [from_package]
     var visited: [text] = []
+    var visited_set: Dict<text, bool> = {}
     while pending.len() > 0:
         val current = pending[pending.len() - 1]
         pending.pop()
         if current == to_package:
             return true
-        if visited.contains(current):
+        if visited_set.contains_key(current):
             continue
         visited = visited.push(current)
+        visited_set[current] = true
         for dependency in package_scc_package_dependencies_v1(headers, current):
-            if not visited.contains(dependency):
+            if not visited_set.contains_key(dependency):
                 pending = pending.push(dependency)
     false
 
@@ -172,6 +174,13 @@ fn package_scc_build_groups_v1(
             continue
         groups = groups.push(package_scc_group_for_package_v1(
             headers, header.package_identity, variant_digest))
+    var header_index: Dict<text, i64> = {}
+    var header_cursor = 0
+    while header_cursor < headers.len():
+        val hid = headers[header_cursor].module_identity
+        if not header_index.contains_key(hid):
+            header_index[hid] = header_cursor
+        header_cursor = header_cursor + 1
     var completed: [PackageSccGroupV1] = []
     for group in groups:
         var dependencies: [text] = []
@@ -180,7 +189,10 @@ fn package_scc_build_groups_v1(
                     not group.members.contains(header.package_identity):
                 continue
             for imported in header!.direct_imports:
-                val target = package_scc_find_header_v1(headers, imported)
+                val target = if header_index.contains_key(imported):
+                    Some(headers[header_index[imported]])
+                else:
+                    nil
                 if target == nil:
                     continue
                 val dependency_group = package_scc_find_group_v1(
@@ -195,14 +207,28 @@ fn package_scc_build_groups_v1(
 fn package_scc_dirty_closure_v1(
     headers: [PackageTldrHeaderV1], roots: [text]
 ) -> [text]:
+    var header_index: Dict<text, i64> = {}
+    var header_cursor = 0
+    while header_cursor < headers.len():
+        val hid = headers[header_cursor].module_identity
+        if not header_index.contains_key(hid):
+            header_index[hid] = header_cursor
+        header_cursor = header_cursor + 1
     var dirty = package_scc_sorted_unique_v1(roots)
+    var dirty_set: Dict<text, bool> = {}
+    for d in dirty:
+        dirty_set[d] = true
     var cursor = 0
     while cursor < dirty.len():
-        val header = package_scc_find_header_v1(headers, dirty[cursor])
+        val header = if header_index.contains_key(dirty[cursor]):
+            Some(headers[header_index[dirty[cursor]]])
+        else:
+            nil
         if header != nil:
             for dependent in header!.reverse_dependents:
-                if not dirty.contains(dependent):
+                if not dirty_set.contains_key(dependent):
                     dirty = dirty.push(dependent)
+                    dirty_set[dependent] = true
         cursor = cursor + 1
     package_scc_sorted_unique_v1(dirty)
 
@@ -214,13 +240,22 @@ fn package_scc_schedule_v1(
     if variant_digest == "":
         return PackageCompileScheduleV1(
             false, "variant-invalid", "", [], [], [])
+    var header_index: Dict<text, i64> = {}
+    var header_cursor = 0
+    while header_cursor < headers.len():
+        val hid = headers[header_cursor].module_identity
+        if not header_index.contains_key(hid):
+            header_index[hid] = header_cursor
+        header_cursor = header_cursor + 1
     var seen_modules: [text] = []
+    var seen_modules_set: Dict<text, bool> = {}
     for header in headers:
-        if seen_modules.contains(header.module_identity):
+        if seen_modules_set.contains_key(header.module_identity):
             return PackageCompileScheduleV1(
                 false, "duplicate-module:{header.module_identity}",
                 variant_digest, [], [], [])
         seen_modules = seen_modules.push(header.module_identity)
+        seen_modules_set[header.module_identity] = true
         if package_tldr_header_validate_v1(header) != "ok":
             return PackageCompileScheduleV1(
                 false, "metadata-invalid:{header.module_identity}",
@@ -230,20 +265,26 @@ fn package_scc_schedule_v1(
                 false, "variant-mismatch:{header.module_identity}",
                 variant_digest, [], [], [])
         for imported in header.direct_imports:
-            val target = package_scc_find_header_v1(headers, imported)
+            val target = if header_index.contains_key(imported):
+                Some(headers[header_index[imported]])
+            else:
+                nil
             if target == nil or not target!.reverse_dependents.contains(header.module_identity):
                 return PackageCompileScheduleV1(
                     false, "reverse-edge-invalid:{header.module_identity}:{imported}",
                     variant_digest, [], [], [])
         for dependent in header.reverse_dependents:
-            val target = package_scc_find_header_v1(headers, dependent)
+            val target = if header_index.contains_key(dependent):
+                Some(headers[header_index[dependent]])
+            else:
+                nil
             if target == nil or not target!.direct_imports.contains(header.module_identity):
                 return PackageCompileScheduleV1(
                     false, "direct-edge-invalid:{header.module_identity}:{dependent}",
                     variant_digest, [], [], [])
     val roots = package_scc_sorted_unique_v1(dirty_roots)
     for root in roots:
-        if package_scc_find_header_v1(headers, root) == nil:
+        if not header_index.contains_key(root):
             return PackageCompileScheduleV1(
                 false, "dirty-root-missing:{root}", variant_digest, [], [], [])
     val dirty_modules = package_scc_dirty_closure_v1(headers, roots)
@@ -255,15 +296,16 @@ fn package_scc_schedule_v1(
             dirty_packages = dirty_packages.push(header.package_identity)
     val groups = package_scc_build_groups_v1(dirty_headers, variant_digest)
     var committed: [text] = []
+    var committed_set: Dict<text, bool> = {}
     var waves: [PackageSccWaveV1] = []
     while committed.len() < groups.len():
         var ready: [PackageSccGroupV1] = []
         for group in groups:
-            if committed.contains(group.identity):
+            if committed_set.contains_key(group.identity):
                 continue
             var blocked = false
             for dependency in group.dependencies:
-                if not committed.contains(dependency):
+                if not committed_set.contains_key(dependency):
                     blocked = true
             if not blocked:
                 ready = ready.push(group)
@@ -275,6 +317,7 @@ fn package_scc_schedule_v1(
         waves = waves.push(PackageSccWaveV1(waves.len(), ready))
         for group in ready:
             committed = committed.push(group.identity)
+            committed_set[group.identity] = true
     PackageCompileScheduleV1(
         true, "ok", variant_digest,
         package_scc_sorted_unique_v1(dirty_packages), groups, waves)
@@ -332,6 +375,13 @@ fn package_scc_consume_index_schedule_v1(
         else:
             group_members[existing_group] = package_scc_sorted_unique_v1(
                 group_members[existing_group].push(package_identity))
+    var module_entry_index: Dict<text, i64> = {}
+    var entry_cursor = 0
+    while entry_cursor < generation.entries.len():
+        val mid = generation.entries[entry_cursor].module_identity
+        if not module_entry_index.contains_key(mid):
+            module_entry_index[mid] = entry_cursor
+        entry_cursor = entry_cursor + 1
     var group_dependencies: [[text]] = []
     var group_index = 0
     while group_index < group_ids.len():
@@ -342,10 +392,10 @@ fn package_scc_consume_index_schedule_v1(
             for imported in entry.direct_imports:
                 var target_package = ""
                 var target_scc = ""
-                for candidate in generation.entries:
-                    if candidate.module_identity == imported:
-                        target_package = candidate.package_identity
-                        target_scc = candidate.scc_identity
+                if module_entry_index.contains_key(imported):
+                    val candidate = generation.entries[module_entry_index[imported]]
+                    target_package = candidate.package_identity
+                    target_scc = candidate.scc_identity
                 if (requested.contains(target_package) and target_scc != "" and
                         target_scc != group_ids[group_index]):
                     dependencies = dependencies.push(target_scc)
@@ -353,16 +403,17 @@ fn package_scc_consume_index_schedule_v1(
             package_scc_sorted_unique_v1(dependencies))
         group_index = group_index + 1
     var committed: [text] = []
+    var committed_set: Dict<text, bool> = {}
     var waves: [[text]] = []
     var package_order: [text] = []
     while committed.len() < group_ids.len():
         var ready: [text] = []
         group_index = 0
         while group_index < group_ids.len():
-            if not committed.contains(group_ids[group_index]):
+            if not committed_set.contains_key(group_ids[group_index]):
                 var blocked = false
                 for dependency in group_dependencies[group_index]:
-                    if not committed.contains(dependency):
+                    if not committed_set.contains_key(dependency):
                         blocked = true
                 if not blocked:
                     ready = ready.push(group_ids[group_index])
@@ -381,6 +432,7 @@ fn package_scc_consume_index_schedule_v1(
                         wave_packages = wave_packages.push(package_identity)
                 group_index = group_index + 1
             committed = committed.push(group_id)
+            committed_set[group_id] = true
         wave_packages = package_scc_sorted_unique_v1(wave_packages)
         waves = waves.push(wave_packages)
         for package_identity in wave_packages:
