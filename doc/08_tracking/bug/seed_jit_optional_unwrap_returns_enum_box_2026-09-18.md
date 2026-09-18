@@ -1,7 +1,7 @@
 # The deployed seed's JIT lane returns the Option BOX from `!`, silently — and it wedges SCV cold-init in every fresh worktree
 
 - **id:** seed_jit_optional_unwrap_returns_enum_box_2026-09-18
-- **status:** OPEN (2026-09-18) — source is already correct; the DEPLOYED binary is not
+- **status:** RESOLVED (2026-09-18) — remedy applied: the binary was redeployed from current source; see "Redeployed" below
 - **severity:** P1 (silent wrong answers on the default lane, plus a permanent native-build wedge)
 - **found:** 2026-09-18, while reproducing `native_empty_dict_text_value_sigsegv_2026-07-20`
 - **binary at fault:** `bin/release/aarch64-unknown-linux-gnu/simple`, 50,093,192 B, built 2026-09-06, sha256 `3d120a6f9ab5704b2225…` (the symlink target of `bin/simple`)
@@ -165,3 +165,36 @@ interpret lane, so any binary that loses a payload fails closed.
   this belongs to.
 - `stage2_native_class_field_text_dict_owner_lost_2026-09-14` — the sibling
   static-type-erasure defect on the native lane.
+
+## Redeployed 2026-09-18 17:03 KST
+
+`bin/release/aarch64-unknown-linux-gnu/simple` — the target of the `bin/simple`
+symlink — was replaced with a seed built from `origin/main` at the time of the
+build:
+
+| | before | after |
+|---|---|---|
+| sha256 | `3d120a6f9ab5704b2225…` | `308de6af84db5c26e2c0…` |
+| size | 50,093,192 B | 51,645,288 B |
+| built | 2026-09-06 | 2026-09-18 |
+
+Method: staged beside the target and swapped with `mv -f`, so the rename is
+atomic and the 31 processes already running the old inode (MCP servers across
+several sessions) were untouched; they pick the new binary up on their next
+start. The previous binary is kept for rollback at
+`bin/release/aarch64-unknown-linux-gnu/simple.stale-2026-09-06` (gitignored);
+restoring it is a single `mv` back over the same path.
+
+Verified through the deployed `bin/simple` after the swap:
+
+- `scripts/check/check-deployed-binary-optional-unwrap.shs` — `PASS — 6 row(s)
+  checked, default and interpret lanes agree` (it FAILED on 5 rows before).
+- `test/01_unit/interpreter/optional_unwrap_payload_spec.spl` — 11/11.
+- `test/01_unit/interpreter/mutate_through_index_shapes_spec.spl` — 7/7; its
+  three dict-value examples failed on the old binary.
+- The SCV cold init that this record documents as wedging every fresh worktree
+  now publishes `generation=16797 count=16797` where it previously published
+  `generation=0 count=0`.
+
+The two source hardenings from #1084 stay in force, and are what makes a future
+bad listing fail closed instead of poisoning the cache again.
