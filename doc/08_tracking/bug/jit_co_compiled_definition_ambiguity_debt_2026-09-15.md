@@ -149,3 +149,11 @@ oracles — runner-environment dispatch skew, unconfirmed root cause.
    "". Two jo2/js definition families exist (app/llm_caret/json_helpers.spl,
    app/mcp/main_lazy_json.spl); the wider closure picks a $dup whose parse
    or store root disagrees.
+6. `storage_layout_native_projection_spec` (compiler/backend/native,
+   2026-09-19): the spec's 6-arg call to
+   `compile_module_with_backend_target_cpu_storage_bindings` (whose ONLY
+   definition takes exactly 6 params) errors "function expects argument for
+   parameter 'msg', but none was provided" -- some inner callee in the wide
+   spec closure dispatched to a $dup whose signature carries a diagnostics
+   `msg` parameter. Sixth instance; same closed-repro shape as (4)/(5)
+   should be constructible by importing the spec's exact block into a stub.
