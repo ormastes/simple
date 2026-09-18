@@ -1,3 +1,19 @@
+## [1.0.0-beta.11] - 2026-09-18
+Eighth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- The interpreted native-build worker died at semantic time with "unknown
+  extern function: rt_file_read_regular_no_follow_last_failure" when
+  typechecking src/lib/nogc_sync_mut/io/file_ops.spl (beta.10 windows-x86_64
+  leg — the first leg to survive the shard-leak OOM fix and reach that
+  module). The bounded no-follow reader twin was in the seed interpreter's
+  extern table; its diagnostic companion was not. Registered it with a
+  thread-local arm recorder mirroring the runtime READ_NF_* codes.
+
+### Release
+- Product version is `1.0.0-beta.11`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.11`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.10] - 2026-09-18
 Seventh corrected beta of the **1.0.0 line**.
 
