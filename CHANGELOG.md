@@ -1,3 +1,21 @@
+## [1.0.0-beta.10] - 2026-09-18
+Seventh corrected beta of the **1.0.0 line**.
+
+### Fixed
+- release windows-x86_64 leg OOM: the parse-shard cache warmer has never
+  completed on a GitHub runner (silent 6-12 min, then "FAILED TIMEOUT") and its
+  leaked multi-GiB child heap stayed alive — the beta.9 worker died with
+  "memory allocation of 65520 bytes failed" 31 s in while the shard and
+  orchestrator hogged the 16 GB runner (run 35285488617). Dead shard children
+  are now killed after a failed wait (parse + HIR), the shard prints a startup
+  heartbeat, and the CI native-build legs set SIMPLE_PARSE_SHARDING=0 so the
+  worker parses in-process (beta.7-proven on this runner).
+  See doc/08_tracking/bug/native_build_shard_child_leak_starves_worker_oom_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.10`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.10`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.9] - 2026-09-17
 Sixth corrected beta of the **1.0.0 line**.
 
