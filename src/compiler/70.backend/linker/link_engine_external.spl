@@ -1,0 +1,311 @@
+# External-engine adapter: LinkRequestV1/LinkExecutionPolicyV1 -> the
+# existing NativeLinkConfig/link_to_native path, and back into a LinkReceiptV1.
+#
+# Lane A3 (mold_mdsocpp_linker_plan_2026-09-18.md row A3). RC1 = zero
+# behaviour change (plan §2): this file only PROJECTS the new KPF-style job
+# records onto the argv builders that already exist in
+# `_LinkerWrapper/native_linking.spl` -- that file is not edited, and is
+# reached only through the `linker_wrapper` facade, exactly like every other
+# external caller of `link_to_native`.
+#
+# `SIMPLE_LINKER=internal` is the one behaviour this file adds: `mold.spl`'s
+# `find_linker_path` (A3-owned) now rejects that alias by name before ever
+# treating it as a resolvable path, and `classify_link_error` below turns
+# that rejection into `LinkOutcomeV1.UnsupportedFeature` instead of a generic
+# failure.
+
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1, KPF_ABI_VERSION_V1, KPF_SCHEMA_HEADER_V1_SIZE}
+use std.common.linker.link_request_v1.{LinkTargetV1, LinkRequestV1, link_request_v1_validate}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, link_policy_v1_validate}
+use std.common.linker.link_receipt_v1.{LinkAccountingClassV1, LinkOutcomeV1, LinkReceiptV1}
+
+use std.nogc_sync_mut.io_runtime.{host_os, host_arch}
+use std.log.{debug}
+
+# `link_to_native`/`NativeLinkConfig` come through the facade per the plan
+# row ("calls link_to_native through the linker_wrapper facade --
+# native_linking.spl is not edited").
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, native_linker_abi_for_target}
+
+# `find_linker_path`/`linker_type_for_path`/`LinkerType` are read directly
+# from `mold.spl` (not re-imported through the facade) purely to report
+# which engine a SUCCESSFUL link actually used -- this is new reporting
+# logic that lives in this file, not a modification of anything owned by
+# another lane.
+use compiler.backend.linker.mold.{find_linker_path, linker_type_for_path, LinkerType}
+
+# ============================================================================
+# A3-local target vocabulary
+# ============================================================================
+#
+# `LinkTargetV1.{arch,os,abi,object_format,endian}` are plain u32 with no
+# assigned values anywhere in `std.common.linker` yet (A2's contract froze
+# the WIDTHS, not a vocabulary -- see link_request_v1.spl's docstring: "Not
+# registered with the S1 schema generator ... until a handoff lands"). The
+# constants below are this adapter's own placeholder encoding, needed to
+# turn a request's target into a `target_triple`/`linker_abi` pair. Treat
+# them as private to this file's projection until a shared enum lands
+# (post-RC1); nothing outside this file is expected to construct a
+# `LinkTargetV1` using these values except this file's own tests.
+
+pub const LINK_ARCH_X86_64: u32 = 1
+pub const LINK_ARCH_AARCH64: u32 = 2
+
+pub const LINK_OS_LINUX: u32 = 1
+pub const LINK_OS_MACOS: u32 = 2
+pub const LINK_OS_FREEBSD: u32 = 3
+pub const LINK_OS_WINDOWS: u32 = 4
+
+pub const LINK_ABI_GNU: u32 = 1
+pub const LINK_ABI_MSVC: u32 = 2
+
+pub const LINK_OBJECT_FORMAT_ELF: u32 = 1
+pub const LINK_OBJECT_FORMAT_MACHO: u32 = 2
+pub const LINK_OBJECT_FORMAT_PE: u32 = 3
+
+pub const LINK_ENDIAN_LITTLE: u32 = 1
+
+pub fn link_target_triple(target: LinkTargetV1) -> text:
+    """Rust-triple spelling for a LinkTargetV1, or "" for an unrecognised arch/os.
+
+    Mirrors exactly the two spellings `native_effective_link_os` already
+    switches on for Windows (`-pc-windows-gnu` / `-pc-windows-msvc`); the
+    other three OSes are only ever compared by `native_effective_link_os`
+    against `linker_abi`, so their triple spelling does not change dispatch
+    -- it is carried through to `NativeLinkConfig.target_triple` for
+    downstream cross-compile plumbing that already reads that field."""
+    var arch_name = ""
+    if target.arch == LINK_ARCH_X86_64:
+        arch_name = "x86_64"
+    elif target.arch == LINK_ARCH_AARCH64:
+        arch_name = "aarch64"
+    if arch_name == "":
+        return ""
+    if target.os == LINK_OS_LINUX:
+        return "{arch_name}-unknown-linux-gnu"
+    if target.os == LINK_OS_MACOS:
+        return "{arch_name}-apple-darwin"
+    if target.os == LINK_OS_FREEBSD:
+        return "{arch_name}-unknown-freebsd"
+    if target.os == LINK_OS_WINDOWS:
+        if target.abi == LINK_ABI_MSVC:
+            return "{arch_name}-pc-windows-msvc"
+        return "{arch_name}-pc-windows-gnu"
+    ""
+
+pub fn native_host_link_target() -> LinkTargetV1:
+    """Best-effort LinkTargetV1 for the process's actual host, from
+    host_os()/host_arch() -- used only to fill LinkReceiptV1.host for
+    reporting; never fed back into a link decision."""
+    var arch_code: u32 = 0
+    val arch = host_arch()
+    if arch == "x86_64":
+        arch_code = LINK_ARCH_X86_64
+    elif arch == "aarch64":
+        arch_code = LINK_ARCH_AARCH64
+
+    var os_code: u32 = 0
+    var object_format: u32 = LINK_OBJECT_FORMAT_ELF
+    val os = host_os()
+    if os == "linux":
+        os_code = LINK_OS_LINUX
+    elif os == "macos" or os == "darwin":
+        os_code = LINK_OS_MACOS
+        object_format = LINK_OBJECT_FORMAT_MACHO
+    elif os == "freebsd":
+        os_code = LINK_OS_FREEBSD
+    elif os == "windows":
+        os_code = LINK_OS_WINDOWS
+        object_format = LINK_OBJECT_FORMAT_PE
+
+    LinkTargetV1(
+        arch: arch_code, os: os_code, abi: LINK_ABI_GNU,
+        object_format: object_format, endian: LINK_ENDIAN_LITTLE,
+        address_width: 64
+    )
+
+# ============================================================================
+# LinkRequestV1 (+LinkExecutionPolicyV1) -> NativeLinkConfig
+# ============================================================================
+
+pub fn link_request_to_native_config(req: LinkRequestV1, policy: LinkExecutionPolicyV1) -> NativeLinkConfig:
+    """Project a LinkRequestV1 onto the NativeLinkConfig that
+    `link_to_native` already consumes (design §6.2; plan A3 row: "adapter
+    LinkRequestV1 -> existing link_to_native with byte-identical argv").
+
+    Mapped: `target.{arch,os,abi}` -> `target_triple` (this file's own
+    `link_target_triple`) -> `linker_abi`, via the SAME
+    `native_linker_abi_for_target` the existing LLVM native-link orchestrator
+    already calls (`backend/llvm_native_link_orchestrator.spl:643`) -- reused
+    rather than reimplemented, so a Linux/FreeBSD target reports "elf" and a
+    macOS target reports "darwin", matching what that real caller already
+    produces, not a `SIMPLE_LINKER`-only "empty unless Windows" guess.
+
+    Left at NativeLinkConfig.default()'s value -- RC1 is zero behaviour
+    change (plan §2), and none of these has a source field yet:
+      - `pie`, `debug`, `strip_output`, `verbose`, `allow_duplicate_definitions`,
+        `allow_cc_fallback`: LinkRequestV1's `output_contract`/
+        `required_features` are opaque u32/u64 with no bit vocabulary
+        assigned in A2's frozen contract.
+      - `libraries`, `library_paths`, `runtime_path`, `retained_symbols`,
+        `extra_flags`, `runtime_bundle`: LinkRequestV1 names its inputs by
+        digest (`inputs_manifest_digest`), not by path -- the literal
+        object/library list stays a caller-supplied argument to
+        `link_to_native`, exactly as it is today.
+
+    `policy` is accepted (not just `req`) because design §8's fast/bounded
+    split is expected to affect this projection post-RC1; it is
+    intentionally unused here, not a placeholder oversight."""
+    NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "",
+        target_triple: link_target_triple(req.target),
+        linker_abi: native_linker_abi_for_target(link_target_triple(req.target)),
+        pie: true,
+        debug: false,
+        strip_output: false,
+        verbose: false,
+        allow_duplicate_definitions: true,
+        allow_cc_fallback: true,
+        retained_symbols: [],
+        extra_flags: [],
+        runtime_bundle: ""
+    )
+
+# ============================================================================
+# Receipt construction
+# ============================================================================
+
+fn requirement_from_header(header: KpfSchemaHeaderV1) -> KpfSchemaRequirementV1:
+    """Self-consistency requirement for validating an incoming req/policy
+    header: no S1-registered requirement exists yet for either schema (see
+    link_request_v1.spl's docstring), so this requires exactly what the
+    header itself claims. That still exercises every REAL shape check
+    (abi_version, struct_size, reserved0) plus each record's own
+    field-level checks (address_width, reproducibility, Bounded's memory
+    limit) -- it just cannot fail on schema-identity mismatch, which is not
+    yet a meaningful check for either record."""
+    KpfSchemaRequirementV1(
+        schema_id: header.schema_id,
+        schema_major: header.schema_major,
+        minimum_minor: header.schema_minor,
+        minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_digest: header.schema_digest
+    )
+
+const LINK_RECEIPT_SCHEMA_MAJOR: u32 = 1
+const LINK_RECEIPT_SCHEMA_MINOR: u32 = 0
+
+fn receipt_header() -> KpfSchemaHeaderV1:
+    """Placeholder schema identity for produced receipts, mirroring
+    link_receipt_v1_spec.spl's own (hi:1, lo:3) convention -- LinkReceiptV1
+    is, per its own docstring, "not registered with the S1 schema
+    generator ... until a handoff lands", so there is no canonical id yet to
+    adopt instead."""
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: KpfId128(hi: 1, lo: 3),
+        schema_major: LINK_RECEIPT_SCHEMA_MAJOR,
+        schema_minor: LINK_RECEIPT_SCHEMA_MINOR,
+        schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0),
+        reserved0: 0
+    )
+
+fn base_receipt(req: LinkRequestV1, policy: LinkExecutionPolicyV1, engine_id: text,
+        outcome: LinkOutcomeV1, accounting: LinkAccountingClassV1) -> LinkReceiptV1:
+    LinkReceiptV1(
+        header: receipt_header(),
+        engine_id: engine_id,
+        host: native_host_link_target(),
+        target: req.target,
+        policy_digest: policy.header.schema_digest,
+        accounting_class: accounting,
+        # RC1 ships no accounting mechanism at all (design §6.2: QualifiedJobScope
+        # is cgroup-judged, MeasuredOnly is best-effort -- this adapter measures
+        # nothing on either path), so every receipt is NotCertified with a
+        # 0 peak rather than a fabricated "best effort" claim.
+        measured_peak_bytes: 0,
+        outcome: outcome
+    )
+
+pub fn classify_link_error(message: text) -> LinkOutcomeV1:
+    """Map a `link_to_native` Err payload to a LinkOutcomeV1.
+
+    The `internal engine not available until G2` text is `mold.spl`'s
+    `find_linker_path` message verbatim (propagated through
+    `link_error_detail("requested-linker-unresolved", ...)` in
+    `native_linking.link_native_unix`) -- keep the two in sync."""
+    if message.contains("internal engine not available until G2"):
+        return LinkOutcomeV1.UnsupportedFeature
+    if message.contains("No object files") or message.contains("Cannot mix SMF"):
+        return LinkOutcomeV1.InputError
+    LinkOutcomeV1.ResourceFailure
+
+fn engine_id_for_outcome(outcome: LinkOutcomeV1) -> text:
+    match outcome:
+        case UnsupportedFeature: "internal"
+        case _("every other failure outcome never resolved an engine at all"): "none"
+
+fn resolve_engine_id_for_success() -> text:
+    """Name the engine that a SUCCESSFUL link actually used.
+
+    `find_linker_path` reports the direct linker (mold/ld.lld/ld) when one
+    resolves; when it does NOT resolve but the overall link still succeeded,
+    `native_linking.link_native_unix`/`link_native_windows` can only have
+    reached success through the compiler-driver (cc) or MSVC (link.exe)
+    fallback -- this is the same fallback condition those functions branch
+    on themselves, re-derived here without editing them."""
+    val linker_result = find_linker_path()
+    if linker_result.is_ok():
+        val kind = linker_type_for_path(linker_result.unwrap())
+        return match kind:
+            case Mold: "mold"
+            case Lld: "ld.lld"
+            case Ld: "ld"
+    if host_os() == "windows":
+        return "link.exe"
+    "cc"
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
+        object_files: [text], output: text) -> LinkReceiptV1:
+    """Validate `req`/`policy`, project onto NativeLinkConfig, and run the
+    existing `link_to_native` -- filling a LinkReceiptV1 from the result.
+
+    `object_files`/`output` are not part of LinkRequestV1 (it names its
+    inputs by digest, design §6.2) and are supplied by the caller exactly as
+    every other `link_to_native` caller supplies them today."""
+    val req_status = link_request_v1_validate(req, requirement_from_header(req.header))
+    if req_status != "":
+        debug("link-engine-external", "request rejected: {req_status}")
+        return base_receipt(req, policy, "none", LinkOutcomeV1.InputError, LinkAccountingClassV1.NotCertified)
+
+    val policy_status = link_policy_v1_validate(policy, requirement_from_header(policy.header))
+    if policy_status != "":
+        debug("link-engine-external", "policy rejected: {policy_status}")
+        return base_receipt(req, policy, "none", LinkOutcomeV1.InputError, LinkAccountingClassV1.NotCertified)
+
+    val config = link_request_to_native_config(req, policy)
+    val link_result = link_to_native(object_files, output, config)
+    if link_result.is_ok():
+        return base_receipt(req, policy, resolve_engine_id_for_success(), LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
+
+    val message = link_result.unwrap_err()
+    val outcome = classify_link_error(message)
+    debug("link-engine-external", "link failed ({outcome.name()}): {message}")
+    base_receipt(req, policy, engine_id_for_outcome(outcome), outcome, LinkAccountingClassV1.NotCertified)
+
+export LINK_ARCH_X86_64, LINK_ARCH_AARCH64
+export LINK_OS_LINUX, LINK_OS_MACOS, LINK_OS_FREEBSD, LINK_OS_WINDOWS
+export LINK_ABI_GNU, LINK_ABI_MSVC
+export LINK_OBJECT_FORMAT_ELF, LINK_OBJECT_FORMAT_MACHO, LINK_OBJECT_FORMAT_PE
+export LINK_ENDIAN_LITTLE
+export link_target_triple, native_host_link_target
+export link_request_to_native_config, link_request_to_native
+export classify_link_error
