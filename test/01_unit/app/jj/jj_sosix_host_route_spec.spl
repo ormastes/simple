@@ -1,0 +1,58 @@
+"""JJ wrappers reach the host through the SOSIX host facade only.
+
+`app.jj.status` and `app.jj.diff` run the `jj` program. They must do so through
+`std.nogc_async_mut.sosix.host_facade.sosix_run` rather than declaring their own
+`extern fn rt_process_run`, so the process boundary has one owner
+(doc/03_plan/runtime/sosix_host_interface_only_plan_2026-09-18.md, lane H1).
+The behaviour examples compare each wrapper with the facade running the same
+command, so they hold whether or not `jj` is installed on the host.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{read_file_text}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+use app.jj.diff.{jj_diff, jj_diff_stat}
+use app.jj.status.{jj_status}
+
+val JJ_BASE_ARGS = ["--no-pager", "--color", "never"]
+
+fn jj_args(extra: [text]) -> [text]:
+    var args: [text] = []
+    for a in JJ_BASE_ARGS:
+        args.push(a)
+    for e in extra:
+        args.push(e)
+    args
+
+describe "jj wrappers route through the SOSIX host facade":
+    it "diff reports the same exit code and output as the facade running jj diff":
+        step("Run jj diff through the wrapper and through sosix_run")
+        val wrapped = jj_diff("", [])
+        val direct = sosix_run("jj", jj_args(["diff"]))
+        expect(wrapped.exit_code).to_equal(direct.exit_code)
+        val expected_raw = if direct.stdout != "": direct.stdout else: direct.stderr
+        expect(wrapped.raw_output).to_equal(expected_raw)
+
+    it "diff --stat reports the same exit code as the facade":
+        step("Run jj diff --stat through the wrapper and through sosix_run")
+        val wrapped = jj_diff_stat("")
+        val direct = sosix_run("jj", jj_args(["diff", "--stat"]))
+        expect(wrapped.exit_code).to_equal(direct.exit_code)
+
+    it "status surfaces the facade's stderr when jj status fails":
+        step("Run jj status through the facade to learn the host outcome")
+        val direct = sosix_run("jj", jj_args(["status"]))
+        val result = jj_status()
+        if direct.exit_code != 0:
+            expect(result.raw_output).to_equal(direct.stderr)
+            expect(result.changes.len()).to_equal(0)
+        else:
+            expect(result.raw_output).to_equal(direct.stdout)
+
+    it "declares no private process extern":
+        step("Neither wrapper declares rt_process_run; both call sosix_run")
+        for path in ["src/app/jj/status.spl", "src/app/jj/diff.spl"]:
+            val body = read_file_text(path)
+            expect(body).to_contain("sosix_run(")
+            expect(body).to_not_contain("extern fn rt_process_run")
