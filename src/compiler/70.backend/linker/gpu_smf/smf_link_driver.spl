@@ -28,15 +28,18 @@
 #   - symbol address = its section's laid-out address + `value`.
 #   - sections are numbered globally in module order, then section order;
 #     only sections reachable from the entry symbol's section are laid out.
-#   - two Global (strong) definitions of one name are an error. Weak/local
-#     precedence beyond that is NOT applied: L4's lowest-order winner is
-#     used as-is.
+#   - binding precedence (applied by the driver on top of GraphResolveCore's
+#     L4 reduction, whose receipt is unchanged): a Local definition resolves
+#     only references from its own module; across modules only Global/Weak
+#     definitions are visible, Global beats Weak, Weak+Weak -> lowest order
+#     wins, Global+Global -> DuplicateStrongDefinition. A reference with no
+#     visible definition is UnresolvedSymbol.
 #
 # Composition only, no inheritance (repo rule).
 # ============================================================================
 
 use std.common.compute.placement_contracts.backend.{StageReceipt}
-use std.common.structural.resolve.resolve_types.{ResolutionRecord, resolve_key_equal}
+use std.common.structural.resolve.resolve_core.{group_sorted}
 use std.common.structural.resolve.resolve_frontier.{ResolveEdge}
 use compiler.backend.linker.smf_writer.{
     SmfRelocation,
@@ -120,10 +123,12 @@ fn _module_pos(modules: [SmfLinkModule], module_index: u32) -> i64:
 fn _owner_key(pos: i64, local: i64) -> text:
     pos.to_text() + ":" + local.to_text()
 
-fn _is_strong(sym: SmfWriterSymbol) -> bool:
+fn _binding_rank(sym: SmfWriterSymbol) -> i64:
+    """0 = Local, 1 = Weak, 2 = Global (strong)."""
     match sym.binding:
-        case Global: true
-        case _: false
+        case Local: 0
+        case Weak: 1
+        case Global: 2
 
 fn _to_u8s(data: [i64]) -> [u8]:
     var out: [u8] = []
@@ -194,42 +199,59 @@ fn smf_link_modules(modules: [SmfLinkModule], entry: text, base_addr: i64) -> Sm
     val resolved = smf_resolve_with_receipt(sorted.defs, sorted.refs)
     receipts.push(resolved.receipt)
 
-    # L5 — archive closure (no archive inputs).
-    var unresolved: [ResolutionRecord] = []
-    for x in resolved.results:
-        if x.status == 0:
-            unresolved.push(x)
-    receipts.push(smf_archive_closure_receipt(unresolved.len()))
-
-    # L4 policy: two strong definitions of one key are an error.
+    # L4 binding policy (see header), per key group of the sorted arenas:
+    # a Local definition answers only references from its own module;
+    # otherwise the Global definition wins, else the lowest-order Weak one.
+    # Two Global definitions of one key are an error even if unreferenced.
     val defs = sorted.defs
-    var di = 0
-    while di < defs.len():
-        var dj = di
-        var strong = 0
-        while dj < defs.len() and resolve_key_equal(defs[dj].key, defs[di].key):
-            val owner = defs[dj].owner
-            val sym = modules[_module_pos(modules, owner.object_slot)].symbols[owner.local_index as i64]
-            if _is_strong(sym):
-                strong = strong + 1
-            dj = dj + 1
-        if strong > 1:
-            val first = defs[di].owner
-            val name = modules[_module_pos(modules, first.object_slot)].symbols[first.local_index as i64].name
-            return _fail(SmfLinkError.DuplicateStrongDefinition(name), receipts)
-        di = dj
-    if unresolved.len() > 0:
-        val r = unresolved[0].reference
-        val name = modules[_module_pos(modules, r.object_slot)].symbols[r.local_index as i64].name
-        return _fail(SmfLinkError.UnresolvedSymbol(name), receipts)
-
-    # Reference owner -> definition owner (module position, symbol index).
+    val refs = sorted.refs
     var def_pos: {text: i64} = {}
     var def_local: {text: i64} = {}
-    for x in resolved.results:
-        val k = _owner_key(_module_pos(modules, x.reference.object_slot), x.reference.local_index as i64)
-        def_pos[k] = _module_pos(modules, x.definition.object_slot)
-        def_local[k] = x.definition.local_index as i64
+    var unresolved_names: [text] = []
+    for view in group_sorted(defs, refs):
+        val d0 = view.definitions_offset as i64
+        val d_end = d0 + (view.definitions_count as i64)
+        var global_pick: i64 = -1
+        var weak_pick: i64 = -1
+        var d = d0
+        while d < d_end:
+            val o = defs[d].owner
+            val binding = _binding_rank(modules[_module_pos(modules, o.object_slot)].symbols[o.local_index as i64])
+            if binding == 2:
+                if global_pick >= 0:
+                    val name = modules[_module_pos(modules, o.object_slot)].symbols[o.local_index as i64].name
+                    return _fail(SmfLinkError.DuplicateStrongDefinition(name), receipts)
+                global_pick = d
+            elif binding == 1 and weak_pick < 0:
+                weak_pick = d
+            d = d + 1
+        var ri = view.references_offset as i64
+        val r_end = ri + (view.references_count as i64)
+        while ri < r_end:
+            val r = refs[ri].owner
+            val rpos = _module_pos(modules, r.object_slot)
+            var pick: i64 = -1
+            d = d0
+            while d < d_end and pick < 0:
+                val o = defs[d].owner
+                val dpos = _module_pos(modules, o.object_slot)
+                if dpos == rpos and _binding_rank(modules[dpos].symbols[o.local_index as i64]) == 0:
+                    pick = d
+                d = d + 1
+            if pick < 0:
+                pick = if global_pick >= 0: global_pick else: weak_pick
+            val k = _owner_key(rpos, r.local_index as i64)
+            if pick < 0:
+                unresolved_names.push(modules[rpos].symbols[r.local_index as i64].name)
+            else:
+                def_pos[k] = _module_pos(modules, defs[pick].owner.object_slot)
+                def_local[k] = defs[pick].owner.local_index as i64
+            ri = ri + 1
+
+    # L5 — archive closure (no archive inputs).
+    receipts.push(smf_archive_closure_receipt(unresolved_names.len()))
+    if unresolved_names.len() > 0:
+        return _fail(SmfLinkError.UnresolvedSymbol(unresolved_names[0]), receipts)
 
     # Global section numbering.
     var section_base: [i64] = []

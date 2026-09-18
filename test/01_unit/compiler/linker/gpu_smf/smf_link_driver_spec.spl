@@ -11,6 +11,7 @@
 #      typed UnresolvedSymbol error naming the symbol.
 #   3. DUPLICATE — two strong (Global) definitions of one name are a typed
 #      DuplicateStrongDefinition error naming the symbol.
+#   5. BINDING — Local definitions are module-private; Global beats Weak.
 #   4. PROFILE — SmfLinkProfile implements the frozen ResolveProfile v1
 #      trait: group_key is the record key, resolve_group is GraphResolveCore's
 #      reduce_group over the profile's own sorted arena.
@@ -176,3 +177,104 @@ describe "SmfLinkProfile implements ResolveProfile":
         expect(got.status).to_equal(expected.status)
         expect(got.reason).to_equal(expected.reason)
         expect(got.diagnostic_count).to_equal(expected.diagnostic_count)
+
+# ----------------------------------------------------------------------------
+# 5. Binding precedence (Local is module-private; Global beats Weak)
+# ----------------------------------------------------------------------------
+
+fn _bsym(name: text, binding: SmfWriterSymbolBinding, section_index: i64, value: i64, size: i64) -> SmfWriterSymbol:
+    SmfWriterSymbol(
+        name: name,
+        binding: binding,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: section_index,
+        value: value,
+        size: size,
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false)
+
+fn _rel32(offset: i64, symbol_index: i64) -> SmfRelocation:
+    SmfRelocation(offset: offset, symbol_index: symbol_index, reloc_type: RelocationType.Rel32, addend: -4)
+
+fn _local_a() -> SmfLinkModule:
+    """Module A (0x1000, 16 bytes): Global `main`, LOCAL `f` at +15, refs to
+    `f` (offset 1) and `g` (offset 6)."""
+    var w = SmfWriter.create()
+    val _s = w.add_code_section("text", [0xE8, 0, 0, 0, 0, 0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3])
+    val _m = w.add_symbol(_bsym("main", SmfWriterSymbolBinding.Global, 0, 0, 16))
+    val _f = w.add_symbol(_bsym("f", SmfWriterSymbolBinding.Local, 0, 15, 1))
+    val _rf = w.add_symbol(_bsym("f", SmfWriterSymbolBinding.Global, -1, 0, 0))
+    val _rg = w.add_symbol(_bsym("g", SmfWriterSymbolBinding.Global, -1, 0, 0))
+    w.add_relocation(_rel32(1, 2))
+    w.add_relocation(_rel32(6, 3))
+    smf_link_module_from_writer(0, w)
+
+fn _global_b() -> SmfLinkModule:
+    """Module B (0x1010, 8 bytes): Global `g` at +0, GLOBAL `f` at +6, ref
+    to `f` (offset 1)."""
+    var w = SmfWriter.create()
+    val _s = w.add_code_section("text", [0xE8, 0, 0, 0, 0, 0xC3, 0x90, 0x90])
+    val _g = w.add_symbol(_bsym("g", SmfWriterSymbolBinding.Global, 0, 0, 8))
+    val _f = w.add_symbol(_bsym("f", SmfWriterSymbolBinding.Global, 0, 6, 1))
+    val _rf = w.add_symbol(_bsym("f", SmfWriterSymbolBinding.Global, -1, 0, 0))
+    w.add_relocation(_rel32(1, 2))
+    smf_link_module_from_writer(1, w)
+
+fn _h_def(module_index: u32, binding: SmfWriterSymbolBinding) -> SmfLinkModule:
+    var w = SmfWriter.create()
+    val _s = w.add_code_section("text", [0x31, 0xC0, 0xC3, 0x90])
+    val _h = w.add_symbol(_bsym("h", binding, 0, 0, 4))
+    smf_link_module_from_writer(module_index, w)
+
+fn _h_caller() -> SmfLinkModule:
+    var w = SmfWriter.create()
+    val _s = w.add_code_section("text", [0xE8, 0, 0, 0, 0, 0x90, 0x90, 0xC3])
+    val _m = w.add_symbol(_bsym("main", SmfWriterSymbolBinding.Global, 0, 0, 8))
+    val _rh = w.add_symbol(_bsym("h", SmfWriterSymbolBinding.Global, -1, 0, 0))
+    w.add_relocation(_rel32(1, 1))
+    smf_link_module_from_writer(0, w)
+
+fn _byte(run_sections: [u8], i: i64) -> i64:
+    run_sections[i] as i64
+
+describe "smf_link_modules binding precedence":
+    it "binds A's reference to A's Local f and B's reference to B's Global f":
+        # A ref f: S = 0x1000+15, P = 0x1001 -> 0x100F - 4 - 0x1001 = 10
+        #   (B's Global f would give 0x1016 - 4 - 0x1001 = 17).
+        # A ref g: 0x1010 - 4 - 0x1006 = 6.
+        # B ref f: S = 0x1010+6, P = 0x1011 -> 0x1016 - 4 - 0x1011 = 1
+        #   (A's Local f would give 0x100F - 4 - 0x1011 = -6 = 0xFA).
+        val run = smf_link_modules([_local_a(), _global_b()], "main", 0x1000)
+        match run.result:
+            case Ok(image):
+                expect(image.sections.len()).to_equal(2)
+                expect(image.sections[1].addr).to_equal(0x1010)
+                expect(_byte(image.sections[0].bytes, 1)).to_equal(10)
+                expect(_byte(image.sections[0].bytes, 6)).to_equal(6)
+                expect(_byte(image.sections[1].bytes, 1)).to_equal(1)
+                expect(_byte(image.sections[1].bytes, 2)).to_equal(0)
+            case Err(e):
+                expect(_error_text(e)).to_equal("ok")
+
+    it "prefers a Global definition over an earlier Weak one":
+        # Only the winner's section is reachable: Global h (module 2) is kept
+        # at 0x1010 and Weak h (module 1) is dead-stripped. 0x1010 - 4 - 0x1001 = 11.
+        # If Weak won, module 1 would be the one kept.
+        val run = smf_link_modules([_h_caller(), _h_def(1, SmfWriterSymbolBinding.Weak), _h_def(2, SmfWriterSymbolBinding.Global)], "main", 0x1000)
+        match run.result:
+            case Ok(image):
+                expect(image.sections.len()).to_equal(2)
+                expect(image.sections[1].module_index as i64).to_equal(2)
+                expect(image.sections[1].addr).to_equal(0x1010)
+                expect(_byte(image.sections[0].bytes, 1)).to_equal(11)
+            case Err(e):
+                expect(_error_text(e)).to_equal("ok")
+
+    it "does not let another module's Local definition satisfy a reference":
+        val run = smf_link_modules([_h_caller(), _h_def(1, SmfWriterSymbolBinding.Local)], "main", 0x1000)
+        match run.result:
+            case Ok(_image):
+                expect("linked").to_equal("unresolved:h")
+            case Err(e):
+                expect(_error_text(e)).to_equal("unresolved:h")
