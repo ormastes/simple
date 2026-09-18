@@ -1682,7 +1682,7 @@ impl MirLowering:
             # (mir_lowering_stmts.spl) binds the loop variable's
             # `struct_value_syms` entry from `array_element_struct_syms` keyed
             # on the COLLECTION local -- and only `lower_array_lit`
-            # (literals.spl:97) and the param-array path ever populated that
+            # (in this file) and the param-array path ever populated that
             # map. A `.values()` result never did, so `for f in d.values()`
             # left the loop var with no struct name, `resolve_field_index`
             # (function_lowering.spl:1305) hit its "type unknown" fallback and
@@ -1690,7 +1690,7 @@ impl MirLowering:
             # read `p.a`, and in Stage 2 `func.name` read `func.symbol` as a
             # raw integer while `func.signature` came back nil, so
             # build_signature dereferenced nil -> SIGSEGV on any input.
-            # Mirror literals.spl's registration here.
+            # Mirror lower_array_lit's registration in this file.
             var dict_keys_elem_struct_name = ""
             val dict_keys_recv_type = self.local_mir_type_of(receiver_local)
             # Probe (SIMPLE_TRACE_DICT_ELEM=1) for bug
@@ -4060,9 +4060,14 @@ impl MirLowering:
         var key_type = MirType.i64()
         var value_type = MirType.i64()
         var first_entry = true
-        # Bug #189 sibling (dict LITERAL) -- see the identical copy in
-        # _MirLoweringExpr/literals.spl; these two definitions are duplicates
-        # and must stay in sync.
+        # Bug #189 sibling (dict LITERAL). A struct-valued dict learns its
+        # element struct NAME from exactly one of two places, and a literal hit
+        # neither: `lower_array_lit` records it for arrays, and
+        # `note_container_elem_type` records it at every `d[k] = v` store. A
+        # dict born fully-formed as `{"k": Point(...)}` is never stored into, so
+        # `array_element_struct_syms` stayed empty and the Index read had no
+        # name-keyed provenance to fall back on -- `{"k": P(...)}["k"].y` still
+        # read field 0 (`x`) after the store-side half of #189 was fixed.
         var value_struct_name = ""
         var b_new = self.builder
         val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
@@ -4097,7 +4102,10 @@ impl MirLowering:
                 if first_entry:
                     value_type = self.local_mir_type_of(value_local) ?? value_type
                     first_entry = false
-                # Capture BEFORE box_runtime_value -- see literals.spl.
+                # Capture BEFORE box_runtime_value, mirroring how value_type is
+                # read off the raw local just above: struct construction
+                # registers struct_value_syms on the value local, and boxing
+                # would hand back a different local id.
                 if value_struct_name == "":
                     value_struct_name = self.struct_value_syms.get(value_local.id) ?? ""
                 val boxed_value = self.box_runtime_value(value_local)
@@ -4650,12 +4658,24 @@ impl MirLowering:
     me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
         """Lower tuple literal.
 
-        See the sibling definition in _MirLoweringExpr/literals.spl for the
-        full rationale: field types come from the lowered element local's
-        own MIR-registered type (`local_mir_type_of`), not the unreliable
-        `elem.type_` HIR annotation (bug doc
+        Field types are read from the JUST-LOWERED element local's own
+        MIR-registered type (`local_mir_type_of`), NOT from `elem.type_`
+        (the HIR-level type annotation). `elem.type_` is unreliably nil for
+        a tuple literal's non-first elements on this flat-HIR path -- a
+        string or bool element silently defaulted to `MirType.i64()` here,
+        which made `coerce_tuple_to_raw_str` (expr_dispatch.spl) treat the
+        field as a plain number: the string field's raw pointer got
+        rendered as a decimal integer (ASLR-varying) and the bool field
+        printed "1"/"0" instead of "true"/"false" (bug doc
         native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02.md,
-        2026-08-07 mixed-type update)."""
+        2026-08-07 mixed-type update). `local_mir_type_of` is reliable here
+        because every literal-lowering path (StringLit -> Opaque("str"),
+        BoolLit -> emit_const_bool -> MirType.bool(), IntLit -> MirType.i64())
+        already registers the element's real MIR type on its local via
+        `new_temp`/`emit_const` before this loop reads it back. `elem.type_`
+        is kept only as a fallback for elements whose lowering did not
+        register any type (defensive, not expected to trigger for scalar
+        literals)."""
         var operands: [MirOperand] = []
         var types: [MirType] = []
         for elem in elements:
