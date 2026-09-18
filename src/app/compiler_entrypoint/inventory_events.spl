@@ -237,6 +237,23 @@ fn compiler_inventory_refresh_v1(
         root, if cursor.valid: cursor.git_head else: head, source_roots, cold_init)
     if git_events == nil:
         return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    # A cold init that listed NO compilable source is never a legitimate state
+    # for this repository, and publishing it is not survivable: the empty
+    # inventory becomes authoritative at generation 0, and every later publish
+    # of real content is then refused for digest divergence at that same
+    # generation -- a permanent wedge whose only escape is deleting the cache by
+    # hand. Measured 2026-09-18: a `text?` git listing unwrapped to the Option
+    # box on the deployed binary's default lane, `.split` yielded nothing, and
+    # `generation=0 count=0` was published for a tree holding 16,791 `.spl`
+    # files; the same command on a correct binary published 16,797 entries.
+    # Fail closed here and name the remedy instead.
+    # See doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+    if cold_init and git_events!.len() == 0:
+        return compiler_inventory_invalid_v1(
+            "cold-init-listed-no-sources (the source walk returned nothing for " +
+            "this checkout; refusing to publish an empty inventory that would " +
+            "wedge the cache -- verify the binary with " +
+            "scripts/check/check-deployed-binary-optional-unwrap.shs)")
     var inventory = compile_source_inventory_apply_git_events_v1(cache_root, git_events!)
     if not inventory.valid:
         return compiler_inventory_invalid_v1("git-event-apply:" + inventory.reason)
