@@ -1,0 +1,165 @@
+# Adversarial regression coverage for the COLL002/COLL020 Certain auto-fixes.
+#
+# A review found `collection_002_fix`/`collection_020_fix`
+# (src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl) produced WRONG or
+# NON-COMPILING rewrites on several textual shapes that satisfied the old,
+# looser preconditions:
+#   - a01/a02: COLL020 ignored pre-seeding (`seen.push(0)` before the loop)
+#     and mutation elsewhere in the loop body (`seen.remove(0)`).
+#   - a03: `collection_is_mutation_of` had no `{name}[...] = ` case, so an
+#     index assignment inside the loop was invisible to the mutation check.
+#   - a04: the array declaration was found INSIDE the loop body (a fresh
+#     per-iteration local), not before it — hoisting it produced
+#     `variable not found` at the hoisted call site.
+#   - a05: the declaration scan was file-wide, so a same-named array in a
+#     DIFFERENT function was used to infer the element type.
+#   - a06: a dotted receiver (`cfg.items.contains(x)`) was parsed as the bare
+#     identifier `items`, resolving to an unrelated local of that name.
+#   - a23: the array was aliased into another function as a call argument
+#     (`grow(arr, x)`), which can mutate/replace it in ways no textual scan
+#     proves safe.
+# Every one of these fixtures compiled to a Certain fix before this change;
+# each must now come back nil (hint-only). a07/a08/a16/a18/a21/a22 are the
+# adjacent "looks similar but IS safe" shapes and must keep fixing.
+#
+# Fixtures below are byte-identical to
+# .../scratchpad/fable_fx/{a01..a23}*.spl from the adversarial review.
+
+use std.spec.*
+use compiler.tools.lint.main.{collection_002_fix, collection_020_fix}
+use std.tooling.easy_fix.*
+
+fn fix002(src: text) -> EasyFix?:
+    collection_002_fix("/tmp/adv.spl", src.split("\n"))
+
+fn fix020(src: text) -> EasyFix?:
+    collection_020_fix("/tmp/adv.spl", src.split("\n"))
+
+fn is_some(fix: EasyFix?) -> bool:
+    match fix:
+        case Some(_): true
+        case nil: false
+
+val A01_020_PRESEED_SRC = "fn dedup(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    seen.push(0)\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    seen\n"
+val A02_020_REMOVE_SRC = "fn dedup(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        if x == 1:\n            seen.remove(0)\n    seen\n"
+val A03_002_INDEX_ASSIGN_SRC = "fn count_hits(xs: [i64]) -> i64:\n    var arr: [i64] = [1, 2, 3]\n    var hits = 0\n    var i = 0\n    while i < xs.len():\n        if arr.contains(xs[i]):\n            hits = hits + 1\n        arr[0] = 99\n        i = i + 1\n    hits\n"
+val A04_002_DECL_IN_LOOP_SRC = "fn f(xs: [i64]) -> i64:\n    var hits = 0\n    for x in xs:\n        val names: [i64] = [x, x + 1]\n        if names.contains(3):\n            hits = hits + 1\n    hits\n"
+val A05_002_CROSSFN_TYPE_SRC = "fn a() -> i64:\n    val names: [i64] = [1, 2]\n    names.len()\n\nfn b(names: [text], qs: [text]) -> i64:\n    var hits = 0\n    for q in qs:\n        if names.contains(q):\n            hits = hits + 1\n    hits\n"
+val A06_002_DOTTED_SRC = "struct Cfg:\n    items: [i64]\n\nfn other() -> i64:\n    val items: [i64] = [7]\n    items.len()\n\nfn count(cfg: Cfg, xs: [i64]) -> i64:\n    var hits = 0\n    for x in xs:\n        if cfg.items.contains(x):\n            hits = hits + 1\n    hits\n"
+val A07_002_MULTIBYTE_SRC = "fn count(xs: [i64]) -> i64:\n    val arr: [i64] = [1, 2, 3]\n    # a comment with non-ascii-lookalike content before the loop\n    var hits = 0\n    for x in xs:\n        if arr.contains(x):\n            hits = hits + 1\n    hits\n"
+val A08_002_TUPLE_SRC = "fn count(qs: [(i64, text)]) -> i64:\n    val pairs: [(i64, text)] = [(1, \"a\"), (2, \"b\")]\n    var hits = 0\n    for q in qs:\n        if pairs.contains(q):\n            hits = hits + 1\n    hits\n"
+val A16_002_NESTED_SRC = "fn count(groups: [Any]) -> i64:\n    var allow: [i64] = [1]\n    var hits = 0\n    for g in groups:\n        for v in g:\n            if allow.contains(v):\n                hits = hits + 1\n        allow.push(2)\n    hits\n"
+val A18_020_BODY_AFTER_SRC = "fn dedup(xs: [i64]) -> i64:\n    var seen: [i64] = []\n    var total = 0\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        total = total + x\n    seen.len() + total\n"
+val A21_002_CALLARG_SRC = "fn key(x: i64) -> i64:\n    x * 2\n\nfn count(xs: [i64]) -> i64:\n    val arr: [i64] = [2, 4]\n    var hits = 0\n    for x in xs:\n        if arr.contains(key(x)):\n            hits = hits + 1\n    hits\n"
+val A22_020_DECL_INSIDE_LOOP_SRC = "fn f(groups: [[i64]]) -> i64:\n    var total = 0\n    for g in groups:\n        var seen: [i64] = []\n        for x in g:\n            if not seen.contains(x):\n                seen.push(x)\n        total = total + seen.len()\n    total\n"
+val A23_002_MUTATE_VIA_CALL_SRC = "fn grow(a: [i64], v: i64):\n    a.push(v)\n\nfn count(xs: [i64]) -> i64:\n    var arr: [i64] = [1]\n    var hits = 0\n    for x in xs:\n        if arr.contains(x):\n            hits = hits + 1\n        grow(arr, x)\n    hits\n"
+
+# The following are already-correct no-fix shapes (pre-existing, unrelated to
+# this change) kept here only as a regression net against this same lane.
+val A09_002_TABS_SRC = "fn count(xs: [i64]) -> i64:\n\tval arr: [i64] = [1, 2, 3]\n\tvar hits = 0\n\tfor x in xs:\n\t\tif arr.contains(x):\n\t\t\thits = hits + 1\n\thits\n"
+val A10_TEXT_VAR_SRC = "fn count(xs: [text]) -> i64:\n    val s: text = \"abc\"\n    var hits = 0\n    for x in xs:\n        if s.contains(x):\n            hits = hits + 1\n    hits\n"
+val A13_PARAM_ARR_SRC = "fn count(arr: [i64], xs: [i64]) -> i64:\n    var hits = 0\n    for x in xs:\n        if arr.contains(x):\n            hits = hits + 1\n    hits\n"
+val A14_020_ONELINE_SRC = "fn dedup(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x): seen.push(x)\n    seen\n"
+val A17_002_CONCAT_SRC = "fn count(xs: [i64]) -> i64:\n    var arr: [i64] = [1]\n    var hits = 0\n    for x in xs:\n        if arr.contains(x):\n            hits = hits + 1\n        arr = arr + [x]\n    hits\n"
+val A19_SHADOW_TWO_FNS_SRC = "fn a(xs: [i64]) -> i64:\n    val arr: [i64] = [1]\n    var h = 0\n    for x in xs:\n        if arr.contains(x):\n            h = h + 1\n    h\n\nfn b(xs: [text]) -> i64:\n    val arr: [text] = [\"q\"]\n    var h = 0\n    for x in xs:\n        if arr.contains(x):\n            h = h + 1\n    h\n"
+
+describe "COLL002/COLL020 adversarial fixtures — must produce NO fix":
+    it "a01: COLL020 array pre-seeded before the loop":
+        step("a01: COLL020 array pre-seeded before the loop")
+        """`seen.push(0)` runs between the `= []` decl and the loop; the
+        hoisted Dict would start empty while the array does not, so no fix
+        is safe."""
+        assert_false(is_some(fix020(A01_020_PRESEED_SRC)))
+
+    it "a02: COLL020 array mutated elsewhere in the loop (.remove)":
+        step("a02: COLL020 array mutated elsewhere in the loop (.remove)")
+        """A `.remove(` call in the same loop body invalidates the Dict the
+        fix would keep in lockstep with the array."""
+        assert_false(is_some(fix020(A02_020_REMOVE_SRC)))
+
+    it "a03: COLL002 array index-assigned inside the loop":
+        step("a03: COLL002 array index-assigned inside the loop")
+        """`arr[0] = 99` mutates the array without matching any
+        `.method(`-prefixed case, and must be caught as a mutation."""
+        assert_false(is_some(fix002(A03_002_INDEX_ASSIGN_SRC)))
+
+    it "a04: COLL002 declaration is inside the loop body":
+        step("a04: COLL002 declaration is inside the loop body")
+        """The `val names` decl is a fresh per-iteration local declared AFTER
+        the loop header, not a loop-invariant array to hoist."""
+        assert_false(is_some(fix002(A04_002_DECL_IN_LOOP_SRC)))
+
+    it "a05: COLL002 declaration found in a different function":
+        step("a05: COLL002 declaration found in a different function")
+        """The only `val names` decl in the file lives in a sibling function;
+        the receiver in this function is a `[text]` parameter, so the decl
+        search must be scoped to the enclosing function and find nothing."""
+        assert_false(is_some(fix002(A05_002_CROSSFN_TYPE_SRC)))
+
+    it "a06: COLL002 dotted receiver (cfg.items.contains)":
+        step("a06: COLL002 dotted receiver (cfg.items.contains)")
+        """The true receiver is `cfg.items`, a struct field; parsing it as
+        the bare identifier `items` would resolve to an unrelated local."""
+        assert_false(is_some(fix002(A06_002_DOTTED_SRC)))
+
+    it "a23: COLL002 array aliased into another function as a call arg":
+        step("a23: COLL002 array aliased into another function as a call arg")
+        """`grow(arr, x)` passes the array to a function that can mutate it
+        in ways no textual scan can prove safe — hint-only."""
+        assert_false(is_some(fix002(A23_002_MUTATE_VIA_CALL_SRC)))
+
+describe "COLL002/COLL020 adjacent-but-safe fixtures — must still fix":
+    it "a07: COLL002 fixes across a multibyte comment":
+        step("a07: COLL002 fixes across a multibyte comment")
+        assert_true(is_some(fix002(A07_002_MULTIBYTE_SRC)))
+
+    it "a08: COLL002 fixes a tuple-typed array":
+        step("a08: COLL002 fixes a tuple-typed array")
+        assert_true(is_some(fix002(A08_002_TUPLE_SRC)))
+
+    it "a16: COLL002 fixes a nested loop, mutation outside the inner loop":
+        step("a16: COLL002 fixes a nested loop, mutation outside the inner loop")
+        """`allow.push(2)` runs in the OUTER loop body, after the inner loop
+        that contains the `.contains(` call — outside the mutation-check
+        range, so this stays a Certain fix."""
+        assert_true(is_some(fix002(A16_002_NESTED_SRC)))
+
+    it "a18: COLL020 fixes with unrelated statements after the guarded push":
+        step("a18: COLL020 fixes with unrelated statements after the guarded push")
+        assert_true(is_some(fix020(A18_020_BODY_AFTER_SRC)))
+
+    it "a21: COLL002 fixes when the .contains( arg is itself a call":
+        step("a21: COLL002 fixes when the .contains( arg is itself a call")
+        assert_true(is_some(fix002(A21_002_CALLARG_SRC)))
+
+    it "a22: COLL020 fixes when the array is declared inside an outer loop":
+        step("a22: COLL020 fixes when the array is declared inside an outer loop")
+        """`seen` is declared inside the OUTER `for g in groups:` loop but
+        before the INNER loop that owns the guarded push — still safe to
+        hoist relative to the inner loop."""
+        assert_true(is_some(fix020(A22_020_DECL_INSIDE_LOOP_SRC)))
+
+describe "COLL002/COLL020 pre-existing no-fix shapes — regression net":
+    it "a09: tab-indented file stays no-fix":
+        step("a09: tab-indented file stays no-fix")
+        assert_false(is_some(fix002(A09_002_TABS_SRC)))
+
+    it "a10: text receiver stays no-fix":
+        step("a10: text receiver stays no-fix")
+        assert_false(is_some(fix002(A10_TEXT_VAR_SRC)))
+
+    it "a13: array is a parameter, not a local decl, stays no-fix":
+        step("a13: array is a parameter, not a local decl, stays no-fix")
+        assert_false(is_some(fix002(A13_PARAM_ARR_SRC)))
+
+    it "a14: one-line guard+push stays no-fix":
+        step("a14: one-line guard+push stays no-fix")
+        assert_false(is_some(fix020(A14_020_ONELINE_SRC)))
+
+    it "a17: array rebuilt via concatenation in the loop stays no-fix":
+        step("a17: array rebuilt via concatenation in the loop stays no-fix")
+        assert_false(is_some(fix002(A17_002_CONCAT_SRC)))
+
+    it "a19: two functions shadow the same array name, ambiguous, stays no-fix":
+        step("a19: two functions shadow the same array name, ambiguous, stays no-fix")
+        assert_false(is_some(fix002(A19_SHADOW_TWO_FNS_SRC)))

@@ -570,12 +570,88 @@ fn collection_is_mutation_of(trimmed: text, name: text) -> bool:
         trimmed.starts_with("{name}.clear(") or trimmed.starts_with("{name}.append(") or
         trimmed.starts_with("{name}.sort(") or trimmed.starts_with("{name}.extend(")):
         return true
+    # Index assignment (`arr[0] = 99`) mutates the array in place without
+    # matching any `.method(` prefix above. Find the matching `]` and check
+    # the text right after it is `=` and not `==` (a comparison, not a
+    # mutation).
+    if trimmed.starts_with("{name}["):
+        val close = trimmed.index_of("]")
+        if close >= 0:
+            val rest = trimmed.slice(close + 1).trim()
+            if rest.starts_with("=") and not rest.starts_with("=="):
+                return true
     false
 
 fn collection_range_mutates(lines: [text], start_idx: i64, end_idx: i64, name: text) -> bool:
     var i = start_idx
     while i <= end_idx:
         if collection_is_mutation_of(lines[i].trim(), name):
+            return true
+        i = i + 1
+    false
+
+fn collection_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+# Nearest enclosing top-level `fn ` header above `line_idx` (indentation 0),
+# found by an upward scan — same shape as `collection_enclosing_loop_line`.
+# -1 when no such header is found before the file start (should not happen
+# for any well-formed source, but callers must treat it as "no scope, no
+# fix" rather than falling back to the whole file).
+fn collection_enclosing_fn_start(lines: [text], line_idx: i64) -> i64:
+    var i = line_idx
+    while i >= 0:
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("fn ") and collection_line_indent(lines[i]) == 0:
+            return i
+        i = i - 1
+    -1
+
+# True when `name` appears, between lines `start_idx..end_idx` inclusive, as
+# a bare token immediately flanked (ignoring spaces) by `(` or `,` on one
+# side and `,` or `)` on the other — i.e. passed as an argument to some call.
+# A callee can alias the array through the parameter and mutate/replace it in
+# ways no textual scan can see, so this is conservative: any match blocks the
+# fix (hint-only) rather than trying to prove the callee is safe.
+fn collection_name_passed_as_call_arg(lines: [text], start_idx: i64, end_idx: i64, name: text) -> bool:
+    var i = start_idx
+    while i <= end_idx:
+        val line = lines[i]
+        var pos = 0
+        while pos < line.len():
+            val idx = text_index_of_from(line, name, pos)
+            if idx < 0:
+                break
+            val after = idx + name.len()
+            val before_ok = idx == 0 or not collection_is_ident_char(line.slice(idx - 1, idx))
+            val after_ok = after >= line.len() or not collection_is_ident_char(line.slice(after, after + 1))
+            if before_ok and after_ok:
+                var b = idx - 1
+                while b >= 0 and line.slice(b, b + 1) == " ":
+                    b = b - 1
+                var a = after
+                while a < line.len() and line.slice(a, a + 1) == " ":
+                    a = a + 1
+                val prev_c = if b >= 0: line.slice(b, b + 1) else: ""
+                val next_c = if a < line.len(): line.slice(a, a + 1) else: ""
+                if (prev_c == "(" or prev_c == ",") and (next_c == "," or next_c == ")"):
+                    return true
+            pos = idx + 1
+        i = i + 1
+    false
+
+# True when any of `name.` / `name[` / `name =` / `(name` / `, name` appears
+# between lines `start_idx..end_idx` inclusive — a broader "was this name
+# referenced at all" scan than `collection_is_mutation_of`, used to enforce
+# that a COLL020 candidate array is untouched between its `= []` declaration
+# and the loop that seeds it (no pre-seeding, no aliasing, nothing).
+fn collection_referenced_between(lines: [text], start_idx: i64, end_idx: i64, name: text) -> bool:
+    var i = start_idx
+    while i <= end_idx:
+        val trimmed = lines[i].trim()
+        if (trimmed.contains("{name}.") or trimmed.contains("{name}[") or
+            trimmed.contains("{name} =") or trimmed.contains("({name}") or
+            trimmed.contains(", {name}")):
             return true
         i = i + 1
     false
@@ -640,16 +716,23 @@ fn collection_infer_elem_type_from_literal(cursor: text) -> text:
         return "i64"
     ""
 
-# Element type for a file-unique `val|var NAME` declaration, or "" when the
-# declaration is missing, ambiguous, `text`-typed (precondition-1 rejection —
-# the receiver isn't actually an array), or its type can't be read. The `.1`
-# is the declaration's line index (only meaningful when `.0 != ""`).
-fn collection_decl_element_type(lines: [text], name: text) -> (text, i64):
+# Element type for a `val|var NAME` declaration unique within
+# `scope_start..scope_end` (inclusive), or "" when the declaration is
+# missing, ambiguous, `text`-typed (precondition-1 rejection — the receiver
+# isn't actually an array), or its type can't be read. The `.1` is the
+# declaration's absolute line index (only meaningful when `.0 != ""`).
+#
+# The scope is always the enclosing function, never the whole file: a
+# same-named `val|var` in a sibling function (or a same-named parameter of
+# the fix's own function, which never matches here since parameters aren't
+# `val|var` lines) must never be mistaken for the receiver's declaration —
+# see `collection_enclosing_fn_start`.
+fn collection_decl_element_type(lines: [text], name: text, scope_start: i64, scope_end: i64) -> (text, i64):
     var found_line = -1
     var ambiguous = false
     var elem_type = ""
-    var i = 0
-    while i < lines.len():
+    var i = scope_start
+    while i <= scope_end:
         val parts = collection_decl_parts(lines[i].trim(), name)
         if parts.0 != "" or parts.1 != "":
             if found_line >= 0:
@@ -685,6 +768,17 @@ fn collection_parse_contains_call(trimmed: text) -> (text, text):
     val receiver = trimmed.slice(start, at)
     if receiver == "":
         return ("", "")
+    # The receiver must be a BARE identifier: a dotted/qualified receiver
+    # (`cfg.items.contains(x)`) textually resolves `items` to whatever local
+    # of that name happens to exist elsewhere in the file/function, which is
+    # a different value than the actual receiver `cfg.items`. Reject when the
+    # character immediately before the identifier is `.` or another
+    # identifier character.
+    if start > 0:
+        val prev = trimmed.slice(start - 1, start)
+        val prev_is_ident = (prev >= "a" and prev <= "z") or (prev >= "A" and prev <= "Z") or (prev >= "0" and prev <= "9") or prev == "_"
+        if prev == "." or prev_is_ident:
+            return ("", "")
     val before = trimmed.slice(0, start).trim()
     if before.ends_with("not"):
         return ("", "")
@@ -711,14 +805,32 @@ fn collection_002_fix(file_path: text, lines: [text]) -> EasyFix?:
     val arg = parsed.1
     if receiver == "":
         return nil
-    val decl = collection_decl_element_type(lines, receiver)
+    # Scope the declaration search to the enclosing function only — a
+    # same-named `val|var` in a sibling function must never be mistaken for
+    # this receiver's declaration.
+    val fn_start = collection_enclosing_fn_start(lines, contains_idx)
+    if fn_start < 0:
+        return nil
+    val fn_end = collection_block_end(lines, fn_start)
+    val decl = collection_decl_element_type(lines, receiver, fn_start, fn_end)
     val elem_type = decl.0
     if elem_type == "":
         return nil
     val loop_line = collection_enclosing_loop_line(lines, contains_idx)
     if loop_line < 0:
         return nil
+    # The declaration must precede the loop being hoisted out of. A decl
+    # found INSIDE the loop body (its line index falls after the loop header)
+    # is a fresh per-iteration local, not a loop-invariant array.
+    if decl.1 >= loop_line:
+        return nil
     if collection_range_mutates(lines, loop_line + 1, collection_block_end(lines, loop_line), receiver):
+        return nil
+    # The array can be aliased through any call in the enclosing function
+    # that takes it as a bare argument (`grow(arr, x)`) — the callee could
+    # mutate or replace it in ways no textual scan can prove safe, so that
+    # stays hint-only rather than a machine-applied fix.
+    if collection_name_passed_as_call_arg(lines, fn_start, fn_end, receiver):
         return nil
 
     val marker = ".contains("
@@ -773,7 +885,12 @@ fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
                     start = start - 1
                 val recv = trimmed.slice(start, at)
                 val close = text_index_of_from(trimmed, ")", at + marker.len())
-                if recv != "" and close >= 0:
+                # Bare-identifier check, same as COLL002's
+                # `collection_parse_contains_call`: a dotted/qualified
+                # receiver must not be resolved to an unrelated same-named
+                # local elsewhere in the file.
+                val dotted = start > 0 and (trimmed.slice(start - 1, start) == "." or collection_is_ident_char(trimmed.slice(start - 1, start)))
+                if recv != "" and close >= 0 and not dotted:
                     val a = trimmed.slice(at + marker.len(), close).trim()
                     if a != "" and not a.contains(","):
                         if found_guard >= 0:
@@ -796,15 +913,40 @@ fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
     val loop_line = collection_enclosing_loop_line(lines, found_guard)
     if loop_line < 0:
         return nil
+    val block_end = collection_block_end(lines, loop_line)
+    # No mutation of the array anywhere in the loop body other than the
+    # guarded push itself — checked as two ranges split around the push line
+    # (reusing `collection_range_mutates` rather than a bespoke scan; an
+    # empty sub-range, e.g. when the push is the very next line, is a no-op
+    # since `start_idx > end_idx` short-circuits the scan).
+    if collection_range_mutates(lines, loop_line + 1, push_idx - 1, receiver):
+        return nil
+    if collection_range_mutates(lines, push_idx + 1, block_end, receiver):
+        return nil
+    # Scope the declaration search to the enclosing function only, same
+    # rationale as COLL002.
+    val fn_start = collection_enclosing_fn_start(lines, found_guard)
+    if fn_start < 0:
+        return nil
+    val fn_end = collection_block_end(lines, fn_start)
     # The array itself must be the fresh local this rule requires: a
     # `val|var NAME: [T] = []` declaration (annotation-only — an un-annotated
     # `[]` carries no element type to infer from).
-    val decl = collection_decl_element_type(lines, receiver)
+    val decl = collection_decl_element_type(lines, receiver, fn_start, fn_end)
     val elem_type = decl.0
     if elem_type == "":
         return nil
+    # The declaration must precede the loop it seeds — a decl found INSIDE
+    # the loop body is a fresh per-iteration local.
+    if decl.1 >= loop_line:
+        return nil
     val decl_init = collection_decl_parts(lines[decl.1].trim(), receiver).1
     if decl_init != "[]":
+        return nil
+    # Nothing may reference the array between its declaration and the loop
+    # that seeds it — a pre-seeded array (`seen.push(0)` right after the
+    # decl) is not the empty-set state the hoisted Dict would start from.
+    if collection_referenced_between(lines, decl.1 + 1, loop_line - 1, receiver):
         return nil
 
     val guard_line_indent = collection_line_indent(lines[found_guard])
@@ -825,7 +967,7 @@ fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
     val decl_at = collection_line_start_offset(lines, loop_line)
 
     var fix = EasyFix.create(
-        "COLL020", "hoist `{receiver}` into its own membership Dict instead of `.contains`",
+        "COLL020", "track membership in `{set_name}` Dict instead of `.contains` on `{receiver}`",
         FixConfidence.Certain)
     fix.add_replacement(Replacement.create(
         file_path, decl_at, decl_at, loop_line + 1, collection_line_indent(lines[loop_line]), decl_text))
