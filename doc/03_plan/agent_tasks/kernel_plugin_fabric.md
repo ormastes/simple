@@ -54,6 +54,7 @@ Published source is not equivalent to a closed gate; runtime-blocked Simple test
 |---|---|---|---|---|
 | S0 architecture/audit | KPF architecture/design/plan docs and coordination state | K0g/K0c boundary, identities, inventory, baselines | none | research sidecars allowed |
 | S1 schema/ABI | `src/tool/kernel_plugin_schema/**`, ABI templates, generated-file policy | frozen V1 prefix, generators, compatibility corpus | S0 | fixture generation allowed |
+| LINK (facets only) (added 2026-09-18) | none — owns no `src/tool/kernel_plugin_schema/**` path; linker lanes own their own files elsewhere | contributes `Link*V1` facets as plain structs pending S1 handoff (`doc/08_tracking/todo/linker_handoffs_2026-09-18.md`) | S1 | see `doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md` |
 
 S1 must merge before generated runtime/SDK implementation begins.
 

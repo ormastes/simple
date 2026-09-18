@@ -205,3 +205,5 @@ Owner: `L/boot_layout/` (parser + `app/linker_gen` generator + `BootLayoutPlan`)
 2. Accept `Link*V1` as plain structs outside the S1 schema generator until a handoff (D8)?
 3. Kernel loader twins (`os/kernel/loader/{elf64,smf}.spl`) stay separate with golden parity — acceptable, or must they share a `common` codec despite the noalloc closure?
 4. Is dropping `lld_sffi`/`lld_shim.cpp` (never built) acceptable before the internal engine owns SimpleOS, given it only changes an error message?
+
+**Decided 2026-09-18:** (1) slice 1 = static ET_EXEC over native-backend objects; (2) `Link*V1` plain structs until S1 handoff; (3) kernel loader twins stay separate with golden parity; (4) `lld_sffi`/`lld_shim` retirement deferred to post-RC1 (not in any RC1 lane).
