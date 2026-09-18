@@ -224,6 +224,8 @@ function changeShapeError(change) {
     if (change.previous_path !== "" || change.file_type !== "regular" || change.previous_file_type !== "absent" || change.previous_content_kind !== "absent" || change.previous_semantic_class !== "absent" || change.encoding !== "utf8" || change.previous_encoding !== "absent") return "added path has an invalid or unsafe shape";
   } else if (["modified", "mode_changed"].includes(change.status)) {
     if (change.previous_path !== "" || change.file_type !== "regular" || change.previous_file_type !== "regular" || change.encoding !== "utf8" || change.previous_encoding !== "utf8") return "modified path has an invalid or unsafe shape";
+  } else if (change.status === "type_changed") {
+    if (change.previous_path !== "" || change.file_type !== "regular" || change.previous_file_type !== "symlink" || change.encoding !== "utf8" || change.previous_encoding !== "utf8") return "type-changed path has an invalid or unsafe shape";
   } else if (change.status === "deleted") {
     if (change.previous_path !== "" || change.file_type !== "absent" || change.previous_file_type !== "regular" || change.content_kind !== "absent" || change.semantic_class !== "absent" || change.encoding !== "absent" || change.previous_encoding !== "utf8") return "deleted path has an invalid or unsafe shape";
   } else if (["renamed", "copied"].includes(change.status)) {
