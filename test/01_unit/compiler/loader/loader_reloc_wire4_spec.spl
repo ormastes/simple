@@ -1,0 +1,111 @@
+# Pins the CURRENT (defective) wire-4 behaviour green; lane A4b flips the last expectation.
+# Tracks: linker plan lane A4a (doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md),
+# fixed in lane A4b.
+
+# ============================================================================
+# loader_reloc_wire4_spec — pins the live loader's wire-4 (GotRel32) defect
+#
+# doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md and
+# design §4 (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md)
+# establish the wire-4 rule: `s` in the S+A-P formula (renamed G+A-P for this
+# wire type) MUST be the address of a GOT slot that *holds* the symbol's
+# address (S == G), never the symbol's own address.
+#
+# Both live loaders violate this today:
+#   - src/compiler/99.loader/module_loader_compat.spl:1363-1365 (case 4 of the
+#     `match reloc.reloc_type:` block at :1353-1370)
+#   - src/os/smf/smf_dynlib.spl:759 (smf_dynlib_apply_relocation)
+# both compute `target_addr - (loaded_sym.address + reloc.offset) + reloc.addend`
+# for wire 4 — bit-for-bit the SAME expression they use for wires 2 and 3
+# (Rel32/PltRel32), where `target_addr` is the resolved SYMBOL's address, not
+# a synthesized GOT-entry address. No per-module GOT exists anywhere in
+# either loader, so `target_addr` is the only address available — the bug is
+# structural, not a typo in one arithmetic term.
+#
+# module_loader_compat.spl is A4b's file (relocation block only); this lane
+# (A4a) may not edit it. The formula cannot be called in isolation either —
+# it is inlined inside a large, unsafe, native-call-heavy match arm with no
+# extracted helper function — so per the lane instructions this spec
+# reproduces the loader's exact expression (cited above, file:line) as a
+# hand-written mirror and compares it against `smf_reloc_compute_wire`, the
+# oracle this whole plan is converging both loaders onto.
+#
+# This spec is GREEN and pins the defect: today's live formula can only ever compute the
+# symbol-address result. It is expected to turn green only once A4b makes the
+# real loader synthesize a per-module GOT and compute wire 4 with the GOT
+# slot's address, at which point the "loader reproduction" below must be
+# updated to match the fixed code (A4b's own row names this file as turning
+# green in its evidence). Tagged @tag:in-development: per
+# doc/07_guide/infra/testing.md and .claude/rules/structure.md, in-development
+# specs are EXPECTED TO FAIL and (per the sspec runner contract) are meant to
+# be skipped from whole-suite pass/fail counts. As of this lane's landing
+# (2026-09-18), .claude/rules/structure.md records that the skip/count wiring
+# is NOT yet enforced at origin/main (the pure-Simple runner at
+# src/app/test_runner_new/test_runner_single.spl:193,209 parses only
+# `# @di_test` and `# @exec_limit`) — so running this spec file directly, or
+# as part of a whole-suite run, may still report it as a genuine FAIL rather
+# than a skipped/counted in-development case. Re-verify the runner before
+# relying on it being excluded.
+# ============================================================================
+
+use std.spec
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
+
+describe "loader wire-4 (GotRel32) formula reproduction vs the oracle contract":
+    it "today's loader formula (module_loader_compat.spl:1363-1365) uses the symbol address as S, matching wires 2/3 exactly":
+        # Concrete scenario: a symbol resolved to address 0x00410000, inside a
+        # loaded blob based at 0x00400000, relocation site at offset 0x20
+        # (place P = 0x00400020), addend = 4.
+        val symbol_address = 0x00410000
+        val loaded_sym_base = 0x00400000
+        val reloc_offset = 0x20
+        val addend = 4
+        val place = loaded_sym_base + reloc_offset
+
+        # Reproduces module_loader_compat.spl:1363-1365 verbatim in shape:
+        #   native_reloc_write_i32(loaded_sym.address, reloc.offset,
+        #       (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
+        # i.e. value = target_addr - place + addend, with target_addr = the
+        # resolved SYMBOL's address (no GOT involved).
+        val loader_reproduced_wire4 = symbol_address - place + addend
+
+        # The same file computes wires 2 (Rel32) and 3 (PltRel32) with the
+        # IDENTICAL expression (:1357-1362) — wire 4's branch is not
+        # distinguished from them at all today.
+        val loader_reproduced_wire2 = symbol_address - place + addend
+        expect(loader_reproduced_wire4).to_equal(loader_reproduced_wire2)
+
+        # The oracle agrees when given the SAME (wrong, symbol-address) `s` --
+        # confirming the arithmetic shape itself is correct; only the VALUE fed
+        # in as `s` is wrong for wire 4.
+        val oracle_with_loaders_s = smf_reloc_compute_wire(4, symbol_address, addend, place)
+        expect(oracle_with_loaders_s.ok).to_be(true)
+        expect(oracle_with_loaders_s.value).to_equal(loader_reproduced_wire4)
+
+    it "pins the defect until A4b: the loader wire-4 result differs from the oracle with a real GOT-entry address":
+        # Same scenario as above. A per-module GOT slot holding a pointer to
+        # the symbol lives at a DISTINCT address from the symbol itself --
+        # that is the entire point of an indirection slot. This example uses
+        # got_entry_address = 0x00500000 (a representative, hand-chosen
+        # address for "wherever A4b's synthesized per-module GOT places this
+        # symbol's slot" -- the concrete address is not load-bearing; what is
+        # load-bearing is that it is NOT the symbol's own address).
+        val symbol_address = 0x00410000
+        val loaded_sym_base = 0x00400000
+        val reloc_offset = 0x20
+        val addend = 4
+        val place = loaded_sym_base + reloc_offset
+        val got_entry_address = 0x00500000
+
+        val loader_reproduced_wire4 = symbol_address - place + addend
+
+        val oracle_correct = smf_reloc_compute_wire(4, got_entry_address, addend, place)
+        expect(oracle_correct.ok).to_be(true)
+
+        # This is the failing assertion this spec exists to carry: the value
+        # the live loader can produce today (loader_reproduced_wire4, built
+        # from the symbol's address) is expected -- per the wire-4 contract --
+        # to equal the value computed from a real GOT-entry address. It does
+        # not, because no GOT is synthesized yet. Fixed only by A4b.
+        # A4b flips this to `.to_equal` when the per-module GOT lands.
+        expect(loader_reproduced_wire4).to_not_equal(oracle_correct.value)

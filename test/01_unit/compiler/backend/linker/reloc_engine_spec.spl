@@ -25,6 +25,7 @@ use compiler.backend.linker.reloc_engine.{
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32,
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
     R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26,
+    R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC,
     R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_HI20, R_RISCV_LO12_I
 }
 
@@ -293,3 +294,107 @@ describe "reloc_engine - byte patching integration":
         expect(patched[1]).to_equal(0x10)
         expect(patched[2]).to_equal(0x00)
         expect(patched[3]).to_equal(0x00)
+
+# ============================================================================
+# Oracle delegation + reject-not-mask (x86_64 S+A / S+A-P via smf_reloc_compute)
+# ============================================================================
+
+describe "reloc_engine - x86_64 reject-not-mask (delegates to smf_reloc_compute)":
+    it "R_X86_64_32 out of range rejects (was: silently masked to 32 bits)":
+        # @req REQ-SSPEC-COMPILER
+        step("R_X86_64_32 out of range rejects (was: silently masked to 32 bits)")
+        # s + a = 4294967296 = 2^32, one past the unsigned 32-bit max (4294967295).
+        # Before this change: `v & 0xffffffff` silently wrapped this to 0.
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_32, 4294967296, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+    it "R_X86_64_32 in range still succeeds with the exact value":
+        # @req REQ-SSPEC-COMPILER
+        step("R_X86_64_32 in range still succeeds with the exact value")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_32, 4294967295, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(4294967295)
+
+# ============================================================================
+# AArch64 page-relative pair: ADRP + ADD/LDR (ADR_PREL_PG_HI21, ADD_ABS_LO12_NC,
+# LDST64_ABS_LO12_NC) — hand-derived per the ARM ELF ABI (AAELF64):
+#   page delta pages = (Page(S+A) - Page(P)) >> 12, Page(x) = x with low 12
+#   bits cleared; immlo = pages[1:0] -> insn[30:29]; immhi = pages[20:2] ->
+#   insn[23:5]. ADD's imm12 = (S+A)[11:0] -> insn[21:10]. LDR (64-bit,
+#   unsigned offset) scales by the 8-byte access size: imm12 = (S+A)[11:0] >> 3
+#   -> insn[21:10].
+# ============================================================================
+
+describe "reloc_engine - AArch64 ADR_PREL_PG_HI21 (page delta)":
+    it "encodes page delta: S+A=0x420000 (page-aligned), P=0x400004 -> 32 pages":
+        # @req REQ-SSPEC-COMPILER
+        step("ADR_PREL_PG_HI21 encodes page delta")
+        # Page(0x420000) = 0x420000; Page(0x400004) = 0x400000.
+        # (0x420000 - 0x400000) >> 12 = 0x20000 >> 12 = 32.
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_ADR_PREL_PG_HI21, 0x420000, 0, 0x400004)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(32)
+
+    it "packs the page delta into an ADRP instruction word (immlo/immhi split)":
+        # @req REQ-SSPEC-COMPILER
+        step("ADR_PREL_PG_HI21 packs immlo[30:29]/immhi[23:5] into the instruction")
+        # Base: 0x90000001 = "adrp x1, #0" (op=1, fixed 10000, Rd=1, immlo=immhi=0).
+        # page_delta_pages=32=0b100000 -> immlo=0, immhi=8.
+        # patched = (insn & 0x9f00001f) | (immlo<<29) | (immhi<<5)
+        #         = 0x90000001 | (8<<5) = 0x90000001 | 0x100 = 0x90000101.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0x90000001)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_ADR_PREL_PG_HI21, 0x420000, 0, 0x400004)
+        expect(result.success).to_equal(true)
+        val insn = read_u32_le(base, 0)
+        val immlo = result.value & 0x3
+        val immhi = (result.value >> 2) & 0x7ffff
+        val patched_word = (insn & 0x9f00001f) | (immlo << 29) | (immhi << 5)
+        expect(patched_word).to_equal(0x90000101)
+        val patched_bytes = patch_u32_le(base, 0, patched_word)
+        expect(read_u32_le(patched_bytes, 0)).to_equal(0x90000101)
+
+describe "reloc_engine - AArch64 ADD_ABS_LO12_NC (imm12 lo12)":
+    it "encodes lo12: S+A=0x420034 -> imm12=0x034":
+        # @req REQ-SSPEC-COMPILER
+        step("ADD_ABS_LO12_NC encodes lo12 into imm12")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_ADD_ABS_LO12_NC, 0x420034, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x034)
+
+    it "packs lo12 into an ADD (immediate) instruction word":
+        # @req REQ-SSPEC-COMPILER
+        step("ADD_ABS_LO12_NC packs imm12 into insn[21:10]")
+        # Base: 0x91000000 = "add x0, x0, #0" (sf=1,op=0,S=0, fixed 10001, imm12=0).
+        # lo12 = 0x420034 & 0xfff = 0x034 = 52. patched = 0x91000000 | (52<<10)
+        #      = 0x91000000 | 0xd000 = 0x9100d000.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0x91000000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_ADD_ABS_LO12_NC, 0x420034, 0, 0)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
+        expect(patched_word).to_equal(0x9100d000)
+
+describe "reloc_engine - AArch64 LDST64_ABS_LO12_NC (imm12 lo12 >> 3)":
+    it "encodes lo12 scaled by 8: S+A=0x420038 (lo12=0x038) -> imm12=7":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST64_ABS_LO12_NC encodes lo12 >> 3 into imm12")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_LDST64_ABS_LO12_NC, 0x420038, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(7)
+
+    it "packs the scaled lo12 into an LDR (64-bit, unsigned offset) instruction word":
+        # @req REQ-SSPEC-COMPILER
+        step("LDST64_ABS_LO12_NC packs scaled imm12 into insn[21:10]")
+        # Base: 0xf9400000 = "ldr x0, [x0]" (size=11, opc=01 LDR, imm12=0).
+        # lo12 = 0x420038 & 0xfff = 0x038 = 56; imm12 = 56 >> 3 = 7.
+        # patched = 0xf9400000 | (7<<10) = 0xf9400000 | 0x1c00 = 0xf9401c00.
+        val base = patch_u32_le([0, 0, 0, 0], 0, 0xf9400000)
+        val result = reloc_apply_aarch64(base, 0, R_AARCH64_LDST64_ABS_LO12_NC, 0x420038, 0, 0)
+        val insn = read_u32_le(base, 0)
+        val patched_word = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
+        expect(patched_word).to_equal(0xf9401c00)
