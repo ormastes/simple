@@ -5896,9 +5896,24 @@ static int rt_core_argc = 0;
 static char** rt_core_argv = NULL;
 static char** rt_core_filtered_argv = NULL;
 
+/* Defined in runtime_fork.c (a member of both native-build capsules). The
+ * STRONG spl_init_args in runtime.c installs the crash handler at this same
+ * point; this WEAK fallback is the only definition the seed core-C capsule
+ * links (it has no runtime.c), so without this call binaries built from
+ * that capsule would define the handler yet never install it. Windows: the
+ * call is compiled out — PE/COFF weak-external resolution across TUs is
+ * unreliable there (see the essay at rt_set_args below), and the handler is
+ * a no-op stub on that platform regardless. */
+#ifndef _WIN32
+extern int64_t rt_install_crash_handler(void);
+#endif
+
 SPL_WEAK void spl_init_args(int argc, char** argv) {
     rt_core_argc = simple_runtime_filter_startup_args(
         argc, argv, &rt_core_filtered_argv, &rt_core_argv);
+#ifndef _WIN32
+    rt_install_crash_handler();
+#endif
 }
 
 SPL_WEAK int64_t spl_arg_count(void) {
@@ -13713,83 +13728,12 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
 }
 
-#if defined(_WIN32)
-/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
- * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
- * call is not itself capped at MAX_PATH (a wide call is not exempt on its
- * own -- only the prefix lifts the ceiling, to ~32767). Caller frees. Named
- * without the rt_ prefix -- it is a pure file-local helper with no runtime-
- * API surface of its own; see scripts/check/check-rt-dual-implementation-
- * ratchet.shs, which treats any new rt_-prefixed definition as a fresh
- * single-lane primitive requiring a Simple twin. The path separator and
- * prefix are built from the numeric code point (92) to keep this free of
- * escape sequences. */
-static wchar_t* spl_widen_long_path(const char* path) {
-    static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
-    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
-    {
-        wchar_t* scan;
-        DWORD need;
-        wchar_t* full;
-        wchar_t* out;
-        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
-        need = GetFullPathNameW(wide, 0, NULL, NULL);
-        if (need == 0) return wide;
-        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
-        if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
-        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
-        if (!out) { free(full); return wide; }
-        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
-        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
-        free(full);
-        free(wide);
-        return out;
-    }
-}
-#endif
-
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
-    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
-     * underlying filesystem's real limit; the AOT native-build cache path
-     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
-     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
-     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3), which
-     * collapsed four layers up into the opaque "AOT object publication
-     * failed". Prefer the wide, extended-length-prefixed call so both
-     * endpoints can exceed MAX_PATH. */
-    {
-        wchar_t* wide_staged = spl_widen_long_path(staged);
-        wchar_t* wide_dest = wide_staged ? spl_widen_long_path(destination) : NULL;
-        if (wide_staged && wide_dest) {
-            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
-            DWORD werror = ok ? 0 : GetLastError();
-            free(wide_staged); free(wide_dest);
-            if (ok) return 1;
-            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
-            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
-            return -1;
-        }
-        free(wide_staged); free(wide_dest);
-    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    {
-        DWORD error = GetLastError();
-        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
-        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
-        return -1;
-    }
+    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;

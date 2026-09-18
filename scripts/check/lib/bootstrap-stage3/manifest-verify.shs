@@ -36,6 +36,96 @@ bootstrap_stage3_own_pid() {
     fi
 }
 
+# Directories created by the no-procfs branch of bootstrap_stage3_fd_view,
+# newline-separated, removed by bootstrap_stage3_fd_view_cleanup. The cleanup
+# runs from an EXIT trap installed by the process-scoped caller (the wrapper
+# bootstrap_stage3_verify_manifest or the self-test fixture); it must NOT be
+# installed inside the seam itself, because the seam is also reached through
+# command substitution, whose subshell would run the trap immediately and
+# delete a live view.
+bootstrap_stage3_fd_view_dirs=
+
+bootstrap_stage3_fd_view_cleanup() {
+    [ -n "$bootstrap_stage3_fd_view_dirs" ] || return 0
+    printf '%s\n' "$bootstrap_stage3_fd_view_dirs" |
+        while IFS= read -r bootstrap_stage3_fd_view_cleanup_dir; do
+            [ -n "$bootstrap_stage3_fd_view_cleanup_dir" ] &&
+                rm -rf -- "$bootstrap_stage3_fd_view_cleanup_dir" 2>/dev/null || :
+        done
+    bootstrap_stage3_fd_view_dirs=
+}
+
+# One seam for the unlink-then-read-by-fd-path protocol
+# (doc/08_tracking/bug/bootstrap_stage3_proc_fd_protocol_has_no_darwin_equivalent_2026-09-12.md).
+# bootstrap_stage3_fd_view <fd> <snapshot_path> prints nothing and sets
+# bootstrap_stage3_fd_view_result to a RE-READABLE path for the open
+# descriptor <fd>. The descriptor must be at read offset 0 (freshly opened or
+# reopened), and the caller keeps owning <snapshot_path> on the procfs branch.
+#
+# Hosts with procfs ([ -r /proc/self/stat ]): the result is /proc/<pid>/fd/<fd>,
+# the magic-link view. Every open() of it re-reads the pinned, unlinked inode at
+# offset 0, so the caller may unlink <snapshot_path> first. This is today's
+# behaviour, byte-identical.
+#
+# Hosts without procfs (macOS, the BSDs): /dev/fd/N is fdesc, a dup with a
+# SHARED offset -- the second read of the same view sees EOF (measured in the
+# bug record), so it cannot be used here even though stat(1) on it works. The
+# result is a one-time read-only COPY of the descriptor content, made now, at
+# offset 0, inside a private mktemp -d 0700 directory; the copy is chmod 0400
+# and KEPT LINKED there (never unlinked) until the exit trap removes the whole
+# directory.
+#
+# The no-procfs branch is a plainly WEAKER anti-TOCTOU guarantee than the
+# /proc magic link: the view names a real directory entry for as long as it
+# lives, so an attacker with write access through the private directory could
+# in principle re-point it, where an unlinked /proc inode cannot be re-pointed
+# at all. The 0700 directory, 0400 file, and trap removal are the strongest
+# mechanism available on this host; do not read this branch as parity with the
+# unlink-by-fd protocol. Sibling validators accept this spelling through
+# bootstrap_stage3_fd_view_path_p (authority.shs); the arms must move together
+# or they reject each other.
+bootstrap_stage3_fd_view() {
+    bootstrap_stage3_fd_view_result=
+    [ "$#" -eq 2 ] || return 1
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    bootstrap_stage3_own_pid || return 1
+    case "$bootstrap_stage3_local_pid" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    if [ -r /proc/self/stat ]; then
+        bootstrap_stage3_fd_view_result=\
+"/proc/$bootstrap_stage3_local_pid/fd/$1"
+        return 0
+    fi
+    bootstrap_stage3_fd_view_dir=$(mktemp -d \
+        "${TMPDIR:-/tmp}/stage3-fd-view.$bootstrap_stage3_local_pid.XXXXXXXX") ||
+        return 1
+    chmod 0700 "$bootstrap_stage3_fd_view_dir" || {
+        rm -rf -- "$bootstrap_stage3_fd_view_dir"
+        return 1
+    }
+    bootstrap_stage3_fd_view_result="$bootstrap_stage3_fd_view_dir/view"
+    (umask 077; set -C; : >"$bootstrap_stage3_fd_view_result") || {
+        rm -rf -- "$bootstrap_stage3_fd_view_dir"
+        bootstrap_stage3_fd_view_result=
+        return 1
+    }
+    dd if="/dev/fd/$1" of="$bootstrap_stage3_fd_view_result" bs=65536 \
+        2>/dev/null || {
+        rm -rf -- "$bootstrap_stage3_fd_view_dir"
+        bootstrap_stage3_fd_view_result=
+        return 1
+    }
+    chmod 0400 "$bootstrap_stage3_fd_view_result" || {
+        rm -rf -- "$bootstrap_stage3_fd_view_dir"
+        bootstrap_stage3_fd_view_result=
+        return 1
+    }
+    bootstrap_stage3_fd_view_dirs=${bootstrap_stage3_fd_view_dirs:+
+"$bootstrap_stage3_fd_view_dirs"}$bootstrap_stage3_fd_view_dir
+    return 0
+}
+
 bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_own_pid || return 1
     case "$bootstrap_stage3_local_pid" in
@@ -69,24 +159,50 @@ bootstrap_stage3_verify_manifest_impl() {
             bootstrap_stage3_normalized_absolute "$bootstrap_stage3_bound_map" || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-path"; return 1; }
             [ -f "$bootstrap_stage3_bound_map" ] && [ ! -L "$bootstrap_stage3_bound_map" ] || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-regular"; return 1; }
             exec 9<"$bootstrap_stage3_bound_map" || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-open"; return 1; }
-            bootstrap_stage3_bound_map=\
-"/proc/$bootstrap_stage3_local_pid/fd/9" ;;
+            if [ -r /proc/self/stat ]; then
+                bootstrap_stage3_bound_map=\
+"/proc/$bootstrap_stage3_local_pid/fd/9"
+            else
+                # No procfs: the seam copies the freshly pinned descriptor
+                # content into a private 0700/0400 view (see
+                # bootstrap_stage3_fd_view). The caller-managed snapshot dance
+                # below is the procfs branch only.
+                bootstrap_stage3_fd_view 9 \
+                    "$bootstrap_stage3_bound_map" || {
+                    bootstrap_stage3_provenance_fail \
+                        "manifest-entry-bound-map-view"
+                    return 1
+                }
+                bootstrap_stage3_bound_map=\
+"$bootstrap_stage3_fd_view_result"
+            fi ;;
     esac
     bootstrap_stage3_manifest_phase_emit 4
     bootstrap_stage3_bound_map_external_sha=$(bootstrap_stage3_hash_file "$bootstrap_stage3_bound_map") || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-hash"; return 1; }
     bootstrap_stage3_manifest_phase_emit 5
-    bootstrap_stage3_bound_map_snapshot="${TMPDIR:-/tmp}/stage3-bound-map.$bootstrap_stage3_local_pid.snapshot"
-    (umask 077; set -C; : >"$bootstrap_stage3_bound_map_snapshot") || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-create"; return 1; }
-    bootstrap_stage3_bound_map_snapshot_owned=1
-    bootstrap_stage3_manifest_phase_emit 6
-    dd if="$bootstrap_stage3_bound_map" of="$bootstrap_stage3_bound_map_snapshot" bs=65536 2>/dev/null || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-copy"; return 1; }
-    chmod 0400 "$bootstrap_stage3_bound_map_snapshot" || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-mode"; return 1; }
-    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_bound_map_snapshot")" = "$bootstrap_stage3_bound_map_external_sha" ] || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-hash"; return 1; }
-    bootstrap_stage3_manifest_phase_emit 7
-    exec 7<"$bootstrap_stage3_bound_map_snapshot" || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-open"; return 1; }
-    rm -f "$bootstrap_stage3_bound_map_snapshot" || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-remove"; return 1; }
+    if [ -r /proc/self/stat ]; then
+        bootstrap_stage3_bound_map_snapshot="${TMPDIR:-/tmp}/stage3-bound-map.$bootstrap_stage3_local_pid.snapshot"
+        (umask 077; set -C; : >"$bootstrap_stage3_bound_map_snapshot") || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-create"; return 1; }
+        bootstrap_stage3_bound_map_snapshot_owned=1
+        bootstrap_stage3_manifest_phase_emit 6
+        dd if="$bootstrap_stage3_bound_map" of="$bootstrap_stage3_bound_map_snapshot" bs=65536 2>/dev/null || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-copy"; return 1; }
+        chmod 0400 "$bootstrap_stage3_bound_map_snapshot" || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-mode"; return 1; }
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_bound_map_snapshot")" = "$bootstrap_stage3_bound_map_external_sha" ] || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-hash"; return 1; }
+        bootstrap_stage3_manifest_phase_emit 7
+        exec 7<"$bootstrap_stage3_bound_map_snapshot" || { rm -f "$bootstrap_stage3_bound_map_snapshot"; bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-open"; return 1; }
+        rm -f "$bootstrap_stage3_bound_map_snapshot" || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-snapshot-remove"; return 1; }
+        bootstrap_stage3_bound_map="/proc/$bootstrap_stage3_local_pid/fd/7"
+    else
+        # The seam already produced the re-readable read-only view; re-assert
+        # its content against the hash taken right after the descriptor pin.
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_bound_map")" = \
+            "$bootstrap_stage3_bound_map_external_sha" ] || {
+            bootstrap_stage3_provenance_fail \
+                "manifest-entry-bound-map-view-hash"
+            return 1
+        }
+    fi
     bootstrap_stage3_manifest_phase_emit 8
-    bootstrap_stage3_bound_map="/proc/$bootstrap_stage3_local_pid/fd/7"
     bootstrap_stage3_map_value() {
         bootstrap_stage3_manifest_value "$1" "$bootstrap_stage3_bound_map"
     }
@@ -164,23 +280,43 @@ bootstrap_stage3_verify_manifest_impl() {
     esac
     bootstrap_stage3_manifest_a_failure_code=U2
     exec 8<"$bootstrap_stage3_manifest" || return 1
+    # Content reads below must go through a re-readable view: the /proc magic
+    # link re-opens at offset 0 on every use. /dev/fd/8 on hosts without procfs
+    # is an fdesc dup with a SHARED offset (safe for stat identity, fatal for
+    # content reads), so the no-procfs branch uses it only for the
+    # before/after stat pair and moves content reads to the seam's private
+    # read-only copy.
+    if [ -r /proc/self/stat ]; then
+        bootstrap_stage3_manifest_fd_view=\
+"/proc/$bootstrap_stage3_local_pid/fd/8"
+    else
+        bootstrap_stage3_manifest_fd_view=/dev/fd/8
+    fi
     bootstrap_stage3_manifest_source_before=$(
         stat -Lc '%d %i %f %s' \
-            "/proc/$bootstrap_stage3_local_pid/fd/8"
+            "$bootstrap_stage3_manifest_fd_view"
     ) || return 1
-    [ -f "/proc/$bootstrap_stage3_local_pid/fd/8" ] || return 1
+    [ -f "$bootstrap_stage3_manifest_fd_view" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=U3
-    bootstrap_stage3_manifest_snapshot="${TMPDIR:-/tmp}/stage3-manifest.$bootstrap_stage3_local_pid.snapshot"
-    (umask 077; set -C; : >"$bootstrap_stage3_manifest_snapshot") || return 1
-    bootstrap_stage3_manifest_snapshot_owned=1
+    if [ -r /proc/self/stat ]; then
+        bootstrap_stage3_manifest_snapshot="${TMPDIR:-/tmp}/stage3-manifest.$bootstrap_stage3_local_pid.snapshot"
+        (umask 077; set -C; : >"$bootstrap_stage3_manifest_snapshot") || return 1
+        bootstrap_stage3_manifest_snapshot_owned=1
+    else
+        bootstrap_stage3_fd_view 8 "$bootstrap_stage3_manifest" || return 1
+        bootstrap_stage3_manifest_snapshot=\
+"$bootstrap_stage3_fd_view_result"
+    fi
     bootstrap_stage3_manifest_a_failure_code=U4
-    dd of="$bootstrap_stage3_manifest_snapshot" bs=65536 <&8 2>/dev/null ||
-        return 1
-    chmod 0400 "$bootstrap_stage3_manifest_snapshot" || return 1
+    if [ -r /proc/self/stat ]; then
+        dd of="$bootstrap_stage3_manifest_snapshot" bs=65536 <&8 2>/dev/null ||
+            return 1
+        chmod 0400 "$bootstrap_stage3_manifest_snapshot" || return 1
+    fi
     bootstrap_stage3_manifest_a_failure_code=U5
     bootstrap_stage3_manifest_source_after=$(
         stat -Lc '%d %i %f %s' \
-            "/proc/$bootstrap_stage3_local_pid/fd/8"
+            "$bootstrap_stage3_manifest_fd_view"
     ) || return 1
     [ "$bootstrap_stage3_manifest_source_before" = \
         "$bootstrap_stage3_manifest_source_after" ] || return 1
@@ -193,18 +329,32 @@ bootstrap_stage3_verify_manifest_impl() {
     ) || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_manifest_snapshot")" = \
         "$bootstrap_stage3_manifest_snapshot_sha" ] || return 1
-    [ "$(bootstrap_stage3_hash_file \
-        "/proc/$bootstrap_stage3_local_pid/fd/8")" = \
-        "$bootstrap_stage3_manifest_snapshot_sha" ] || return 1
+    if [ -r /proc/self/stat ]; then
+        [ "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_manifest_fd_view")" = \
+            "$bootstrap_stage3_manifest_snapshot_sha" ] || return 1
+    else
+        # No-procfs: the pinned descriptor content was copied by the seam, so
+        # the caller's path must still resolve to the same bytes; a drifted
+        # path fails closed here.
+        [ "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_manifest")" = \
+            "$bootstrap_stage3_manifest_snapshot_sha" ] || return 1
+    fi
     bootstrap_stage3_manifest_a_failure_code=T0
     exec 8<"$bootstrap_stage3_manifest_snapshot" || return 1
+    if [ ! -r /proc/self/stat ]; then
+        # From here on, content reads go to the re-readable view path itself.
+        bootstrap_stage3_manifest_fd_view=\
+"$bootstrap_stage3_manifest_snapshot"
+    fi
     bootstrap_stage3_manifest_a_failure_code=T1
     bootstrap_stage3_manifest_snapshot_path_identity=$(
         stat -Lc '%d %i %f %s' "$bootstrap_stage3_manifest_snapshot"
     ) || return 1
     bootstrap_stage3_manifest_snapshot_fd_identity=$(
         stat -Lc '%d %i %f %s' \
-            "/proc/$bootstrap_stage3_local_pid/fd/8"
+            "$bootstrap_stage3_manifest_fd_view"
     ) || return 1
     [ "$bootstrap_stage3_manifest_snapshot_path_identity" = \
         "$bootstrap_stage3_manifest_snapshot_fd_identity" ] || return 1
@@ -213,12 +363,12 @@ bootstrap_stage3_verify_manifest_impl() {
         [ "$4" = "$bootstrap_stage3_manifest_source_size" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=T2
     [ "$(bootstrap_stage3_hash_file \
-        "/proc/$bootstrap_stage3_local_pid/fd/8")" = \
+        "$bootstrap_stage3_manifest_fd_view")" = \
         "$bootstrap_stage3_manifest_snapshot_sha" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=T3
     grep -Fqx 'schema=simple-bootstrap-stage3-provenance-v4' \
-        "/proc/$bootstrap_stage3_local_pid/fd/8" || return 1
-    bootstrap_stage3_manifest="/proc/$bootstrap_stage3_local_pid/fd/8"
+        "$bootstrap_stage3_manifest_fd_view" || return 1
+    bootstrap_stage3_manifest="$bootstrap_stage3_manifest_fd_view"
     bootstrap_stage3_manifest_a_failure_code=U8
     bootstrap_stage3_manifest_schema=$(
         bootstrap_stage3_manifest_value schema "$bootstrap_stage3_manifest"
@@ -409,8 +559,10 @@ bootstrap_stage3_verify_manifest_impl() {
             expr "$bootstrap_stage3_runtime_path" : \
                 '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
             exec 6<"$bootstrap_stage3_runtime_path/." || return 1
+            bootstrap_stage3_fd_view 6 "$bootstrap_stage3_runtime_path" ||
+                return 1
             bootstrap_stage3_runtime_path=\
-"/proc/$bootstrap_stage3_local_pid/fd/6"
+"$bootstrap_stage3_fd_view_result"
             set -- $(stat -Lc '%d %i %a' "$bootstrap_stage3_runtime_path") || return 1
             [ "$(bootstrap_stage3_map_value runtime_path_dev)" = "$1" ] &&
                 [ "$(bootstrap_stage3_map_value runtime_path_ino)" = "$2" ] &&
@@ -1114,6 +1266,11 @@ bootstrap_stage3_verify_manifest() (
     bootstrap_stage3_manifest_snapshot=
     bootstrap_stage3_manifest_snapshot_owned=0
     bootstrap_stage3_manifest_a_failure_code=
+    bootstrap_stage3_fd_view_dirs=
+    # Views created by the no-procfs branch of bootstrap_stage3_fd_view live in
+    # private mktemp directories; remove them on every exit path of this
+    # process-scoped subshell.
+    trap bootstrap_stage3_fd_view_cleanup EXIT
     if bootstrap_stage3_verify_manifest_impl "$@"; then
         bootstrap_stage3_verify_manifest_status=0
     else

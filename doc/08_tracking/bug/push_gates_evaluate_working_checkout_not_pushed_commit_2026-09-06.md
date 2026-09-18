@@ -4,8 +4,89 @@
 - **Class:** fail-wrong guard (same family as
   `pre_push_guards_fail_open_on_cwd_2026-08-01.md`, but the opposite failure —
   these guards *do* check something, they check the wrong tree)
-- **Status:** one gate fixed (`push-rt-dual-implementation`), the class remains
-  open for the other 16 `tree`-mode rows.
+- **Status:** 2026-09-16: 11 blocking rows fixed (six on 2026-09-07 via PR
+  #465, commits 45f16f29027, ca867521f93, 13a831908ae, plus the five
+  spirv-pinned rows this sweep — see the update section below). Zero
+  blocking `tree` rows remain; the class stays OPEN for the 35 advisory
+  `tree` rows and for the generic mechanism question about tree rows whose
+  subjects have no committed form.
+
+## 2026-09-16 update (macOS sweep)
+
+Progress on this class: the five blocking `spirv-pinned` rows that were
+added as `tree` rows after the original census — `push-rect-batch-spirv-pinned`,
+`push-blit-spirv-pinned`, `push-blur-rect-spirv-pinned`,
+`push-shadow-rect-spirv-pinned`, `push-glass-material-spirv-pinned` — moved
+from `tree` to `ref`. Their subjects are committed content (regenerate from
+checked-in GLSL, compare against checked-in SPIR-V words), which per the rule
+in this file belongs on `--rev`. The dispatcher mechanism note above (the
+three-mode table and the `run_manifest_push_gates` dispatch) is unchanged and
+still accurate.
+
+What the conversion carries, identical to the established pattern from
+`check-rt-dual-implementation-ratchet.shs` / PR #465:
+
+- `--rev <REV>` materialises the committed GLSL source and pinned SPIR-V
+  blob with `git archive <REV> -- <paths> | tar -x` into a temp dir at the
+  pushed sha, and the scan runs there. The transcription tool
+  (`scripts/tool/spirv-to-spl-words.shs`, plus
+  `scripts/tool/extract-blit-glsl.shs` for blit) is archived from the same
+  rev — the tool is itself content, and a working-copy tool sabotage
+  deciding a committed-content verdict is the same wrong-tree defect one
+  level down.
+- Fail-closed throughout: a failed or incomplete materialisation is
+  `ERROR — nothing was checked (could not materialise <rev>)`, exit 2, never
+  a pass. Default no-arg behavior is unchanged (working checkout).
+- A selftest fixture that asserts the two paths DISAGREE (rect-batch,
+  blur-rect, shadow-rect, glass-material fixture 5; blit fixture 6): commit
+  a matching pair, dirty the working copy with an unregenerated GLSL edit,
+  and require `--rev HEAD` to PASS while a working-tree scan of the same
+  directory FAILs. The fixture is fatal before every scan, so it runs on the
+  push path. These guards have no baseline/allowlist file, so the census's
+  second rot axis (data file reverting to the checkout) has no surface; the
+  tool axis was injected separately, below.
+
+Verification on macOS at HEAD `6217f1ce603c`, 2026-09-16, verdicts captured
+with exit codes:
+
+- 10/10 runs PASS across the five scripts in default mode and with
+  `--rev HEAD`, identical byte counts and pinned shas across modes
+  (rect-batch 5848, blit 6848, blur-rect 6544, shadow-rect 5136,
+  glass-material 20688 bytes).
+- Fail-closed: `--rev deadbeef...` and `--rev HEAD~999999` -> ERROR exit 2.
+- Tool-axis rot injection: working-copy `spirv-to-spl-words.shs` sabotaged
+  to exit 2 -> `--rev HEAD` still PASSes (scan reads the rev-archived tool);
+  the same script rotted to point the tool back at the checkout ->
+  `ERROR — ... (transcription failed: SABOTAGE)` exit 2. Same shape for
+  blit's extractor (`GLSL extraction failed: SABOTAGE`). Both discriminate.
+- Dispatcher byte-match: 62 manifest keys vs 62 arms, `comm -23` empty; the
+  five converted rows resolve to their new `ref` arms.
+  `check-push-must-pass.shs --self-test` -> `PASS — 20 ledger fixtures
+  checked`.
+- `check-guard-wiring.shs` keeps the five spirv scripts wired; its red (3
+  NEW unwired `check-simple-browser-production-*` guards, untracked files
+  from another lane) predates this change.
+
+Still open — the class is NOT closed:
+
+- **35 advisory `tree` rows remain.** Most have committed-content subjects
+  and are convertible by this same materialisation pattern when picked up;
+  per-row plans live in the census work list
+  (`push_gate_tree_mode_row_census_2026-09-06.md`).
+- **The generic mechanism question is untouched:** what should a `tree` row
+  whose subject has no committed form (needs a built artifact, a seed
+  binary, or a host tool like `cygpath`) evaluate, and how is it prevented
+  from silently scanning the shared checkout? Candidates: materialise the
+  rev and run there with a declared missing-tool verdict, or keep `tree`
+  with the row's host-scoped subject stated in its header and manifest
+  description. Rows in this bucket include `push-dual-run-shadow`,
+  `push-plan-acceptance-swept`, `push-entry-closure-ratchet`,
+  `push-ui-slim-closure*`, `push-stage4-dynamic-runtime-lane`, and the
+  cygpath exec halves of the `push-shs-*` rows. Blocked-on-a-binary is a
+  blocker, not a justification — same as recorded 2026-09-07.
+- The bypass condition recorded in this file still bounds all of it: topic
+  pushes are made with `--no-verify` while blocking gates are red on main,
+  so these gates read the right tree only when they run.
 
 ## Symptom that made this real
 

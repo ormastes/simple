@@ -1,9 +1,30 @@
+## 2026-09-16 re-verification (macOS sweep)
+
+Command (macOS aarch64 M4 host, `bin/simple` = Rust seed `src/compiler_rust/target/bootstrap/simple` rebuilt 2026-09-14):
+`bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`
+
+Outcome: **FAIL — 48 examples executed, 47 passed, 1 failed** (exit 1).
+`SPEC FILE VERDICT: ... engine2d_shared_raster_parity_spec.spl outcome=ERROR declared>=48 executed=48 passed=47 failed=1 skipped=0 dropped=0`
+
+Every example this record's coverage close added passes: `draw_image blits an identical surface`, all 4 `draw_image (blit) parity-sweep coverage close` raw-copy formula examples (on-surface, right/bottom clip, left/top clip, fully-off-surface no-op), and the matrix rows `draw_image | EQUAL | mism=0` / `draw_image_blend | EQUAL | mism=0`.
+
+The single failure is unrelated to this record:
+```
+✗ draw_line (thick) diverges — sw parallel-offset lines vs emu per-point txt square [canonical: design review]
+  expected false to equal true
+```
+The printed matrix now reports `draw_line (thick) | DIVERGE | mism=0` — sw and emu agree on this op (mism=0), so the spec's "diverges" expectation appears stale after the 2026-09-14 spec touch / lib unification, while the two r<=0 divergence pins still pass.
+
+Resulting status: **OPEN** — the recorded repro command still exits non-zero, so per sweep rules the record stays open with this fresh evidence; the draw_image coverage defect itself is green on-host.
+
 # draw_image (kernel_blit_image) had a real Metal dispatch path but ZERO CPU-vs-Metal parity coverage
 ## Closed 2026-09-16 — Status Closed; draw_image parity coverage added, all gates pass bit-exact
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
+
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces; 2026-09-16 macOS re-run: 47/48, sole failure the unrelated `draw_line (thick)` stale-divergence example — see section above)
 
 ## Status
 Closed (2026-07-07) — coverage gap, not a live divergence. No fix was needed;

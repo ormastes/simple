@@ -3,7 +3,7 @@
 # be exactly what glslangValidator produces from the checked-in `_glsl_blit()`
 # GLSL.
 #
-#   sh scripts/check/check-blit-spirv-pinned.shs [--selftest]
+#   sh scripts/check/check-blit-spirv-pinned.shs [--selftest] [--rev <REV>]
 #
 # Why this exists: the image blit/src-over kernel exists TWICE in the tree --
 # as readable GLSL in backend_vulkan_glsl.spl `_glsl_blit()`, and as ~6.8 KB of
@@ -24,6 +24,14 @@
 # and compare the byte body AND the `# sha256:` pin line inside `spirv_blit()`
 # against the committed module, byte for byte.
 #
+# --rev <REV> materialises the committed GLSL module and blob with
+# `git archive` and evaluates THAT, never the shared working checkout: both are
+# committed content, and the extractor plus transcription tool are archived
+# from the same rev because the tools are themselves content. A materialisation
+# failure is ERROR, never a pass. Default (no arguments) scans the working
+# checkout, unchanged. ref-mode since 2026-09-16 -- see
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
 # Verdict is the LAST line of stdout, same convention as the pre-push guards:
 #   PASS  -- <n> byte(s) compared, ...            exit 0
 #   FAIL  -- ...                                  exit 1
@@ -33,11 +41,27 @@
 # of evidence.
 set -eu
 
-repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-glsl_spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl"
-blob_spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl"
-words_tool="$repo_root/scripts/tool/spirv-to-spl-words.shs"
-extract_glsl="$repo_root/scripts/tool/extract-blit-glsl.shs"
+SELF="$0"
+
+REV=""
+ROOT=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV="$2"; shift 2 ;;
+        --root) ROOT="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+fi
+glsl_spl="$ROOT/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl"
+blob_spl="$ROOT/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl"
+words_tool="$ROOT/scripts/tool/spirv-to-spl-words.shs"
+extract_glsl="$ROOT/scripts/tool/extract-blit-glsl.shs"
 
 oops() { echo "ERROR — nothing was checked ($1)"; exit 2; }
 
@@ -251,6 +275,54 @@ selftest() {
         rm -rf "$_t"; return 1
     fi
 
+    # Fixture 6 -- --rev must read the COMMITTED GLSL module and the COMMITTED
+    # blob, never the working checkout. Same replay of the 2026-09-06
+    # wrong-tree incident as the sibling rect-batch guard's fixture 5: the
+    # fixture commits a matching pair, then dirties the working copy with the
+    # unregenerated GLSL edit from fixture 3. A working-tree scan of the same
+    # directory must FAIL; only a committed-content scan is correct, and it
+    # must PASS. A --rev that silently fell back to the checkout fails this
+    # fixture.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "selftest: FAILED — git unavailable, cannot verify the --rev committed-content path" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _fx="$_t/f6"
+    mkdir -p "$_fx/src/lib/gc_async_mut/gpu/engine2d" "$_fx/scripts/tool"
+    cp "$words_tool" "$_fx/scripts/tool/spirv-to-spl-words.shs"
+    cp "$extract_glsl" "$_fx/scripts/tool/extract-blit-glsl.shs"
+    write_fixture_glsl "$_fx/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl" "out_a"
+    sh "$extract_glsl" "$_fx/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl" \
+        > "$_t/f6.comp" 2>/dev/null \
+        || { echo "selftest FIXTURE 6 extractor failed on fixture" >&2; rm -rf "$_t"; return 1; }
+    "$_g" -V --target-env vulkan1.1 -o "$_t/f6.spv" "$_t/f6.comp" >/dev/null 2>&1 \
+        || { echo "selftest FIXTURE 6 could not compile fixture GLSL" >&2; rm -rf "$_t"; return 1; }
+    sh "$words_tool" "$_t/f6.spv" 4 > "$_t/f6.words"
+    write_fixture_blob "$_fx/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl" "$_t/f6.words"
+    if ! ( cd "$_fx" && git init -q . && git config user.email selftest@example.com \
+           && git config user.name selftest && git add -A && git commit -q -m committed ) \
+           >/dev/null 2>&1; then
+        echo "selftest FIXTURE 6 could not build the fixture repo" >&2
+        rm -rf "$_t"; return 1
+    fi
+    # Working copy only: the stale `/255u` formula from fixture 3, not
+    # regenerated.
+    write_fixture_glsl "$_fx/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl" "255u"
+    _out="$_t/f6rev.out"
+    _rc=0
+    BLIT_SPIRV_PIN_SELFTEST_CHILD=1 sh "$SELF" --root "$_fx" --rev HEAD > "$_out" 2>&1 || _rc=$?
+    if [ "$_rc" -ne 0 ] || ! grep -q '^PASS' "$_out"; then
+        echo "selftest FIXTURE 6 (--rev did not read committed content) rc=$_rc: $(tail -1 "$_out")" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _out="$_t/f6wt.out"
+    _rc=0
+    BLIT_SPIRV_PIN_SELFTEST_CHILD=1 sh "$SELF" --root "$_fx" > "$_out" 2>&1 || _rc=$?
+    if [ "$_rc" -ne 1 ] || ! grep -q '^FAIL' "$_out"; then
+        echo "selftest FIXTURE 6 (working-tree scan must FAIL on the dirty edit) rc=$_rc: $(tail -1 "$_out")" >&2
+        rm -rf "$_t"; return 1
+    fi
+
     rm -rf "$_t"
     return 0
 }
@@ -261,18 +333,49 @@ glslang=$(find_glslang)
 [ -f "$words_tool" ] || oops "missing $words_tool"
 [ -f "$extract_glsl" ] || oops "missing $extract_glsl"
 
-st_rc=0
-selftest "$glslang" || st_rc=$?
-if [ "$st_rc" -eq 2 ]; then
-    oops "selftest could not run (see stderr)"
-elif [ "$st_rc" -ne 0 ]; then
-    echo "FAIL — selftest failed; the guard itself is broken, nothing was checked"
-    exit 1
+if [ "${BLIT_SPIRV_PIN_SELFTEST_CHILD:-0}" != 1 ]; then
+    # Fixture 6 invokes this script recursively; re-running the selftest there
+    # would recurse without end. The child is exercising the real scan path,
+    # which is the point of the fixture.
+    st_rc=0
+    selftest "$glslang" || st_rc=$?
+    if [ "$st_rc" -eq 2 ]; then
+        oops "selftest could not run (see stderr)"
+    elif [ "$st_rc" -ne 0 ]; then
+        echo "FAIL — selftest failed; the guard itself is broken, nothing was checked"
+        exit 1
+    fi
 fi
 
-if [ "${1:-}" = "--selftest" ]; then
-    echo "PASS — 5 selftest fixture(s) checked, guard behaves correctly"
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 6 selftest fixture(s) checked, guard behaves correctly"
     exit 0
+fi
+
+# --rev: read the COMMITTED GLSL module and blob, never the shared working
+# checkout. Both are committed content; the extractor and transcription tool
+# are archived from the same rev because the tools are themselves content.
+if [ -n "$REV" ]; then
+    _work=$(mktemp -d) || oops "mktemp failed"
+    trap 'rm -rf "$_work"' EXIT INT TERM
+    mkdir -p "$_work/rev"
+    _mat_rc=0
+    ( cd "$ROOT" && git archive "$REV" -- \
+        src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl \
+        src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl \
+        scripts/tool/spirv-to-spl-words.shs \
+        scripts/tool/extract-blit-glsl.shs ) 2>/dev/null \
+        | tar -x -C "$_work/rev" 2>/dev/null || _mat_rc=1
+    if [ "$_mat_rc" -ne 0 ] \
+       || [ ! -f "$_work/rev/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl" ] \
+       || [ ! -f "$_work/rev/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl" ]; then
+        echo "ERROR — nothing was checked (could not materialise $REV)"
+        exit 2
+    fi
+    glsl_spl="$_work/rev/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl"
+    blob_spl="$_work/rev/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl"
+    words_tool="$_work/rev/scripts/tool/spirv-to-spl-words.shs"
+    extract_glsl="$_work/rev/scripts/tool/extract-blit-glsl.shs"
 fi
 
 rc=0

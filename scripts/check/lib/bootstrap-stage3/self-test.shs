@@ -570,16 +570,49 @@ bootstrap_stage3_provenance_self_test() {
         BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX=\
 "$bootstrap_stage3_test_root/procfd-verify"
         export BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX
-        bootstrap_stage3_verify_command_transcript /proc/$$/fd/9 \
-            "$bootstrap_stage3_test_root" \
+        # The fd-view seam: on procfs hosts the view is the /proc magic link
+        # (today's spelling, byte-identical); on hosts without procfs it is a
+        # private read-only copy. The broken /dev/fd dup-semantics port fails
+        # the discriminator below: with a shared offset the SECOND sequential
+        # read of the same view returns EOF, so at least three sequential
+        # reads must be asserted, never a single read.
+        trap bootstrap_stage3_fd_view_cleanup EXIT
+        bootstrap_stage3_fd_view 9 \
+            "$bootstrap_stage3_test_root/procfd-view-9" || exit 1
+        bootstrap_stage3_test_view9=$bootstrap_stage3_fd_view_result
+        printf '%s\n' "$bootstrap_stage3_test_view9" \
+            >"$bootstrap_stage3_test_root/fdview9.path"
+        [ -f "$bootstrap_stage3_test_view9" ] || exit 1
+        bootstrap_stage3_test_view9_read1=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_test_view9") || exit 1
+        bootstrap_stage3_test_view9_read2=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_test_view9") || exit 1
+        bootstrap_stage3_test_view9_read3=$(wc -l \
+            <"$bootstrap_stage3_test_view9" | tr -d ' ') || exit 1
+        [ -n "$bootstrap_stage3_test_view9_read1" ] &&
+            [ "$bootstrap_stage3_test_view9_read1" = \
+                "$bootstrap_stage3_test_view9_read2" ] &&
+            [ "$bootstrap_stage3_test_view9_read3" -gt 0 ] || exit 1
+        [ "$(sed -n '1p' "$bootstrap_stage3_test_view9")" = \
+            'schema=simple-bootstrap-command-transcript-v2' ] || exit 1
+        [ "$(tail -n 1 "$bootstrap_stage3_test_view9")" = \
+            "$(tail -n 1 "$bootstrap_stage3_test_transcript")" ] || exit 1
+        bootstrap_stage3_verify_command_transcript \
+            "$bootstrap_stage3_test_view9" "$bootstrap_stage3_test_root" \
             "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
             /bin/sh -c 'exit 0' || exit 1
         [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected" ] &&
             [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host" ] || exit 1
-        bootstrap_stage3_verify_command_transcript \
-            /proc/$$/fd/8/transcript "$bootstrap_stage3_test_root" \
-            "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
-            /bin/sh -c 'exit 0' || exit 1
+        if [ -r /proc/self/stat ]; then
+            # Directory traversal through the fd path is a /proc magic-link
+            # capability; the no-procfs seam produces file views only, so
+            # this positive case stays procfs-gated (its negative cases below
+            # remain host-independent rejections).
+            bootstrap_stage3_verify_command_transcript \
+                /proc/$$/fd/8/transcript "$bootstrap_stage3_test_root" \
+                "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
+                /bin/sh -c 'exit 0' || exit 1
+        fi
         for bootstrap_stage3_test_bad_procfd_transcript in \
             /proc/$$/fd/8/a/b /proc/$$/fd/8/../transcript \
             /proc/$$/fd/8/.hidden /proc/$$/fd/8/bad+leaf \
@@ -603,6 +636,9 @@ bootstrap_stage3_provenance_self_test() {
         [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-expected" ] &&
             [ ! -e "${BOOTSTRAP_STAGE3_VERIFIER_SCRATCH_PREFIX}.transcript-host" ] || exit 1
     ) || return 1
+    # The no-procfs seam view must have been removed by the fixture's EXIT
+    # trap; on procfs the /proc/$$/fd/9 spelling is gone with the closed fd.
+    [ ! -e "$(cat "$bootstrap_stage3_test_root/fdview9.path")" ] || return 1
     if bootstrap_stage3_write_command_transcript \
         "$bootstrap_stage3_test_transcript.duplicate" \
         "$bootstrap_stage3_test_root" \

@@ -1,4 +1,48 @@
+## 2026-09-16 re-verification (macOS sweep)
+
+Command (macOS aarch64 M4 host):
+`SIMPLE_GPU_TEST=1 SIMPLE_LIB=src build/cargo-r2/release/simple test test/03_system/app/ui.browser/feature/gpu_provider_conformance_device_spec.spl`
+(binary `build/cargo-r2/release/simple`, 39,636,840 B, built 2026-09-14 with the cargo `metal` feature — links Metal.framework via objc2-metal)
+
+Outcome: **FAIL — 2 examples, 1 failure** (exit 1). Verbatim:
+```
+Engine2D GPU provider conformance on this host
+  ✗ probes every provider without a device and grades none of them full
+    semantic: unknown extern function: rt_metal_device_identity
+  ✓ unnamed
+
+2 examples, 1 failure
+SPEC FILE VERDICT: ... gpu_provider_conformance_device_spec.spl outcome=ERROR declared>=1 executed=2 passed=1 failed=1 skipped=0 dropped=0
+```
+
+What happened: the seed rebuilt 2026-09-14 DID fix the availability half of
+this todo's premise — `rt_metal_is_available`/`rt_metal_create_device` now
+answer a real device on this M4 (corroborated the same day by
+`metal_msl_pipeline_spec` going 7/7 with real MSL pipeline compiles — see
+`lane4_metal_and_vulkan_backend_specs_red_2026-09-12.md`). But the probe
+transcript this todo demands still cannot be produced: the Metal probe calls
+`rt_metal_device_identity` (extern at `src/lib/nogc_sync_mut/io/metal_sffi.spl:26`,
+invoked from `metal_sffi_device_registry_identity` :410), and that extern is
+**GENUINELY_MISSING from the seed** — it is not in the binary's runtime symbol
+table (present Metal externs: `rt_metal_init/is_available/device_count/device_name/
+device_memory/create_device/...`; `strings` finds no `rt_metal_device_identity`),
+matching the GENUINELY_MISSING census entries in
+`doc/08_tracking/bug/data/sffi_contract_inventory_2026-08-21.tsv` and
+`unbacked_extern_census_2026-08-18.tsv`. `rt_metal_device_supports_metal3` is
+likewise still missing. The semantic pass therefore kills the probe-all example
+before any identity/grade transcript prints, and the gated Metal scenario does
+not execute (its `metal_lane_ready()` predicate hits the same missing extern).
+The Vulkan gated scenario is the passing example.
+
+Resulting status: **OPEN** — no device transcript was produced, and this todo's
+rule forbids closing without one. Fresh blocker to record: implement
+`rt_metal_device_identity` (and `rt_metal_device_supports_metal3`) in the Rust
+runtime, rebuild the seed, then re-run the same command — the transcript
+(device name / registry identity / conformance grade) should then print.
+
 # TODO: [gpu][P2] Exercise the Metal provider probe on a host where metal_available() is true
+
+Status: OPEN (re-verified 2026-09-16: the 2026-09-14 Metal-featured seed makes the probe available, but the spec still cannot produce the identity transcript — `rt_metal_device_identity` remains GENUINELY_MISSING from the seed, so the probe-all example dies at semantic with "unknown extern function"; no transcript, still open per its rule — see "2026-09-16 re-verification (macOS sweep)" above)
 
 Date: 2026-09-06
 Lane: GPU scheduler hardening (plan doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md)
