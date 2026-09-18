@@ -1,0 +1,225 @@
+# ELF64 ET_EXEC writer — segment planning + serialization (lane A7 slice 1).
+#
+# Owner of "ELF exec write" (design §2). Plans the static image into PT_LOAD
+# segments and serializes it through the _ElfWriter byte codec (reached via
+# the elf_writer facade). No file I/O — returns raw [i64] bytes.
+#
+# Layout (same shape as `ld.lld -static` without -z separate-code):
+#   PT_LOAD R   : ELF header + program headers + .rodata   (file offset 0)
+#   PT_LOAD RX  : .text
+#   PT_LOAD RW  : .data (file-backed) + .bss (memsz > filesz)
+#   PT_GNU_STACK: RW, non-executable stack
+# Segments are packed in the file; each segment's vaddr is the previous
+# segment's end rounded up to the next page plus (offset mod page), so
+# p_offset == p_vaddr (mod p_align) holds and no two segments with different
+# permissions share a page.
+
+use compiler.backend.linker.elf_writer.{
+    ElfLayoutSection,
+    strtab_new, strtab_add, strtab_find, align_up,
+    write_zeros, write_bytes,
+    emit_elf_header_full, emit_program_header, emit_section_header_at,
+    ELF64_PHDR_SIZE, ET_EXEC_VAL
+}
+use compiler.backend.linker.elf_inspect.{ELF64_HEADER_SIZE, ELF64_SHDR_SIZE}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val PT_LOAD: i64 = 1
+val PT_GNU_STACK: i64 = 0x6474e551
+val PF_X: i64 = 1
+val PF_W: i64 = 2
+val PF_R: i64 = 4
+
+val SHF_WRITE: i64 = 1
+val SHF_ALLOC: i64 = 2
+val SHF_EXECINSTR: i64 = 4
+
+val SHT_PROGBITS_E: i64 = 1
+val SHT_STRTAB_E: i64 = 3
+val SHT_NOBITS_E: i64 = 8
+
+# Output section kinds, in address order.
+val ELF_OUT_RODATA: i64 = 0
+val ELF_OUT_TEXT: i64 = 1
+val ELF_OUT_DATA: i64 = 2
+val ELF_OUT_BSS: i64 = 3
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ElfExecSegment:
+    p_type: i64
+    p_flags: i64
+    p_offset: i64
+    p_vaddr: i64
+    p_filesz: i64
+    p_memsz: i64
+    p_align: i64
+
+struct ElfExecPlan:
+    """Placement of the four output sections (index = ELF_OUT_* kind)."""
+    offsets: [i64]     # file offset per kind (bss: offset where it would start)
+    vaddrs: [i64]      # virtual address per kind
+    sizes: [i64]
+    aligns: [i64]
+    segments: [ElfExecSegment]
+    file_end: i64      # end of the last file-backed byte
+
+# ============================================================================
+# Planning
+# ============================================================================
+
+fn elf_exec_kind_name(kind: i64) -> text:
+    if kind == ELF_OUT_RODATA:
+        return ".rodata"
+    if kind == ELF_OUT_TEXT:
+        return ".text"
+    if kind == ELF_OUT_DATA:
+        return ".data"
+    ".bss"
+
+fn elf_exec_page_align(prev_vend: i64, offset: i64, page: i64) -> i64:
+    """First vaddr >= next page after prev_vend that is congruent to offset mod page."""
+    align_up(prev_vend, page) + (offset % page)
+
+# reason: positional planner inputs — four (size, align) pairs by ELF_OUT_* kind
+fn elf_exec_plan(sizes: [i64], aligns: [i64], base: i64, page: i64) -> Result<ElfExecPlan, text>:
+    """Plan R / RX / RW PT_LOADs for sizes/aligns indexed by ELF_OUT_* kind."""
+    var k: i64 = 0
+    while k < 4:
+        if aligns[k] > page:
+            return Err("section {elf_exec_kind_name(k)} alignment {aligns[k]} exceeds page size {page}")
+        k = k + 1
+
+    val has_text = sizes[ELF_OUT_TEXT] > 0
+    val has_rw = sizes[ELF_OUT_DATA] > 0 or sizes[ELF_OUT_BSS] > 0
+    var phnum: i64 = 2  # R load + GNU_STACK
+    if has_text:
+        phnum = phnum + 1
+    if has_rw:
+        phnum = phnum + 1
+
+    var offsets: [i64] = [0, 0, 0, 0]
+    var vaddrs: [i64] = [0, 0, 0, 0]
+    var segs: [ElfExecSegment] = []
+
+    # --- R: headers + .rodata ---
+    var off = ELF64_HEADER_SIZE + phnum * ELF64_PHDR_SIZE
+    off = align_up(off, aligns[ELF_OUT_RODATA])
+    offsets[ELF_OUT_RODATA] = off
+    vaddrs[ELF_OUT_RODATA] = base + off
+    off = off + sizes[ELF_OUT_RODATA]
+    segs = segs.push(ElfExecSegment(p_type: PT_LOAD, p_flags: PF_R, p_offset: 0, p_vaddr: base,
+        p_filesz: off, p_memsz: off, p_align: page))
+    var vend = base + off
+
+    # --- RX: .text ---
+    if has_text:
+        off = align_up(off, aligns[ELF_OUT_TEXT])
+        val tv = elf_exec_page_align(vend, off, page)
+        offsets[ELF_OUT_TEXT] = off
+        vaddrs[ELF_OUT_TEXT] = tv
+        val tsz = sizes[ELF_OUT_TEXT]
+        segs = segs.push(ElfExecSegment(p_type: PT_LOAD, p_flags: PF_R | PF_X, p_offset: off, p_vaddr: tv,
+            p_filesz: tsz, p_memsz: tsz, p_align: page))
+        off = off + tsz
+        vend = tv + tsz
+
+    # --- RW: .data then .bss ---
+    if has_rw:
+        off = align_up(off, aligns[ELF_OUT_DATA])
+        val dv = elf_exec_page_align(vend, off, page)
+        offsets[ELF_OUT_DATA] = off
+        vaddrs[ELF_OUT_DATA] = dv
+        val dsz = sizes[ELF_OUT_DATA]
+        val bv = align_up(dv + dsz, aligns[ELF_OUT_BSS])
+        offsets[ELF_OUT_BSS] = off + dsz
+        vaddrs[ELF_OUT_BSS] = bv
+        val memsz = (bv + sizes[ELF_OUT_BSS]) - dv
+        segs = segs.push(ElfExecSegment(p_type: PT_LOAD, p_flags: PF_R | PF_W, p_offset: off, p_vaddr: dv,
+            p_filesz: dsz, p_memsz: memsz, p_align: page))
+        off = off + dsz
+
+    segs = segs.push(ElfExecSegment(p_type: PT_GNU_STACK, p_flags: PF_R | PF_W, p_offset: 0, p_vaddr: 0,
+        p_filesz: 0, p_memsz: 0, p_align: 0))
+
+    Ok(ElfExecPlan(offsets: offsets, vaddrs: vaddrs, sizes: sizes, aligns: aligns,
+        segments: segs, file_end: off))
+
+# ============================================================================
+# Serialization
+# ============================================================================
+
+fn elf_exec_kind_flags(kind: i64) -> i64:
+    if kind == ELF_OUT_TEXT:
+        return SHF_ALLOC | SHF_EXECINSTR
+    if kind == ELF_OUT_RODATA:
+        return SHF_ALLOC
+    SHF_ALLOC | SHF_WRITE
+
+# reason: positional ET_EXEC writer inputs (machine, entry, plan, per-kind bytes)
+fn elf_write_exec(e_machine: i64, e_entry: i64, plan: ElfExecPlan, contents: [[i64]]) -> [i64]:
+    """Serialize a planned static ET_EXEC. contents[kind] holds the bytes of
+    .rodata/.text/.data (index ELF_OUT_*); .bss contents are ignored."""
+    # Section header string table: only non-empty output sections get headers.
+    var shstr = strtab_new()
+    var kinds: [i64] = []
+    var k: i64 = 0
+    while k < 4:
+        if plan.sizes[k] > 0:
+            kinds = kinds.push(k)
+            shstr = strtab_add(shstr, elf_exec_kind_name(k))
+        k = k + 1
+    shstr = strtab_add(shstr, ".shstrtab")
+
+    val shstr_off = plan.file_end
+    val shoff = align_up(shstr_off + shstr.data.len(), 8)
+    val shnum = kinds.len() + 2
+    val phnum = plan.segments.len()
+
+    var b: [i64] = []
+    b = emit_elf_header_full(b, ET_EXEC_VAL, e_machine, e_entry, ELF64_HEADER_SIZE, shoff, phnum, shnum, shnum - 1)
+    for seg in plan.segments:
+        b = emit_program_header(b, seg.p_type, seg.p_flags, seg.p_offset, seg.p_vaddr, seg.p_filesz, seg.p_memsz, seg.p_align)
+
+    # File-backed section contents at their planned offsets.
+    for kind in kinds:
+        if kind != ELF_OUT_BSS:
+            b = write_zeros(b, plan.offsets[kind] - b.len())
+            b = write_bytes(b, contents[kind])
+
+    b = write_zeros(b, shstr_off - b.len())
+    b = write_bytes(b, shstr.data)
+    b = write_zeros(b, shoff - b.len())
+
+    # Section header table: null, output sections, .shstrtab.
+    b = write_zeros(b, ELF64_SHDR_SIZE)
+    for kind in kinds:
+        var st = SHT_PROGBITS_E
+        if kind == ELF_OUT_BSS:
+            st = SHT_NOBITS_E
+        val layout = ElfLayoutSection(name: elf_exec_kind_name(kind),
+            sh_name_idx: strtab_find(shstr, elf_exec_kind_name(kind)),
+            sh_type: st, sh_flags: elf_exec_kind_flags(kind),
+            sh_offset: plan.offsets[kind], sh_size: plan.sizes[kind],
+            sh_link: 0, sh_info: 0, sh_addralign: plan.aligns[kind], sh_entsize: 0, data: [])
+        b = emit_section_header_at(b, layout, plan.vaddrs[kind])
+    val shstr_layout = ElfLayoutSection(name: ".shstrtab", sh_name_idx: strtab_find(shstr, ".shstrtab"),
+        sh_type: SHT_STRTAB_E, sh_flags: 0, sh_offset: shstr_off, sh_size: shstr.data.len(),
+        sh_link: 0, sh_info: 0, sh_addralign: 1, sh_entsize: 0, data: [])
+    b = emit_section_header_at(b, shstr_layout, 0)
+    b
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfExecSegment, ElfExecPlan
+export elf_exec_plan, elf_write_exec, elf_exec_kind_name
+export ELF_OUT_RODATA, ELF_OUT_TEXT, ELF_OUT_DATA, ELF_OUT_BSS
+export PT_LOAD, PT_GNU_STACK, PF_X, PF_W, PF_R
+export SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR
