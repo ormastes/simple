@@ -238,3 +238,57 @@ two files are green while the other 28 identical files are red. That workaround
 hid the defect rather than removing it, and it should be reverted once the real
 fix lands.
 
+
+## Re-measurement 2026-09-18 — reproduces on BOTH lanes, and it belongs to a family
+
+Binary: `bin/simple` as redeployed 2026-09-18 (`308de6af84db5c26e2c0`, built from
+`origin/main`). Measurements on this host before 2026-09-18 17:00 used a binary
+with its own silent wrong answers and are not comparable.
+
+```simple
+enum Evt:
+    Click(x: i64)
+    Key(code: i64)
+
+fn make() -> Evt?:
+    Some(Evt.Click(x: 5))
+
+fn main() -> i64:
+    match make():
+        case Evt.Click(x): print "direct=click{x}"
+        case Evt.Key(c):   print "direct=key{c}"
+        case _:            print "direct=WILDCARD"
+    0
+```
+
+| shape | interpret | JIT |
+|---|---|---|
+| `Evt?` matched against BARE variant patterns | **WILDCARD** | **WILDCARD** |
+| same value matched as `case Some(Evt.Click(x))` | `click5` | `click5` |
+
+So it still reproduces, both engines agree, and the `Some(...)`-wrapped form is
+the one that works. Whether a bare variant pattern *should* match an optional
+scrutinee is a design question and this entry does not settle it — but silently
+selecting the wildcard is the worst of the three available answers, because it
+produces a plausible wrong branch rather than either a match or a diagnostic.
+With no wildcard arm present the same shape falls through silently instead
+(`match_enum_fallthrough_silent_2026-08-01`).
+
+### It is one family with two other open entries
+
+All three are the same missing check — pattern/argument type agreement is not
+enforced, so a mismatch resolves to a silent answer instead of a diagnostic:
+
+| entry | shape | today |
+|---|---|---|
+| this one | non-Option pattern vs **Option** scrutinee | silently takes `_` |
+| `option_pattern_accepted_on_non_option_scrutinee_2026-07-27` | Option pattern vs **non-Option** scrutinee | silently accepted, engines bind different values |
+| `bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04` | `i64` argument vs **`bool`** parameter | silently accepted, `take_bool(5)` prints `got=true` |
+
+They are mirror images of one another and should be priced as one job. Note
+before attempting it: enforcement has blast radius, which is exactly why
+`match_enum_fallthrough_silent_2026-08-01` chose a runtime diagnostic over a
+compile-time checker after measuring 286 candidate sites and 336 enum names
+declared more than once. Any fix here deserves the same measurement first.
+`src/compiler/30.types/bidirectional_checking.spl` is where argument agreement
+lives; PR #1077 is open on the sibling `type_infer/*` files.
