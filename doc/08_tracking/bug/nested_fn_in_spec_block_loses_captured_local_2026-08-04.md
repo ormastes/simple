@@ -1,4 +1,153 @@
-# BUG: a nested `fn` declared inside a LAMBDA body does not capture the lambda's locals — silently reads zero, or dies with "variable not found" (spec `it` blocks are just the common case)
+# BUG: a nested `fn` declared inside a LAMBDA body does not capture the lambda's locals — spec `it` blocks are just the common case
+
+**Status: FIXED (2026-09-19) in the Rust seed's call dispatch. Not yet deployed — `bin/simple` still carries the defect. See "Fix" below.**
+
+## Fix 2026-09-19
+
+### What was actually wrong — a correction to yesterday's localisation
+
+Yesterday's note concluded, from the probe where a nested `fn` inside a lambda
+still read a module-level `var` correctly, that the `fn` was "lowered as a free,
+top-level function". **That inference was wrong, and the probe could not have
+decided it**: the closure's captured environment chains to module scope too, so
+both the broken path and the correct one answer that probe identically. It
+discriminated nothing.
+
+The real mechanism is dispatch order in the interpreter, and it is one function
+being registered in two places.
+
+`exec_block_closure_into` (`interpreter_call/block_execution.rs`) registers a
+nested `fn` **twice**:
+
+- into the flat `functions` map, so the body can recurse;
+- into the block scope as a `Value::Function` whose `captured_env` is the block's
+  environment — the registration that carries `inner_local`.
+
+`evaluate_call` (`interpreter_call/mod.rs`) then consulted the flat map at
+Priority 5 and the environment only at Priority 6. The flat entry always won, and
+it runs the body against the **caller's** environment, so the capture was thrown
+away and the block's own `val`s were simply absent.
+
+That also explains, without any extra theory, why a `fn` nested in a plain
+function body always worked: that path (`interpreter/node_exec.rs`) binds **only**
+the environment and never touches the flat map, so Priority 6 handled it.
+
+### The change
+
+Two edits, both in `interpreter_call/mod.rs`, 54 lines with the reasoning:
+
+1. **Priority 4.9**, ahead of the flat-map lookup: if the environment binds this
+   name to a `Value::Function` whose `def` is the *same `Arc<FunctionDef>`* as the
+   flat entry, they are by construction the two registrations of one nested
+   definition, and the closure is the one carrying scope — so dispatch through it.
+   Identity is established by pointer rather than by testing whether the captured
+   environment "looks" non-empty: `CowEnv` is a copy-on-write overlay over a
+   shared base, so an emptiness test says nothing about what a closure can see.
+2. **letrec self-binding** where a `Value::Function` is invoked: `captured_env` was
+   cloned *before* the closure was inserted into the block scope, so a nested `fn`
+   cannot see itself. That was invisible while the flat map answered every call;
+   with the closure now winning, a recursive nested `fn` would have failed with
+   `variable <name> not found`. The function is bound under its own name only when
+   the captured scope does not already define it, so an outer binding still wins.
+
+Without the second edit the first is a trade, not a fix.
+
+### Evidence
+
+`test/01_unit/interpreter/nested_fn_in_lambda_capture_spec.spl` (added here),
+run through the spec runner on both binaries:
+
+| binary | result |
+|---|---|
+| deployed `bin/simple` (2026-09-18 seed) | **3 passed, 4 failed** — `semantic: variable n / buf / base / shadowed not found` |
+| seed rebuilt with this change | **7 passed, 0 failed** |
+
+The three examples that pass on the broken binary are kept as controls on
+purpose: they are the module-var, callback and thunk shapes, all of which
+already worked. A probe of only those reports green on a broken binary, which is
+exactly how this survived six weeks — the original repro used the callback shape.
+
+Recursion is covered (`fact(4)` reading the enclosing `base`, answering 240), so
+the letrec edit is pinned rather than assumed.
+
+### Regression checking
+
+- **Seed unit tests**: `cargo test --release -p simple-compiler` gives
+  `4094 passed; 19 failed` **both with and without** the change, and the two
+  failure name-lists are byte-identical. The 19 are pre-existing (vulkan externs,
+  stage4/native_project, linker, one MIR lowering test) and untouched by this.
+  Verified by running the suite twice rather than asserted.
+- **Spec suites**: 12 spec files that declare `fn`s inside `it` blocks, 219
+  examples, run on the old and new binaries. Every file reports an identical
+  pass/fail count. This matters more than the number suggests — 266 spec files in
+  `test/01_unit` use this shape, so a dispatch-precedence change has a wide blast
+  radius.
+
+### A second defect the letrec edit repairs — on one route only
+
+A **recursive** nested `fn` inside a PLAIN function body (no lambda anywhere)
+was wholly broken, and not with a capture error:
+
+```simple
+fn outer() -> i64:
+    val base = 10
+    fn fact(n: i64) -> i64:
+        if n <= 1:
+            return base
+        n * fact(n - 1)
+    fact(4)
+```
+
+| route | deployed seed | rebuilt seed |
+|---|---|---|
+| `bin/simple run` | **`error[E1002]: function `fact` not found`** | **240, correct** |
+| spec runner (`test`) | `semantic: variable `base` not found` | `semantic: variable `base` not found` |
+
+On the `run` route this is a clean repair, and it comes from the letrec half
+of the change rather than the dispatch half: the plain-fn path binds only the
+environment, so the closure was the only registration and it could not see
+itself. Nothing in this record predicted it; it turned up because the shape was
+probed on both binaries rather than assumed to be covered.
+
+Through the **spec runner** the same code still fails, identically on both
+binaries. So the spec runner reaches a module-level function body by a path
+this change does not touch, and that path loses the enclosing `val` for a
+recursive nested `fn`. That is a remaining member of this family, measured but
+not diagnosed. The spec deliberately does not assert this example — asserting
+it would add a red, and dropping it silently would hide a real finding, so it
+is recorded here instead.
+
+### What this does NOT fix, measured
+
+- **`test/01_unit/os/acpi/acpi_test.spl` still fails its same 3 examples.** This
+  record has claimed since August that the acpi spec is the silent-zero arm of
+  this defect. **It is not.** A minimal probe of the acpi shape — a nested `fn`
+  capturing a local `[u8]`, forwarding to a module-level `_buf_read32`, passed as
+  a callback — passes on the OLD binary as well as the new one. The callback shape
+  was never broken. Whatever fails in the acpi spec is a different defect and
+  needs its own investigation; it should not be tracked here.
+- **The JIT still drops the whole module to the interpreter** for this shape
+  (`unresolved external symbol '<nested fn>'`, ~100-1000x). That is a separate
+  defect in HIR lowering: `stmt_lowering.rs` answers `Node::Function(_f) =>
+  Ok(vec![])` with the comment "Nested function definitions are ignored in native
+  lowering for now". This change is interpreter-only and deliberately does not
+  touch it, so the perf cliff remains.
+- **Deployment.** `bin/simple` is shared by other sessions on this host and is not
+  swapped here. Until it is redeployed, the defect is still live for everything
+  that runs through it.
+
+### One question left open, deliberately not asserted
+
+A nested `fn` does **not** see a local rebound *after* the `fn` was declared — the
+closure captures the block scope by value at the declaration point, so a later
+`total = 5` is invisible. Whether that snapshot is the intended semantics or a
+second defect is not settled here, and the spec says so at the point where such
+an example would sit rather than blessing either answer.
+
+---
+
+## Investigation history, retained
+
 
 **Status: OPEN — re-verified 2026-09-18 on a freshly redeployed seed. Not a stale-binary artifact.**
 
