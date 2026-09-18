@@ -1,0 +1,114 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# std.nogc_async_mut.df unique/value_counts/groupby Dict-index regression coverage
+
+**Family-explicit sibling of `df_unique_scaling_spec.spl`** and of
+`df_unique_scaling_nogc_sync_mut_spec.spl`. `use std.df.*` was measured
+(strace) to resolve to `src/lib/nogc_async_mut/df/` — i.e. THIS family — so
+`df_unique_scaling_spec.spl`'s ambiguous `std.df.*` import happens to already
+exercise this family's code today. This file pins `use
+std.nogc_async_mut.df.*` explicitly anyway, so that fact stops being load-
+bearing: the spec keeps testing this family even if module-resolution
+precedence ever changes, and it stays a true sibling of the
+`nogc_sync_mut`-pinned spec (which the ambiguous import does NOT reach).
+
+Not asserting an in-spec O(n) timing threshold here: the mandated evidence
+binary (Rust seed) has its own, unrelated, method-dispatch overhead for
+`impl Series:` methods that makes wall-clock thresholds noisy at this layer
+(see the perf writeup this lane produced). The scaling `it` below only checks
+correctness at a size well past "a few elements"; the actual before/after
+timing evidence — and the red-to-green proof that this spec depends on this
+family's Dict fix specifically — is measured separately by temporarily
+reverting this family's `mod.spl`/`df_transform.spl` to the linear
+`f64_group_index`/`i64_group_index` scan and re-running a large-n scaling
+case (n=20000/10000 distinct) against ONLY this family's import: that
+reproduces the timeout the un-fixed algorithm has, at this same import path,
+while the fixed version completes.
+"""
+
+use std.spec.step
+
+use std.spipe.*
+use std.nogc_async_mut.df.*
+use std.ndarray.*
+
+
+describe "std.nogc_async_mut.df — Series unique_i64/unique_f64 (order, duplicates, missing, float edge cases)":
+    it "unique_i64 keeps first-occurrence order and collapses duplicates":
+        step("unique_i64 keeps first-occurrence order and collapses duplicates")
+        val ms = Series.from_i64_masked(
+            Symbol.from("g"),
+            [Int64.new(5), Int64.new(1), Int64.new(5), Int64.new(1), Int64.new(9), Int64.new(1)],
+            [Bool.new(false), Bool.new(false), Bool.new(false), Bool.new(false), Bool.new(false), Bool.new(false)]
+        )
+        val s = ms.unwrap()
+        val u = s.unique_i64()
+        expect(u.len()).to_equal(Index.new(3))
+        expect(u.values.flat_i64(Index.new(0))).to_equal(Int64.new(5))
+        expect(u.values.flat_i64(Index.new(1))).to_equal(Int64.new(1))
+        expect(u.values.flat_i64(Index.new(2))).to_equal(Int64.new(9))
+
+    it "unique_f64 collapses -0.0 into a prior 0.0, matching f64 == semantics":
+        step("unique_f64 collapses -0.0 into a prior 0.0, matching f64 == semantics")
+        val s = Series.from_values(
+            name: Symbol.from("z"),
+            values: [Float64.new(0.0), Float64.new(-0.0), Float64.new(1.0)]
+        )
+        val u = s.unique_f64()
+        expect(u.len()).to_equal(Index.new(2))
+        expect(u.values.flat_f64(Index.new(0))).to_equal(Float64.new(0.0))
+        expect(u.values.flat_f64(Index.new(1))).to_equal(Float64.new(1.0))
+
+    it "unique_f64 never collapses NaN with itself, matching f64 == semantics (NaN != NaN)":
+        step("unique_f64 never collapses NaN with itself")
+        val big = 1.0e308
+        val pos_inf = big * 10.0
+        val nan1 = pos_inf - pos_inf
+        val nan2 = (0.0 - pos_inf) + pos_inf
+        val s = Series.from_values(
+            name: Symbol.from("n"),
+            values: [Float64.new(1.0), Float64.new(nan1), Float64.new(nan1), Float64.new(nan2)]
+        )
+        val u = s.unique_f64()
+        expect(u.len()).to_equal(Index.new(4))
+
+    it "unique_f64 completes for 3000 values with 1500 distinct (Dict path exercised at scale)":
+        step("unique_f64 completes for 3000 values with 1500 distinct")
+        var values: [Float64] = []
+        var i = 0
+        while i < 3000:
+            values.push(Float64.new((i % 1500) as f64))
+            i = i + 1
+        val s = Series.from_values(name: Symbol.from("scale"), values: values)
+        val u = s.unique_f64()
+        expect(u.len()).to_equal(Index.new(1500))
+
+describe "std.nogc_async_mut.df — value_counts / groupby_numeric (Dict slot index)":
+    it "value_counts counts occurrences per distinct value in first-occurrence key order":
+        step("value_counts counts occurrences per distinct value in first-occurrence key order")
+        val s = Series.from_values(
+            name: Symbol.from("color"),
+            values: [Float64.new(1.0), Float64.new(2.0), Float64.new(1.0), Float64.new(3.0), Float64.new(2.0), Float64.new(2.0)]
+        )
+        val vc = value_counts(s)
+        expect(vc.num_rows()).to_equal(Index.new(3))
+        val counts = vc.col(Symbol.from("count")).unwrap()
+        expect(counts.values.flat_i64(Index.new(0))).to_equal(Int64.new(2))
+        expect(counts.values.flat_i64(Index.new(1))).to_equal(Int64.new(3))
+        expect(counts.values.flat_i64(Index.new(2))).to_equal(Int64.new(1))
+
+    it "groupby_sum sums values per distinct F64 key in first-occurrence key order":
+        step("groupby_sum sums values per distinct F64 key in first-occurrence key order")
+        val df = DataFrame.from_columns([
+            SeriesErased.F64Series(Series.from_values(name: Symbol.from("k"), values: [Float64.new(1.0), Float64.new(2.0), Float64.new(1.0)])),
+            SeriesErased.F64Series(Series.from_values(name: Symbol.from("v"), values: [Float64.new(10.0), Float64.new(20.0), Float64.new(5.0)])),
+        ]).unwrap()
+        val grouped = df.groupby_sum(Symbol.from("k"), Symbol.from("v")).unwrap()
+        val keys = grouped.col(Symbol.from("k")).unwrap()
+        val vals = grouped.col(Symbol.from("v")).unwrap()
+        expect(grouped.num_rows()).to_equal(Index.new(2))
+        expect(keys.values.flat_f64(Index.new(0))).to_equal(Float64.new(1.0))
+        expect(vals.values.flat_f64(Index.new(0))).to_equal(Float64.new(15.0))

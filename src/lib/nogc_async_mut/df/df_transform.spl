@@ -93,14 +93,18 @@ fn pivot_sum(frame: DataFrame, index: Symbol, columns: Symbol, values: Symbol, v
 fn pivot_sum_i64_index(index_series: Series, column_series: Series, value_series: Series, index_name: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
     var row_keys: [Int64] = []
     var col_keys: [Int64] = []
+    var seen_row: Dict<i64, bool> = {}
+    var seen_col: Dict<i64, bool> = {}
     var row = 0
     while row < value_series.len().value:
         if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
             val row_key = index_series.values.flat_i64(Index.new(row))
             val col_key = column_series.values.flat_i64(Index.new(row))
-            if i64_group_index(row_keys, row_key) < 0:
+            if not seen_row.contains_key(row_key.value):
+                seen_row[row_key.value] = true
                 row_keys.push(row_key)
-            if i64_group_index(col_keys, col_key) < 0:
+            if not seen_col.contains_key(col_key.value):
+                seen_col[col_key.value] = true
                 col_keys.push(col_key)
         row = row + 1
     var out: [SeriesErased] = [
@@ -123,14 +127,22 @@ fn pivot_sum_i64_index(index_series: Series, column_series: Series, value_series
 fn pivot_sum_f64_index(index_series: Series, column_series: Series, value_series: Series, index_name: Symbol, value_prefix: Symbol) -> Result<DataFrame, DfError>:
     var row_keys: [Float64] = []
     var col_keys: [Int64] = []
+    var seen_row: Dict<f64, bool> = {}
+    var seen_col: Dict<i64, bool> = {}
     var row = 0
     while row < value_series.len().value:
         if not index_series.missing[row].value and not column_series.missing[row].value and not value_series.missing[row].value:
             val row_key = index_series.values.flat_f64(Index.new(row))
             val col_key = column_series.values.flat_i64(Index.new(row))
-            if f64_group_index(row_keys, row_key) < 0:
+            if row_key.value.is_nan():
                 row_keys.push(row_key)
-            if i64_group_index(col_keys, col_key) < 0:
+            else:
+                val dict_key = if row_key.value == 0.0: 0.0 else: row_key.value
+                if not seen_row.contains_key(dict_key):
+                    seen_row[dict_key] = true
+                    row_keys.push(row_key)
+            if not seen_col.contains_key(col_key.value):
+                seen_col[col_key.value] = true
                 col_keys.push(col_key)
         row = row + 1
     var out: [SeriesErased] = [
@@ -422,23 +434,36 @@ fn groupby_numeric(frame: DataFrame, by: Symbol, value: Symbol, mean: bool) -> R
         case DType.Bool:
             Err(DfError.ShapeMismatch)
 
+# Dict-slot-index rewrite of the former `f64_group_index` linear scan (same
+# O(n^2) pattern and fix as Series.unique_f64 in mod.spl — see that function's
+# comment for the NaN/-0.0 rationale, reproduced here identically since
+# `f64_group_index`'s `keys[i] == value` scan is the exact behavior being
+# preserved).
 fn groupby_f64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean: bool) -> Result<DataFrame, DfError>:
     var keys: [Float64] = []
     var sums: [Float64] = []
     var counts: [Int64] = []
+    var slot_of: Dict<f64, i64> = {}
     var row = 0
     while row < values.len().value:
         if not key.missing[row].value and not values.missing[row].value:
             val key_value = key.values.flat_f64(Index.new(row))
             val value_value = values.values.flat_f64(Index.new(row))
-            val index = f64_group_index(keys, key_value)
-            if index < 0:
+            if key_value.value.is_nan():
                 keys.push(key_value)
                 sums.push(value_value)
                 counts.push(Int64.new(1))
             else:
-                sums[index] = Float64.new(sums[index].value + value_value.value)
-                counts[index] = Int64.new(counts[index].value + 1)
+                val dict_key = if key_value.value == 0.0: 0.0 else: key_value.value
+                if slot_of.contains_key(dict_key):
+                    val index = slot_of[dict_key]
+                    sums[index] = Float64.new(sums[index].value + value_value.value)
+                    counts[index] = Int64.new(counts[index].value + 1)
+                else:
+                    slot_of[dict_key] = keys.len()
+                    keys.push(key_value)
+                    sums.push(value_value)
+                    counts.push(Int64.new(1))
         row = row + 1
     if mean:
         sums = divide_group_sums(sums, counts)
@@ -447,23 +472,28 @@ fn groupby_f64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean:
         Series(name: value, values: array(sums), dtype: DType.F64, missing: no_missing_values(sums.len()))
     ]))
 
+# Dict-slot-index rewrite of the former `i64_group_index` linear scan — see
+# groupby_f64_key above. i64 has no NaN/-0.0 ambiguity, so this is a direct
+# membership+slot lookup with no special-casing.
 fn groupby_i64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean: bool) -> Result<DataFrame, DfError>:
     var keys: [Int64] = []
     var sums: [Float64] = []
     var counts: [Int64] = []
+    var slot_of: Dict<i64, i64> = {}
     var row = 0
     while row < values.len().value:
         if not key.missing[row].value and not values.missing[row].value:
             val key_value = key.values.flat_i64(Index.new(row))
             val value_value = values.values.flat_f64(Index.new(row))
-            val index = i64_group_index(keys, key_value)
-            if index < 0:
+            if slot_of.contains_key(key_value.value):
+                val index = slot_of[key_value.value]
+                sums[index] = Float64.new(sums[index].value + value_value.value)
+                counts[index] = Int64.new(counts[index].value + 1)
+            else:
+                slot_of[key_value.value] = keys.len()
                 keys.push(key_value)
                 sums.push(value_value)
                 counts.push(Int64.new(1))
-            else:
-                sums[index] = Float64.new(sums[index].value + value_value.value)
-                counts[index] = Int64.new(counts[index].value + 1)
         row = row + 1
     if mean:
         sums = divide_group_sums(sums, counts)
@@ -471,22 +501,6 @@ fn groupby_i64_key(key: Series, values: Series, by: Symbol, value: Symbol, mean:
         Series(name: by, values: array_i64(keys), dtype: DType.I64, missing: no_missing_values(keys.len())),
         Series(name: value, values: array(sums), dtype: DType.F64, missing: no_missing_values(sums.len()))
     ]))
-
-fn f64_group_index(keys: [Float64], value: Float64) -> i64:
-    var i = 0
-    while i < keys.len():
-        if keys[i] == value:
-            return i
-        i = i + 1
-    -1
-
-fn i64_group_index(keys: [Int64], value: Int64) -> i64:
-    var i = 0
-    while i < keys.len():
-        if keys[i] == value:
-            return i
-        i = i + 1
-    -1
 
 fn divide_group_sums(sums: [Float64], counts: [Int64]) -> [Float64]:
     var out: [Float64] = []
