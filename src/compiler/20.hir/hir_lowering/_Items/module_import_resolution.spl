@@ -19,6 +19,7 @@ use compiler.hir.hir_lowering.hir_phase_profile.{
 }
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -71,6 +72,12 @@ impl HirLowering:
         # elided, and every root still expands its own closure from scratch.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         val prof_glob_started = hir_phase_profile_now()
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true, true)
         hir_phase_profile_add(HIR_PROF_GLOB, prof_glob_started)
@@ -82,7 +89,57 @@ impl HirLowering:
         # implementation details of the sibling that wrote them.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, false, false)
+
+    me glob_expand_memo_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar glob-expansion chain table, or -1.
+        Never reads the {text: i64} Dict: contains_key on it mis-reports
+        under Stage-2 native codegen (BOOT-20 2026-09-18, the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        if self.glob_expand_memo_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.glob_expand_memo_hash_mask
+        var index = self.glob_expand_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.glob_expand_memo_keys[index] == key:
+                return index
+            index = self.glob_expand_memo_hash_next[index]
+        -1
+
+    me glob_expand_memo_record(key: text, depth: i64):
+        """Insert or refresh one (key -> shallowest depth) pair in the scalar
+        glob-expansion table; the legacy Dict is written in lockstep. Unlike
+        the append-only memos this one is refreshed in place: a shallower
+        arrival re-expands and overwrites the depth, exactly as the Dict did.
+        """
+        val existing = self.glob_expand_memo_lookup(key)
+        if existing >= 0:
+            self.glob_expand_memo_values[existing] = depth
+            self.glob_expand_memo[key] = depth
+            return
+        if self.glob_expand_memo_hash_buckets.len() == 0:
+            # 1024 buckets per root expansion; the reachable set of one root
+            # is bounded by the frozen registry size and chains absorb the
+            # cyclic-graph volume.
+            val glob_bucket_count: i64 = 1024
+            self.glob_expand_memo_hash_mask = glob_bucket_count - 1
+            var fill = 0
+            while fill < glob_bucket_count:
+                self.glob_expand_memo_hash_buckets = self.glob_expand_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.glob_expand_memo_hash_mask
+        self.glob_expand_memo_hash_next = self.glob_expand_memo_hash_next.push(
+            self.glob_expand_memo_hash_buckets[bucket])
+        self.glob_expand_memo_hash_buckets[bucket] = self.glob_expand_memo_keys.len()
+        self.glob_expand_memo_keys = self.glob_expand_memo_keys.push(key)
+        self.glob_expand_memo_values = self.glob_expand_memo_values.push(depth)
+        self.glob_expand_memo[key] = depth
 
     me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool, materialize_enums: bool):
         if depth > 8:
@@ -91,13 +148,14 @@ impl HirLowering:
         # hir_lowering/types.spl. Skip only when this key was ALREADY expanded
         # at the same or a shallower depth; a shallower arrival re-expands
         # because it can reach further before the depth cap bites.
-        # Bracket-index read after contains_key: Dict.get() on the self-hosted
-        # native path corrupts/mis-reports present values.
-        if self.glob_expand_memo.contains_key(imported_mod_name):
-            val seen_depth: i64 = self.glob_expand_memo[imported_mod_name]
+        # BOOT-20 (2026-09-18): answered from the scalar chain table; the
+        # Dict is no longer consulted (native-path Dict.get caveat).
+        val expand_slot = self.glob_expand_memo_lookup(imported_mod_name)
+        if expand_slot >= 0:
+            val seen_depth: i64 = self.glob_expand_memo_values[expand_slot]
             if seen_depth <= depth:
                 return
-        self.glob_expand_memo[imported_mod_name] = depth
+        self.glob_expand_memo_record(imported_mod_name, depth)
         hir_phase_profile_count_glob_expansion()
         var keys = imported_mod.composite_names
         var idx = 0
