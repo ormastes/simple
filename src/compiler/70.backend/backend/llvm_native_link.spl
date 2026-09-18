@@ -3,10 +3,150 @@
 
 use compiler.backend.backend.llvm_native_link_stage4_projection.{llvm_nm_output_has_strong_definition, llvm_stage4_candidate_archive_inventory}
 use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions, hosted_c_target_matches_host, compile_entry_point_c}
-use compiler.backend.backend.llvm_native_link_orchestrator.{link_llvm_native}
-use compiler.backend.backend.simpleos_native_symbols.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs}
+use compiler.backend.backend.llvm_native_link_orchestrator as llvm_native_link_orchestrator
+use compiler.backend.backend.simpleos_native_symbols.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs, is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
 use compiler.backend.backend.simpleos_native_trivial_body.{simpleos_body_is_trivial_constant, simpleos_trivial_body_rt_symbols}
 use compiler.backend.backend.simpleos_native_guards.{simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs}
 use compiler.backend.backend.simpleos_native_linkers.{link_simpleos_x86_64_external}
+use compiler.backend.backend.llvm_capability.{find_nm_portable}
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
+use std.platform.{is_macos}
+use std.nogc_sync_mut.io_runtime.{process_run, file_exists}
 
-export NativeLinkOptions, link_llvm_native, compile_entry_point_c, hosted_c_target_matches_host, llvm_nm_output_has_strong_definition, llvm_stage4_candidate_archive_inventory, is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs, simpleos_body_is_trivial_constant, simpleos_trivial_body_rt_symbols, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, link_simpleos_x86_64_external
+# ---------------------------------------------------------------------------
+# Hosted-lane extern-fabrication fence
+# ---------------------------------------------------------------------------
+#
+# Port of the Rust seed guard `check_no_fabricated_extern_definitions`
+# (src/compiler_rust/compiler/src/linker/native_binary/stubs.rs, called from
+# builder.rs on every link) to the pure-Simple hosted link path, closing
+# doc/08_tracking/bug/native_link_fabricates_weak_empty_extern_definitions_2026-08-01.md:
+# `link_llvm_native`'s hosted branch had NO fabrication guard of any kind
+# (the SimpleOS guard is wired only into the four freestanding branches).
+#
+# Contract mirrored from the seed, deliberately unchanged:
+# - An unimplemented `@extern fn` is emitted as a WEAK, EMPTY (zero-size, or
+#   size-column-absent) definition. A weak zero-size FUNCTION symbol has no
+#   body by construction, so this test needs no heuristic and cannot
+#   false-positive on a real function (Preemptible/weak real functions still
+#   carry a non-zero size on platforms whose nm reports real sizes).
+# - Weak OBJECT classes W/w/V/v all count (GNU and BSD nm spellings).
+# - Freestanding/SimpleOS routes are skipped: baremetal externs are
+#   legitimately absent at compile time and those links run their own
+#   fabricated-stub ratchet (simpleos_check_no_fabricated_rt_stubs).
+# - MSVC toolchains are skipped rather than misparsed.
+# - If nm cannot be run, fails, or prints nothing for an object, that object
+#   is skipped: fail OPEN, same policy as the seed guard -- never block
+#   targets the fence cannot inspect.
+# - There is NO env hatch and NO allowlist on this path, by design.
+#
+# Platform blindness, measured 2026-09-18 on macOS: Mach-O `nm -S` reports
+# EVERY size as zero ("warning: sizes with --print-size for Mach-O files are
+# always zero"), so on Darwin a zero size does not distinguish fabricated from
+# real. `sizes_meaningful = not is_macos()` encodes exactly that: on Darwin
+# only a genuinely ABSENT size column accuses (the seed's `!has_size`
+# predicate), which makes the Darwin guard inert-but-harmless, mirroring the
+# seed guard's behavior on a platform whose nm cannot answer the question.
+# The strong, non-empty (T, size-3) fabrication variant confirmed live on the
+# SEED lane (2026-08-08 update in the bug record) is NOT covered here: at the
+# link layer a strong tiny body is indistinguishable from a real tiny
+# constant-return function without front-end extern-declaration metadata the
+# link interface does not carry. That variant stays fenced by
+# scripts/check/check-native-extern-fabrication.shs on the seed lane.
+
+fn hosted_nm_weak_definition_type(ty: text) -> bool:
+    ty == "W" or ty == "w" or ty == "V" or ty == "v"
+
+pub fn hosted_nm_fabricated_extern_names(nm_output: text, sizes_meaningful: bool) -> [text]:
+    """Classify one `nm --defined-only -S` output: names of weak, empty
+    (zero-size or size-column-absent) defined symbols -- the fabrication
+    shape for an `@extern fn` with no implementation. Pure: no I/O, no
+    process spawns, so the predicate is spec-testable under the interpreter."""
+    var fabricated: [text] = []
+    var seen: {text: bool} = {}
+    for raw in nm_output.split("\n"):
+        val line = raw.trim()
+        if line == "":
+            continue
+        var parts: [text] = []
+        for piece in line.split(" "):
+            if piece != "":
+                parts.push(piece)
+        val n = parts.len()
+        if n < 2:
+            continue
+        # nm shape: "ADDR [SIZE] TYPE NAME"; a NAME never contains spaces.
+        var ty = ""
+        var name = ""
+        if n >= 3:
+            ty = parts[n - 2]
+            name = parts[n - 1]
+        else:
+            ty = parts[0]
+            name = parts[1]
+        if ty.len() != 1:
+            continue
+        if not hosted_nm_weak_definition_type(ty):
+            continue
+        # Empty means: no SIZE column at all (the seed's `!has_size`), or a
+        # present size column whose hex is all zero on a platform whose nm
+        # reports real sizes.
+        var empty = n < 4
+        if n >= 4 and sizes_meaningful:
+            empty = parts[n - 3].replace("0", "") == ""
+        if not empty:
+            continue
+        if not seen.has(name):
+            seen[name] = true
+            fabricated.push(name)
+    fabricated
+
+pub fn hosted_check_no_fabricated_extern_definitions(user_objects: [text], entry_label: text) -> Result<bool, text>:
+    """Hosted-branch port of the seed's check_no_fabricated_extern_definitions.
+
+    Runs BEFORE the link over the user objects (the same observation point as
+    the seed guard, which inspects the compiled object pre-link). Returns
+    Ok(true) when nothing fabricated is found and the link may proceed;
+    Err(names) -- loud, naming every offending symbol and its object -- when
+    codegen emitted a weak, empty definition for an `@extern fn` that has no
+    implementation anywhere. Never fabricates, never warns-and-continues."""
+    # Freestanding/SimpleOS routes: baremetal externs are legitimately absent
+    # at compile time; those links carry their own fabricated-stub ratchet.
+    if is_simpleos_x86_64_link(user_objects, entry_label) or is_simpleos_arm64_link(entry_label) or is_simpleos_riscv64_link(user_objects, entry_label) or is_simpleos_riscv32_link(user_objects, entry_label):
+        return Ok(true)
+    # MSVC toolchains report symbols in a different format; skip rather than
+    # misparse (seed parity).
+    val cc = find_c_compiler()
+    if cc != "" and _is_msvc_cc(cc):
+        return Ok(true)
+    val nm = find_nm_portable()
+    if nm == "":
+        return Ok(true)
+    val sizes_meaningful = not is_macos()
+    var fabricated: [text] = []
+    for obj in user_objects:
+        if obj == "" or not file_exists(obj):
+            continue
+        val (nm_out, nm_err, nm_code) = process_run(nm, ["--defined-only", "-S", obj])
+        if nm_code != 0 or nm_out.trim() == "":
+            continue
+        for name in hosted_nm_fabricated_extern_names(nm_out, sizes_meaningful):
+            fabricated.push("{name} (weak empty definition in {obj})")
+    if fabricated.len() == 0:
+        return Ok(true)
+    fabricated.sort()
+    Err("native link refused: {fabricated.len()} extern declaration(s) have NO implementation and were emitted as weak, empty (zero-size) definitions: [{fabricated.join(\", \")}]. Linking would succeed and every call to them would silently return garbage instead of failing (doc/08_tracking/bug/native_link_fabricates_weak_empty_extern_definitions_2026-08-01.md). Implement the symbol, correct the `@extern` name, or link the library that provides it.")
+
+pub fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+    """link_llvm_native with the hosted-lane extern-fabrication fence: an
+    unimplemented `@extern fn` fails CLOSED here, before any link attempt,
+    instead of letting a fabricated weak, empty definition link clean and
+    silently return garbage at every call site."""
+    match hosted_check_no_fabricated_extern_definitions(user_objects, output):
+        case Err(message):
+            return Err(message)
+        case Ok(_):
+            ()
+    llvm_native_link_orchestrator.link_llvm_native(user_objects, output, options)
+
+export NativeLinkOptions, link_llvm_native, compile_entry_point_c, hosted_c_target_matches_host, llvm_nm_output_has_strong_definition, llvm_stage4_candidate_archive_inventory, is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs, simpleos_body_is_trivial_constant, simpleos_trivial_body_rt_symbols, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, link_simpleos_x86_64_external, hosted_nm_fabricated_extern_names, hosted_check_no_fabricated_extern_definitions

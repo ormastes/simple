@@ -133,3 +133,7 @@ Option B should follow as a correctness fix for the interpreter.
 - `src/compiler/70.backend/backend/native/__init__.spl` (re-exports both)
 - `src/compiler/70.backend/lowering/intrinsic_lowering_aarch64.spl:18-20` (explicit import, silently overridden)
 - `test/01_unit/compiler/backend/lowering_aarch64_crypto_spec.spl` (failing test)
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

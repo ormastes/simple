@@ -181,6 +181,25 @@ policy_value() {
   ' "$2"
 }
 
+# Gate a required-equality provenance check through the bound Stage 3
+# comparator (bootstrap_stage3_compare_bind / bootstrap_stage3_require_equal),
+# the same fix the main bootstrap path carries for bare `cmp -s`: status 1 is
+# content drift and refuses with the caller's reason; a larger status is
+# comparator infrastructure failure and refuses with its own reason, so a
+# missing/shadowed/drifted comparator can neither masquerade as provenance
+# drift nor pass a gate silently.
+require_provenance_equal() {
+  recovery_equal_reason=$1
+  shift
+  bootstrap_stage3_require_equal "stage3 recovery authority provenance" "$@" || {
+    recovery_equal_status=$?
+    case "$recovery_equal_status" in
+      1) finish refused "$recovery_equal_reason" 1 ;;
+      *) finish refused "${recovery_equal_reason}-comparator-unavailable" 1 ;;
+    esac
+  }
+}
+
 source_root_arg=
 output_arg=
 planner_arg=
@@ -310,6 +329,9 @@ last_check=stage3-authority-facade
 last_check=planner-verifier
 . "$guard_root/scripts/check/lib/bootstrap-planner-admission-bound.shs" 2>/dev/null || \
   finish refused planner-verifier-invalid 1
+last_check=comparator-bind
+bootstrap_stage3_compare_bind >/dev/null 2>&1 || \
+  finish refused comparator-bind-failed 1
 
 last_check=host-platform
 platform=$(bootstrap_stage3_host_platform 2>/dev/null) || finish refused unsupported-host 1
@@ -381,7 +403,7 @@ case "$(manifest_value authority "$parent_provenance" 2>/dev/null || true)" in
   *) finish refused parent-provenance-authority-invalid 1 ;;
 esac
 
-admission_keys='schema status candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 simple_abi_policy simple_abi_version simple_abi_deferred sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3'
+admission_keys='schema status admission_receipt_path candidate_path candidate_sha256 source_snapshot_path source_snapshot_sha256 runtime_snapshot_path runtime_snapshot_sha256 runtime_authority_path hosted_runtime_relative_path hosted_runtime_sha256 tool_authority_path tool_authority_sha256 build_args_sha256 simple_abi_policy simple_abi_version simple_abi_deferred sanity_evidence_path sanity_evidence_sha256 receiver_evidence_path receiver_evidence_sha256 receiver_log_path receiver_log_sha256 admission_identity checks_executed_at_admission checks_replayed_during_stage3'
 exact_equal_receipt_keys "$admission" "$admission_keys" || finish refused stage2-admission-key-set-invalid 1
 stage2_admission_sha256=$(bootstrap_stage3_hash_file "$admission" 2>/dev/null || true)
 is_sha256 "$stage2_admission_sha256" || finish refused stage2-admission-unhashable 1
@@ -482,8 +504,11 @@ SIMPLE_ABI_POLICY=$abi_policy
 export SIMPLE_ABI_POLICY
 last_check=stage2-admission-verification
 bootstrap_stage3_verify_stage2_admission_receipt \
-  "$admission" "$admitted" "$source_snapshot" "$runtime_snapshot" \
-  "$tool_snapshot" "$stage2_args_sha" "$sanity" "$receiver" "$source_root" \
+  "$admission" "$admission" "$admitted" "$admitted" \
+  "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime" "$runtime" "$tool_snapshot" "$tool_snapshot" "$stage2_args_sha" \
+  "$sanity" "$sanity" "$(dirname -- "$sanity")" \
+  "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$source_root" \
   >/dev/null 2>&1 || finish refused stage2-admission-invalid 1
 
 planner_receipt=$(canonical_file "$planner_arg" 2>/dev/null || true)
@@ -516,25 +541,25 @@ fresh_tool="$tmp_root/tool-authority.snapshot"
 last_check=fresh-source-snapshot
 bootstrap_stage3_source_snapshot "$fresh_source" "$source_root" >/dev/null 2>&1 || \
   finish refused fresh-source-snapshot-failed 1
-cmp -s "$source_snapshot" "$fresh_source" || finish refused source-snapshot-stale 1
+require_provenance_equal source-snapshot-stale "$source_snapshot" "$fresh_source"
 last_check=fresh-git-snapshot
 bootstrap_stage3_git_state "$source_root" "$fresh_git" >/dev/null 2>&1 || \
   finish refused fresh-git-snapshot-failed 1
-cmp -s "$git_snapshot" "$fresh_git" || finish refused git-snapshot-stale 1
+require_provenance_equal git-snapshot-stale "$git_snapshot" "$fresh_git"
 last_check=fresh-runtime-snapshot
 bootstrap_stage3_directory_snapshot "$fresh_runtime" "$runtime" >/dev/null 2>&1 || \
   finish refused fresh-runtime-snapshot-failed 1
-cmp -s "$runtime_snapshot" "$fresh_runtime" || finish refused runtime-snapshot-stale 1
+require_provenance_equal runtime-snapshot-stale "$runtime_snapshot" "$fresh_runtime"
 stage2_path=$(bootstrap_stage3_transcript_host_value "$transcript" PATH 2>/dev/null || true)
 [ -n "$stage2_path" ] || finish refused stage2-tool-path-missing 1
 last_check=fresh-tool-authority-snapshot
 bootstrap_stage3_tool_authority_snapshot "$fresh_tool" "$stage2_path" "$source_root" \
   >/dev/null 2>&1 || finish refused fresh-tool-authority-snapshot-failed 1
-cmp -s "$tool_snapshot" "$fresh_tool" || finish refused tool-authority-stale 1
+require_provenance_equal tool-authority-stale "$tool_snapshot" "$fresh_tool"
 planner_git=$(bootstrap_planner_v2_field git_state_path "$planner_receipt" 2>/dev/null || true)
-cmp -s "$planner_git" "$fresh_git" || finish refused planner-git-state-stale 1
+require_provenance_equal planner-git-state-stale "$planner_git" "$fresh_git"
 planner_runtime_snapshot=$(bootstrap_planner_v2_field runtime_snapshot_path "$planner_receipt" 2>/dev/null || true)
-cmp -s "$planner_runtime_snapshot" "$fresh_runtime" || finish refused planner-runtime-snapshot-stale 1
+require_provenance_equal planner-runtime-snapshot-stale "$planner_runtime_snapshot" "$fresh_runtime"
 
 last_check=authority-complete
 finish pass authority-complete 0
