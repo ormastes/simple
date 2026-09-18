@@ -140,3 +140,12 @@ oracles — runner-environment dispatch skew, unconfirmed root cause.
    fix for the compiler debt should use this file as the regression test:
    it is small, self-contained, and binary (pass in a stub file, fail in
    the real one).
+5. `assistant_dashboard_e2e_spec` (mcp_unit, 2026-09-19). Identical mechanics
+   to (4): `handle_assistant_start` + `assistant_store_list_sessions` +
+   the std.nogc_async_mut.mcp.helpers jo2/jp/js body builders all work in a
+   20-line probe (session persisted, prompt exact match), but the full spec
+   (which additionally imports app.dashboard.assistant_collectors snapshot/
+   timeline collectors) finds no session — `find_session_by_prompt` returns
+   "". Two jo2/js definition families exist (app/llm_caret/json_helpers.spl,
+   app/mcp/main_lazy_json.spl); the wider closure picks a $dup whose parse
+   or store root disagrees.
