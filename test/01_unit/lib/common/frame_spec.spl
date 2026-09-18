@@ -1,0 +1,160 @@
+# Frame API spec
+#
+# Tests for src/lib/common/frame.spl — the typed-library key-lambda API over
+# [Record], §10.1 of
+# doc/05_design/compiler/collection_planner/adaptive_collections_typed_query_design.md.
+
+"""
+## Purpose and audience
+Verifies key_set, index_by, distinct_by, group_by_key, count_by, semi_join,
+anti_join, top_k_by: order preservation, duplicate handling, and the
+index_by/top_k_by boundary contracts. Audience: engineers maintaining the
+frame module and callers migrating manual Dict-slot scans onto it.
+"""
+
+use std.spec.step
+use std.common.frame.{
+    key_set, index_by, distinct_by, group_by_key, count_by,
+    semi_join, anti_join, top_k_by
+}
+
+struct Row:
+    id: i64
+    cat: text
+    score: i64
+
+fn ids(rows: [Row]) -> [i64]:
+    var out: [i64] = []
+    for r in rows:
+        out.push(r.id)
+    out
+
+fn cat_of(r: Row) -> text:
+    r.cat
+
+# @req: REQ-COMMON-Frame-001
+describe "std.common.frame":
+    describe "key_set":
+        it "contains every distinct key from duplicate input":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: key_set membership over duplicate keys")
+            val rows = [Row(id: 1, cat: "a", score: 5), Row(id: 2, cat: "b", score: 3), Row(id: 3, cat: "a", score: 9)]
+            val ks = key_set(rows, cat_of)
+            expect(ks.contains_key("a")).to_be_true()
+            expect(ks.contains_key("b")).to_be_true()
+            expect(ks.contains_key("c")).to_be_false()
+
+    describe "index_by":
+        it "maps each key to its FIRST row position":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: index_by keeps first position on duplicate key")
+            val rows = [Row(id: 10, cat: "a", score: 1), Row(id: 11, cat: "b", score: 2), Row(id: 12, cat: "a", score: 3)]
+            val idx = index_by(rows, cat_of)
+            expect(idx.contains_key("a")).to_be_true()
+            expect(idx["a"]).to_equal(0)  # oracle: "a" first occurs at position 0, not 2
+            expect(idx["b"]).to_equal(1)  # oracle: "b" first occurs at position 1
+
+        it "contains_key is false for an absent key, distinguishing it from row 0":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: index_by contains_key contract for absent key")
+            val rows = [Row(id: 20, cat: "a", score: 1)]
+            val idx = index_by(rows, cat_of)
+            expect(idx.contains_key("zzz")).to_be_false()
+
+    describe "distinct_by":
+        it "keeps first occurrence per key, input order preserved":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: distinct_by order + duplicate removal")
+            val rows = [Row(id: 1, cat: "a", score: 1), Row(id: 2, cat: "b", score: 2), Row(id: 3, cat: "a", score: 3), Row(id: 4, cat: "c", score: 4)]
+            val d = distinct_by(rows, cat_of)
+            expect(ids(d)).to_equal([1, 2, 4])  # oracle: first "a" (id 1) kept, second "a" (id 3) dropped
+
+    describe "group_by_key":
+        it "groups in first-encounter key order, no dropped members":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: group_by_key member counts + order")
+            val rows = [Row(id: 1, cat: "a", score: 1), Row(id: 2, cat: "b", score: 2), Row(id: 3, cat: "a", score: 3), Row(id: 4, cat: "a", score: 4), Row(id: 5, cat: "b", score: 5)]
+            val groups = group_by_key(rows, cat_of)
+            expect(groups.len()).to_equal(2)  # oracle: two distinct keys "a", "b"
+            expect(groups[0].0).to_equal("a")  # oracle: "a" encountered first
+            expect(groups[1].0).to_equal("b")
+            expect(ids(groups[0].1)).to_equal([1, 3, 4])  # oracle: all 3 "a" members kept, input order
+            expect(ids(groups[1].1)).to_equal([2, 5])  # oracle: both "b" members kept, input order
+
+    describe "count_by":
+        it "counts in first-encounter key order":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: count_by counts + order")
+            val rows = [Row(id: 1, cat: "x", score: 1), Row(id: 2, cat: "y", score: 2), Row(id: 3, cat: "x", score: 3), Row(id: 4, cat: "x", score: 4)]
+            val counts = count_by(rows, cat_of)
+            expect(counts.len()).to_equal(2)  # oracle: two distinct keys
+            expect(counts[0].0).to_equal("x")
+            expect(counts[0].1).to_equal(3)  # oracle: 3 rows with cat "x"
+            expect(counts[1].0).to_equal("y")
+            expect(counts[1].1).to_equal(1)  # oracle: 1 row with cat "y"
+
+    describe "semi_join":
+        it "keeps l-rows with a match, in l order, duplicates kept":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: semi_join order + duplicate retention")
+            val l = [Row(id: 1, cat: "a", score: 0), Row(id: 2, cat: "b", score: 0), Row(id: 3, cat: "a", score: 0), Row(id: 4, cat: "c", score: 0)]
+            val r = [Row(id: 100, cat: "a", score: 0), Row(id: 101, cat: "c", score: 0)]
+            val joined = semi_join(l, r, cat_of, cat_of)
+            expect(ids(joined)).to_equal([1, 3, 4])  # oracle: "b" has no match in r, dropped; both "a" dupes kept
+
+    describe "anti_join":
+        it "keeps l-rows with no match, in l order":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: anti_join order + no-match filter")
+            val l = [Row(id: 1, cat: "a", score: 0), Row(id: 2, cat: "b", score: 0), Row(id: 3, cat: "a", score: 0), Row(id: 4, cat: "c", score: 0)]
+            val r = [Row(id: 100, cat: "a", score: 0), Row(id: 101, cat: "c", score: 0)]
+            val joined = anti_join(l, r, cat_of, cat_of)
+            expect(ids(joined)).to_equal([2])  # oracle: only "b" rows have no match in r
+
+    describe "top_k_by":
+        it "returns k highest scores, descending, ties keep input order":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: top_k_by descending order + tie stability")
+            val rows = [Row(id: 1, cat: "a", score: 5), Row(id: 2, cat: "b", score: 9), Row(id: 3, cat: "c", score: 9), Row(id: 4, cat: "d", score: 1), Row(id: 5, cat: "e", score: 7)]
+            val top = top_k_by(rows, 3, fn(r: Row): r.score)
+            expect(ids(top)).to_equal([2, 3, 5])  # oracle: 9(id2),9(id3) tie -> input order, then 7(id5)
+
+        it "k <= 0 returns empty":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: top_k_by k<=0 boundary")
+            val rows = [Row(id: 1, cat: "a", score: 5)]
+            expect(top_k_by(rows, 0, fn(r: Row): r.score).len()).to_equal(0)  # oracle: k=0 -> []
+            expect(top_k_by(rows, -1, fn(r: Row): r.score).len()).to_equal(0)  # oracle: k<0 -> []
+
+        it "k >= len returns all rows sorted descending":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: top_k_by k>=len boundary")
+            val rows = [Row(id: 1, cat: "a", score: 2), Row(id: 2, cat: "b", score: 8), Row(id: 3, cat: "c", score: 4)]
+            val top = top_k_by(rows, 10, fn(r: Row): r.score)
+            expect(ids(top)).to_equal([2, 3, 1])  # oracle: full sort descending by score, k > len
+
+    describe "scaling (does not blow up)":
+        it "distinct_by and semi_join complete with correct counts at 4000 and 16000 elements":
+            # @req: REQ-COMMON-Frame-001
+            step("Verify: distinct_by/semi_join scale from 4000 to 16000 without exploding")
+            var small: [Row] = []
+            var i = 0
+            while i < 4000:
+                small.push(Row(id: i, cat: "k{i % 500}", score: i))
+                i = i + 1
+            var big: [Row] = []
+            i = 0
+            while i < 16000:
+                big.push(Row(id: i, cat: "k{i % 500}", score: i))
+                i = i + 1
+
+            val small_distinct = distinct_by(small, cat_of)
+            val big_distinct = distinct_by(big, cat_of)
+            expect(small_distinct.len()).to_equal(500)  # oracle: 500 distinct keys "k0".."k499" at n=4000
+            expect(big_distinct.len()).to_equal(500)  # oracle: same 500 distinct keys at n=16000
+
+            val r_side = [Row(id: 9000, cat: "k0", score: 0), Row(id: 9001, cat: "k1", score: 0)]
+            val small_joined = semi_join(small, r_side, cat_of, cat_of)
+            val big_joined = semi_join(big, r_side, cat_of, cat_of)
+            expect(small_joined.len()).to_equal(16)  # oracle: 4000/500 = 8 rows per key, 2 keys match -> 16
+            expect(big_joined.len()).to_equal(64)  # oracle: 16000/500 = 32 rows per key, 2 keys match -> 64
