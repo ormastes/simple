@@ -162,3 +162,7 @@ All nine blocked rows are now Todo DB rows (`bin/simple todo-scan`, 276 TODOs):
 C3/C4/C5/G3 carry `# TODO: (sosix <row>)` at the code site where the work lands
 (`posix.spl`, `file_driver.spl`, `io_rw.spl`); F1, AC-3b, G4, A5 and the startup
 A/B are recorded in the blocked-rows doc, which `todo-scan` also reads.
+
+## Health check + host-interface-only plan (2026-09-18)
+
+- 2026-09-18: lane specs still green on seed `3d120a6f9ab5704b`. `posix_spec` 0/3 as expected. The acceptance spec was 7/8 on every clean checkout because the perf and baseline reports were never committed. They are present here only as untracked files (8/8 locally, still 7/8 on a clean checkout), pending a decision on committing them. Capsule gate R5 is red, 6303 > 6240, because of drift from other lanes. The `push-no-direct-rt` gate was red at 6307 > 6306 because of #1052; lane H1 (`app/jj` routed through `sosix_run`) brings it back to 6303 and PASS. The 31 kernel-side sosix reds and timeouts are unchanged from `4bd22ad051f`. Next plan: `doc/03_plan/runtime/sosix_host_interface_only_plan_2026-09-18.md`.
