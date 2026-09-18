@@ -10,7 +10,7 @@
 # This replaces the pattern of duplicating extern fn declarations in every
 # test file and compiler module that needs I/O.
 
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, _resolve_posix_tool}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
 # HOST-OS DETECTOR CONSOLIDATION (2026-09-14): the single canonical
 # rt_platform_name wrapper, not a locally re-declared extern. See
@@ -34,12 +34,14 @@ extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_run(cmd, args)
+        rt_process_run(rcmd, rargs)
 
 fn _io_runtime_process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_async(cmd, args)
+        rt_process_spawn_async(rcmd, rargs)
 
 fn _io_runtime_process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -50,8 +52,9 @@ fn _io_runtime_process_kill_raw(pid: i64) -> bool:
         rt_process_kill(pid)
 
 fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_run_timeout(cmd, args, timeout_ms)
+        rt_process_run_timeout(rcmd, rargs, timeout_ms)
 
 @unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -525,7 +528,14 @@ pub fn is_char_device(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_is_char_device(host_path_native(path))
 
+## Prefer the native directory listing (works on hosts without /bin/sh,
+## e.g. Windows); fall back to the shell form only when the native probe
+## cannot read the directory.
 pub fn list_dir(path: text) -> [text]:
+    val native = unsafe(capabilities: [ffi]):
+        rt_dir_list(host_path_native(path))
+    if native != nil:
+        return native
     val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
     if code != 0:
         return []

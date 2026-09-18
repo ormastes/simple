@@ -82,7 +82,7 @@ This eliminates payload bugs (no branches, no fail paths, no data sections) and 
 ## Running the Gate
 
 ```bash
-cd /home/ormastes/dev/pub/simple/test/riscv_isa_gate
+cd $repo/test/riscv_isa_gate
 ./run_gate.sh
 ```
 

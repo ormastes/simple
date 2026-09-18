@@ -235,6 +235,7 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
                 out.push(c);
                 if out.is_symlink() {
                     if let Ok(target) = std::fs::read_link(&out) {
+                        let target = normalize_unix_style_target(target);
                         if target.is_absolute() {
                             out = target;
                         } else {
@@ -247,6 +248,44 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Git-Bash/MSYS/Cygwin `ln -s` writes symlink targets in Unix form
+/// (`/c/Users/...` or `/cygdrive/c/Users/...`). Windows `Path::is_absolute`
+/// rejects those (no drive prefix), so safe_canonicalize used to push them as
+/// relative components and produced a nonexistent path — which made
+/// `deduplicate_for_compilation` keep every aliased source file twice (e.g.
+/// `src/compiler/frontend` and `src/compiler/10.frontend`), and HIR then
+/// rejected the dual-loaded modules with "invalid export origin". Translate
+/// the leading `/X/` (or `/cygdrive/X/`) into `X:/` so dedup keys match.
+#[cfg(windows)]
+fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
+    let s = target.to_string_lossy().replace('\\', "/");
+    let mut rest: Option<&str> = None;
+    let mut drive: Option<char> = None;
+    if let Some(tail) = s.strip_prefix("/cygdrive/") {
+        let mut chars = tail.chars();
+        if let Some(d) = chars.next() {
+            if chars.next() == Some('/') {
+                drive = Some(d);
+                rest = Some(chars.as_str());
+            }
+        }
+    } else if let Some(tail) = s.strip_prefix('/') {
+        let mut chars = tail.chars();
+        if let Some(d) = chars.next() {
+            if chars.next() == Some('/') {
+                drive = Some(d);
+                rest = Some(chars.as_str());
+            }
+        }
+    }
+    match (drive, rest) {
+        (Some(d), Some(r)) if d.is_ascii_alphabetic() => {
+            PathBuf::from(format!("{}:/{}", d.to_ascii_uppercase(), r))
+        }
+        _ => target,
+    }
 }
 
 /// CLI-provided runtime library directory override.
