@@ -1,0 +1,140 @@
+# Opt-in collection profiler (design §10.2, adaptive_collections_typed_query_design.md).
+#
+# Nothing is instrumented automatically: a caller registers named "sites"
+# (one per collection use worth watching) and reports lookup/insert counts by
+# hand. The hot path (`coll_on_lookup` / `coll_on_insert`) does only integer
+# array updates by slot — no text keys, no allocation, no clock. Only
+# `coll_site` (cold, once per site name) does a linear text search.
+#
+# Profiling collections:
+#
+#     use std.common.collection_profile.{coll_profiler_new, coll_site, coll_on_lookup, coll_advice}
+#
+#     var p = coll_profiler_new()
+#     val site = coll_site(p, "user_lookup")           # register once, cold
+#     coll_on_lookup(p, site, found, scanned_count, arr.len())   # hot path
+#     for line in coll_advice(p):
+#         print(line)
+#
+# Advice is evidence, not proof: it always names the site and the measured
+# counts, and it always says "recommend" — it never claims a rewrite happened.
+#
+# Mutation note: profiler state is stored as parallel `[i64]` arrays on the
+# profiler object, one slot per site, rather than as an array of
+# `CollectionSiteStats` structs. Simple's struct-in-array element mutation is
+# unreliable (COLL019 / ADR-004: a mutating write through an indexed struct
+# field can be silently lost) — see
+# doc/07_guide/language/value_semantics_by_engine.md. Direct index assignment
+# on a primitive-typed array field (`self.lookups[site] = ...`) has none of
+# that ambiguity, so that is the only mutation this module performs on the
+# hot path. `coll_stats` / `coll_report` / `coll_advice` build fresh
+# `CollectionSiteStats` values for READING only; they never mutate one that
+# already lives inside an array.
+
+# One site's accumulated counters, for reporting/serialization only — never
+# stored inside an array and mutated in place (see module note above).
+struct CollectionSiteStats:
+    name: text
+    lookups: i64
+    lookup_hits: i64
+    scanned: i64
+    inserts: i64
+    max_len: i64
+
+# `scanned / lookups > 32` (design §10.2's threshold) checked without
+# floating point: `scanned > lookups * ADVICE_SCAN_RATIO`.
+val ADVICE_MIN_LOOKUPS: i64 = 64
+val ADVICE_SCAN_RATIO: i64 = 32
+
+class CollectionProfiler:
+    site_names: [text]
+    lookups: [i64]
+    lookup_hits: [i64]
+    scanned: [i64]
+    inserts: [i64]
+    max_len: [i64]
+
+    static fn new() -> CollectionProfiler:
+        CollectionProfiler(
+            site_names: [], lookups: [], lookup_hits: [],
+            scanned: [], inserts: [], max_len: [])
+
+fn coll_profiler_new() -> CollectionProfiler:
+    CollectionProfiler.new()
+
+# Cold path: registers `name` once and returns its slot. Re-registering the
+# same name returns the same slot. Linear name search is acceptable here
+# because this never runs on the hot path.
+fn coll_site(p: CollectionProfiler, name: text) -> i64:
+    var i = 0
+    for existing in p.site_names:
+        if existing == name:
+            return i
+        i = i + 1
+    p.site_names.push(name)
+    p.lookups.push(0)
+    p.lookup_hits.push(0)
+    p.scanned.push(0)
+    p.inserts.push(0)
+    p.max_len.push(0)
+    p.site_names.len() - 1
+
+# Hot path: integer array updates by slot only.
+fn coll_on_lookup(p: CollectionProfiler, site: i64, hit: bool, scanned: i64, len: i64):
+    p.lookups[site] = p.lookups[site] + 1
+    if hit:
+        p.lookup_hits[site] = p.lookup_hits[site] + 1
+    p.scanned[site] = p.scanned[site] + scanned
+    if len > p.max_len[site]:
+        p.max_len[site] = len
+
+# Hot path: integer array updates by slot only.
+fn coll_on_insert(p: CollectionProfiler, site: i64, len: i64):
+    p.inserts[site] = p.inserts[site] + 1
+    if len > p.max_len[site]:
+        p.max_len[site] = len
+
+# Read-only snapshot, one freshly built struct per site.
+fn coll_stats(p: CollectionProfiler) -> [CollectionSiteStats]:
+    var out: [CollectionSiteStats] = []
+    var i = 0
+    for name in p.site_names:
+        out.push(CollectionSiteStats(
+            name: name,
+            lookups: p.lookups[i],
+            lookup_hits: p.lookup_hits[i],
+            scanned: p.scanned[i],
+            inserts: p.inserts[i],
+            max_len: p.max_len[i]))
+        i = i + 1
+    out
+
+fn coll_report(p: CollectionProfiler) -> [text]:
+    var out: [text] = []
+    var i = 0
+    for name in p.site_names:
+        out.push(
+            "{name}: lookups={p.lookups[i]} hits={p.lookup_hits[i]} " +
+            "scanned={p.scanned[i]} inserts={p.inserts[i]} max_len={p.max_len[i]}")
+        i = i + 1
+    out
+
+# Switch recommendations. Evidence only — never claims a change happened.
+fn coll_advice(p: CollectionProfiler) -> [text]:
+    var out: [text] = []
+    var i = 0
+    for name in p.site_names:
+        val lk = p.lookups[i]
+        val sc = p.scanned[i]
+        if lk > ADVICE_MIN_LOOKUPS:
+            if sc > lk * ADVICE_SCAN_RATIO:
+                val avg_scanned = sc / lk
+                out.push(
+                    "{name}: dataframe-able: {lk} linear lookups scanning avg " +
+                    "{avg_scanned} elements — recommend key_set/index_by (std.common.frame)")
+                if p.inserts[i] == 0:
+                    out.push(
+                        "{name}: recommend build once, then index " +
+                        "({lk} lookups, 0 inserts)")
+        i = i + 1
+    out

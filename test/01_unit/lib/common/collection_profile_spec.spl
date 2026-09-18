@@ -1,0 +1,143 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/05_design/compiler/collection_planner/adaptive_collections_typed_query_design.md §10.2
+
+# collection_profile spec
+#
+# Tests for src/lib/common/collection_profile.spl — the opt-in pure-Simple
+# collection profiler (adaptive_collections_typed_query_design.md §10.2).
+
+use std.spec.step
+
+use std.common.collection_profile.{
+    coll_profiler_new, coll_site, coll_on_lookup, coll_on_insert,
+    coll_report, coll_advice, coll_stats
+}
+
+
+describe "collection_profile":
+    describe "coll_site registration":
+        it "registers a new site and returns slot 0 for the first name":
+            step("registers a new site and returns slot 0 for the first name")
+            var p = coll_profiler_new()
+            val slot = coll_site(p, "user_lookup")
+            expect(slot).to_equal(0)
+
+        it "returns the same slot when the same name is registered again":
+            step("returns the same slot when the same name is registered again")
+            var p = coll_profiler_new()
+            val slot1 = coll_site(p, "user_lookup")
+            val slot2 = coll_site(p, "user_lookup")
+            expect(slot2).to_equal(slot1)
+
+        it "assigns increasing slots for distinct names":
+            step("assigns increasing slots for distinct names")
+            var p = coll_profiler_new()
+            val slot_a = coll_site(p, "site_a")
+            val slot_b = coll_site(p, "site_b")
+            expect(slot_a).to_equal(0)
+            expect(slot_b).to_equal(1)
+
+    describe "counters accumulate":
+        it "sums lookups, hits and scanned across calls":
+            step("sums lookups, hits and scanned across calls")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "counters")
+            coll_on_lookup(p, site, true, 3, 10)
+            coll_on_lookup(p, site, false, 7, 10)
+            val rows = coll_report(p)
+            expect(rows.len()).to_equal(1)
+            expect(rows[0]).to_contain("lookups=2")
+            expect(rows[0]).to_contain("hits=1")
+            expect(rows[0]).to_contain("scanned=10")
+
+        it "tracks max_len across lookups and inserts":
+            step("tracks max_len across lookups and inserts")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "growing")
+            coll_on_lookup(p, site, true, 1, 5)
+            coll_on_insert(p, site, 12)
+            coll_on_lookup(p, site, true, 1, 8)
+            val rows = coll_report(p)
+            expect(rows[0]).to_contain("max_len=12")
+
+        it "counts inserts separately from lookups":
+            step("counts inserts separately from lookups")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "inserts")
+            coll_on_insert(p, site, 1)
+            coll_on_insert(p, site, 2)
+            val rows = coll_report(p)
+            expect(rows[0]).to_contain("inserts=2")
+            expect(rows[0]).to_contain("lookups=0")
+
+    describe "coll_report row count":
+        it "emits one row per registered site":
+            step("emits one row per registered site")
+            var p = coll_profiler_new()
+            coll_site(p, "site_a")
+            coll_site(p, "site_b")
+            coll_site(p, "site_c")
+            val rows = coll_report(p)
+            expect(rows.len()).to_equal(3)
+
+    describe "coll_advice":
+        it "recommends key_set/index_by for a linear-lookup-heavy site":
+            step("recommends key_set/index_by for a linear-lookup-heavy site")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "linear_scan_site")
+            var i = 0
+            while i < 100:
+                coll_on_lookup(p, site, true, 500, 500)
+                i = i + 1
+            val advice = coll_advice(p)
+            expect(advice.len()).to_be_greater_than(0)
+            var joined = ""
+            for line in advice:
+                joined = "{joined}{line}\n"
+            expect(joined).to_contain("linear_scan_site")
+            expect(joined).to_contain("recommend")
+            expect(joined).to_contain("key_set")
+            expect(joined).to_contain("100")
+
+        it "is silent for an already-indexed site with cheap lookups":
+            step("is silent for an already-indexed site with cheap lookups")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "indexed_site")
+            var i = 0
+            while i < 100:
+                coll_on_lookup(p, site, true, 1, 100)
+                i = i + 1
+            val advice = coll_advice(p)
+            expect(advice.len()).to_equal(0)
+
+        it "recommends build-once-then-index only alongside the dataframe-able line, never alone on a cheap-lookup site":
+            step("recommends build-once-then-index only alongside the dataframe-able line, never alone on a cheap-lookup site")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "never_built_site")
+            var i = 0
+            while i < 100:
+                coll_on_lookup(p, site, true, 500, 500)
+                i = i + 1
+            val advice = coll_advice(p)
+            var joined = ""
+            for line in advice:
+                joined = "{joined}{line}\n"
+            expect(joined).to_contain("build once, then index")
+            expect(joined).to_contain("dataframe-able")
+
+    describe "coll_stats":
+        it "builds one CollectionSiteStats snapshot per registered site":
+            step("builds one CollectionSiteStats snapshot per registered site")
+            var p = coll_profiler_new()
+            val site = coll_site(p, "snapshot_site")
+            coll_on_lookup(p, site, true, 4, 9)
+            coll_on_insert(p, site, 9)
+            val stats = coll_stats(p)
+            expect(stats.len()).to_equal(1)
+            expect(stats[0].name).to_equal("snapshot_site")
+            expect(stats[0].lookups).to_equal(1)
+            expect(stats[0].lookup_hits).to_equal(1)
+            expect(stats[0].scanned).to_equal(4)
+            expect(stats[0].inserts).to_equal(1)
+            expect(stats[0].max_len).to_equal(9)
