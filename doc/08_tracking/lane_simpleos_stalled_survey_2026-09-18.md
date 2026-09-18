@@ -79,3 +79,35 @@ If the `/tmp` worktrees get cleaned, these patches plus the local branches
 `json_logic` was surveyed as a possible "simple logics" lane: it is DONE
 (doc `json_logic_spec_blocked_stub_modules_2026-06-26.md` closed 2026-09-13);
 no lane named "logics" exists in the repo.
+
+## Correction 2026-09-18 (evening) — trial merge measured, revival prepared, vehicle rejected by policy
+
+The "skip" verdict above was re-examined with an actual 3-way merge of the
+storage-pair cluster (`ea1080a6bf0`) into current main:
+
+- **Only 10 conflicting files** (5 code: sdn parser 2 hunks, 4 cli/app 1
+  hunk each; 5 docs) against 480 commits of divergence — the merge is far
+  cheaper than the rebase estimate above.
+- All 10 resolved (sdn parser keeps the lane's seq-dispatch walker — it
+  passes both sides' pinned specs where a naive HEAD-combination fails the
+  lane's strict-traversal spec; cli keeps HEAD's beta.11 version literals;
+  docs unioned; todo_db merged 385 rows, 0 duplicate ids).
+- The lane's inherent DEPTAIL regression (`cannot iterate over this type:
+  Nil`, cost spec 9/11 even on the untouched lane tip — a strong hint why
+  the lane stalled) was root-caused and fixed: two main-era Nil-init
+  omissions in `module_surface_declarations.spl` (friends/internal_exports
+  never projected; ModuleSurfaceField.visibility never passed) that the
+  lane's member-visibility code is the first to read. +15 lines.
+- Validation after resolution+fix: cost spec 11/11, memo 7/7, owner_index
+  4/4, sdn dup-key 3/3, os boot capacity guard 3/3.
+
+**Vehicle rejected by repo policy:** the push gate `push-conflict-tree`
+refuses the 311-commit merge ("outgoing commit union ... exceeds its
+bounded history limit") — the project enforces linear/rebased history, so
+big-merge revival PRs are not landable by construction.
+
+**Preserved for the owner** (in `.simple/lane-preserves/`):
+`storage-pair-merged-vs-main.patch` (191k lines, the fully-resolved+fixed
+tree vs main), merged tip `7a8661c3e17`. Owner landing path: replay/linearize
+per lane (jj-based) using this resolved tree as the conflict-resolution
+reference, in dependency order starting from the release-cutset receipt lane.
