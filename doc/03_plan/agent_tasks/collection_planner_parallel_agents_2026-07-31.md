@@ -2,6 +2,7 @@
 
 **Date:** 2026-07-31
 **Research:** `doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md`
+**Superseded for new work (2026-09-18):** `doc/03_plan/compiler/collection_planner/adaptive_collections_typed_query_rc1_plan_2026-09-18.md`. Wave 0 history and risk register below remain valid.
 **Method:** disjoint-ownership lanes, fail-closed gates, orchestrator verifies every
 lane against the live tree. **No lane is accepted on its own report alone.**
 

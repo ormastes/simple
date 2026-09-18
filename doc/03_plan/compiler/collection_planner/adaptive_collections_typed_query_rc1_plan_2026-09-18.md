@@ -1,0 +1,89 @@
+# Adaptive collections + typed queries — parallel plan (RC1 preparation)
+
+**Date:** 2026-09-18
+**Research:** `doc/01_research/compiler/collection_planner/adaptive_collections_typed_query_2026-09-18.md`
+**Design:** `doc/05_design/compiler/collection_planner/adaptive_collections_typed_query_design.md`
+**Supersedes for new work:** `doc/03_plan/agent_tasks/collection_planner_parallel_agents_2026-07-31.md`
+(its Wave 0 history and risk register remain valid; its W1 P0 gate is carried
+forward below as G-P0).
+**Worktree:** `/home/yoon/dev/simple-adaptive-collections`, branch
+`work/adaptive-collections-typed-query` (docs only). Each lane gets its own
+`work/<lane>` worktree from `origin/main` and lands via its own PR.
+
+## Ground rules (unchanged from 07-31)
+
+1. **Disjoint file ownership.** The Owns column is the contract.
+2. **Agents do not commit;** the orchestrator reviews diff + evidence, then lands.
+3. **Evidence bar:** exact command, its output, before/after on a real file. TDD:
+   failing spec first, then the change.
+4. Each lane ends `pass` / `blocked` / `filed`.
+5. **RC1 rule:** no lane in this plan may change program output except the
+   explicit complexity fixes (L1, L2), which must preserve output order.
+
+## Gates
+
+- **G-P0** (carried from 07-31 W1): closure/indirect-call ABI JIT+LLVM,
+  predicate `any`/`all` parity, native `Dict.set` insert, cross-backend
+  functional tests. `rt_array_map` is now defined — needs only a parity test (L0).
+  Gates every **post-RC1** transform lane; does not gate RC1 lanes.
+- **G-RC1:** all RC1 lanes `pass` or explicitly `filed` with a tracking record
+  before the `-rc.1` candidate is cut
+  (`doc/07_guide/infra/software_release.md`).
+
+## Wave R — RC1 lanes (all parallel unless noted)
+
+| Lane | Work | Owns | Depends | Evidence |
+|---|---|---|---|---|
+| **L0** P0 parity census | Execution specs for `map`/`filter`/`any`/`all`/closure calls across interpreter, JIT, native; confirm `rt_array_map` defined + called. Report each P0 item green/red. | `test/01_unit/compiler/collection/p0_parity_spec.spl` *(new)* | — | spec output per engine; red items filed under `doc/08_tracking/bug/` |
+| **L1** stdlib `group_by` | Replace linear slot scan with `Dict<K, i64>` key→slot, keeping first-encounter order; use only `d[k] = v` + `contains_key` (native Dict pitfalls). Remove the `# ponytail:` note. | `src/lib/gc_async_mut/pure/collections.spl` | — | order-preservation spec + 1K→16K scaling spec |
+| **L2** `std.df` unique | `unique_f64`/`unique_i64` (`df/mod.spl:194,214`) and `nunique` → Dict-backed seen set, missing handling unchanged. | `src/lib/nogc_sync_mut/df/mod.spl` | — | existing df specs green + new scaling spec |
+| **L3** `Map<K,V>` audit | Audit `nogc_sync_mut/src/map.spl` for interp/native parity (insert, overwrite, remove, collisions, text/int keys). Tests only; file bugs. No API change. | `test/01_unit/lib/map_parity_spec.spl` *(new)* | — | parity table; bugs filed |
+| **L4** contract + registry | `CollectionSemanticContractV1` + `collection_operations.sdn` + loader; mapping for Array, Dict, `Map`, text HashMap/HashSet. | `src/lib/common/collections/semantic_contract.spl`, `config/compiler/collection_operations.sdn` *(new)* | — | loader spec; every registry op has one family |
+| **L5** origin IDs | `CollectionOriginV1` / `CollectionOperationId` computed in typed HIR for literals + ctors. | one new file under `src/compiler/20.hir/` | L4 (registry ids) | stability spec across whitespace edits; two-literals-one-line spec |
+| **L6** `.sprof` v2 codec | `ProfileSessionV2` DTO/codec/query in common; v1 reader untouched; `CollectionSummaryV1`; dedup/saturation/missing mask; bounds. | `src/lib/common/profile/` *(new)*; adapter edit in `src/app/optimize/sprof_loader.spl` | L5 (origin shape) — may start on a stub | v1 fixtures byte-identical; v2 corruption specs |
+| **L7** `basic` counters + off proof | Numeric per-thread slots for collection ops; `off` mode proven absent from binary by symbol scan. | `src/app/compile/native_profile_counter_runtime.spl`, `scripts/check/check-collection-telemetry-off.shs` *(new, --selftest)* | L5, L6 | accounting-oracle spec; off-mode gate PASS |
+| **L8** report-only planner | `CollectionPlanReport` + `remark[COLL-PLAN]` + explain CLI; status always `AnalysisOnly`; no IR mutation. | `src/compiler/60.mir_opt/mir_opt/collection_opt_report.spl` *(new)* | L4, L6 | no-IR-diff spec; deterministic report spec |
+| **L9** COLL complexity rules | Registry-driven rules for nested membership / nested equality find / repeated sort (07-31 COLL009–012, 018). Warnings only, no auto-fix. | `src/compiler/35.semantics/lint/collection_patterns.spl` | L4 | fixture fires + clean fixture silent |
+| **L10** lexer regression corpus | Tests pinning `t.0`, `n.0.1`, `0.5`, `1..2`, `1..=2`, `1...` in seed + self-hosted lexers, ahead of `.field` grammar. | `test/01_unit/compiler/lexer/dot_number_corpus_spec.spl` *(new)* | — | spec green on both lexers |
+| **L11** optimizer cost baseline | Compile-time + RSS per O-level on a small corpus (tiny fns, long chains, wide records). Measurement only; results to `doc/10_metrics/`. | `scripts/check/collection-opt-baseline.shs` *(new)* | — | recorded numbers with binary identity (`readlink -f bin/simple`) |
+
+Critical path: L4 → L5 → L6 → L7/L8. L0–L3, L10, L11 start immediately; L9 after L4.
+Max parallel at start: 7 lanes (L0, L1, L2, L3, L4, L10, L11).
+
+```
+t0 ─┬─ L0 | L1 | L2 | L3 | L10 | L11      (independent, parallel)
+    └─ L4 ─┬─ L5 ─ L6 ─┬─ L7
+           └─ L9       └─ L8                ─── G-RC1
+```
+
+## Wave P — post-RC1 (planned, not scheduled)
+
+| Lane | Work | Gate |
+|---|---|---|
+| P1 | `.field` grammar: seed Rust + self-hosted parser + formatter + IDE + GPU lexer; `QueryExpr`; O0 faithful lowering | L10, RC1 shipped |
+| P2 | `@col` / `@col_site` / `@col_impl` local-binding retention + `ResolvedCollectionPolicyV1` + SDN include loader | attribute retention proof |
+| P3 | `{a, b}` set literal (additive; `{}` stays Dict) | P1 parser owner free |
+| P4 | O1 fusion + required-field set | P1, G-P0 |
+| P5 | O2 rewrites: semi-join, distinct, group, IndexBy, TopK, windows | G-P0, L3 green |
+| P6 | Static/creation-time specialization (`PhysicalCollectionPlanV1`) | P5 |
+| P7 | Guarded growth/boundary switching + receipts | P6 + fault-injection harness |
+| P8 | Layout feed into `StorageLayoutPlanV1` (storage_layout owner) | P6 |
+| P9 | SIMD / GPU batch execution | P8 + real device evidence |
+| P10 | O3 search, `sampled`/`deep` profiling, online adaptation | P6–P9 |
+
+## Delegation
+
+Per memory: small-model agents per lane with explicit file ownership and a
+failing-spec-first instruction; orchestrator reviews every diff at a higher
+level and re-runs the evidence command before landing. Never `git stash` in a
+lane worktree.
+
+## Risk register (additions)
+
+| Risk | Control |
+|---|---|
+| Report-only planner quietly mutates IR | L8 no-IR-diff spec is a hard gate |
+| Telemetry leaks into normal binaries | L7 off-mode gate with `--selftest` |
+| v2 codec breaks v1 consumers | L6 byte-identical v1 fixtures |
+| Proposed roots collide with later-landed code | census before each *(new)* path |
+| Grammar work sneaks into RC1 | Rule 5 + L10 is tests-only |

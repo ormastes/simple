@@ -639,3 +639,12 @@ This makes functional code the *safer* path in Simple without pretending that
 - Existing MIR pass: `src/compiler/60.mir_opt/mir_opt/collection_opt*.spl`
 - Dict native pitfalls: `doc/07_guide/language/dict_native_pitfalls.md`
 - Prior perf plan: `doc/01_research/compiler/performance/performance_optimization_plan.md`
+
+## Next (2026-09-18)
+
+- Research: `adaptive_collections_typed_query_2026-09-18.md` (this directory) —
+  merges the adaptive-collections and typed-dataframe-query reports; re-verifies
+  §1 (P0.1 `rt_array_map` closed, pure `unique` fixed, generic `Map<K,V>` exists
+  in `nogc_sync_mut/src/map.spl`, `std.df` unique still O(n²)).
+- Plan (RC1): `doc/03_plan/compiler/collection_planner/adaptive_collections_typed_query_rc1_plan_2026-09-18.md`
+- Design: `doc/05_design/compiler/collection_planner/adaptive_collections_typed_query_design.md`
