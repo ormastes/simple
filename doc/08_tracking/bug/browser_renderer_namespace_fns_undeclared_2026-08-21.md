@@ -67,3 +67,7 @@ drop, since dropping privileges first would remove the `CAP_SYS_ADMIN` needed
 for the namespace call). Then define `SPL_HAS_BROWSER_RENDERER_NAMESPACES` and
 re-verify.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: linux-lane** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
