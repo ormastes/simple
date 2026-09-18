@@ -375,3 +375,30 @@ admission now pass; slices 1-4 each fixed verifiable stage3 errors), plus the
 review-admission infra fix. The full stage3 native build of the compiler
 closure remains blocked by the wedge above. Chain evidence: stage2 PASS +
 admitted on every run including v5; stage3 never passes driver.spl.
+
+### Differential result 2026-09-18 — seed completes the full stage3 closure; the wedge is compiler-binary-specific
+
+Running the EXACT stage3 replay command (same sources — main @ slice 5,
+same env, fresh caches, 4 threads) with the two compiler binaries:
+
+- **Rust seed** (`src/compiler_rust/target/bootstrap/simple`, x86-64 host):
+  full closure build **PASS in 380.2s** (341.8s compile + 38.4s link,
+  884 modules, 0 failed, rc=0). Output binary:
+  `/tmp/boot20-int/diag-scratch/simple` (148MB, aarch64) — a fresh
+  seed-built stage3-equivalent compiler from current sources.
+- **Stage2-admitted** (aarch64, qemu-user): wedges in `driver.spl` HIR
+  imports (100% CPU, flat ~40GB RSS) as characterized above.
+
+Same sources, same flags, same environment variables — the only difference
+is the compiler binary. This closes the localization loop: the defect is in
+the stage2-NATIVE-COMPILED COMPILER'S OWN EXECUTION (its generated
+codegen/runtime state during HIR), not in any source the closure shares. The
+seed-built binary also serves as an unblocking asset for tooling lanes that
+merely need a current-compiler build (it is NOT a bootstrap-ladder
+substitute — provenance policy requires stage3 to be built by the admitted
+stage2).
+
+The next diagnostic step remains the instrumented stage2 (SIGPROF sampler)
+or a seed-vs-native registry-state differential inside the wedged process;
+the qemu `-g` route was attempted twice and is impractical (single-session
+stub; >3h to reach the wedge under TCG).
