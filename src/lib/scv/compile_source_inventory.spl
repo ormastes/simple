@@ -164,9 +164,11 @@ fn compile_source_inventory_apply_and_publish_v1(
         if not changed.valid:
             return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
         inventory = changed.inventory!
-    val digest = compile_source_inventory_publish_v1(cache_root, inventory)
+    val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
+        cache_root, inventory)
     if digest == "":
-        return CompileSourceInventoryReadV1(false, "inventory-publication-failed", "", nil)
+        return CompileSourceInventoryReadV1(
+            false, "inventory-publication-failed:" + publish_reason, "", nil)
     compile_source_inventory_read_current_v1(cache_root)
 
 fn compile_source_inventory_apply_git_changes_v1(
@@ -400,26 +402,54 @@ fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryRe
 fn compile_source_inventory_publish_v1(
     cache_root: text, inventory: CompileSourceInventoryV1
 ) -> text:
+    """Publish and answer the digest, or "" on any failure.
+
+    Kept for the exported contract. Everything in-tree should call
+    `compile_source_inventory_publish_reasoned_v1` instead and surface the
+    reason: this function has EIGHT distinct failure paths and collapsing them
+    into one empty string is what made a permanently wedged cache read exactly
+    like a full disk. See
+    doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+    """
+    val (digest, _reason) = compile_source_inventory_publish_reasoned_v1(cache_root, inventory)
+    digest
+
+fn compile_source_inventory_publish_reasoned_v1(
+    cache_root: text, inventory: CompileSourceInventoryV1
+) -> (text, text):
+    """Publish an inventory, answering `(digest, reason)`.
+
+    `reason` is "ok" on success and otherwise names WHICH of the eight failure
+    paths fired, so a caller can tell a retryable race
+    (`publish-superseded-by-newer-generation`) from a permanent wedge
+    (`publish-generation-digest-divergence`, which no retry can clear) from an
+    environment failure (`publish-lock-unavailable`, `publish-storage-*`).
+    """
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
-        return ""
+        return ("", "publish-cache-root-invalid")
     val content = compile_source_inventory_encode_v1(inventory)
     if content == "":
-        return ""
+        return ("", "publish-encode-empty")
     val digest = sha256_text(content)
     val root = compile_source_inventory_storage_v1(cache_root)
     if not rt_dir_create_all("{root}/generations"):
-        return ""
+        return ("", "publish-storage-mkdir-failed")
     val publication_lock = file_lock("{root}/publication.lock", 5)
     if publication_lock < 0:
-        return ""
+        return ("", "publish-lock-unavailable")
     val current = compile_source_inventory_read_current_v1(cache_root)
     if current.valid and current.inventory!.generation > inventory.generation:
         val _unlocked = file_unlock(publication_lock)
-        return ""
+        return ("", "publish-superseded-by-newer-generation")
     if current.valid and current.inventory!.generation == inventory.generation:
         val existing_digest = current.digest
         val _unlocked = file_unlock(publication_lock)
-        return if existing_digest == digest: digest else: ""
+        if existing_digest == digest:
+            return (digest, "ok")
+        # Same generation, different content: no retry can ever clear this, and
+        # it is exactly the state an empty generation-0 inventory leaves behind.
+        # Say so, and name the remedy, instead of answering "" like a transient.
+        return ("", "publish-generation-digest-divergence (cached inventory at this generation has different content; clear {cache_root} to rebuild)")
     val generation_path = "{root}/generations/{digest}.inventory"
     if not rt_file_exists(generation_path):
         val generation_staged = "{generation_path}.tmp.{rt_getpid()}"
@@ -430,16 +460,16 @@ fn compile_source_inventory_publish_v1(
             val raced = compile_source_inventory_read_text_v1(generation_path)
             if raced == nil or raced! != content:
                 val _unlocked = file_unlock(publication_lock)
-                return ""
+                return ("", "publish-generation-write-failed")
     val staged = "{root}/CURRENT.tmp.{rt_getpid()}"
     rt_file_delete(staged)
     if not file_create_excl(staged, digest) or
             not rt_file_rename(staged, "{root}/CURRENT"):
         rt_file_delete(staged)
         val _unlocked = file_unlock(publication_lock)
-        return ""
+        return ("", "publish-current-write-failed")
     val _unlocked = file_unlock(publication_lock)
-    digest
+    (digest, "ok")
 
 fn compile_source_inventory_read_current_v1(
     cache_root: text
@@ -505,7 +535,7 @@ export compile_source_inventory_apply_git_events_v1
 export compile_source_inventory_apply_filesystem_events_v1
 export compile_source_inventory_encode_v1, compile_source_inventory_decode_v1
 export compile_source_inventory_digest_v1
-export compile_source_inventory_publish_v1, compile_source_inventory_read_current_v1
+export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
 export compile_source_inventory_recover_v1
 export compile_source_inventory_snapshot_rows_v1
 use std.common.text_advanced.{split_whitespace}
