@@ -55,3 +55,7 @@ seed-side JIT investigation, not a stdlib fix.
 2. Check whether the crash is specific to `generate_range`'s closure
    (`fn(n): (n + 1, n + 1 < end_val)`) or general to any generator use under JIT.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

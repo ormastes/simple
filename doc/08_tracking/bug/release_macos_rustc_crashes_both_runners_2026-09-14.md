@@ -82,3 +82,7 @@ the whole job down and skips both downstream jobs. `create-release` never fails
 - `beta1_tag_cannot_bootstrap_on_windows_2026-09-14.md` — the Windows lane, and
   the gate analysis this record extends.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

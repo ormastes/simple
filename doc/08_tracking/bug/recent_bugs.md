@@ -1309,3 +1309,87 @@
 | capsule_immutability_check_fail_open_gnu_find_perm_2026-08-30 | P0 | fixed | Runtime-capsule and stage3-authority immutability checks used GNU-only find -perm /0222; on BSD find it errored to stderr and printed nothing, so the check was FAIL-OPEN | 2026-08-30 |
 | weak_symbol_detection_elf_only_nm_kinds_macho_2026-08-30 | P1 | fixed | Weak-symbol detection used ELF nm kind letters W and V; Mach-O prints weak definitions as T, so every weak fallback looked strong and the Stage-4 capsule guard rejected the build | 2026-08-30 |
 | process_group_setsid_absent_on_macos_2026-08-30 | P1 | fixed | setsid is util-linux and absent on macOS; used by two twin copies of io/process_ops.spl (src/lib and src/app) and by run-process-group-timeout.shs | 2026-08-30 |
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: linux-lane** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:real-gpu]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:real-gpu]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

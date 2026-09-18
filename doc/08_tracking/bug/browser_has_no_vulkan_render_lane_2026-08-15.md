@@ -133,3 +133,7 @@ it and reads it back pixel-perfect on lavapipe (`readback_source=device_readback
 - Longer term: a real browser `vulkan` render lane routing draw IR through
   engine2d GPU primitives.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
