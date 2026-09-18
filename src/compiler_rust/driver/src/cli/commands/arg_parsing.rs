@@ -113,7 +113,13 @@ pub fn parse_lang_flag(args: &[String]) {
 fn is_fix_flag(arg: &str) -> bool {
     matches!(
         arg,
-        "--fix" | "--fix-all" | "--fix-warnings" | "--fix-errors" | "--fix-info" | "--fix-interactive" | "--fix-dry-run"
+        "--fix"
+            | "--fix-all"
+            | "--fix-warnings"
+            | "--fix-errors"
+            | "--fix-info"
+            | "--fix-interactive"
+            | "--fix-dry-run"
     ) || arg.starts_with("--fix-id=")
         || arg.starts_with("--fix-code=")
         || arg.starts_with("--fix-nth=")
@@ -196,7 +202,10 @@ mod tests {
     fn test_filter_keeps_fix_flags_for_lint_and_fix() {
         let lint: Vec<String> = ["lint", "--fix", "a.spl"].iter().map(|s| s.to_string()).collect();
         assert_eq!(filter_internal_flags(&lint), lint);
-        let fix: Vec<String> = ["fix", "--fix-dry-run", "a.spl"].iter().map(|s| s.to_string()).collect();
+        let fix: Vec<String> = ["fix", "--fix-dry-run", "a.spl"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(filter_internal_flags(&fix), fix);
         let run: Vec<String> = ["run", "--fix", "a.spl"].iter().map(|s| s.to_string()).collect();
         assert_eq!(filter_internal_flags(&run), vec!["run", "a.spl"]);
