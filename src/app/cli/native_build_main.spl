@@ -1,7 +1,7 @@
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, cwd}
-use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
+use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query}
 use app.io.file_ops.{path_absolute}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
@@ -598,6 +598,15 @@ fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text
         if code != 0:
             eprint "[parse-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}"
             failed = failed.push(i)
+            # A timed-out (-2) child is STILL RUNNING and holds its multi-GiB
+            # interpreter heap. If it stays alive it competes with the HIR
+            # shards and the real worker for the runner's memory and can push
+            # the worker into alloc-failure (beta.9 windows leg: leaked shard
+            # + worker OOM, "memory allocation of 65520 bytes failed").
+            # Best-effort kill; an already-exited child makes this a no-op.
+            if pid > 0:
+                val killed = process_kill(pid)
+                eprint "[parse-shard] shard={i}/{count} pid={pid} dead-child cleanup: kill={killed}"
         else:
             print "[parse-shard] shard={i}/{count} pid={pid} exit=0"
         k = k + 1
@@ -705,6 +714,11 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
         val code = process_wait(pid, timeout_ms)
         if code == 0:
             done = done + 1
+        else:
+            # Same leak as the parse shards: a timed-out HIR child stays alive
+            # holding its heap while the real worker runs. Reap it.
+            val killed = process_kill(pid)
+            eprint "[hir-shard] pid={pid} dead-child cleanup: kill={killed}"
     if queue_dir != "":
         env_set("SIMPLE_HIR_SHARD_QUEUE", old_queue)
         val _removed = dir_remove_all(queue_dir)
