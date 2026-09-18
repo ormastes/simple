@@ -49,8 +49,8 @@ Guide: `doc/07_guide/language/collections/dataframe_way.md`.
   applies them. `simple lint --fix` needs the seed fix `1f570918de4` to be
   deployed first: before that change, `filter_internal_flags` stripped `--fix*`
   for every command.
-- **Trap: two `std.df` copies.** `use std.df` resolves to
-  `nogc_async_mut/df`, **not** `nogc_sync_mut/df`. Edit both, and import the
+- **Trap: two `std.df` copies.** Which copy `use std.df` loads depends on the importing family context
+  (the test runner loaded `nogc_async_mut/df`, although `resolution.spl` tier order lists `nogc_sync_mut` first). Edit both, and import the
   family explicitly in specs. Otherwise the spec passes on the unfixed copy.
 - **Trap: Dict keys compare bitwise.** For `f64`, `-0.0 != 0.0` and
   `NaN == NaN`. Fold `-0.0` and bypass NaN to keep `==` semantics.
