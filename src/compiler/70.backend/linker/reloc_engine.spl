@@ -35,10 +35,15 @@ val R_X86_64_GOTPCREL: i64   = 9   # G + GOT + A - P
 val R_AARCH64_NONE: i64      = 0
 val R_AARCH64_ABS64: i64     = 257  # S + A
 val R_AARCH64_ABS32: i64     = 258  # S + A (u32)
-val R_AARCH64_CALL26: i64    = 283  # S + A - P (bits 27:2)
+val R_AARCH64_LDST8_ABS_LO12_NC: i64 = 278   # (S+A) & 0xfff, into imm12 (byte, unscaled)
+val R_AARCH64_JUMP26: i64    = 282  # S + A - P (bits 27:2), B — same formula as CALL26
+val R_AARCH64_CALL26: i64    = 283  # S + A - P (bits 27:2), BL
+val R_AARCH64_LDST16_ABS_LO12_NC: i64 = 284  # ((S+A) & 0xfff) >> 1, into imm12 (2-byte scaled)
+val R_AARCH64_LDST32_ABS_LO12_NC: i64 = 285  # ((S+A) & 0xfff) >> 2, into imm12 (4-byte scaled)
 val R_AARCH64_ADR_PREL_PG_HI21: i64 = 275  # (Page(S+A) - Page(P)) >> 12, split immlo[1:0]/immhi[20:2]
 val R_AARCH64_ADD_ABS_LO12_NC: i64 = 277   # (S+A) & 0xfff, into imm12
 val R_AARCH64_LDST64_ABS_LO12_NC: i64 = 286  # ((S+A) & 0xfff) >> 3, into imm12 (8-byte scaled)
+val R_AARCH64_LDST128_ABS_LO12_NC: i64 = 299 # ((S+A) & 0xfff) >> 4, into imm12 (16-byte scaled)
 
 # ============================================================================
 # RISC-V Relocation Types (subset)
@@ -207,9 +212,18 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val v = s + a
         return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
 
-    if rtype == R_AARCH64_CALL26:
-        val v = (s + a - p) >> 2
-        return RelocResult(success: true, offset: offset, value: v & 0x3ffffff, error: "")
+    if rtype == R_AARCH64_CALL26 or rtype == R_AARCH64_JUMP26:
+        # AAELF64: BL (CALL26) and B (JUMP26) share the formula and imm26
+        # encoding. (S+A-P) must be 4-byte aligned and the raw byte offset
+        # must fit the signed-26-bit-x4-scaled field, i.e. lie in
+        # [-2^27, 2^27). Reject rather than silently masking an
+        # out-of-range or truncating a misaligned target.
+        val v = s + a - p
+        if v & 0x3 != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_CALL26/JUMP26 branch target not 4-byte aligned: (S + A - P) & 0x3 != 0")
+        if v < -134217728 or v >= 134217728:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_CALL26/JUMP26 branch offset out of range: (S + A - P) must be in [-2^27, 2^27)")
+        return RelocResult(success: true, offset: offset, value: (v >> 2) & 0x3ffffff, error: "")
 
     if rtype == R_AARCH64_ADR_PREL_PG_HI21:
         # Page(S+A) - Page(P), right-shifted 12 to a signed 21-bit page count.
@@ -236,6 +250,31 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_LDST64_ABS_LO12_NC target not 8-byte aligned: (S + A) & 0x7 != 0")
         val lo12 = (s + a) & 0xfff
         return RelocResult(success: true, offset: offset, value: lo12 >> 3, error: "")
+
+    if rtype == R_AARCH64_LDST8_ABS_LO12_NC:
+        # Byte access: scale 1, no alignment constraint — every byte offset
+        # is valid, so this is the one LDST*_ABS_LO12_NC variant with no
+        # reject path on the target itself.
+        val lo12 = (s + a) & 0xfff
+        return RelocResult(success: true, offset: offset, value: lo12, error: "")
+
+    if rtype == R_AARCH64_LDST16_ABS_LO12_NC:
+        if (s + a) & 0x1 != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_LDST16_ABS_LO12_NC target not 2-byte aligned: (S + A) & 0x1 != 0")
+        val lo12 = (s + a) & 0xfff
+        return RelocResult(success: true, offset: offset, value: lo12 >> 1, error: "")
+
+    if rtype == R_AARCH64_LDST32_ABS_LO12_NC:
+        if (s + a) & 0x3 != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_LDST32_ABS_LO12_NC target not 4-byte aligned: (S + A) & 0x3 != 0")
+        val lo12 = (s + a) & 0xfff
+        return RelocResult(success: true, offset: offset, value: lo12 >> 2, error: "")
+
+    if rtype == R_AARCH64_LDST128_ABS_LO12_NC:
+        if (s + a) & 0xf != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_LDST128_ABS_LO12_NC target not 16-byte aligned: (S + A) & 0xf != 0")
+        val lo12 = (s + a) & 0xfff
+        return RelocResult(success: true, offset: offset, value: lo12 >> 4, error: "")
 
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported aarch64 reloc type {rtype}")
 
@@ -297,7 +336,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
         case AArch64:
             if rtype == R_AARCH64_ABS64:
                 patch_u64_le(bytes, offset, result.value)
-            else if rtype == R_AARCH64_CALL26:
+            else if rtype == R_AARCH64_CALL26 or rtype == R_AARCH64_JUMP26:
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xfc000000) | (result.value & 0x3ffffff)
                 patch_u32_le(bytes, offset, patched)
@@ -309,7 +348,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val immhi = (result.value >> 2) & 0x7ffff
                 val patched = (insn & 0x9f00001f) | (immlo << 29) | (immhi << 5)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC:
+            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC:
                 # imm12 -> insn[21:10]; keep-mask 0xffc003ff clears exactly that field.
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
@@ -344,7 +383,8 @@ export reloc_patch_bytes, reloc_arch_from_machine
 export patch_u32_le, patch_u64_le, read_u32_le
 export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_GOT32
 export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
-export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26
+export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
+export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
 export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
 export R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_HI20, R_RISCV_LO12_I

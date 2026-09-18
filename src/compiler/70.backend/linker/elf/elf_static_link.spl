@@ -27,8 +27,7 @@ use compiler.backend.linker.elf_parser.{
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{
-    RelocArch, reloc_apply, reloc_patch_bytes,
-    R_AARCH64_CALL26
+    RelocArch, reloc_apply, reloc_patch_bytes
 }
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
 use compiler.backend.linker.elf.elf_exec_writer.{
@@ -42,7 +41,6 @@ val ELF_STATIC_BASE: i64 = 0x400000
 val SHN_ABS: i64 = 0xfff1
 val SHN_COMMON: i64 = 0xfff2
 val SHN_LORESERVE: i64 = 0xff00
-val R_AARCH64_JUMP26: i64 = 282
 
 # ============================================================================
 # Types
@@ -251,6 +249,8 @@ fn elf_static_relocate(inputs: ElfStaticInputs, plan: ElfExecPlan, res: SymResol
         val obj = inputs.objects[oi]
         for r in obj.relocations:
             val tsec = r.target_section_idx
+            if tsec < 0 or tsec >= inputs.sec_kind[oi].len():
+                return Err("object {oi}: relocation targets section index {tsec} out of range (malformed sh_info)")
             val kind = inputs.sec_kind[oi][tsec]
             if kind < 0:
                 # relocation against a non-allocatable section (e.g. debug info): not emitted
@@ -267,9 +267,9 @@ fn elf_static_relocate(inputs: ElfStaticInputs, plan: ElfExecPlan, res: SymResol
                 val sym = obj.symbols[sym_idx]
                 sym_name = sym.name
                 s = elf_static_sym_addr(inputs, plan, res, oi, sym)?
-            # AAELF64: JUMP26 has the CALL26 formula and imm26 encoding (B vs BL).
-            if target == RelocArch.AArch64 and rtype == R_AARCH64_JUMP26:
-                rtype = R_AARCH64_CALL26
+            # R_AARCH64_JUMP26 (282, B) now passes straight through: reloc_engine
+            # handles it natively with the same formula/encoding as CALL26 (283,
+            # BL) — no rtype rewrite needed here any more.
             val place = inputs.sec_off[oi][tsec] + r.r_offset
             val p = plan.vaddrs[kind] + place
             val applied = reloc_apply(target, out[kind], place, rtype, s, r.r_addend, p)
