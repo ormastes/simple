@@ -1,0 +1,334 @@
+# Internal static ELF linker — lane A7 slice 1.
+#
+# elf_static_link: ET_REL objects (+ ar archives) -> static ET_EXEC bytes.
+# Callable only through this API; NOT wired behind find_linker_path, and
+# SIMPLE_LINKER=internal stays rejected until G2 parity (design D2).
+#
+# Phases (design §5, mold order): parse (elf_parser) -> archive closure fixpoint
+# (elf/archive_closure) -> resolve (sym_resolver: strong duplicate = error) ->
+# undefined check (strong undefined = error, weak undefined = 0) -> layout
+# (elf/elf_exec_writer plan, base 0x400000) -> relocate (reloc_engine encoders,
+# values from the smf_reloc_formulas oracle; any reject = error) -> write
+# (elf/elf_exec_writer over the _ElfWriter codec).
+#
+# Slice-1 limits (reported, not silently degraded):
+#   - static non-PIE only: no GOT/PLT/TLS/.dynamic/PT_INTERP (PLT32 = PC32)
+#   - allocatable input sections must be SHT_PROGBITS or SHT_NOBITS
+#   - no section GC: every allocatable section of every selected input is kept
+#     (ld.lld's default without --gc-sections); roots = entry are only checked
+#   - output carries no .symtab (section headers: .rodata/.text/.data/.bss/.shstrtab)
+#   - single-threaded; no StageReceipts yet (design §6 follow-up)
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding,
+    elf_reloc_sym, elf_reloc_type, elf_section_addralign,
+    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, SHT_NOBITS
+}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
+use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, reloc_apply, reloc_patch_bytes,
+    R_AARCH64_CALL26
+}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
+use compiler.backend.linker.elf.elf_exec_writer.{
+    ElfExecPlan, elf_exec_plan, elf_write_exec,
+    ELF_OUT_RODATA, ELF_OUT_TEXT, ELF_OUT_DATA, ELF_OUT_BSS,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR
+}
+use compiler.backend.linker.elf_writer.{align_up, write_zeros}
+
+val ELF_STATIC_BASE: i64 = 0x400000
+val SHN_ABS: i64 = 0xfff1
+val SHN_COMMON: i64 = 0xfff2
+val SHN_LORESERVE: i64 = 0xff00
+val R_AARCH64_JUMP26: i64 = 282
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ElfStaticInputs:
+    """Every selected input object with per-section placement."""
+    objects: [ElfObject]
+    sec_kind: [[i64]]     # [obj][sec] -> ELF_OUT_* kind, -1 = not placed
+    sec_off: [[i64]]      # [obj][sec] -> offset inside its output section
+
+# ============================================================================
+# Target
+# ============================================================================
+
+fn elf_static_machine(target: RelocArch) -> Result<i64, text>:
+    match target:
+        case X86_64:
+            Ok(EM_X86_64)
+        case AArch64:
+            Ok(EM_AARCH64)
+        case _:
+            Err("elf_static_link: slice 1 supports only x86_64 and aarch64 targets")
+
+fn elf_static_page(target: RelocArch) -> i64:
+    # ld.lld's default max-page-size: 64 KiB on aarch64 (64K-page kernels), 4 KiB on x86_64.
+    match target:
+        case AArch64:
+            0x10000
+        case _:
+            0x1000
+
+# ============================================================================
+# Input classification
+# ============================================================================
+
+fn elf_static_kind(sh_type: i64, sh_flags: i64) -> i64:
+    if sh_flags & SHF_EXECINSTR != 0:
+        return ELF_OUT_TEXT
+    if sh_flags & SHF_WRITE != 0:
+        if sh_type == SHT_NOBITS:
+            return ELF_OUT_BSS
+        return ELF_OUT_DATA
+    ELF_OUT_RODATA
+
+fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
+    """Assign every allocatable input section to an output kind + offset."""
+    var sizes: [i64] = [0, 0, 0, 0]
+    var sec_kind: [[i64]] = []
+    var sec_off: [[i64]] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var kinds: [i64] = []
+        var offs: [i64] = []
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_flags & SHF_ALLOC == 0:
+                kinds = kinds.push(-1)
+                offs = offs.push(0)
+            else if sec.sh_type != SHT_PROGBITS and sec.sh_type != SHT_NOBITS:
+                return Err("object {oi}: allocatable section {si} has unsupported type {sec.sh_type} (slice 1: PROGBITS/NOBITS only)")
+            else:
+                val kind = elf_static_kind(sec.sh_type, sec.sh_flags)
+                var al = elf_section_addralign(obj, si)
+                if al < 1:
+                    al = 1
+                val at = align_up(sizes[kind], al)
+                kinds = kinds.push(kind)
+                offs = offs.push(at)
+                sizes[kind] = at + sec.sh_size
+            si = si + 1
+        sec_kind = sec_kind.push(kinds)
+        sec_off = sec_off.push(offs)
+        oi = oi + 1
+    Ok(ElfStaticInputs(objects: objects, sec_kind: sec_kind, sec_off: sec_off))
+
+fn elf_static_sizes_aligns(inputs: ElfStaticInputs) -> [[i64]]:
+    """[sizes, aligns] per output kind (sizes recomputed exactly as placed)."""
+    var sizes: [i64] = [0, 0, 0, 0]
+    var aligns: [i64] = [1, 1, 1, 1]
+    var oi: i64 = 0
+    while oi < inputs.objects.len():
+        val obj = inputs.objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val kind = inputs.sec_kind[oi][si]
+            if kind >= 0:
+                val end = inputs.sec_off[oi][si] + obj.sections[si].sh_size
+                if end > sizes[kind]:
+                    sizes[kind] = end
+                val al = elf_section_addralign(obj, si)
+                if al > aligns[kind]:
+                    aligns[kind] = al
+            si = si + 1
+        oi = oi + 1
+    [sizes, aligns]
+
+fn elf_static_contents(inputs: ElfStaticInputs, sizes: [i64]) -> [[i64]]:
+    """Concatenate input section bytes per output kind (zero padding between)."""
+    var out: [[i64]] = []
+    var kind: i64 = 0
+    while kind < 4:
+        var buf: [i64] = []
+        if kind != ELF_OUT_BSS:
+            var oi: i64 = 0
+            while oi < inputs.objects.len():
+                val obj = inputs.objects[oi]
+                var si: i64 = 0
+                while si < obj.sections.len():
+                    if inputs.sec_kind[oi][si] == kind:
+                        val sec = obj.sections[si]
+                        buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
+                        # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                        var bi: i64 = 0
+                        while bi < sec.sh_size:
+                            buf = buf.push(obj.raw[sec.sh_addr + bi] as i64)
+                            bi = bi + 1
+                    si = si + 1
+                oi = oi + 1
+            buf = write_zeros(buf, sizes[kind] - buf.len())
+        out = out.push(buf)
+        kind = kind + 1
+    out
+
+# ============================================================================
+# Symbol addresses
+# ============================================================================
+
+fn elf_static_sec_vaddr(inputs: ElfStaticInputs, plan: ElfExecPlan, oi: i64, si: i64) -> i64:
+    """Output vaddr of input section (oi, si), or -1 when it was not placed."""
+    if si < 0 or si >= inputs.sec_kind[oi].len():
+        return -1
+    val kind = inputs.sec_kind[oi][si]
+    if kind < 0:
+        return -1
+    plan.vaddrs[kind] + inputs.sec_off[oi][si]
+
+fn elf_static_entry_addr(inputs: ElfStaticInputs, plan: ElfExecPlan, e: SymEntry) -> Result<i64, text>:
+    if e.section_idx == SHN_ABS:
+        return Ok(e.offset)
+    val base = elf_static_sec_vaddr(inputs, plan, e.obj_idx, e.section_idx)
+    if base < 0:
+        return Err("symbol {e.name} is defined in a non-allocatable section")
+    Ok(base + e.offset)
+
+# reason: positional resolution context (inputs, plan, resolution, object, symbol)
+fn elf_static_sym_addr(inputs: ElfStaticInputs, plan: ElfExecPlan, res: SymResolution, oi: i64, sym: ElfSymbol) -> Result<i64, text>:
+    val bind = elf_symbol_binding(sym)
+    if sym.st_shndx == SHN_COMMON:
+        return Err("symbol {sym.name}: SHN_COMMON is unsupported in slice 1 (compile with -fno-common)")
+    if bind != STB_LOCAL and sym.name != "":
+        # Global/weak: the resolved definition wins (a strong def may override a local weak one).
+        if res.defined.has(sym.name):
+            return elf_static_entry_addr(inputs, plan, res.defined[sym.name])
+        if bind == STB_WEAK:
+            return Ok(0)
+        return Err("undefined symbol: {sym.name}")
+    if sym.st_shndx == SHN_UNDEF:
+        return Ok(0)
+    if sym.st_shndx == SHN_ABS:
+        return Ok(sym.st_value)
+    if sym.st_shndx >= SHN_LORESERVE:
+        return Err("symbol {sym.name}: reserved section index {sym.st_shndx} unsupported")
+    val base = elf_static_sec_vaddr(inputs, plan, oi, sym.st_shndx)
+    if base < 0:
+        return Err("local symbol '{sym.name}' refers to a non-allocatable section {sym.st_shndx}")
+    Ok(base + sym.st_value)
+
+# ============================================================================
+# Checks
+# ============================================================================
+
+fn elf_static_undefined(objects: [ElfObject], res: SymResolution) -> [text]:
+    """Strong (STB_GLOBAL) undefined references with no definition anywhere."""
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    for obj in objects:
+        for sym in obj.symbols:
+            if sym.name != "" and sym.st_shndx == SHN_UNDEF and elf_symbol_binding(sym) == STB_GLOBAL:
+                if not res.defined.has(sym.name) and not seen.has(sym.name):
+                    seen[sym.name] = true
+                    out = out.push(sym.name)
+    out
+
+fn elf_static_join(items: [text]) -> text:
+    var s = ""
+    var i: i64 = 0
+    while i < items.len():
+        if i > 0:
+            s = s + "; "
+        s = s + items[i]
+        i = i + 1
+    s
+
+# ============================================================================
+# Relocation
+# ============================================================================
+
+# reason: positional relocation context
+fn elf_static_relocate(inputs: ElfStaticInputs, plan: ElfExecPlan, res: SymResolution, target: RelocArch, contents: [[i64]]) -> Result<[[i64]], text>:
+    var out = contents
+    var oi: i64 = 0
+    while oi < inputs.objects.len():
+        val obj = inputs.objects[oi]
+        for r in obj.relocations:
+            val tsec = r.target_section_idx
+            val kind = inputs.sec_kind[oi][tsec]
+            if kind < 0:
+                # relocation against a non-allocatable section (e.g. debug info): not emitted
+                continue
+            val sym_idx = elf_reloc_sym(r)
+            var rtype = elf_reloc_type(r)
+            if kind == ELF_OUT_BSS:
+                return Err("object {oi}: relocation type {rtype} targets a NOBITS section")
+            var s: i64 = 0
+            var sym_name = ""
+            if sym_idx > 0:
+                if sym_idx >= obj.symbols.len():
+                    return Err("object {oi}: relocation symbol index {sym_idx} out of range")
+                val sym = obj.symbols[sym_idx]
+                sym_name = sym.name
+                s = elf_static_sym_addr(inputs, plan, res, oi, sym)?
+            # AAELF64: JUMP26 has the CALL26 formula and imm26 encoding (B vs BL).
+            if target == RelocArch.AArch64 and rtype == R_AARCH64_JUMP26:
+                rtype = R_AARCH64_CALL26
+            val place = inputs.sec_off[oi][tsec] + r.r_offset
+            val p = plan.vaddrs[kind] + place
+            val applied = reloc_apply(target, out[kind], place, rtype, s, r.r_addend, p)
+            if not applied.success:
+                return Err("object {oi}: relocation type {elf_reloc_type(r)} against '{sym_name}' at {p}: {applied.error}")
+            out[kind] = reloc_patch_bytes(target, out[kind], place, rtype, s, r.r_addend, p)
+        oi = oi + 1
+    Ok(out)
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+fn elf_static_link(objects: [[i64]], archives: [[i64]], entry: text, target: RelocArch) -> Result<[i64], text>:
+    """Link ET_REL objects (+ archives) into a static ET_EXEC; Err on any link error."""
+    val machine = elf_static_machine(target)?
+
+    var roots: [ElfObject] = []
+    var i: i64 = 0
+    while i < objects.len():
+        val parsed = elf_parse_object(objects[i])
+        if parsed.is_err():
+            return Err("object {i}: {parsed.unwrap_err()}")
+        val obj = parsed.unwrap()
+        if obj.header.e_type != ET_REL:
+            return Err("object {i}: not a relocatable object (e_type {obj.header.e_type})")
+        if obj.header.e_machine != machine:
+            return Err("object {i}: e_machine {obj.header.e_machine} does not match target {machine}")
+        roots = roots.push(obj)
+        i = i + 1
+
+    val closure = elf_archive_closure(roots, archives)?
+    var all = roots
+    for m in closure.members:
+        if m.obj.header.e_machine != machine:
+            return Err("archive member {m.name}: e_machine {m.obj.header.e_machine} does not match target {machine}")
+        all = all.push(m.obj)
+
+    val res = sym_resolve_objects(all)
+    if res.errors.len() > 0:
+        return Err(elf_static_join(res.errors))
+    val undef = elf_static_undefined(all, res)
+    if undef.len() > 0:
+        return Err("undefined symbol: " + elf_static_join(undef))
+    if not res.defined.has(entry):
+        return Err("entry symbol not defined: {entry}")
+
+    val inputs = elf_static_place(all)?
+    val sa = elf_static_sizes_aligns(inputs)
+    val plan = elf_exec_plan(sa[0], sa[1], ELF_STATIC_BASE, elf_static_page(target))?
+    val contents = elf_static_contents(inputs, sa[0])
+    val relocated = elf_static_relocate(inputs, plan, res, target, contents)?
+    val entry_addr = elf_static_entry_addr(inputs, plan, res.defined[entry])?
+    Ok(elf_write_exec(machine, entry_addr, plan, relocated))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfStaticInputs
+export elf_static_link
+export ELF_STATIC_BASE
