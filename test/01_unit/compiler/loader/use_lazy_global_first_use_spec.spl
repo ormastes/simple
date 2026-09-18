@@ -1,0 +1,40 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/interp_lazy_import_global_first_use_unmaterialized_2026-07-15.md
+
+"""
+## Purpose and audience
+Purpose: a module global imported with `use lazy` must materialize on first
+use in the pure-Simple interpreter — the first read of the global resolves to
+its value instead of staying unresolved ("undefined variable").
+Audience: compiler engineers who maintain the interpreter module loader.
+
+The scenario program is evaluated by the pure-Simple interpreter through
+`core_interpret` (the same nested-interpreter model as
+src/app/test_runner_new/inprocess_probe.spl), so the lazy-import machinery
+under test is the interpreter runtime loader in
+src/compiler/10.frontend/core/interpreter/, not the host pipeline. The outer
+spec asserts on the interpreter's error channel: before the fix the first
+read of `answer` force-loaded the fixture module but stayed unresolved
+("undefined variable: answer") because the deferred-force acknowledgement
+only consulted the function and struct tables, never the interpreter
+environment where module globals live.
+"""
+
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+
+describe "use lazy global first use":
+    it "materializes a lazy-imported module global on first read":
+        step("Verify: first read of a lazy-imported module global resolves to its value")
+        # Oracle: use_lazy_global_val_provider.spl defines `val answer = 73`.
+        # The interpreted program reads the lazy-imported global twice and
+        # calls an undefined probe function unless both reads yield 73, so any
+        # unresolved or wrong read surfaces as an interpreter error.
+        val src = "use lazy use_lazy_global_val_provider.{{answer}}\nval first = answer\nval second = answer\nif first == 73 and second == 73:\n    0\nelse:\n    lazy_global_probe_failure()\n"
+        val _ = core_interpret(src, "test/unit/compiler/loader/use_lazy_global_first_use_spec.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
