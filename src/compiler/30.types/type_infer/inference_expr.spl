@@ -318,6 +318,49 @@ impl HmInferContext:
             case Ok(_): Ok(())
             case Err(e): Err(e)
 
+    me infer_return_expr(value: HirExpr?, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer a `return` statement and check it against the enclosing
+        function's declared return type.
+
+        `.?` (ExistsCheck) yields T? — the payload when present, nil when
+        absent. Returning that optional from a function declared with a
+        NON-optional return type (e.g. `-> bool`) used to pass silently and
+        leak the payload (or nil) to callers; reject it here with a
+        compile-time diagnostic instead. See
+        doc/08_tracking/bug/dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md
+        """
+        match value:
+            case Some(v):
+                match self.synthesize_expr(v):
+                    case Ok(value_ty):
+                        val declared_opt = self.current_return_type
+                        if declared_opt != nil:
+                            val declared = self.resolve(declared_opt.unwrap())
+                            match declared.kind:
+                                case Optional(_) | Infer(_, _):
+                                    # Declared optional (or still unknown):
+                                    # any payload type is acceptable.
+                                    Ok(value_ty)
+                                case _:
+                                    val resolved_value = self.resolve(value_ty)
+                                    match resolved_value.kind:
+                                        case Optional(_):
+                                            self.error(TypeInferError.Other(
+                                                "optional value of type '{resolved_value.kind}' cannot satisfy the non-optional return type '{declared.kind}' of function '{self.current_fn_name}' ('.?' yields T? -- the payload if present, nil if absent); return `expr != nil` or an explicit comparison instead",
+                                                v.span))
+                                            # Yield the declared type so the
+                                            # enclosing body-vs-return-type
+                                            # subsume stays silent after this
+                                            # diagnostic.
+                                            Ok(declared)
+                                        case _:
+                                            Ok(value_ty)
+                        else:
+                            Ok(value_ty)
+                    case Err(e): Err(e)
+            case _:
+                Ok(HirType(kind: HirTypeKind.Unit, span: span))
+
     # =========================================================================
     # Type Inference (Algorithm W) - Synthesis Implementation
     # =========================================================================
@@ -374,9 +417,17 @@ impl HmInferContext:
             case HirExprKind.UnitLit:
                 Ok(HirType(kind: HirTypeKind.Unit, span: span))
 
+            # nil literal: an optional with a fresh payload type variable
+            case NilLit:
+                Ok(HirType(kind: HirTypeKind.Optional(self.fresh_var(span)), span: span))
+
             # Variables - lookup with narrowing support
             case Var(symbol):
                 val name = symbol.id.to_text()  # Get symbol name from ID
+                self.lookup_with_narrowing(symbol.id, name, span)
+
+            # Named variables: identical to Var, the name is already resolved
+            case NamedVar(symbol, name):
                 self.lookup_with_narrowing(symbol.id, name, span)
 
             # Array literals
@@ -754,5 +805,27 @@ impl HmInferContext:
                 val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
                 Ok(HirType(kind: HirTypeKind.Slice(int_ty), span: span))
 
+            # `.?` existence check: a value-or-nil operator, NOT a boolean
+            # predicate. On an `inner?` base it yields `inner?` — the payload
+            # when present, nil when absent — so its type stays optional and
+            # a non-optional return position can reject it. See
+            # doc/08_tracking/bug/dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md
+            case ExistsCheck(base):
+                match self.synthesize_expr(base):
+                    case Ok(base_ty):
+                        val resolved_base = self.resolve(base_ty)
+                        match resolved_base.kind:
+                            case Optional(_):
+                                Ok(resolved_base)
+                            case Infer(_, _):
+                                Ok(resolved_base)
+                            case _:
+                                Ok(HirType(kind: HirTypeKind.Optional(resolved_base), span: span))
+                    case Err(e): Err(e)
+
+            # Control transfer: `return expr` and bare `return`.
+            case Return(value):
+                self.infer_return_expr(value, span)
+
             case _:
-                Err(TypeInferError(message: "unsupported expression kind: {expr.kind}", span: span))
+                Err(TypeInferError.Other(message: "unsupported expression kind: {expr.kind}", span: span))
