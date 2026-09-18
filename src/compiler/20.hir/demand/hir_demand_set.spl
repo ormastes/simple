@@ -33,35 +33,39 @@ struct HirDemandSetV1:
     sccs: [HirDemandSccV1]
     digest: text
 
-fn hir_demand_find_body_v1(
-    bodies: [DeferredHirBodyV1], identity: text
-) -> DeferredHirBodyV1?:
-    for body in bodies:
-        if body.identity == identity:
-            return Some(body)
-    nil
-
 fn hir_demand_reaches_v1(
     bodies: [DeferredHirBodyV1], selected: [text], from_identity: text,
     to_identity: text
 ) -> bool:
+    var body_index: Dict<text, i64> = {}
+    var body_cursor = 0
+    while body_cursor < bodies.len():
+        val bid = bodies[body_cursor].identity
+        if not body_index.contains_key(bid):
+            body_index[bid] = body_cursor
+        body_cursor = body_cursor + 1
     var pending: [text] = [from_identity]
     var visited: [text] = []
+    var visited_set: Dict<text, bool> = {}
     while pending.len() > 0:
         val current = pending[pending.len() - 1]
         pending.pop()
         if current == to_identity:
             return true
-        if visited.contains(current):
+        if visited_set.contains_key(current):
             continue
         visited.push(current)
-        val body = hir_demand_find_body_v1(bodies, current)
+        visited_set[current] = true
+        val body = if body_index.contains_key(current):
+            Some(bodies[body_index[current]])
+        else:
+            nil
         if body == nil:
             continue
         for dependency in body!.dependencies:
             if (dependency.kind == HirDemandDependencyKindV1.body and
                     selected.contains(dependency.identity) and
-                    not visited.contains(dependency.identity)):
+                    not visited_set.contains_key(dependency.identity)):
                 pending.push(dependency.identity)
     false
 
@@ -93,11 +97,22 @@ fn hir_demand_sccs_v1(
         groups.push(HirDemandSccV1(
             hir_demand_scc_identity_v1(snapshot_revision, canonical_members),
             canonical_members, []))
+    var body_index: Dict<text, i64> = {}
+    var body_cursor = 0
+    while body_cursor < bodies.len():
+        val bid = bodies[body_cursor].identity
+        if not body_index.contains_key(bid):
+            body_index[bid] = body_cursor
+        body_cursor = body_cursor + 1
     var completed: [HirDemandSccV1] = []
     for group in groups:
         var dependencies: [text] = []
         for member in group.members:
-            val body = hir_demand_find_body_v1(bodies, member)!
+            val body_opt = if body_index.contains_key(member):
+                Some(bodies[body_index[member]])
+            else:
+                nil
+            val body = body_opt!
             for dependency in body.dependencies:
                 if (dependency.kind != HirDemandDependencyKindV1.body or
                         group.members.contains(dependency.identity)):
@@ -173,10 +188,20 @@ fn hir_demand_close_v1(
         known.push(body.identity)
         if deferred_hir_body_validate_v1(body, snapshot_revision) != "ok":
             return Err(HirDemandErrorV1.invalid_body)
+    var body_index: Dict<text, i64> = {}
+    var body_cursor = 0
+    while body_cursor < bodies.len():
+        val bid = bodies[body_cursor].identity
+        if not body_index.contains_key(bid):
+            body_index[bid] = body_cursor
+        body_cursor = body_cursor + 1
     var pending_bodies: [text] = []
     var operations: [text] = []
     for request in requests:
-        val body = hir_demand_find_body_v1(bodies, request.body_identity)
+        val body = if body_index.contains_key(request.body_identity):
+            Some(bodies[body_index[request.body_identity]])
+        else:
+            nil
         if body == nil:
             return Err(HirDemandErrorV1.missing_root)
         if (not hir_demand_identity_valid_v1(request.operation) or
@@ -195,7 +220,10 @@ fn hir_demand_close_v1(
         cursor = cursor + 1
         if selected_bodies.contains(identity):
             continue
-        val body = hir_demand_find_body_v1(bodies, identity)
+        val body = if body_index.contains_key(identity):
+            Some(bodies[body_index[identity]])
+        else:
+            nil
         if body == nil:
             return Err(HirDemandErrorV1.missing_dependency)
         selected_bodies.push(identity)
@@ -207,7 +235,10 @@ fn hir_demand_close_v1(
             if dependency.kind == HirDemandDependencyKindV1.body:
                 pending_bodies.push(dependency.identity)
             elif dependency.kind == HirDemandDependencyKindV1.operation:
-                val target = hir_demand_find_body_v1(bodies, dependency.identity)
+                val target = if body_index.contains_key(dependency.identity):
+                    Some(bodies[body_index[dependency.identity]])
+                else:
+                    nil
                 if target == nil:
                     return Err(HirDemandErrorV1.missing_dependency)
                 if (dependency.required_operation == "" or
