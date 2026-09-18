@@ -1,8 +1,8 @@
 # The dataframe way: no accidental O(n²) collection code
 
 **Audience:** people and LLM agents writing Simple.
-**Status:** the library and lint rules below are landing in the
-`work/adaptive-collections-typed-query` lanes. Check the verdict of each spec
+**Status:** library, profiler, lint rules and `simple fix` auto-fix are implemented on the
+`work/adaptive-collections-typed-query` branch (specs green 2026-09-18). Check each spec verdict
 before relying on one.
 
 LLM-generated code often gets collection work wrong in the same few ways. It
@@ -50,7 +50,8 @@ for u in users:
 
 ```bash
 bin/simple lint path/to/file.spl         # one file per run
-bin/simple lint --fix path/to/file.spl   # applies only Certain fixes
+bin/simple fix path/to/file.spl         # applies only Certain fixes (COLL002, COLL020)
+bin/simple lint --fix path/to/file.spl  # same, once the seed with 1f570918de4 is deployed
 ```
 
 An auto-fix is applied only when its textual preconditions are proven. For

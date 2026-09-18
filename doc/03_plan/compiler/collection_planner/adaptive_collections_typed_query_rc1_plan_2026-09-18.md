@@ -88,6 +88,20 @@ $B test --no-session-daemon <one spec path>
 
 Landing via PR is a separate step.
 
+
+### Wave G status — 2026-09-18 (merged into `work/adaptive-collections-typed-query`)
+
+| Lane | Result | Evidence |
+|---|---|---|
+| L12 frame | **pass** (Fable PASS) | `frame_spec` 12/12; pure `group_by` specs unchanged at 10/10 |
+| L6' profiler | **pass** (Fable PASS) | `collection_profile_spec` 11/11 |
+| L2 `std.df` | **pass** after a Fable blocker. The fix first landed only in `nogc_sync_mut/df`, but `std.df` resolves to `nogc_async_mut/df`; it is now ported to both | n=25000: TIMEOUT(120 s) → 2.2 s in both families; `value_counts` 9/9, `groupby` 3/3; per-family scaling specs 6/6 each |
+| L9' lint + auto-fix | **pass** | `collection_easy_fix` 10/10 (was 2 failing); `collection_frame_rules` 11/11; `lint_fix_apply` 3/3; `simple fix <file>` rewrites a COLL020 loop, and re-lint is clean |
+| L9'' `lint --fix` CLI | **filed / pending deploy** | Root cause: the seed's `filter_internal_flags` stripped `--fix*` for all commands. The seed patch `1f570918de4` passes `cargo test` 4/4. It takes effect on the next seed deploy (the shared `bin/simple` is not redeployed from a lane) |
+| L13 apply | **pass** | `99.loader` / `95.interp` were already Dict-based (0 sites). Fixed the `80.driver` SCC scheduler, `20.hir` demand reachability and `80.driver` action graph. Specs: `package_scc_scheduler` 5/5 (a fixture bug fixed; it was 2/5), `hir_demand_set` 5/5, `package_index_route` 4/4, coordinator coverage proven by probe |
+| L14 README + guide | **pass** | README "Distinctive Features" entry plus `doc/07_guide/language/collections/dataframe_way.md` |
+| Perf regression found | **filed** | `doc/08_tracking/bug/seed_method_dispatch_superlinear_series_2026-09-18.md` |
+
 ## Wave P — post-RC1 (planned, not scheduled)
 
 | Lane | Work | Gate |
