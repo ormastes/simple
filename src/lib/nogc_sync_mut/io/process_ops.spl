@@ -818,11 +818,54 @@ use std.io_runtime.{getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 extern fn rt_stderr_flush()
 
+pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
+    # Test suites spawn POSIX tools by absolute path ("/bin/sh" 2000+, plus
+    # /bin/echo, /usr/bin/grep, ...). Those paths do not exist on Windows;
+    # route them onto the Git-for-Windows userland: real binaries resolve to
+    # <Git>/usr/bin/<name>.exe when present, shells resolve to the discovered
+    # sh, and the rest run as `sh -c '<name> "$@"'` so builtins (echo/true/
+    # false/test) keep working. Non-POSIX commands and non-Windows hosts pass
+    # through unchanged. (host_path_native is applied by the callers and is
+    # idempotent on the resolved native paths.)
+    if not _is_windows_platform():
+        return (cmd, args)
+    val unix = cmd.replace("\\", "/")
+    if not unix.starts_with("/bin/") and not unix.starts_with("/usr/bin/"):
+        return (cmd, args)
+    val parts = unix.split("/")
+    val name = parts[parts.len() - 1]
+    val sh = _windows_posix_shell_path()
+    if sh == "cmd.exe":
+        return (cmd, args)
+    val sh_norm = sh.replace("\\", "/")
+    var git_root = ""
+    if sh_norm.ends_with("/usr/bin/sh.exe") or sh_norm.ends_with("/usr/bin/bash.exe"):
+        git_root = sh_norm.substring(0, sh_norm.len() - 15)
+    elif sh_norm.ends_with("/bin/sh.exe") or sh_norm.ends_with("/bin/bash.exe"):
+        git_root = sh_norm.substring(0, sh_norm.len() - 10)
+    if git_root != "":
+        val candidate = "{git_root}/usr/bin/{name}.exe"
+        if file_exists(candidate):
+            return (candidate, args)
+        if name == "sh" or name == "bash":
+            return (sh, args)
+    var sh_args: [text] = ["-c", "{name} \"$@\""]
+    sh_args = sh_args.push("_")
+    for a in args:
+        sh_args = sh_args.push(a)
+    (sh, sh_args)
+
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_run(host_path_native(rcmd), rargs)
     unsafe(capabilities: [ffi]):
         rt_process_run(host_path_native(cmd), args)
 
 fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_run_bounded(host_path_native(rcmd), rargs, timeout_ms, max_output_bytes)
     unsafe(capabilities: [ffi]):
         rt_process_run_bounded(host_path_native(cmd), args, timeout_ms, max_output_bytes)
 
@@ -831,6 +874,9 @@ fn _process_is_running_raw(pid: i64) -> bool:
         rt_process_is_running(pid)
 
 fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_async(host_path_native(rcmd), rargs)
     unsafe(capabilities: [ffi]):
         rt_process_spawn_async(host_path_native(cmd), args)
 
@@ -1612,19 +1658,54 @@ fn _windows_posix_shell_path() -> text:
     # cannot run them -- every such spec failed on Windows with empty output
     # while passing on Linux CI. Prefer a real POSIX sh (Git Bash / MSYS /
     # Cygwin) when present; fall back to cmd.exe only as a last resort.
+    # Discovery order: explicit override, PATH scan (Git portable installs
+    # like C:\dev\tool\Git land here, and PATH entries may be POSIX-form
+    # "/c/..." when the runner was spawned from Git Bash), then the usual
+    # install locations. BASH when it is already a native path.
+    val override = env_get("SIMPLE_POSIX_SHELL") ?? ""
+    if override != "" and file_exists(override):
+        return override
+    val path_env = env_get("PATH") ?? ""
+    if path_env != "":
+        for raw_seg in path_env.split(";"):
+            val seg = _mingwish_path(raw_seg)
+            if seg == "":
+                continue
+            # The segment may be the install root (Git\cmd), a bin dir
+            # (Git\bin, Git\usr\bin), or anything else -- probe all shapes.
+            if file_exists(seg + "/sh.exe"):
+                return seg + "/sh.exe"
+            if file_exists(seg + "/usr/bin/sh.exe"):
+                return seg + "/usr/bin/sh.exe"
+            if file_exists(seg + "/bin/sh.exe"):
+                return seg + "/bin/sh.exe"
+    val bash_env = env_get("BASH") ?? ""
+    if bash_env.contains(":/") or bash_env.contains(":\\"):
+        if file_exists(bash_env):
+            return bash_env
     val candidates: [text] = [
-        env_get("SIMPLE_POSIX_SHELL") ?? "",
-        env_get("BASH") ?? "",
-        "C:/Program Files/Git/bin/sh.exe",
-        "C:/Program Files (x86)/Git/bin/sh.exe",
         "C:/Program Files/Git/usr/bin/sh.exe",
+        "C:/Program Files/Git/bin/sh.exe",
+        "C:/Program Files (x86)/Git/usr/bin/sh.exe",
+        "C:/Program Files (x86)/Git/bin/sh.exe",
         "C:/msys64/usr/bin/sh.exe",
         "C:/cygwin64/bin/sh.exe"
     ]
     for candidate in candidates:
-        if candidate != "" and file_exists(candidate):
+        if file_exists(candidate):
             return candidate
     "cmd.exe"
+
+fn _mingwish_path(path: text) -> text:
+    # Normalize a PATH entry for probing: backslashes to slashes, and a
+    # leading "/x/" MSYS drive spelling to "x:/" (the grammar host_path
+    # documents). Anything else passes through unchanged.
+    val unix = path.replace("\\", "/")
+    if unix.len() >= 3 and unix.starts_with("/") and unix.slice(2, 3) == "/":
+        val drive = unix.slice(1, 2)
+        if drive >= "a" and drive <= "z" or drive >= "A" and drive <= "Z":
+            return drive.lower() + ":/" + unix.slice(3, unix.len())
+    unix
 
 fn _shell_command_args(command: text) -> (text, [text]):
     if _is_windows_platform():

@@ -25,12 +25,18 @@ only. Fixed 2026-09-18 by making the spec read natively
 ## Attempted and reverted
 
 Mapping `/tmp` -> `%TEMP%` inside `host_path_native_for` was tried and
-reverted the same day: the seed's own env reports the real Windows TEMP, but
-(a) several raw rt_ call sites bypass the boundary entirely, so write and
-hash land in different namespaces anyway, and (b) the shell's /tmp is a third
-location the seed cannot influence. A partial mapping made write-vs-hash
-WORSE (hashes started returning "" for files the raw writes placed in
-`<drive>:\tmp`).
+reverted the same day: several raw rt_ call sites bypass the boundary
+entirely (write and hash land in different namespaces anyway), so a partial
+mapping made write-vs-hash WORSE (hashes started returning "" for files the
+raw writes placed in `<drive>:\tmp`).
+
+**Correction 2026-09-19:** the mount table on the Git-Bash host maps `/tmp`
+to `%TEMP%` (`usertemp` mount) — the shell and %TEMP% agree. The real split
+is exactly TWO namespaces: the native boundary (`<drive>:\tmp` for unmapped
+POSIX paths) vs everything routed/MSYS-aware (%TEMP%). The reverted mapping
+would have aligned the boundary with %TEMP%; it stays reverted only because
+raw bypasses (since fixed for publish; `rt_file_write_text` in io_runtime
+line 230 was verified to map) must be audited first.
 
 ## What would fix it properly
 
