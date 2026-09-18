@@ -438,40 +438,86 @@ fn open_regular_no_follow(path: &Path) -> Option<std::fs::File> {
     }
 }
 
+// Failure-arm codes for the interpreter twin of
+// rt_file_read_regular_no_follow_bounded. Mirrors the runtime crate's
+// READ_NF_* codes (runtime/src/value/sffi/file_io/file_ops.rs): the Simple
+// caller reads the arm through rt_file_read_regular_no_follow_last_failure
+// when the reader returns NIL, and a non-zero "never called" sentinel keeps
+// the readout unambiguous (0 would mean the diagnostic extern itself is
+// unresolved). Without this twin, the interpreted native-build worker dies at
+// semantic time with "unknown extern function:
+// rt_file_read_regular_no_follow_last_failure" the moment it typechecks
+// src/lib/nogc_sync_mut/io/file_ops.spl (beta.10 windows-x86_64 leg).
+thread_local! {
+    static INTERP_READ_NF_LAST_FAILURE: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(INTERP_READ_NF_NEVER_CALLED) };
+}
+
+const INTERP_READ_NF_NEVER_CALLED: i64 = 77;
+const INTERP_READ_NF_OK: i64 = 100;
+const INTERP_READ_NF_BAD_ARGS: i64 = 2;
+const INTERP_READ_NF_OPEN: i64 = 4;
+const INTERP_READ_NF_METADATA: i64 = 5;
+const INTERP_READ_NF_NOT_REGULAR: i64 = 6;
+const INTERP_READ_NF_TOO_LARGE: i64 = 7;
+const INTERP_READ_NF_REPARSE: i64 = 8;
+const INTERP_READ_NF_READ: i64 = 9;
+const INTERP_READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+
+fn interp_read_no_follow_fail(code: i64) -> Value {
+    INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(code));
+    Value::Nil
+}
+
+/// Arm code recorded by the most recent interpreter bounded no-follow read.
+pub fn rt_file_read_regular_no_follow_last_failure(
+    _args: &[Value],
+) -> Result<Value, CompileError> {
+    Ok(Value::Int(
+        INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.get()),
+    ))
+}
+
 /// Read one regular file from one no-follow handle with a hard byte bound.
 pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let max_bytes = match args.get(1) {
         Some(Value::Int(value)) if *value >= 0 => *value,
-        _ => return Ok(Value::Nil),
+        _ => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_ARGS)),
     };
     let mut file = match open_regular_no_follow(Path::new(&path)) {
         Some(file) => file,
-        None => return Ok(Value::Nil),
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_OPEN)),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(Value::Nil),
+        Err(_) => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_METADATA)),
     };
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
-        return Ok(Value::Nil);
+    if !metadata.is_file() {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_NOT_REGULAR));
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE));
     }
     #[cfg(windows)]
     if metadata.file_attributes() & 0x0000_0400 != 0 {
-        return Ok(Value::Nil);
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_REPARSE));
     }
     let limit = match (max_bytes as u64).checked_add(1) {
         Some(limit) => limit,
-        None => return Ok(Value::Nil),
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE)),
     };
     let mut bytes = Vec::new();
     let mut bounded = file.take(limit);
     if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as i64 > max_bytes {
-        return Ok(Value::Nil);
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_READ));
     }
     match String::from_utf8(bytes) {
-        Ok(content) => Ok(Value::text(content)),
-        Err(_) => Ok(Value::Nil),
+        Ok(content) => {
+            INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(INTERP_READ_NF_OK));
+            Ok(Value::text(content))
+        }
+        Err(_) => Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_UTF8_CONTENT)),
     }
 }
 

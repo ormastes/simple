@@ -1,3 +1,53 @@
+## [1.0.0-beta.11] - 2026-09-18
+Eighth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- The interpreted native-build worker died at semantic time with "unknown
+  extern function: rt_file_read_regular_no_follow_last_failure" when
+  typechecking src/lib/nogc_sync_mut/io/file_ops.spl (beta.10 windows-x86_64
+  leg — the first leg to survive the shard-leak OOM fix and reach that
+  module). The bounded no-follow reader twin was in the seed interpreter's
+  extern table; its diagnostic companion was not. Registered it with a
+  thread-local arm recorder mirroring the runtime READ_NF_* codes.
+
+### Release
+- Product version is `1.0.0-beta.11`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.11`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.10] - 2026-09-18
+Seventh corrected beta of the **1.0.0 line**.
+
+### Fixed
+- release windows-x86_64 leg OOM: the parse-shard cache warmer has never
+  completed on a GitHub runner (silent 6-12 min, then "FAILED TIMEOUT") and its
+  leaked multi-GiB child heap stayed alive — the beta.9 worker died with
+  "memory allocation of 65520 bytes failed" 31 s in while the shard and
+  orchestrator hogged the 16 GB runner (run 35285488617). Dead shard children
+  are now killed after a failed wait (parse + HIR), the shard prints a startup
+  heartbeat, and the CI native-build legs set SIMPLE_PARSE_SHARDING=0 so the
+  worker parses in-process (beta.7-proven on this runner).
+  See doc/08_tracking/bug/native_build_shard_child_leak_starves_worker_oom_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.10`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.10`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.9] - 2026-09-17
+Sixth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Parser recovery pass flagged any identifier named `namespace` as the C++
+  mistake unconditionally; the seed-run release compile aborted on
+  action_identity.spl et al (beta.8 windows-x86_64 leg). Now only the
+  declaration shape `namespace <ident>` is flagged.
+- build-binaries Stage 2 legs now set SIMPLE_SCV_INVENTORY_COLD_INIT=1
+  (main was red with compile-event-journal-missing since the SCV gate
+  rollout).
+
+### Release
+- Product version is `1.0.0-beta.9`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.9`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.8] - 2026-09-17
 Fifth corrected beta of the **1.0.0 line**.
 

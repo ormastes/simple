@@ -873,3 +873,57 @@ Scope note: this run measured the **Rust seed's** interpreter. The package
 attributed the row to
 `src/compiler/10.frontend/core/interpreter/eval_calls.spl`; that is a heuristic
 path mapping, and the pure-Simple interpreter was not separately measured here.
+
+## Re-measurement 2026-09-18 — still open, and the interpreter row has CHANGED
+
+Binary: a seed built from `origin/main` `c8fa65bf714` (2026-09-18), 51,645,288 B,
+sha256 `308de6af84db5c26e2c0`; the same probe on the 2026-09-14 seed answers
+identically, so this is not a one-build artifact.
+
+Probe (`n` is a bare `i64 = 6`, no `index_of` involved):
+
+```simple
+fn main() -> i64:
+    val n = 6
+    match n:
+        case Some(i):
+            print "B match_Some_arm_taken i=" + i.to_text()
+        case _:
+            print "C wildcard_arm_taken"
+    print "D unwrap_or=" + n.unwrap_or(-99).to_text()
+    if val Some(k) = n:
+        print "E if_val_Some_taken k=" + k.to_text()
+    else:
+        print "F if_val_not_taken"
+    0
+```
+
+| row | interpret lane | JIT lane |
+|---|---|---|
+| `match n: case Some(i)` | **Some arm taken, binds `6`** | Some arm taken, binds **`<value:0x6>`** |
+| `n.unwrap_or(-99)` | `6` | **`<value:0x6>`** |
+| `if val Some(k) = n` | **taken, binds `6`** | taken, binds **`<value:0x6>`** |
+
+What changed since the original table, and what did not:
+
+- **Changed:** the interpreter no longer "matches neither arm". It now takes the
+  `Some` arm and binds the raw scalar. The original report's second defect (a
+  `_` wildcard that failed to match) therefore no longer reproduces on this
+  probe — it should not be cited as live without re-measuring.
+- **Unchanged, and still the core defect:** both engines silently ACCEPT
+  `Some(_)`, `if val Some(...)` and `.unwrap_or` on a plain `i64`. No compile
+  error on either lane.
+- **Unchanged:** the two engines still DISAGREE on what gets bound — the raw
+  scalar on the interpret lane, a tag box that stringifies as `<value:0x6>` on
+  the JIT lane. The record's point that fixing one engine alone widens the gap
+  stands.
+
+The fix direction in the section above (reject the pattern at type-check time,
+so the three engines cannot disagree about a program that should not compile)
+is unaffected by this re-measurement.
+
+**Coordination note (2026-09-18):** PR #1077 is open and edits
+`src/compiler/30.types/type_infer/{context,inference_control,inference_expr}.spl`
+for the adjacent dot-question/non-optional-return enforcement in the same HM
+checker. A pattern-side fix should land after it, or be written against its
+tree, rather than underneath it.
