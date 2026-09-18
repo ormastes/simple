@@ -39,10 +39,13 @@ use std.spec
 use compiler.loader.module_loader_compat.{loader_smf_reloc_value}
 use compiler.loader.loader.object_mapper.{
     apply_smf_relocations, ResolvedSymbol,
-    SharedExecMapper, SharedExecMapperConfig
+    SharedExecMapper, SharedExecMapperConfig, SharedExecRecord
 }
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
-use compiler.loader.smf_mmap_native.{native_alloc_rw_memory, native_mmap_read_bytes, native_exec_memory_count}
+use compiler.loader.smf_mmap_native.{
+    native_alloc_rw_memory, native_mmap_read_bytes, native_exec_memory_count,
+    native_free_exec_memory
+}
 
 # Manual little-endian decode, NOT `as i32`-and-shift: i32 arithmetic in
 # this language does not wrap at 32 bits under `<<`/`|`, so a naive decode
@@ -217,11 +220,81 @@ describe "loader wire-4 (GotRel32) via the real loader helper, with a synthesize
             address: code_addr, size: 8, generation: 1,
             got_base: got_addr, got_size: 8)
 
+        mapper.records["replace_fn"] = old_record
+
         # This is the EXACT call `map_symbol`'s replace branch makes on the
         # outgoing record before attempting the new mapping -- unmodified
         # copy-paste of the call site, not a re-implementation.
-        expect(mapper._free_mapped_resources(old_record)).to_equal(true)
+        expect(mapper._free_mapped_resources("replace_fn", old_record)).to_equal(true)
         # Both the old code mapping and its old GOT slot must be gone.
+        expect(native_exec_memory_count()).to_equal(baseline)
+
+    it "hot-reload keying: set_got on the new generation's prefixed key never touches the old generation's record":
+        # Reproduces module_loader.spl's moduleloader_replace_live keying
+        # exactly: the OLD generation stays mapped under the PLAIN symbol
+        # name until it is explicitly retired (module_loader.spl:493-513),
+        # while the candidate is mapped under
+        # "{path}#gen{N}:{symbol}" (module_loader.spl:403,435) --
+        # `candidate_prefix + name`. Fable review of lane A4b commit
+        # 939c924dc16: calling `set_got(plain_name, ...)` while both records
+        # exist attaches the NEW GOT to the OLD (still-live) record; when the
+        # old record retires, its GOT (actually the live candidate's GOT) is
+        # freed out from under the running code (use-after-free), while the
+        # candidate's own record keeps `got_base == 0` forever (leak).
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val baseline = native_exec_memory_count()
+
+        # Old generation: mapped under the plain name, already owns a GOT
+        # from ITS OWN load.
+        val old_code = native_alloc_rw_memory(8)
+        val old_got = native_alloc_rw_memory(8)
+        mapper.records["target_fn"] = SharedExecRecord(
+            owner_id: "path", symbol: "target_fn",
+            address: old_code, size: 8, generation: 1,
+            got_base: old_got, got_size: 8)
+
+        # New generation: mapped under the hot-reload candidate-prefixed key.
+        val new_code = native_alloc_rw_memory(8)
+        mapper.records["path#gen2:target_fn"] = SharedExecRecord(
+            owner_id: "path", symbol: "path#gen2:target_fn",
+            address: new_code, size: 8, generation: 1,
+            got_base: 0, got_size: 0)
+        expect(native_exec_memory_count()).to_equal(baseline + 3)
+
+        val new_got = native_alloc_rw_memory(8)
+        expect(native_exec_memory_count()).to_equal(baseline + 4)
+
+        # A caller passing the PLAIN name (the pre-fix bug) must be
+        # REJECTED, not silently attached: the address check fails because
+        # `target_fn`'s record address is `old_code`, not `new_code`.
+        expect(mapper.set_got("target_fn", new_code, new_got, 8)).to_equal(false)
+        expect(mapper.get_record("target_fn").unwrap().got_base).to_equal(old_got)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(0)
+
+        # The correct call: the EXACT key the candidate was mapped under,
+        # with its OWN address.
+        expect(mapper.set_got("path#gen2:target_fn", new_code, new_got, 8)).to_equal(true)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(new_got)
+        expect(mapper.get_record("target_fn").unwrap().got_base).to_equal(old_got)
+
+        # A second attempt to attach a GOT to the already-GOT-bearing new
+        # record must also be rejected (never silently overwritten/leaked).
+        val another_got = native_alloc_rw_memory(8)
+        expect(mapper.set_got("path#gen2:target_fn", new_code, another_got, 8)).to_equal(false)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(new_got)
+        _ = native_free_exec_memory(another_got, 8)
+
+        # Retire the OLD generation's record, exactly as
+        # generation_sweeper.spl / resource_lifecycle.spl do.
+        expect(mapper.unmap_symbol("target_fn")).to_equal(true)
+        # Only the OLD code + OLD GOT are freed. The NEW generation's code
+        # and its own (correctly attached) GOT remain fully allocated --
+        # nothing was freed out from under the live candidate.
+        expect(native_exec_memory_count()).to_equal(baseline + 2)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().got_base).to_equal(new_got)
+        expect(mapper.get_record("path#gen2:target_fn").unwrap().address).to_equal(new_code)
+
+        expect(mapper.unmap_symbol("path#gen2:target_fn")).to_equal(true)
         expect(native_exec_memory_count()).to_equal(baseline)
 
     # ------------------------------------------------------------------

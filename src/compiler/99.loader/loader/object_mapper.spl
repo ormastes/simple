@@ -86,14 +86,33 @@ impl SharedExecMapper:
     slot (lane A4b). Shared by the `map_symbol` replace path and
     `unmap_symbol` so a GOTPCREL-bearing symbol's slot is released
     everywhere its code mapping is -- see `SharedExecRecord.got_base`
-    doc comment and Fable review of lane A4b commit ac8b46d8af0."""
-    me _free_mapped_resources(rec: SharedExecRecord) -> bool:
+    doc comment and Fable review of lane A4b commit ac8b46d8af0.
+
+    `symbol` is the exact key `rec` is (or was) stored under. If the code
+    mapping frees but the GOT free then fails, the record at that key is
+    updated in place with `address: 0, size: 0` before returning false --
+    otherwise a caller that ignores the false and retries (or a second
+    caller racing on the same key) would call `exec_mapping_free` again on
+    memory that is already gone (double free), per Fable review of lane
+    A4b commit 939c924dc16. The GOT itself is left recorded (leaked, not
+    corrupted) rather than guessed at."""
+    me _free_mapped_resources(symbol: text, rec: SharedExecRecord) -> bool:
         val freed = exec_mapping_free(rec.address, rec.size)
         if not freed:
             return false
         if rec.got_base != 0:
             val got_freed = native_free_exec_memory(rec.got_base, rec.got_size)
             if not got_freed:
+                if self.records.has(symbol):
+                    self.records[symbol] = SharedExecRecord(
+                        owner_id: rec.owner_id,
+                        symbol: rec.symbol,
+                        address: 0,
+                        size: 0,
+                        generation: rec.generation,
+                        got_base: rec.got_base,
+                        got_size: rec.got_size
+                    )
                 return false
         true
 
@@ -107,7 +126,7 @@ impl SharedExecMapper:
             if not allow_replace:
                 return Err("Symbol already mapped: {symbol}")
             val old = self.records[symbol]
-            if not self._free_mapped_resources(old):
+            if not self._free_mapped_resources(symbol, old):
                 return Err("Failed to free existing mapping for {symbol}")
             self.total_bytes = self.total_bytes - old.size
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
@@ -158,12 +177,37 @@ impl SharedExecMapper:
 
     """Attach a GOT allocation (lane A4b) to an already-mapped symbol's
     record, so it is freed alongside the code mapping on replace/unmap
-    instead of leaking. Returns false if the symbol has no mapping."""
-    me set_got(symbol: text, got_base: i64, got_size: i64) -> bool:
-        if not self.records.has(symbol):
+    instead of leaking.
+
+    `key` MUST be the exact key the code was mapped under (the same key
+    passed to `map_symbol`) -- NOT necessarily the plain SMF symbol name.
+    Hot reload (module_loader.spl's `moduleloader_replace_live`) maps
+    candidate code under a generation-scoped key
+    ("{path}#gen{N}:{symbol}"), while the OLD generation's record is still
+    present under the plain name until it is explicitly retired; calling
+    this with the plain name during a hot reload would attach the NEW
+    GOT to the OLD record, which then frees it out from under the live
+    candidate on retirement (use-after-free) while the candidate's own
+    record keeps `got_base == 0` (never freed) -- Fable review of lane A4b
+    commit 939c924dc16.
+
+    `addr` (the mapped code's OWN address, as returned by `map_symbol` /
+    stored in the caller's `LoadedSymbol.address`) is verified against the
+    record's `address` as a second, independent check: even if `key` were
+    wrong, a stale or reused key pointing at a DIFFERENT record's code
+    address is refused rather than silently attached. `got_base == 0` on
+    the existing record is also required, so a second GOT is never
+    silently overwritten (and leaked) by a later call.
+
+    Returns false -- doing nothing -- when the key is unmapped, the address
+    does not match, or the record already carries a GOT."""
+    me set_got(key: text, addr: i64, got_base: i64, got_size: i64) -> bool:
+        if not self.records.has(key):
             return false
-        val rec = self.records[symbol]
-        self.records[symbol] = SharedExecRecord(
+        val rec = self.records[key]
+        if rec.address != addr or rec.got_base != 0:
+            return false
+        self.records[key] = SharedExecRecord(
             owner_id: rec.owner_id,
             symbol: rec.symbol,
             address: rec.address,
@@ -179,7 +223,7 @@ impl SharedExecMapper:
             return false
 
         val rec = self.records[symbol]
-        if not self._free_mapped_resources(rec):
+        if not self._free_mapped_resources(symbol, rec):
             return false
 
         self.total_bytes = self.total_bytes - rec.size

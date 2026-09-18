@@ -22,7 +22,7 @@ use ..linker.smf_reader.*
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
-use .smf_mmap_native.{native_make_executable, native_make_rw, native_flush_icache, native_call_function_0}
+use .smf_mmap_native.{native_make_executable, native_make_rw, native_flush_icache, native_call_function_0, native_free_exec_memory}
 use .jit_instantiator.*
 use ..metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use ..unload_ownership.{partition_global_symbols_by_owner, global_symbols_without_names}
@@ -302,12 +302,24 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
         LoadResult.Success(module: module)
 
 
-fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: [u8]) -> Result<(), text>:
+fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: [u8], key_prefix: text = "") -> Result<(), text>:
         """Apply SMF relocations for a loaded module.
 
         Reads the Reloc section from SMF data. If relocations exist, temporarily
         makes code memory writable, applies relocations, then restores RX protection.
         For old SMF files without relocations, returns Ok immediately.
+
+        `key_prefix` is prepended to each plain SMF symbol name to form the
+        EXACT key that symbol's code was mapped under in
+        `SharedExecMapper.records` (the same key passed to `map_symbol` via
+        `moduleloader_allocate_exec_module`). It defaults to "" for a plain
+        load, where the mapping key IS the plain name. Hot reload
+        (`moduleloader_replace_live`) maps candidate code under
+        `candidate_prefix + name` while `module.symbols` here stays keyed by
+        plain name, so `moduleloader_replace_live` passes `candidate_prefix`
+        explicitly -- getting this wrong attaches a synthesized GOT to the
+        OLD generation's record instead of the new candidate's own record
+        (Fable review of lane A4b commit 939c924dc16).
         """
         val mem_reader_result = SmfReaderMemory.from_data(smf_data)
         if mem_reader_result.is_err():
@@ -366,10 +378,18 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
             # Record any GOT synthesized for this symbol's GotRel32
             # relocations against its own exec mapping so it is freed
             # alongside that mapping on replace/unmap instead of leaking
-            # (Fable review of lane A4b commit ac8b46d8af0).
+            # (Fable review of lane A4b commit ac8b46d8af0). MUST use the
+            # exact key the code was mapped under (key_prefix + sym_name),
+            # never the plain sym_name alone: during a hot reload the plain
+            # name still names the OLD generation's still-live record
+            # (Fable review of lane A4b commit 939c924dc16).
             val got = apply_result.unwrap()
             if got.base != 0:
-                _ = moduleloader_ensure_jit(self).exec_mapper.set_got(sym_name, got.base, got.size)
+                val exec_key = key_prefix + sym_name
+                val attached = moduleloader_ensure_jit(self).exec_mapper.set_got(exec_key, addr, got.base, got.size)
+                if not attached:
+                    _ = native_free_exec_memory(got.base, got.size)
+                    return Err("Failed to attach GOT for {sym_name} (exec_key={exec_key})")
 
             # Restore RX protection
             val rx_ok = unsafe(capabilities: [raw_ptr]):
@@ -463,7 +483,7 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
             moduleloader_unmap_internal_symbols(self, internal_symbols)
             return LoadResult.Error(message: module_bytes_result.unwrap_err())
 
-        val reloc_result = moduleloader_apply_relocations(self, path, module_bytes_result.unwrap())
+        val reloc_result = moduleloader_apply_relocations(self, path, module_bytes_result.unwrap(), candidate_prefix)
         if reloc_result.is_err():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
