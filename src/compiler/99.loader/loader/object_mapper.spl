@@ -4,8 +4,9 @@
 # loader/module and JIT flows do not duplicate mmap/write/protect lifecycle.
 
 use .exec_mapping.{exec_mapping_map_rx, exec_mapping_free}
-use .smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64}
+use .smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64, native_alloc_rw_memory}
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
 
 struct SharedExecMapperConfig:
     verbose: bool
@@ -249,6 +250,17 @@ struct ResolvedSymbol:
     name: text
     address: i64
 
+"""Resolve a relocation's target symbol address, falling back to the global
+symbol table by name when the per-module resolution is unset (address 0)."""
+fn _resolve_smf_reloc_symbol(index: i64, symbols: [ResolvedSymbol], global_symbols: Dict<text, i64>) -> i64:
+    var sym_addr = 0i64
+    if index < symbols.len():
+        val sym = symbols[index]
+        sym_addr = sym.address
+        if sym_addr == 0 and global_symbols.has(sym.name):
+            sym_addr = global_symbols[sym.name]
+    sym_addr
+
 """Apply SMF relocations to code loaded at code_addr.
 
 Args:
@@ -260,6 +272,19 @@ Args:
 
 Returns:
     Ok(()) on success, Err with message on failure.
+
+Converged (lane A4b, doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md
+§4) onto the shared value oracle `smf_reloc_compute_wire`
+(compiler.backend.linker.gpu_smf.smf_reloc_formulas): an out-of-i32-range
+Rel32/PltRel32/GotRel32/Abs32 delta now REJECTS (Err) instead of the previous
+silent `as i32` truncation
+(doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md).
+
+GotRel32 (wire 4) additionally synthesizes a per-module GOT: one 8-byte RW
+slot per distinct target symbol, allocated once up front and never freed for
+the lifetime of the loaded code (same lifetime contract as the exec mapping
+itself). R_X86_64_GOTPCREL loads *through* a GOT slot, so S must be the
+slot's address (S == G), never the resolved symbol's own address.
 """
 fn apply_smf_relocations(
     code_addr: i64,
@@ -268,6 +293,28 @@ fn apply_smf_relocations(
     symbols: [ResolvedSymbol],
     global_symbols: Dict<text, i64>
 ) -> Result<(), text>:
+    # Synthesize a per-module GOT for wire-4 sites before patching anything.
+    var got_slot_addr: Dict<i64, i64> = {}
+    var got_target_indices: [i64] = []
+    for reloc in relocs:
+        if reloc.reloc_type == 4 and not got_slot_addr.has(reloc.symbol_index):
+            got_slot_addr[reloc.symbol_index] = 0
+            got_target_indices.push(reloc.symbol_index)
+    if got_target_indices.len() > 0:
+        val got_base = native_alloc_rw_memory(got_target_indices.len() as i64 * 8)
+        if got_base == 0:
+            return Err("Failed to allocate GOT for GotRel32 relocations")
+        var got_index = 0i64
+        for symbol_index in got_target_indices:
+            val slot_addr = got_base + got_index * 8
+            val got_target_addr = _resolve_smf_reloc_symbol(symbol_index, symbols, global_symbols)
+            if got_target_addr == 0:
+                return Err("Unresolved GOT symbol at index {symbol_index}")
+            unsafe(capabilities: [raw_ptr]):
+                native_reloc_write_i64(slot_addr, 0, got_target_addr)
+            got_slot_addr[symbol_index] = slot_addr
+            got_index = got_index + 1
+
     for reloc in relocs:
         # Validate the complete write width before deriving patch_addr. This
         # prevents both end-of-mapping overrun and address-addition overflow.
@@ -278,45 +325,36 @@ fn apply_smf_relocations(
             return Err("Relocation address overflow at offset {reloc.offset}")
         val patch_addr = code_addr + reloc.offset
 
-        # Resolve symbol address
-        var sym_addr = 0i64
-        if reloc.symbol_index < symbols.len():
-            val sym = symbols[reloc.symbol_index]
-            sym_addr = sym.address
-            # If unresolved, try global table
-            if sym_addr == 0 and global_symbols.has(sym.name):
-                sym_addr = global_symbols[sym.name]
+        var sym_addr = _resolve_smf_reloc_symbol(reloc.symbol_index, symbols, global_symbols)
         if sym_addr == 0:
             return Err("Unresolved symbol at index {reloc.symbol_index}")
 
-        # Apply relocation based on type
+        var reloc_s = sym_addr
+        if reloc.reloc_type == 4:
+            if not got_slot_addr.has(reloc.symbol_index):
+                return Err("GotRel32 requires GOT synthesis but no slot found for symbol index {reloc.symbol_index}")
+            reloc_s = got_slot_addr[reloc.symbol_index]
+
         # Wire values: 1=Abs64, 2=Rel32/Pc32, 3=PltRel32/Plt32, 4=GotRel32/GotPcRel, 5=Abs32
+        val computed = smf_reloc_compute_wire(reloc.reloc_type as i64, reloc_s, reloc.addend, patch_addr)
+        if not computed.ok:
+            return Err("Relocation value out of range for wire type {reloc.reloc_type} (S={reloc_s}, A={reloc.addend}, P={patch_addr})")
         match reloc.reloc_type:
             1:
-                # Abs64: write 8 bytes = sym_addr + addend
-                val value = sym_addr + reloc.addend
                 unsafe(capabilities: [raw_ptr]):
-                    native_reloc_write_i64(code_addr, reloc.offset, value)
+                    native_reloc_write_i64(code_addr, reloc.offset, computed.value)
             2:
-                # Rel32/Pc32: write 4 bytes = (sym_addr - patch_addr + addend) as i32
-                val value = sym_addr - patch_addr + reloc.addend
                 unsafe(capabilities: [raw_ptr]):
-                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                    native_reloc_write_i32(code_addr, reloc.offset, computed.value as i32)
             3:
-                # PltRel32/Plt32: same as Pc32
-                val value = sym_addr - patch_addr + reloc.addend
                 unsafe(capabilities: [raw_ptr]):
-                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                    native_reloc_write_i32(code_addr, reloc.offset, computed.value as i32)
             4:
-                # GotRel32/GotPcRel: same as Pc32 (GOT entry resolved)
-                val value = sym_addr - patch_addr + reloc.addend
                 unsafe(capabilities: [raw_ptr]):
-                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                    native_reloc_write_i32(code_addr, reloc.offset, computed.value as i32)
             5:
-                # Abs32: write low 4 bytes = sym_addr + addend
-                val value = sym_addr + reloc.addend
                 unsafe(capabilities: [raw_ptr]):
-                    native_reloc_write_i32(code_addr, reloc.offset, value as i32)
+                    native_reloc_write_i32(code_addr, reloc.offset, computed.value as i32)
             _:
                 return Err("Unknown relocation type: {reloc.reloc_type}")
 

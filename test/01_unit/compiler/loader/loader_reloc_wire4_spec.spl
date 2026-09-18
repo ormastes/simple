@@ -1,111 +1,145 @@
-# Pins the CURRENT (defective) wire-4 behaviour green. This is a hand-written
-# reproduction, not a call into the real loader, so it does NOT flip on its
-# own when A4b fixes the loader — A4b must replace the assertions here (or add
-# a separate test that drives the real code) once a per-module GOT exists.
-# Tracks: linker plan lane A4a (doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md),
-# fixed in lane A4b.
-
-# ============================================================================
-# loader_reloc_wire4_spec — pins the live loader's wire-4 (GotRel32) defect
+# loader_reloc_wire4_spec — REPLACED (lane A4b) the hand-written
+# reproduction that used to live in this file with a test that drives the
+# REAL loader helper, `loader_smf_reloc_value`
+# (compiler.loader.module_loader_compat), plus a synthesized GOT slot built
+# the same way the live loader's relocation loop builds one.
 #
-# doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md and
-# design §4 (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md)
-# establish the wire-4 rule: `s` in the S+A-P formula (renamed G+A-P for this
-# wire type) MUST be the address of a GOT slot that *holds* the symbol's
-# address (S == G), never the symbol's own address.
+# History: this file used to hand-reproduce the loader's buggy inline
+# expression (`target_addr - place + addend`, using the resolved symbol's
+# OWN address as S) and assert it differed from the oracle's GOT-based
+# result via `to_not_equal` -- a pin of the pre-A4b defect that could not
+# flip itself when the loader was fixed, because it never called the loader.
 #
-# Both live loaders violate this today:
-#   - src/compiler/99.loader/module_loader_compat.spl:1363-1365 (case 4 of the
-#     `match reloc.reloc_type:` block at :1353-1370)
-#   - src/os/smf/smf_dynlib.spl:759 (smf_dynlib_apply_relocation)
-# both compute `target_addr - (loaded_sym.address + reloc.offset) + reloc.addend`
-# for wire 4 — bit-for-bit the SAME expression they use for wires 2 and 3
-# (Rel32/PltRel32), where `target_addr` is the resolved SYMBOL's address, not
-# a synthesized GOT-entry address. No per-module GOT exists anywhere in
-# either loader, so `target_addr` is the only address available — the bug is
-# structural, not a typo in one arithmetic term.
+# Lane A4a's bug doc (doc/08_tracking/bug/
+# smf_gotrel32_applied_as_symbol_value_2026-09-18.md) and design §4
+# (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md) establish
+# the rule: for wire 4 (GotRel32 / R_X86_64_GOTPCREL), S must be the address
+# of a per-module GOT slot that HOLDS the resolved symbol's address (S ==
+# G), never the symbol's own address, because a GOTPCREL site LOADS THROUGH
+# the slot at runtime.
 #
-# module_loader_compat.spl is A4b's file (relocation block only); this lane
-# (A4a) may not edit it. The formula cannot be called in isolation either —
-# it is inlined inside a large, unsafe, native-call-heavy match arm with no
-# extracted helper function — so per the lane instructions this spec
-# reproduces the loader's exact expression (cited above, file:line) as a
-# hand-written mirror and compares it against `smf_reloc_compute_wire`, the
-# oracle this whole plan is converging both loaders onto.
-#
-# This spec is GREEN today and pins the defect via `to_not_equal`: the live
-# loader's symbol-address-based result is asserted to DIFFER from the
-# oracle's GOT-address-based correct result, which is true right now because
-# no per-module GOT exists. This is a hand-written mirror of today's buggy
-# formula, disconnected from the real loader code — it CANNOT "flip green by
-# itself" when A4b lands a fix, because nothing here calls the real loader.
-# A4b must not rely on this file turning green on its own: A4b is expected to
-# REPLACE this spec's reproduction-based assertions with a test that drives
-# the real fixed code path (module_loader_compat.spl / smf_dynlib.spl) once a
-# per-module GOT exists — e.g. `T/compiler/loader/loader_reloc_oracle_spec.spl`
-# (A4b's own new file per the lane plan) is where the real convergence proof
-# belongs; this file's job ends at pinning the CURRENT defect with a concrete
-# hand-derived example, not at proving the eventual fix.
-# ============================================================================
+# Lane A4b converged both live relocation loops
+# (module_loader_compat.spl's relocation block, object_mapper.spl's
+# apply_smf_relocations) onto `loader_smf_reloc_value` /
+# `smf_reloc_compute_wire` and, for module_loader_compat.spl and
+# object_mapper.spl specifically, added GOT synthesis: one 8-byte RW slot
+# per distinct wire-4 target symbol, filled with that symbol's resolved
+# address, allocated before any relocation is patched. The first test below
+# proves the formula-level half of that fix directly against the real
+# helper. The second test drives `apply_smf_relocations`
+# (compiler.loader.loader.object_mapper) itself end to end -- real allocated
+# memory standing in for a loaded code region and a resolved symbol, no
+# hand-reproduced arithmetic -- to prove the GOT-slot ALLOCATION and
+# DICT-LOOKUP machinery (which is inline in the loader's relocation loop,
+# not a pure function, since it needs `native_alloc_rw_memory` and the
+# loader's own symbol tables) actually indirects through a slot rather than
+# repeating the pre-A4b bug.
 
 use std.spec
-use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
+use compiler.loader.module_loader_compat.{loader_smf_reloc_value}
+use compiler.loader.loader.object_mapper.{apply_smf_relocations, ResolvedSymbol}
+use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
+use compiler.loader.smf_mmap_native.{native_alloc_rw_memory, native_mmap_read_bytes}
 
-describe "loader wire-4 (GotRel32) formula reproduction vs the oracle contract":
-    it "today's loader formula (module_loader_compat.spl:1363-1365) uses the symbol address as S, matching wires 2/3 exactly":
-        # Concrete scenario: a symbol resolved to address 0x00410000, inside a
-        # loaded blob based at 0x00400000, relocation site at offset 0x20
-        # (place P = 0x00400020), addend = 4.
+# Manual little-endian decode, NOT `as i32`-and-shift: i32 arithmetic in
+# this language does not wrap at 32 bits under `<<`/`|`, so a naive decode
+# misreads any negative patched value (e.g. bytes for -12345 decode as
+# 4294954951, not -12345) -- verified empirically before writing this spec.
+# Accumulate in i64, then apply the two's-complement correction by hand.
+fn _wire4_bytes_to_i32_le(bytes: [u8]) -> i64:
+    var raw = 0i64
+    var shift = 0i64
+    var i = 0
+    while i < 4:
+        raw = raw | ((bytes[i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    if raw >= 2147483648:
+        raw = raw - 4294967296
+    raw
+
+fn _wire4_bytes_to_i64_le(bytes: [u8]) -> i64:
+    var value = 0i64
+    var shift = 0i64
+    var i = 0
+    while i < 8:
+        value = value | ((bytes[i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+describe "loader wire-4 (GotRel32) via the real loader helper, with a synthesized GOT slot":
+    it "using the GOT slot's address as S yields a value distinct from using the symbol's own address":
+        # Same scenario as the original hand reproduction: a symbol resolved
+        # to address 0x00410000, inside a loaded blob based at 0x00400000,
+        # relocation site at offset 0x20 (place P = 0x00400020), addend = 4.
         val symbol_address = 0x00410000
         val loaded_sym_base = 0x00400000
         val reloc_offset = 0x20
         val addend = 4
         val place = loaded_sym_base + reloc_offset
 
-        # Reproduces module_loader_compat.spl:1363-1365 verbatim in shape:
-        #   native_reloc_write_i32(loaded_sym.address, reloc.offset,
-        #       (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
-        # i.e. value = target_addr - place + addend, with target_addr = the
-        # resolved SYMBOL's address (no GOT involved).
-        val loader_reproduced_wire4 = symbol_address - place + addend
+        # A per-module GOT slot lives at a DISTINCT address from the symbol
+        # it points at -- that is the entire point of an indirection slot.
+        # (In the live loader this address comes from `native_alloc_rw_memory`;
+        # here it stands in for "wherever the synthesized GOT places this
+        # symbol's slot".)
+        val got_slot_address = 0x00500000
 
-        # The same file computes wires 2 (Rel32) and 3 (PltRel32) with the
-        # IDENTICAL expression (:1357-1362) — wire 4's branch is not
-        # distinguished from them at all today.
-        val loader_reproduced_wire2 = symbol_address - place + addend
-        expect(loader_reproduced_wire4).to_equal(loader_reproduced_wire2)
+        val buggy_using_symbol_address = loader_smf_reloc_value(4, symbol_address, place, addend)
+        val correct_using_got_slot = loader_smf_reloc_value(4, got_slot_address, place, addend)
 
-        # The oracle agrees when given the SAME (wrong, symbol-address) `s` --
-        # confirming the arithmetic shape itself is correct; only the VALUE fed
-        # in as `s` is wrong for wire 4.
-        val oracle_with_loaders_s = smf_reloc_compute_wire(4, symbol_address, addend, place)
-        expect(oracle_with_loaders_s.ok).to_be(true)
-        expect(oracle_with_loaders_s.value).to_equal(loader_reproduced_wire4)
+        expect(buggy_using_symbol_address.is_ok()).to_equal(true)
+        expect(correct_using_got_slot.is_ok()).to_equal(true)
+        # The two are NOT equal: the fixed loader path (which always passes
+        # the GOT-slot address per the contract) produces a different patch
+        # value than a hypothetical caller that (incorrectly) passed the
+        # symbol's own address. This is the exact distinction the pre-A4b
+        # bug erased -- both loops used to compute the "buggy" value above.
+        expect(correct_using_got_slot.unwrap()).to_not_equal(buggy_using_symbol_address.unwrap())
+        expect(correct_using_got_slot.unwrap()).to_equal(got_slot_address - place + addend)
 
-    it "pins the defect until A4b: the loader wire-4 result differs from the oracle with a real GOT-entry address":
-        # Same scenario as above. A per-module GOT slot holding a pointer to
-        # the symbol lives at a DISTINCT address from the symbol itself --
-        # that is the entire point of an indirection slot. This example uses
-        # got_entry_address = 0x00500000 (a representative, hand-chosen
-        # address for "wherever A4b's synthesized per-module GOT places this
-        # symbol's slot" -- the concrete address is not load-bearing; what is
-        # load-bearing is that it is NOT the symbol's own address).
-        val symbol_address = 0x00410000
-        val loaded_sym_base = 0x00400000
-        val reloc_offset = 0x20
-        val addend = 4
-        val place = loaded_sym_base + reloc_offset
-        val got_entry_address = 0x00500000
+    it "apply_smf_relocations (the real caller, object_mapper.spl) synthesizes a GOT slot and patches through it, end to end":
+        # Drives the REAL `apply_smf_relocations` with real allocated memory
+        # standing in for a loaded code region and a resolved symbol -- no
+        # hand-reproduced arithmetic. This is the caller-level proof that
+        # the formula-level test above only assumes.
+        val code_size = 16i64
+        val code_addr = native_alloc_rw_memory(code_size)
+        expect(code_addr).to_not_equal(0)
+        val sym_addr = native_alloc_rw_memory(8)
+        expect(sym_addr).to_not_equal(0)
+        expect(sym_addr).to_not_equal(code_addr)
 
-        val loader_reproduced_wire4 = symbol_address - place + addend
+        val reloc_offset = 4i64
+        val addend = 0i64
+        val reloc = SmfRelocEntry(offset: reloc_offset, symbol_index: 0, reloc_type: 4, addend: addend)
+        val symbols = [ResolvedSymbol(name: "target_symbol", address: sym_addr)]
+        val global_symbols: Dict<text, i64> = {}
 
-        val oracle_correct = smf_reloc_compute_wire(4, got_entry_address, addend, place)
-        expect(oracle_correct.ok).to_be(true)
+        val result = apply_smf_relocations(code_addr, code_size, [reloc], symbols, global_symbols)
+        expect(result.is_ok()).to_equal(true)
 
-        # This is the failing assertion this spec exists to carry: the value
-        # the live loader can produce today (loader_reproduced_wire4, built
-        # from the symbol's address) is expected -- per the wire-4 contract --
-        # to equal the value computed from a real GOT-entry address. It does
-        # not, because no GOT is synthesized yet. Fixed only by A4b.
-        # A4b flips this to `.to_equal` when the per-module GOT lands.
-        expect(loader_reproduced_wire4).to_not_equal(oracle_correct.value)
+        val place = code_addr + reloc_offset
+        val patch_bytes = native_mmap_read_bytes(code_addr, reloc_offset, 4)
+        val patched_value = _wire4_bytes_to_i32_le(patch_bytes)
+
+        # If the loader had (incorrectly) used the symbol's own address as S
+        # -- the pre-A4b bug -- the patched value would equal sym_addr -
+        # place + addend. It must NOT: the real code must go through a
+        # synthesized GOT slot instead.
+        val buggy_value_using_symbol_address = sym_addr - place + addend
+        expect(patched_value).to_not_equal(buggy_value_using_symbol_address)
+
+        # Solve for S (the GOT slot's address) from the patched value:
+        # value = S - place + addend  =>  S = value + place - addend.
+        val derived_slot_addr = patched_value + place - addend
+
+        # The derived slot must be real, distinct memory that HOLDS the
+        # symbol's actual resolved address -- proving a genuine GOT
+        # indirection happened, not merely a different constant.
+        expect(derived_slot_addr).to_not_equal(sym_addr)
+        expect(derived_slot_addr).to_not_equal(code_addr)
+        val slot_bytes = native_mmap_read_bytes(derived_slot_addr, 0, 8)
+        val slot_value = _wire4_bytes_to_i64_le(slot_bytes)
+        expect(slot_value).to_equal(sym_addr)
