@@ -1,4 +1,150 @@
-# BUG: a nested `fn` declared inside a spec `it` block does not capture the block's locals — silently reads zero, or dies with "variable not found"
+# BUG: a nested `fn` declared inside a LAMBDA body does not capture the lambda's locals — silently reads zero, or dies with "variable not found" (spec `it` blocks are just the common case)
+
+**Status: OPEN — re-verified 2026-09-18 on a freshly redeployed seed. Not a stale-binary artifact.**
+
+## Re-verification 2026-09-18, and a much smaller repro
+
+This matters because the host's deployed seed was found to be 12 days stale that
+same day and was replaced (see
+`seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`), which invalidated
+every measurement taken against the old binary. Several records checked in that
+pass turned out to describe already-fixed behaviour. **This one does not.** Both
+arms still reproduce on a seed built from `origin/main` on 2026-09-18.
+
+**Arm B, loud, in three lines — no lambda and no callback required.** Every
+earlier repro in this record went through an `it`-block lambda handing a closure
+to a function under test, which framed this as a closure-passing defect. It is
+simpler than that: a nested `fn` cannot see the enclosing block's locals at all.
+
+```simple
+use std.spec
+
+describe "nested fn captures the it-block local":
+    it "reads a captured array through a nested fn":
+        val buf: [i64] = [7, 8, 9]
+        fn r(i: i64) -> i64:
+            buf[i]
+        expect(r(1)).to_equal(8)
+
+    it "reads a captured scalar through a nested fn":
+        val n = 42
+        fn g() -> i64:
+            n
+        expect(g()).to_equal(42)
+
+    it "reads the captured array inline (control)":
+        val buf: [i64] = [7, 8, 9]
+        expect(buf[1]).to_equal(8)
+```
+
+```
+✗ reads a captured array through a nested fn
+    semantic: variable `buf` not found
+✗ reads a captured scalar through a nested fn
+    semantic: variable `n` not found
+✓ reads the captured array inline (control)
+3 examples, 2 failures
+```
+
+Three facts this adds to the record:
+
+- **It is not array-specific.** A plain `i64` local fails identically. The
+  original write-up's `[u8]` fixtures made this look like a container-capture
+  problem; it is not.
+- **It is a SEMANTIC-phase error, not a runtime one.** The message is
+  `semantic: variable ... not found`, so the nested `fn`'s body is resolved
+  against a scope that never contained the block's locals. That places the fix in
+  name resolution, not in closure capture or environment copying.
+- **The inline control passes**, so the local itself is bound correctly; only the
+  nested `fn`'s view of it is missing.
+
+**Arm A, the silent one, also still reproduces.** This record's named victim
+`test/01_unit/os/acpi/acpi_test.spl` was re-run on the new seed and still fails
+with the exact numbers quoted below:
+
+```
+✗ extracts MMIO base from GAS address at offset 48   expected 0 to equal 4275044352
+✗ reads legacy PM_TMR_BLK at offset 76 ...           expected 0 to equal 45064
+✗ prefers X_PM_TMR_BLK GAS at offset 208 ...         expected 0 to equal 47104
+10 examples, 7 passed, 3 failed
+```
+
+So the two arms are one defect seen through two call shapes: calling the nested
+`fn` **directly** raises the loud resolver error, while handing it to another
+function as a callback yields the dangerous silent zero. Any fix must be checked
+against both, and the three-line repro above is the cheaper of the two to iterate
+on.
+
+## Root cause, localised 2026-09-18 — it is NOT about spec blocks
+
+The title and every repro in this record put the defect inside a spec `it`
+block. That framing is wrong and has kept the search in the spec runner. Three
+probes, each 12 lines and none of them using `std.spec` at all:
+
+| where the nested `fn` is declared | what it reads | result |
+|---|---|---|
+| inside a plain `fn` body | that fn's `val` | **42, correct**, both lanes |
+| inside a lambda body | that lambda's `val` | **`semantic: variable ... not found`** |
+| inside a lambda body | a module-level `var` | **99, correct** |
+
+So a `fn` nested in a **plain function** captures correctly, and the same `fn`
+nested in a **lambda** resolves against module scope only. A spec `it` block is
+simply a lambda, which is the whole of its involvement. Anything that nests a
+`fn` inside any closure hits this, spec or not.
+
+```simple
+fn call_it(f: () -> i64) -> i64:
+    f()
+
+fn main() -> i64:
+    val blk = \:
+        val inner_local = 7
+        fn nested() -> i64:
+            inner_local          # semantic: variable `inner_local` not found
+        nested()
+    print call_it(blk).to_text()
+    0
+```
+
+Read together, the three rows say the nested `fn` is lowered as a FREE,
+top-level function: it keeps module scope and is handed no enclosing-lambda
+environment. The lowering path for a `fn` inside a function body clearly does
+thread the enclosing scope; the path for a `fn` inside a lambda body does not.
+That is the fix site, and it is narrower than "closure capture" as a whole.
+
+### A second, silent cost nobody had noticed
+
+Both lambda probes also print this before the interpreter ever runs:
+
+```
+[jit-fallback] unresolved external symbol 'nested': whole module dropped to the
+interpreter (expect ~100-1000x slowdown).
+[INFO] JIT compilation failed, falling back to interpreter: ... would NULL-jump
+in JIT; deferring to interpreter
+
+```
+
+The nested `fn` is not in the module symbol table either, so the JIT cannot
+resolve it and **drops the entire module to the interpreter**. That happens even
+in the module-scope probe, which returns the RIGHT answer — so a file carrying
+one nested `fn` inside one lambda silently loses JIT for everything in it, with
+the correct result masking the cliff. Every spec file using this shape has been
+paying that.
+
+## Scope note on the earlier "out of scope for this lane" verdict
+
+The 2026-08-09 re-confirmation below closed with "no `.spl`/`.shs` root-cause fix
+is available at this layer", on the standing "fix Simple, not Rust" rule. That
+reasoning still holds about WHERE the defect lives, but the conclusion that it
+cannot be worked has weakened: a Rust-seed fix was authored and landed on
+2026-09-18 (`src/compiler_rust/.../mir/lower/lowering_stmt.rs`, PR #1090) when
+that was where a defect actually was. Seed work is therefore available for this,
+with the usual cost that it needs a seed rebuild to verify.
+
+---
+
+## Original record, retained
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
