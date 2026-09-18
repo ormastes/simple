@@ -95,3 +95,27 @@ corruption class the file's own comments document; harmless and more robust.
 - All Windows `native-build` lanes (blocks the linker Gate 0 real-corpus
   baseline — see doc/01_research/domain/simple_linker_mold_mdsocpp.md §17).
 - Any other JIT/AOT lane compiling the full driver closure.
+
+## 2026-09-19: two more live dispatches observed (whole-suite triage)
+
+1. `format_size` — 8 same-signature `fn format_size(bytes: i64)` definitions
+   across devhub/output, lib/common/format_utils, three
+   lib/*/package/list.spl copies, os file apps, and llm_dashboard gui.
+   `test/01_unit/app/devhub/itf_output_spec.spl` expects devhub's KiB
+   oracle but the spec closure dispatched format_utils' KB variant
+   ("1.5 KB" vs "1.5 KiB"). One shadow (env_panel_html) renamed to
+   format_size_panel; the dispatch itself remains compiler debt.
+2. `process_run` — patching the raw runners of std.nogc_sync_mut
+   io.process_ops, io_runtime, AND app.io.process_ops fixed
+   `process_run("/bin/echo")` for minimal closures, but large specs
+   (cli_misc and ~20 copy-pasted siblings with wide import closures)
+   still dispatched the gc_async_mut pure-runtime variant
+   (src/lib/gc_async_mut/pure/runtime.spl:305), which shells via its own
+   system_shell and bypasses the resolver entirely. Workaround applied:
+   specs route through shell(). Root fix remains: dispatch must resolve
+   by import path, not last-defined $dup.
+
+Also noted: cli_process_facade_source it2 ("facade contracts
+distinct/non-recursive") reports recursion-count 2 under the test runner
+while identical probes outside the runner give 1 on the same file and
+oracles — runner-environment dispatch skew, unconfirmed root cause.
