@@ -13,6 +13,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -555,12 +556,12 @@ impl HirLowering:
         # is never cached, so the memo can only ever short-circuit a search
         # whose answer was already "this owner does not have it".
         val miss_key = hir_payload_origin_miss_key(imported_mod_name, dependency)
-        if self.payload_origin_miss_memo.contains_key(miss_key):
+        if self.payload_origin_miss_memo_lookup(miss_key):
             self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
             return
         val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
         if not origin.found:
-            self.payload_origin_miss_memo[miss_key] = true
+            self.payload_origin_miss_memo_record(miss_key)
             # NEVER silent. An unresolved payload origin used to return with no
             # trace at all, and the failure resurfaced much later as a hard
             # `unresolved type: {name}` (hir_lowering/types.spl) attributed to
@@ -614,6 +615,41 @@ impl HirLowering:
                 seen[nested] = true
                 self.register_materialized_payload_named_dependency(terminal, origin.module_key, nested, alias_skipped, import_span)
 
+    me payload_origin_miss_memo_lookup(key: text) -> bool:
+        """Scalar-chain membership probe for the payload-origin miss memo.
+        Never reads the {text: bool} Dict: contains_key on it mis-reports
+        under Stage-2 native codegen (BOOT-20 2026-09-18, the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        if self.payload_origin_miss_memo_hash_buckets.len() == 0:
+            return false
+        val bucket = hash_text(key) & self.payload_origin_miss_memo_hash_mask
+        var index = self.payload_origin_miss_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.payload_origin_miss_memo_keys[index] == key:
+                return true
+            index = self.payload_origin_miss_memo_hash_next[index]
+        false
+
+    me payload_origin_miss_memo_record(key: text):
+        """Append one missed (owner, name) answer to the scalar chain table;
+        the legacy Dict is written in lockstep so its len()/contains_key
+        shape stays the oracle hir_payload_origin_miss_memo_spec pins."""
+        if self.payload_origin_miss_memo_hash_buckets.len() == 0:
+            # 4096 buckets, built once per lowerer: container spellings times
+            # declaring owners volume, absorbed by the chains.
+            val payload_bucket_count: i64 = 4096
+            self.payload_origin_miss_memo_hash_mask = payload_bucket_count - 1
+            var fill = 0
+            while fill < payload_bucket_count:
+                self.payload_origin_miss_memo_hash_buckets = self.payload_origin_miss_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.payload_origin_miss_memo_hash_mask
+        self.payload_origin_miss_memo_hash_next = self.payload_origin_miss_memo_hash_next.push(
+            self.payload_origin_miss_memo_hash_buckets[bucket])
+        self.payload_origin_miss_memo_hash_buckets[bucket] = self.payload_origin_miss_memo_keys.len()
+        self.payload_origin_miss_memo_keys = self.payload_origin_miss_memo_keys.push(key)
+        self.payload_origin_miss_memo[key] = true
+
     me register_materialized_enum_payload_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, enum_: ModuleSurfaceEnum, import_span: Span):
         """Materialize the complete named dependency closure of one enum."""
         val identity = hir_payload_terminal_identity(imported_mod.module_name, enum_.name, "enum")
@@ -654,15 +690,55 @@ impl HirLowering:
     me dep_tail_already_bound(tail_key: text) -> bool:
         """DEPTAIL: has this importer already run this dependency tail to
         completion? Drops the memo when `module_filename` names a different
-        module, exactly as the `register_imported_symbol` wrapper does."""
+        module, exactly as the `register_imported_symbol` wrapper does.
+        BOOT-20 (2026-09-18): answered from the scalar chain table; the Dict
+        is not consulted (driver.spl 9h/100%-CPU/flat-RSS wedge)."""
         if self.dep_tail_memo_owner != self.module_filename:
             val fresh_dep_tail_memo: {text: bool} = {}
             self.dep_tail_memo = fresh_dep_tail_memo
             self.dep_tail_memo_owner = self.module_filename
-        if self.dep_tail_memo.contains_key(tail_key):
+            # Scalar read authority resets with the Dict (BOOT-20 2026-09-18).
+            self.dep_tail_memo_keys = []
+            self.dep_tail_memo_hash_buckets = []
+            self.dep_tail_memo_hash_next = []
+            self.dep_tail_memo_hash_mask = 0
+        if self.dep_tail_memo_lookup(tail_key):
             self.dep_tail_skip_count = self.dep_tail_skip_count + 1
             return true
         false
+
+    me dep_tail_memo_lookup(key: text) -> bool:
+        """Scalar-chain membership probe for the dependency-tail memo. Never
+        reads the {text: bool} Dict: contains_key on it mis-reports under
+        Stage-2 native codegen (BOOT-20 2026-09-18)."""
+        if self.dep_tail_memo_hash_buckets.len() == 0:
+            return false
+        val bucket = hash_text(key) & self.dep_tail_memo_hash_mask
+        var index = self.dep_tail_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.dep_tail_memo_keys[index] == key:
+                return true
+            index = self.dep_tail_memo_hash_next[index]
+        false
+
+    me dep_tail_memo_record(key: text):
+        """Append one completed tail key to the scalar chain table; the
+        legacy Dict is written in lockstep for shape compatibility."""
+        if self.dep_tail_memo_hash_buckets.len() == 0:
+            # 1024 buckets per importer; declared/explicit dependency volume
+            # per module is far smaller and chains absorb the rest.
+            val tail_bucket_count: i64 = 1024
+            self.dep_tail_memo_hash_mask = tail_bucket_count - 1
+            var fill = 0
+            while fill < tail_bucket_count:
+                self.dep_tail_memo_hash_buckets = self.dep_tail_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.dep_tail_memo_hash_mask
+        self.dep_tail_memo_hash_next = self.dep_tail_memo_hash_next.push(
+            self.dep_tail_memo_hash_buckets[bucket])
+        self.dep_tail_memo_hash_buckets[bucket] = self.dep_tail_memo_keys.len()
+        self.dep_tail_memo_keys = self.dep_tail_memo_keys.push(key)
+        self.dep_tail_memo[key] = true
 
     me materialize_imported_callable_declared_dependency_inner(
         imported_mod: ModuleSurface,
@@ -685,7 +761,7 @@ impl HirLowering:
                 imported_mod.module_name, dependency, symbol)
             # Recorded only after the bind actually happened; an invalid
             # lookup stays retryable within this importer.
-            self.dep_tail_memo[declared_tail_key] = true
+            self.dep_tail_memo_record(declared_tail_key)
 
     me materialize_imported_callable_explicit_dependency(
         imported_mod: ModuleSurface,
@@ -723,9 +799,10 @@ impl HirLowering:
         val memo_key = imported_mod.module_name + " " + dependency
         var selected_target: i64 = -1
         var selected_item: text = ""
-        if self.explicit_dep_target_memo.contains_key(memo_key):
-            selected_target = self.explicit_dep_target_memo[memo_key]
-            selected_item = self.explicit_dep_item_memo[memo_key]
+        val explicit_slot = self.explicit_dep_memo_lookup(memo_key)
+        if explicit_slot >= 0:
+            selected_target = self.explicit_dep_target_memo_target_values[explicit_slot]
+            selected_item = self.explicit_dep_target_memo_item_values[explicit_slot]
         else:
             self.explicit_dep_scan_count = self.explicit_dep_scan_count + 1
             hir_phase_profile_count_explicit_scan(imported_mod.imports.len())
@@ -814,8 +891,7 @@ impl HirLowering:
                 # the pre-memo code did.
                 selected_target = -2
                 selected_item = ""
-            self.explicit_dep_target_memo[memo_key] = selected_target
-            self.explicit_dep_item_memo[memo_key] = selected_item
+            self.explicit_dep_memo_record(memo_key, selected_target, selected_item)
         if selected_target == -2:
             self.error(
                 "ambiguous explicit callable dependency `{dependency}` in `{imported_mod.module_name}`",
@@ -840,11 +916,11 @@ impl HirLowering:
             # other would skip a resolution that could still succeed. This key
             # only ever dedupes the ADVISORY.
             val callable_miss_key = hir_payload_origin_miss_key("callable " + imported_mod.module_name, dependency)
-            val callable_already_advised = self.payload_origin_miss_memo.contains_key(callable_miss_key)
+            val callable_already_advised = self.payload_origin_miss_memo_lookup(callable_miss_key)
             if callable_already_advised:
                 self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
             if not hir_dependency_is_builtin_type(dependency) and not callable_already_advised:
-                self.payload_origin_miss_memo[callable_miss_key] = true
+                self.payload_origin_miss_memo_record(callable_miss_key)
                 eprint("[hir-callable-dep-origin-unresolved] owner={imported_mod.module_name} dependency={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
         val terminal = self.module_surfaces.surfaces[selected_target]
@@ -874,7 +950,48 @@ impl HirLowering:
             # published. The `-2` ambiguity and `< 0` unresolved branches
             # above return earlier and are never recorded, so their
             # diagnostics keep their exact per-call multiplicity.
-            self.dep_tail_memo[explicit_tail_key] = true
+            self.dep_tail_memo_record(explicit_tail_key)
+
+    me explicit_dep_memo_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar explicit-dependency chain table, or -1.
+        Never reads the {text: *} Dicts: their contains_key/bracket-read pair
+        mis-reports under Stage-2 native codegen (BOOT-20 2026-09-18, the
+        driver.spl 9h/100%-CPU/flat-RSS wedge)."""
+        if self.explicit_dep_target_memo_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.explicit_dep_target_memo_hash_mask
+        var index = self.explicit_dep_target_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.explicit_dep_target_memo_keys[index] == key:
+                return index
+            index = self.explicit_dep_target_memo_hash_next[index]
+        -1
+
+    me explicit_dep_memo_record(key: text, selected_target: i64, selected_item: text):
+        """Append one explicit-dependency resolution to the scalar chain
+        table; the legacy Dicts are written in lockstep so their len()/
+        bracket shape stays the oracle hir_import_registration_cost_spec
+        pins. Recorded only after the sweep (the else arm of the probe), so a
+        key is never refreshed -- exactly the Dict's write-once contract."""
+        if self.explicit_dep_target_memo_hash_buckets.len() == 0:
+            # 4096 buckets, built once per lowerer: the sweep volume of the
+            # stage-3 closure (662 surfaces x dependency names) absorbed by
+            # the chains.
+            val explicit_bucket_count: i64 = 4096
+            self.explicit_dep_target_memo_hash_mask = explicit_bucket_count - 1
+            var fill = 0
+            while fill < explicit_bucket_count:
+                self.explicit_dep_target_memo_hash_buckets = self.explicit_dep_target_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.explicit_dep_target_memo_hash_mask
+        self.explicit_dep_target_memo_hash_next = self.explicit_dep_target_memo_hash_next.push(
+            self.explicit_dep_target_memo_hash_buckets[bucket])
+        self.explicit_dep_target_memo_hash_buckets[bucket] = self.explicit_dep_target_memo_keys.len()
+        self.explicit_dep_target_memo_keys = self.explicit_dep_target_memo_keys.push(key)
+        self.explicit_dep_target_memo_target_values = self.explicit_dep_target_memo_target_values.push(selected_target)
+        self.explicit_dep_target_memo_item_values = self.explicit_dep_target_memo_item_values.push(selected_item)
+        self.explicit_dep_target_memo[key] = selected_target
+        self.explicit_dep_item_memo[key] = selected_item
 
     me cached_surface_package_name(module_name: text) -> text:
         """Package name of `surface`, memoized by module name.
@@ -883,12 +1000,49 @@ impl HirLowering:
         dotted name, allocating on every call. The full-registry scan in
         materialize_imported_field_package_dependency called it once per
         candidate per query; the registry is frozen for the whole HIR phase,
-        so one computation per surface is enough."""
-        if self.surface_package_name_memo.contains_key(module_name):
-            return self.surface_package_name_memo[module_name]
+        so one computation per surface is enough. BOOT-20 (2026-09-18):
+        answered from the scalar chain table; the {text: text} Dict corrupts
+        values on a hit under Stage-2 native codegen (the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        val package_slot = self.surface_package_name_memo_lookup(module_name)
+        if package_slot >= 0:
+            return self.surface_package_name_memo_values[package_slot]
         val computed = module_surface_package_name_from_name(module_name)
-        self.surface_package_name_memo[module_name] = computed
+        self.surface_package_name_memo_record(module_name, computed)
         computed
+
+    me surface_package_name_memo_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar package-name chain table, or -1."""
+        if self.surface_package_name_memo_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.surface_package_name_memo_hash_mask
+        var index = self.surface_package_name_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.surface_package_name_memo_keys[index] == key:
+                return index
+            index = self.surface_package_name_memo_hash_next[index]
+        -1
+
+    me surface_package_name_memo_record(key: text, computed: text):
+        """Append one computed package name to the scalar chain table; the
+        legacy Dict is written in lockstep so its len() stays the oracle
+        hir_package_dependency_scan_memo_spec pins."""
+        if self.surface_package_name_memo_hash_buckets.len() == 0:
+            # 1024 buckets, built once per lowerer: bounded by the frozen
+            # registry's surface count.
+            val package_bucket_count: i64 = 1024
+            self.surface_package_name_memo_hash_mask = package_bucket_count - 1
+            var fill = 0
+            while fill < package_bucket_count:
+                self.surface_package_name_memo_hash_buckets = self.surface_package_name_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.surface_package_name_memo_hash_mask
+        self.surface_package_name_memo_hash_next = self.surface_package_name_memo_hash_next.push(
+            self.surface_package_name_memo_hash_buckets[bucket])
+        self.surface_package_name_memo_hash_buckets[bucket] = self.surface_package_name_memo_keys.len()
+        self.surface_package_name_memo_keys = self.surface_package_name_memo_keys.push(key)
+        self.surface_package_name_memo_values = self.surface_package_name_memo_values.push(computed)
+        self.surface_package_name_memo[key] = computed
 
     me materialize_imported_field_package_dependency(
         imported_index: i64,
