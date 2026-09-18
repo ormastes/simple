@@ -1,0 +1,147 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/compiler/linker/linker_loader_inventory_2026-09-18.md ; plan: doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md ; architecture: doc/04_architecture/README.md ; design: doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md
+
+"""Pin spec for the A12 (SMF read dedup) lane.
+
+Pins today's behaviour of `objtaker_take_object` (obj_taker.spl) and the
+public `smf_reader.spl` (`SmfReaderImpl`/`SmfReaderFfi`) API surface that
+other callers in this tree actually use (`object_resolver.spl`,
+`object_provider.spl`, `link.spl`, `lazy_instantiator.spl`,
+`smf_getter.spl`, `99.loader/loader/module_loader.spl`) -- BEFORE
+`smf_reader.spl` is swapped to a thin file->`SmfReaderMemory` shim
+(doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md §2, SMF read
+row). Every assertion here must still pass, unchanged, after the swap.
+
+The fixture is a real SMF built by the existing writer
+(`compiler.driver.smf_writer.build_smf_with_code_for_target`), not
+hand-rolled bytes -- the same helper `object_provider_spec.spl` uses to
+build fixtures for this same directory.
+"""
+
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+use compiler.backend.linker.obj_taker.{
+    ObjTaker, ObjTakeResult, SmfSymbol, SymbolType, SymbolBinding,
+    objtaker_with_defaults, objtaker_take_object
+}
+use compiler.driver.smf_writer.{build_smf_with_code_for_target, Target}
+use std.io_runtime.{file_write_bytes}
+
+fn fixture_code() -> [u8]:
+    # mov eax, 42 ; ret -- arbitrary but deterministic, distinguishable bytes.
+    [0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3]
+
+fn write_fixture() -> text:
+    val path = "/tmp/smf_reader_obj_taker_pin_fixture.smf"
+    val data = build_smf_with_code_for_target(fixture_code(), Target.x86_64_unknown_linux_gnu())
+    expect(file_write_bytes(path, data)).to_equal(true)
+    path
+
+describe "A12 pin: smf_reader.spl public API, today":
+    # @manual scenario evidence
+    it "opens a writer-built SMF and reports a header consistent with one exported symbol":
+        # @req REQ-SSPEC-COMPILER
+        step("opens a writer-built SMF and reports a header consistent with one exported symbol")
+        val path = write_fixture()
+        val reader_result = SmfReaderImpl.open(path)
+        expect(reader_result.is_ok()).to_equal(true)
+        val reader = reader_result.unwrap()
+        expect(reader.path()).to_equal(path)
+        expect(reader.header.symbol_count).to_equal(1)
+
+    it "exposes exactly one exported symbol named main with the fixture's code size":
+        # @req REQ-SSPEC-COMPILER
+        step("exposes exactly one exported symbol named main with the fixture's code size")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        val exported = reader.exported_symbols()
+        expect(exported.len()).to_equal(1)
+        expect(exported[0].name).to_equal("main")
+        expect(exported[0].size).to_equal(fixture_code().len() as i64)
+        expect(exported[0].binding).to_equal(SymbolBinding.Global)
+        # Pinned as-is: parse_symbol_type (smf_reader.spl) `match`es a raw u8
+        # the same way parse_symbol_binding used to before its documented
+        # 2026-08-17 fix (see the comment above parse_symbol_binding in
+        # smf_reader.spl) -- every arm misses and `case _` wins, so a
+        # Function-typed symbol (sym_type byte 0) decodes as Unknown today.
+        # Not fixed here: this lane only dedups the reader, and the shim must
+        # reproduce this exact result, bug and all.
+        expect(exported[0].ty).to_equal(SymbolType.Unknown)
+        expect(exported[0].is_generic_template).to_equal(false)
+
+    it "looks up the main symbol by name":
+        # @req REQ-SSPEC-COMPILER
+        step("looks up the main symbol by name")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        val found = reader.lookup_symbol("main")
+        expect(found.is_ok()).to_equal(true)
+        expect(found.unwrap().offset).to_equal(0)
+        expect(reader.lookup_symbol("does_not_exist").is_err()).to_equal(true)
+
+    it "reads back the exact code bytes for the main symbol":
+        # @req REQ-SSPEC-COMPILER
+        step("reads back the exact code bytes for the main symbol")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        val symbol = reader.lookup_symbol("main").unwrap()
+        val code_result = reader.read_code(symbol)
+        expect(code_result.is_ok()).to_equal(true)
+        expect(code_result.unwrap()).to_equal(fixture_code())
+
+    it "reports no template symbols and empty note.sdn dependencies for a plain module":
+        # @req REQ-SSPEC-COMPILER
+        step("reports no template symbols and empty note.sdn dependencies for a plain module")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        expect(reader.template_symbols().len()).to_equal(0)
+        val meta = reader.read_note_sdn()
+        expect(meta.dependencies.len()).to_equal(0)
+
+describe "A12 pin: objtaker_take_object over SmfReaderImpl, today":
+    # @manual scenario evidence
+    it "extracts the concrete code for an existing symbol as ObjTakeResult.Code":
+        # @req REQ-SSPEC-COMPILER
+        step("extracts the concrete code for an existing symbol as ObjTakeResult.Code")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        var obj_taker = objtaker_with_defaults()
+        val result = objtaker_take_object(obj_taker, reader, "main")
+        match result:
+            case Code(bytes, symbol, ty):
+                expect(bytes).to_equal(fixture_code())
+                expect(symbol.name).to_equal("main")
+                expect(ty).to_equal(nil)
+            case _:
+                expect("expected Code").to_equal("got something else")
+
+    it "reports NotFound for a symbol absent from the module":
+        # @req REQ-SSPEC-COMPILER
+        step("reports NotFound for a symbol absent from the module")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        var obj_taker = objtaker_with_defaults()
+        val result = objtaker_take_object(obj_taker, reader, "no_such_symbol")
+        match result:
+            case NotFound(name):
+                expect(name).to_equal("no_such_symbol")
+            case _:
+                expect("expected NotFound").to_equal("got something else")
+
+    it "serves the second take of the same symbol from the instance cache with identical bytes":
+        # @req REQ-SSPEC-COMPILER
+        step("serves the second take of the same symbol from the instance cache with identical bytes")
+        val path = write_fixture()
+        val reader = SmfReaderImpl.open(path).unwrap()
+        var obj_taker = objtaker_with_defaults()
+        val first = objtaker_take_object(obj_taker, reader, "main")
+        val second = objtaker_take_object(obj_taker, reader, "main")
+        match first:
+            case Code(bytes1, _, _):
+                match second:
+                    case Code(bytes2, _, _):
+                        expect(bytes2).to_equal(bytes1)
+                    case _:
+                        expect("expected Code").to_equal("got something else")
+            case _:
+                expect("expected Code").to_equal("got something else")
