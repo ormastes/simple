@@ -194,6 +194,19 @@ class HirLowering:
     # depth 8 can still be re-expanded from a shallower arrival, which is what
     # keeps the depth cap's reachable set intact.
     glob_expand_memo: {text: i64}
+    # BOOT-20 (2026-09-18): scalar read authority for the glob-expansion
+    # depth memo above. Its contains_key/bracket-read pair sits on the glob
+    # path driver.spl hammers once per root expansion; the class-field Dict
+    # mis-reports membership under Stage-2 native codegen (the driver.spl
+    # wedge: 9h HIR at 100% CPU, flat RSS). keys is append-only and values
+    # holds the depth parallel to keys; buckets/next/mask are open-addressing
+    # hash chains over keys (FNV-1a via std.io_runtime.hash_text). Cleared
+    # wherever glob_expand_memo is reset (both glob roots + begin_module).
+    glob_expand_memo_keys: [text]
+    glob_expand_memo_values: [i64]
+    glob_expand_memo_hash_buckets: [i64]
+    glob_expand_memo_hash_next: [i64]
+    glob_expand_memo_hash_mask: i64
     # PKGDEP (2026-08-21): package-sibling FIELD-dependency resolution memo.
     # `materialize_imported_field_package_dependency` scans every surface in
     # the frozen registry (662 in a full bootstrap) for each unresolved field
@@ -207,6 +220,15 @@ class HirLowering:
     field_package_dep_memo: {text: i64}
     # Per-surface package name cache for the same scan (keyed by module_name).
     surface_package_name_memo: {text: text}
+    # BOOT-20 (2026-09-18): scalar read authority for the package-name cache;
+    # the {text: text} class-field Dict corrupts values on a hit under Stage-2
+    # native codegen (the driver.spl wedge: 9h HIR at 100% CPU, flat RSS).
+    # values holds the package name parallel to keys.
+    surface_package_name_memo_keys: [text]
+    surface_package_name_memo_values: [text]
+    surface_package_name_memo_hash_buckets: [i64]
+    surface_package_name_memo_hash_next: [i64]
+    surface_package_name_memo_hash_mask: i64
     # Full-registry scans actually performed by the package-dependency
     # fallback. Observable mechanism counter for the memo above; a spec
     # pins that repeated identical queries do not raise it.
@@ -276,6 +298,17 @@ class HirLowering:
     # re-emitted per importer so diagnostics are unchanged).
     explicit_dep_target_memo: {text: i64}
     explicit_dep_item_memo: {text: text}
+    # BOOT-20 (2026-09-18): scalar read authority for the explicit-dependency
+    # resolution memo; the {text: i64}/{text: text} class-field Dict pair
+    # mis-reports under Stage-2 native codegen (the driver.spl wedge: 9h HIR
+    # at 100% CPU, flat RSS). target_values/item_values are parallel to keys;
+    # the -1 miss and -2 ambiguity sentinels live in target_values.
+    explicit_dep_target_memo_keys: [text]
+    explicit_dep_target_memo_target_values: [i64]
+    explicit_dep_target_memo_item_values: [text]
+    explicit_dep_target_memo_hash_buckets: [i64]
+    explicit_dep_target_memo_hash_next: [i64]
+    explicit_dep_target_memo_hash_mask: i64
     # PAYLOADMISS (2026-08-22): negative memo for
     # `resolve_materialized_enum_payload_origin`, keyed `{owner key} {name}`.
     # ONLY misses are cached. A HIT is never cached, so a module that really
@@ -290,6 +323,16 @@ class HirLowering:
     # The advisory is emitted once per (owner, name) rather than once per
     # occurrence for the same reason.
     payload_origin_miss_memo: {text: bool}
+    # BOOT-20 (2026-09-18): scalar read authority for the payload-origin miss
+    # memo; the {text: bool} class-field Dict contains_key false-negatives
+    # under Stage-2 native codegen (the driver.spl wedge: 9h HIR at 100% CPU,
+    # flat RSS), re-emitting the advisory storm this memo exists to dedupe.
+    # Membership-only hash chains; registry-pure, so never cleared (same
+    # contract as the Dict).
+    payload_origin_miss_memo_keys: [text]
+    payload_origin_miss_memo_hash_buckets: [i64]
+    payload_origin_miss_memo_hash_next: [i64]
+    payload_origin_miss_memo_hash_mask: i64
     payload_origin_miss_skip_count: i64
     # RISDONE (2026-08-21): completed-registration memo for
     # `register_imported_symbol`, keyed on
@@ -326,6 +369,16 @@ class HirLowering:
     # because the tail writes into that importer's symbol table.
     dep_tail_memo: {text: bool}
     dep_tail_memo_owner: text
+    # BOOT-20 (2026-09-18): scalar read authority for the dependency-tail
+    # memo; the {text: bool} class-field Dict contains_key mis-reports under
+    # Stage-2 native codegen (the driver.spl wedge: 9h HIR at 100% CPU, flat
+    # RSS). Membership-only hash chains. Reset wherever dep_tail_memo is
+    # cleared: the lazy owner-change drop in dep_tail_already_bound and
+    # begin_module.
+    dep_tail_memo_keys: [text]
+    dep_tail_memo_hash_buckets: [i64]
+    dep_tail_memo_hash_next: [i64]
+    dep_tail_memo_hash_mask: i64
     dep_tail_skip_count: i64
     # IMPLIDX (2026-08-22): impl positions per (frozen surface, implemented
     # type name). `register_imported_type_methods_inner` swept EVERY impl of
@@ -367,6 +420,22 @@ class HirLowering:
     # `impl_index_positions`. First occurrence wins, exactly like the scan.
     name_index_built: {text: bool}
     name_index_positions: {text: i64}
+    # BOOT-20 (2026-09-18): scalar read authority for the NAMEIDX position
+    # map and its per-surface built set; both class-field Dicts mis-report
+    # under Stage-2 native codegen (the driver.spl wedge: 9h HIR at 100% CPU,
+    # flat RSS). positions_values is parallel to keys; the built_* chains are
+    # the membership set of surface keys that finished indexing. Same
+    # no-clear contract as the Dicts: every key embeds the registry
+    # generation, so a re-frozen registry never reads a stale entry.
+    name_index_keys: [text]
+    name_index_positions_values: [i64]
+    name_index_hash_buckets: [i64]
+    name_index_hash_next: [i64]
+    name_index_hash_mask: i64
+    name_index_built_keys: [text]
+    name_index_built_buckets: [i64]
+    name_index_built_next: [i64]
+    name_index_built_mask: i64
     name_index_build_count: i64
     # GLBMEMO (2026-08-22): negative memo for `try_register_glob_reachable_symbol`,
     # keyed `{generation} {importer surface index} {name}`. That sweep runs from
@@ -381,6 +450,16 @@ class HirLowering:
     # recorded; a success returns before the write. The key carries the
     # generation, so a re-frozen registry cannot be answered from a stale entry.
     glob_reachable_miss_memo: {text: bool}
+    # BOOT-20 (2026-09-18): scalar read authority for the glob-reachable miss
+    # memo; the {text: bool} class-field Dict contains_key false-negatives
+    # under Stage-2 native codegen (the driver.spl wedge: 9h HIR at 100% CPU,
+    # flat RSS), re-running the O(glob targets) proof sweep per unbound name.
+    # Membership-only hash chains; the key already embeds the generation, so
+    # no clear site exists (same contract as the Dict).
+    glob_reachable_miss_memo_keys: [text]
+    glob_reachable_miss_memo_hash_buckets: [i64]
+    glob_reachable_miss_memo_hash_next: [i64]
+    glob_reachable_miss_memo_hash_mask: i64
     # Sweeps actually performed. Observable mechanism counter, same role as
     # `explicit_dep_scan_count`: a spec pins that repeating one unbound name
     # sweeps exactly once.
@@ -405,6 +484,18 @@ class HirLowering:
     # query and capped at 512 rows; a Dict probe is O(1) and uncapped.
     reexport_root_memo_index: {text: i64}
     reexport_root_memo_item: {text: text}
+    # BOOT-20 (2026-09-18): scalar read authority for the REXMEMO root memo;
+    # the {text: i64}/{text: text} class-field Dict pair mis-reports under
+    # Stage-2 native codegen -- a corrupted hit feeds a garbage item_name
+    # straight into register_imported_symbol (the driver.spl wedge: 9h HIR at
+    # 100% CPU, flat RSS). index_values/item_values are parallel to keys;
+    # reset with the Dicts on the generation guard in find_reexport_source.
+    reexport_root_memo_keys: [text]
+    reexport_root_memo_index_values: [i64]
+    reexport_root_memo_item_values: [text]
+    reexport_root_memo_hash_buckets: [i64]
+    reexport_root_memo_hash_next: [i64]
+    reexport_root_memo_hash_mask: i64
     reexport_visit_surface_indices: [i64]
     reexport_visit_wanted: [text]
     reexport_visit_depths: [i64]
@@ -508,8 +599,18 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registering_import_symbols: false,
         fn_tuple_returns: empty_fn_tuple_returns,
         glob_expand_memo: empty_glob_expand_memo,
+        glob_expand_memo_keys: [],
+        glob_expand_memo_values: [],
+        glob_expand_memo_hash_buckets: [],
+        glob_expand_memo_hash_next: [],
+        glob_expand_memo_hash_mask: 0,
         field_package_dep_memo: empty_field_package_dep_memo,
         surface_package_name_memo: empty_surface_package_name_memo,
+        surface_package_name_memo_keys: [],
+        surface_package_name_memo_values: [],
+        surface_package_name_memo_hash_buckets: [],
+        surface_package_name_memo_hash_next: [],
+        surface_package_name_memo_hash_mask: 0,
         field_package_dep_scan_count: 0,
         surface_decl_owners: empty_surface_decl_owners,
         surface_decl_index_built: false,
@@ -528,8 +629,18 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         surface_index_by_name_build_count: 0,
         explicit_dep_target_memo: empty_explicit_dep_target_memo,
         explicit_dep_item_memo: empty_explicit_dep_item_memo,
+        explicit_dep_target_memo_keys: [],
+        explicit_dep_target_memo_target_values: [],
+        explicit_dep_target_memo_item_values: [],
+        explicit_dep_target_memo_hash_buckets: [],
+        explicit_dep_target_memo_hash_next: [],
+        explicit_dep_target_memo_hash_mask: 0,
         explicit_dep_scan_count: 0,
         payload_origin_miss_memo: empty_payload_origin_miss_memo,
+        payload_origin_miss_memo_keys: [],
+        payload_origin_miss_memo_hash_buckets: [],
+        payload_origin_miss_memo_hash_next: [],
+        payload_origin_miss_memo_hash_mask: 0,
         payload_origin_miss_skip_count: 0,
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
@@ -540,6 +651,10 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_skip_count: 0,
         dep_tail_memo: empty_dep_tail_memo,
         dep_tail_memo_owner: "",
+        dep_tail_memo_keys: [],
+        dep_tail_memo_hash_buckets: [],
+        dep_tail_memo_hash_next: [],
+        dep_tail_memo_hash_mask: 0,
         dep_tail_skip_count: 0,
         impl_index_built: empty_impl_index_built,
         impl_index_positions: empty_impl_index_positions,
@@ -549,13 +664,32 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         impl_rows_visited: 0,
         name_index_built: empty_name_index_built,
         name_index_positions: empty_name_index_positions,
+        name_index_keys: [],
+        name_index_positions_values: [],
+        name_index_hash_buckets: [],
+        name_index_hash_next: [],
+        name_index_hash_mask: 0,
+        name_index_built_keys: [],
+        name_index_built_buckets: [],
+        name_index_built_next: [],
+        name_index_built_mask: 0,
         name_index_build_count: 0,
         glob_reachable_miss_memo: empty_glob_reachable_miss_memo,
+        glob_reachable_miss_memo_keys: [],
+        glob_reachable_miss_memo_hash_buckets: [],
+        glob_reachable_miss_memo_hash_next: [],
+        glob_reachable_miss_memo_hash_mask: 0,
         glob_reachable_scan_count: 0,
         glob_reachable_importer_index: -1,
         glob_reachable_importer_owner: "",
         reexport_root_memo_index: empty_reexport_root_memo_index,
         reexport_root_memo_item: empty_reexport_root_memo_item,
+        reexport_root_memo_keys: [],
+        reexport_root_memo_index_values: [],
+        reexport_root_memo_item_values: [],
+        reexport_root_memo_hash_buckets: [],
+        reexport_root_memo_hash_next: [],
+        reexport_root_memo_hash_mask: 0,
         reexport_visit_surface_indices: empty_reexport_visit_surface_indices,
         reexport_visit_wanted: empty_reexport_visit_wanted,
         reexport_visit_depths: empty_reexport_visit_depths,

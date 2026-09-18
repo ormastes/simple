@@ -1462,6 +1462,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_file_read_regular_no_follow_bounded",
         file_io::rt_file_read_regular_no_follow_bounded
     );
+    insert_simple!(
+        "rt_file_read_regular_no_follow_last_failure",
+        file_io::rt_file_read_regular_no_follow_last_failure
+    );
     insert_simple!("rt_file_is_char_device", file_io::rt_file_is_char_device);
     insert_simple!("rt_file_exists_str", file_io::rt_file_exists);
     insert_simple!("rt_file_find", file_io::rt_file_find);

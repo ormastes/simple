@@ -367,10 +367,29 @@ impl<'a> MirLowerer<'a> {
                     // read, a field projection, an index projection) -- skipped for a
                     // FRESH aggregate initializer (an array literal, a call result:
                     // nothing else names that heap memory yet, so aliasing the fresh
-                    // local is harmless) and for `[u8]` byte-packed arrays (a separate
-                    // rt_byte_array_*/rt_typed_bytes_u8_push heap layout that
-                    // rt_array_copy's rt_array_push-based copy loop does not
-                    // understand).
+                    // local is harmless).
+                    //
+                    // `[u8]` used to be carved out here on the grounds that
+                    // rt_array_copy's rt_array_push-based loop "does not
+                    // understand" the byte-packed heap layout. That reason is
+                    // stale and was verified so before this change: BOTH
+                    // runtimes reproduce the source layout rather than
+                    // flattening it -- runtime/src/value/collections.rs
+                    // branches on `is_byte_packed()` into rt_byte_array_new +
+                    // copy_nonoverlapping::<u8>, and src/runtime/runtime_native.c
+                    // branches on RT_CORE_ARRAY_FLAG_BYTES into a memcpy with
+                    // elem_size 1.
+                    //
+                    // The carve-out was not harmless: skipping the copy ALIASES
+                    // the source buffer, so `val cp = bs` and by-value argument
+                    // passing gave the JIT lane reference semantics for byte
+                    // arrays while the interpreter (Arc clone + make_mut) kept
+                    // value semantics. The two engines therefore disagreed about
+                    // the same source text, silently. Measured 2026-09-18 on
+                    // test/fixtures/engine_differential/packed_array_value_semantics.spl:
+                    // interpret printed arg_orig0=1 u8_copy1=2, JIT printed
+                    // arg_orig0=99 u8_copy1=99 -- the fixture's own definition of
+                    // an engine with reference semantics.
                     let is_array_place_alias = Self::hir_expr_is_place(&val.kind)
                         && self
                             .type_registry
@@ -378,7 +397,7 @@ impl<'a> MirLowerer<'a> {
                                 tr.get_array_element(effective_declared_ty)
                                     .or_else(|| tr.get_array_element(value_ty))
                             })
-                            .is_some_and(|elem| elem != TypeId::U8);
+                            .is_some();
                     let vreg = if is_array_place_alias {
                         self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
