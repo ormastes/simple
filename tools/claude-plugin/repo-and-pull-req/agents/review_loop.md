@@ -9,7 +9,8 @@ description: "Autonomous hourly PR review agent — reads PR status, processes c
 
 Autonomous PR reviewer. Invoked on a schedule (cadence depends on `--level`)
 to check PR status, process review comments, fix code or reply, and (per
-`--level`) bot-approve / wait for human approval / merge.
+`--level`) bot-approve / scoped self-review admission or eligible independent
+provider approval / merge.
 
 ## Invocation
 
@@ -23,7 +24,7 @@ Procedure* below):
 # L2 (bot-approves + auto-merges; poll 60s up to 24h)
 /schedule 60s /repo_and_pull_req review <pr-number> --level=2
 
-# L3 (waits for human approval + merges; poll 5m up to 7d)
+# L3 (awaits eligible independent provider User account + merges; poll 5m up to 7d)
 /schedule 5m /repo_and_pull_req review <pr-number> --level=3
 ```
 
@@ -90,8 +91,13 @@ if [ -f "$STATE_FILE" ]; then
   LEVEL=$(jq       -r ".level // ${CLI_LEVEL:-1}"   "$STATE_FILE")
   TARGET=$(jq      -r ".target // \"${CLI_TARGET:-$DETECTED_TARGET}\"" "$STATE_FILE")
   APPROVER=$(jq    -r '.approver // "null"'         "$STATE_FILE")
+  REVIEW_HEAD_SHA=$(jq -r '.review_head_sha // "null"' "$STATE_FILE")
+  REVIEWER_MODEL=$(jq -r '.reviewer_model // "null"' "$STATE_FILE")
+  REVIEWER_EFFORT=$(jq -r '.reviewer_effort // "null"' "$STATE_FILE")
+  REVIEW_P0_COUNT=$(jq -r '.review_p0_count // -1' "$STATE_FILE")
+  REVIEW_P1_COUNT=$(jq -r '.review_p1_count // -1' "$STATE_FILE")
   BOT_APPROVED=$(jq -r '.bot_approved   // false'   "$STATE_FILE")
-  HUMAN_APPROVED=$(jq -r '.human_approved // false' "$STATE_FILE")
+  USER_ACCOUNT_APPROVED=$(jq -r '.user_account_approved // .human_approved // false' "$STATE_FILE")
   CHECKS_PASSING=$(jq -r '.checks_passing // false' "$STATE_FILE")
   MERGE_ATTEMPTED=$(jq -r '.merge_attempted // false' "$STATE_FILE")
 else
@@ -100,8 +106,13 @@ else
   LEVEL="${CLI_LEVEL:-1}"
   TARGET="${CLI_TARGET:-$DETECTED_TARGET}"
   APPROVER="null"
+  REVIEW_HEAD_SHA=null
+  REVIEWER_MODEL=null
+  REVIEWER_EFFORT=null
+  REVIEW_P0_COUNT=-1
+  REVIEW_P1_COUNT=-1
   BOT_APPROVED=false
-  HUMAN_APPROVED=false
+  USER_ACCOUNT_APPROVED=false
   CHECKS_PASSING=false
   MERGE_ATTEMPTED=false
 fi
@@ -202,7 +213,12 @@ fi
 
 #### L2 — Bot approves + auto-merges (poll 60s up to 24h)
 
-1. Run review pass (Step 3) and bot-verdict (Step 5).
+1. Run review pass (Step 3) and bot-verdict (Step 5). Same-author
+   credentials never self-approve: they dispatch the scoped
+   `SPipe Self Review Admission` after a high-effort exact-head review
+   reports zero P0/P1, and merge only once that admission check is green
+   on the current head. Independent credentials may submit provider
+   approval directly.
 2. After bot-approve, poll checks: `gh pr checks ${PR_NUMBER} --json state`.
    - If green → `CHECKS_PASSING=true`, `status=awaiting-checks` cleared.
    - If failing → cycle continues, `status=watching`.
@@ -214,18 +230,18 @@ fi
    Status = `merged` on success; otherwise classify failure (see
    *Failure Modes*).
 
-#### L3 — Wait for human approval + merge (poll 5m up to 7d)
+#### L3 — Await eligible independent provider approval + merge (poll 5m up to 7d)
 
 1. Run review pass (Step 3). Do NOT bot-approve. Set
    `status=awaiting-human`.
-2. Poll for human approval:
+2. Poll for eligible independent provider approval:
    ```bash
-   HUMAN=$(gh pr view "${PR_NUMBER}" --json reviews \
+   APPROVED_COUNT=$(gh pr view "${PR_NUMBER}" --json reviews \
      --jq '[.reviews[] | select(.state=="APPROVED")] | length')
-   if [ "$HUMAN" -gt 0 ]; then HUMAN_APPROVED=true; fi
+   if [ "$APPROVED_COUNT" -gt 0 ]; then USER_ACCOUNT_APPROVED=true; fi
    ```
 3. Poll checks (same as L2).
-4. If `HUMAN_APPROVED && CHECKS_PASSING && !MERGE_ATTEMPTED`:
+4. If `USER_ACCOUNT_APPROVED && CHECKS_PASSING && !MERGE_ATTEMPTED`:
    merge via `gh pr merge ${PR_NUMBER} --squash --delete-branch`.
 
 #### Compatibility note (L1 vs arch doc)
@@ -272,8 +288,13 @@ jq -n \
   --argjson level "$LEVEL" \
   --arg approver "$APPROVER" \
   --arg vsrc "${VERDICT_SOURCE:-null}" \
+  --arg review_head "$REVIEW_HEAD_SHA" \
+  --arg reviewer_model "$REVIEWER_MODEL" \
+  --arg reviewer_effort "$REVIEWER_EFFORT" \
+  --argjson review_p0 "$REVIEW_P0_COUNT" \
+  --argjson review_p1 "$REVIEW_P1_COUNT" \
   --argjson bot_app "$BOT_APPROVED" \
-  --argjson hum_app "$HUMAN_APPROVED" \
+  --argjson user_app "$USER_ACCOUNT_APPROVED" \
   --argjson checks "$CHECKS_PASSING" \
   --argjson merged "$MERGE_ATTEMPTED" \
   --argjson cyc $((CYCLE_COUNT + 1)) \
@@ -283,7 +304,10 @@ jq -n \
   --arg status "${STATUS:-watching}" \
   '{pr_number:$pr, branch:$br, jira_key:$jk, target:$target, level:$level,
     approver:$approver, verdict_source:$vsrc,
-    bot_approved:$bot_app, human_approved:$hum_app,
+    review_head_sha:$review_head, reviewer_model:$reviewer_model,
+    reviewer_effort:$reviewer_effort, review_p0_count:$review_p0,
+    review_p1_count:$review_p1,
+    bot_approved:$bot_app, user_account_approved:$user_app,
     checks_passing:$checks, merge_attempted:$merged,
     cycle_count:$cyc, last_check:$now,
     comments_processed:$cmts, fixes_applied:$fixes,
