@@ -122,6 +122,8 @@ Parallelism: mold's per-phase `tbb::parallel_for` maps to a SOSIX worker-pool ca
 | `LinkExecutionPolicyV1` | header · mode Fast/Bounded/Auto · job_memory_limit_bytes · scratch_limit_bytes · max_workers · allowed_placements · enforcement_requirement |
 | `LinkReceiptV1` | header · engine id (external path **or** capsule id) · host/target · policy digest · `MdsocppGenerationReceiptV1` · stage receipts · accounting class · measured peak · outcome (`Success/UnsupportedFeature/UnsupportedBudget/IncompleteDebugOutput/InputError/ResourceFailure/Cancelled`) |
 
+**RC1 limit (lane A3):** the external adapter fills `engine id` by re-running `find_linker_path`. When the link falls back to `cc` (missing CRT files or a failed direct link), the receipt still names the resolved mold/ld.lld/ld. That is why every RC1 receipt is `NotCertified`. G2 threads the actual engine out of `link_native_unix`.
+
 Validated by `kpf_validate_schema_header_v1`. Handoff to S1 (`src/tool/kernel_plugin_schema/`) is filed, not assumed.
 
 ## 7. KPF product facets (real symbols)
