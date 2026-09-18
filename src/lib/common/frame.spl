@@ -1,0 +1,128 @@
+# Frame API — typed key-lambda operations over [T] (§10.1,
+# doc/05_design/compiler/collection_planner/adaptive_collections_typed_query_design.md).
+# Pure, no I/O, importable from every family. Uses only the Dict-safe subset:
+# `d[k] = v` and `contains_key(k)` (checked before every `d[k]` read) — never
+# `.set()` (silently drops inserts under native codegen) and never `.get()`.
+# Dicts are always locals, never class fields.
+# See doc/07_guide/language/dict_native_pitfalls.md.
+
+export key_set, index_by, distinct_by, group_by_key, count_by
+export semi_join, anti_join, top_k_by
+
+# Membership index over `key(x)` for every x in xs. O(n) expected.
+fn key_set<T, K>(xs: [T], key: fn(T) -> K) -> Dict<K, bool>:
+    var seen: Dict<K, bool> = {}
+    for item in xs:
+        seen[key(item)] = true
+    seen
+
+# key -> FIRST row position. Caller contract: call contains_key(k) before
+# reading d[k] — a missed d[k] returns 0, indistinguishable from row 0. O(n).
+fn index_by<T, K>(xs: [T], key: fn(T) -> K) -> Dict<K, i64>:
+    var idx: Dict<K, i64> = {}
+    var i = 0
+    while i < xs.len():
+        val k = key(xs[i])
+        if not idx.contains_key(k):
+            idx[k] = i
+        i = i + 1
+    idx
+
+# First occurrence per key, input order preserved. O(n).
+fn distinct_by<T, K>(xs: [T], key: fn(T) -> K) -> [T]:
+    var seen: Dict<K, bool> = {}
+    var result: [T] = []
+    for item in xs:
+        val k = key(item)
+        if not seen.contains_key(k):
+            seen[k] = true
+            result.push(item)
+    result
+
+# First-encounter group order; members keep input order. Dict<K, i64>
+# key->slot plus parallel `keys`/`members` arrays, zipped only at the end —
+# `groups[j].1.push(x)` on a tuple field mutates a discarded copy and drops
+# members (pure/collections.spl group_by note). O(n).
+fn group_by_key<T, K>(xs: [T], key: fn(T) -> K) -> [(K, [T])]:
+    var slot: Dict<K, i64> = {}
+    var keys: [K] = []
+    var members: [[T]] = []
+    for item in xs:
+        val k = key(item)
+        if slot.contains_key(k):
+            members[slot[k]].push(item)
+        else:
+            slot[k] = keys.len()
+            keys.push(k)
+            members.push([item])
+    var groups: [(K, [T])] = []
+    var i = 0
+    while i < keys.len():
+        groups.push((keys[i], members[i]))
+        i = i + 1
+    groups
+
+# Same slot idiom as group_by_key; first-encounter order. O(n).
+fn count_by<T, K>(xs: [T], key: fn(T) -> K) -> [(K, i64)]:
+    var slot: Dict<K, i64> = {}
+    var keys: [K] = []
+    var counts: [i64] = []
+    for item in xs:
+        val k = key(item)
+        if slot.contains_key(k):
+            counts[slot[k]] = counts[slot[k]] + 1
+        else:
+            slot[k] = keys.len()
+            keys.push(k)
+            counts.push(1)
+    var result: [(K, i64)] = []
+    var i = 0
+    while i < keys.len():
+        result.push((keys[i], counts[i]))
+        i = i + 1
+    result
+
+# Rows of l with a match in r, in l order, duplicates kept. O(l + r).
+fn semi_join<L, R, K>(l: [L], r: [R], lk: fn(L) -> K, rk: fn(R) -> K) -> [L]:
+    val rkeys = key_set(r, rk)
+    var result: [L] = []
+    for item in l:
+        if rkeys.contains_key(lk(item)):
+            result.push(item)
+    result
+
+# Rows of l with no match in r. O(l + r).
+fn anti_join<L, R, K>(l: [L], r: [R], lk: fn(L) -> K, rk: fn(R) -> K) -> [L]:
+    val rkeys = key_set(r, rk)
+    var result: [L] = []
+    for item in l:
+        if not rkeys.contains_key(lk(item)):
+            result.push(item)
+    result
+
+# k highest scores, output in descending score, ties keep input order.
+# k <= 0 -> []; k >= len -> all rows, sorted the same way. Sorted k-buffer
+# maintained by insertion, never a full sort: O(n * k) worst case.
+fn top_k_by<T>(xs: [T], k: i64, score: fn(T) -> i64) -> [T]:
+    if k <= 0:
+        return []
+    var buf: [T] = []
+    var buf_scores: [i64] = []
+    for item in xs:
+        val s = score(item)
+        if buf.len() < k:
+            var pos = 0
+            while pos < buf.len() and buf_scores[pos] >= s:
+                pos = pos + 1
+            buf.insert(pos, item)
+            buf_scores.insert(pos, s)
+        else:
+            if s > buf_scores[buf.len() - 1]:
+                var pos = 0
+                while pos < buf.len() and buf_scores[pos] >= s:
+                    pos = pos + 1
+                buf.insert(pos, item)
+                buf_scores.insert(pos, s)
+                buf.pop()
+                buf_scores.pop()
+    buf
