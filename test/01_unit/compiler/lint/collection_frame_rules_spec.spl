@@ -1,0 +1,130 @@
+# COLL015/016/020/021/022 — dataframe-able collection patterns.
+#
+# doc/05_design/compiler/collection_planner/adaptive_collections_typed_query_design.md
+# section 10.3. Every dirty fixture below must fire its code; every paired
+# clean fixture must stay silent. Messages must name the std.common.frame
+# call, the inline Dict form, and say "dataframe-able" (per section 10.3's
+# message-form contract). Only COLL020 (and COLL002, covered in
+# collection_easy_fix_spec.spl) get a machine-applicable fix in this lane;
+# COLL015/016/021/022 are advisory-only and must never attach an easy_fix.
+use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+
+fn results_for(path: text, src: text) -> [text]:
+    var codes: [text] = []
+    for result in lint_cli_source(Linter.new(), path, src):
+        codes.push(result.lint.code)
+    codes
+
+fn has(codes: [text], code: text) -> bool:
+    for c in codes:
+        if c == code:
+            return true
+    false
+
+fn message_for(path: text, src: text, code: text) -> text:
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == code:
+            return result.lint.message
+    ""
+
+fn easy_fix_present(path: text, src: text, code: text) -> bool:
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == code:
+            match result.lint.easy_fix:
+                case Some(_): return true
+                case nil: val _ = 0
+    false
+
+describe "COLL015 accidental_cartesian_product":
+    # @manual scenario evidence
+
+    it "fires on nested loops compared by == across both loop variables":
+        step("fires on nested loops compared by == across both loop variables")
+        val src = "fn join_naive(as_: [i64], bs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for a in as_:\n        for b in bs:\n            if a == b:\n                out.push(a)\n    out\n"
+        expect(has(results_for("/tmp/coll015_dirty.spl", src), "COLL015")).to_equal(true)
+        val msg = message_for("/tmp/coll015_dirty.spl", src, "COLL015")
+        expect(msg).to_contain("semi_join")
+        expect(msg).to_contain("std.common.frame")
+        expect(msg).to_contain("dataframe-able")
+        expect(msg).to_contain("Dict")
+        expect(easy_fix_present("/tmp/coll015_dirty.spl", src, "COLL015")).to_equal(false)
+
+    it "stays silent when the inner comparison never mentions the inner loop variable":
+        step("stays silent when the inner comparison never mentions the inner loop variable")
+        val src = "fn no_join(as_: [i64], bs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for a in as_:\n        for b in bs:\n            if a == 0:\n                out.push(b)\n    out\n"
+        expect(has(results_for("/tmp/coll015_clean.spl", src), "COLL015")).to_equal(false)
+
+describe "COLL016 missing_index":
+    it "fires on .find() inside a loop whose predicate mentions the outer loop variable":
+        step("fires on .find() inside a loop whose predicate mentions the outer loop variable")
+        val src = "fn lookup_slow(orders: [i64], users: [i64]) -> [i64]:\n    var out: [i64] = []\n    for o in orders:\n        val hit = users.find(\\u: u == o)\n        out.push(hit)\n    out\n"
+        expect(has(results_for("/tmp/coll016_dirty.spl", src), "COLL016")).to_equal(true)
+        val msg = message_for("/tmp/coll016_dirty.spl", src, "COLL016")
+        expect(msg).to_contain("index_by")
+        expect(msg).to_contain("std.common.frame")
+        expect(msg).to_contain("dataframe-able")
+        expect(msg).to_contain("Dict")
+        expect(easy_fix_present("/tmp/coll016_dirty.spl", src, "COLL016")).to_equal(false)
+
+    it "stays silent when the predicate never mentions the outer loop variable":
+        step("stays silent when the predicate never mentions the outer loop variable")
+        val src = "fn lookup_fast(orders: [i64], users: [i64]) -> [i64]:\n    var out: [i64] = []\n    for o in orders:\n        val hit = users.find(\\u: u == 0)\n        out.push(hit)\n    out\n"
+        expect(has(results_for("/tmp/coll016_clean.spl", src), "COLL016")).to_equal(false)
+
+describe "COLL020 manual_distinct":
+    it "fires on a growing array used as its own contains-guarded seen-set":
+        step("fires on a growing array used as its own contains-guarded seen-set")
+        val src = "fn distinct_slow(xs: [i64]) -> [i64]:\n    var result: [i64] = []\n    for x in xs:\n        if not result.contains(x):\n            result.push(x)\n    result\n"
+        expect(has(results_for("/tmp/coll020_dirty.spl", src), "COLL020")).to_equal(true)
+        val msg = message_for("/tmp/coll020_dirty.spl", src, "COLL020")
+        expect(msg).to_contain("distinct_by")
+        expect(msg).to_contain("std.common.frame")
+        expect(msg).to_contain("dataframe-able")
+        expect(msg).to_contain("Dict")
+
+    it "stays silent on the two-array seen/result shape (documented scope limit)":
+        step("stays silent on the two-array seen/result shape (documented scope limit)")
+        """This detector only claims the single-array form (§10.3's simplest
+        shape); a separate `seen` array needs alias analysis this AST walker
+        does not have, so it is a deliberate miss, not a bug."""
+        val src = "fn distinct_two_array(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var result: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            result.push(x)\n    result\n"
+        expect(has(results_for("/tmp/coll020_clean.spl", src), "COLL020")).to_equal(false)
+
+describe "COLL021 manual_group":
+    it "fires on a keys-array slot scan followed by a negative-index guard":
+        step("fires on a keys-array slot scan followed by a negative-index guard")
+        val src = "fn group_slow(rows: [i64], keys: [i64]) -> [i64]:\n    var out: [i64] = []\n    for row in rows:\n        var idx: i64 = -1\n        for j in 0..keys.len():\n            if keys[j] == row:\n                idx = j\n        if idx < 0:\n            keys.push(row)\n        out.push(idx)\n    out\n"
+        expect(has(results_for("/tmp/coll021_dirty.spl", src), "COLL021")).to_equal(true)
+        val msg = message_for("/tmp/coll021_dirty.spl", src, "COLL021")
+        expect(msg).to_contain("group_by_key")
+        expect(msg).to_contain("std.common.frame")
+        expect(msg).to_contain("dataframe-able")
+        expect(msg).to_contain("Dict")
+        expect(easy_fix_present("/tmp/coll021_dirty.spl", src, "COLL021")).to_equal(false)
+
+    it "stays silent when the slot scan has no negative-index guard afterward":
+        step("stays silent when the slot scan has no negative-index guard afterward")
+        val src = "fn group_no_guard(rows: [i64], keys: [i64]) -> [i64]:\n    var out: [i64] = []\n    for row in rows:\n        var idx: i64 = -1\n        for j in 0..keys.len():\n            if keys[j] == row:\n                idx = j\n        out.push(idx)\n    out\n"
+        expect(has(results_for("/tmp/coll021_clean.spl", src), "COLL021")).to_equal(false)
+
+describe "COLL022 sort_then_take":
+    it "fires on .sort().take(k)":
+        step("fires on .sort().take(k)")
+        val src = "fn top_slow(xs: [i64]) -> [i64]:\n    val top3 = xs.sort().take(3)\n    top3\n"
+        expect(has(results_for("/tmp/coll022_dirty.spl", src), "COLL022")).to_equal(true)
+        val msg = message_for("/tmp/coll022_dirty.spl", src, "COLL022")
+        expect(msg).to_contain("top_k_by")
+        expect(msg).to_contain("std.common.frame")
+        expect(msg).to_contain("dataframe-able")
+        expect(easy_fix_present("/tmp/coll022_dirty.spl", src, "COLL022")).to_equal(false)
+
+    it "fires on .sort()[0:k]":
+        step("fires on .sort()[0:k]")
+        val src = "fn top_slow_slice(xs: [i64]) -> [i64]:\n    val top3 = xs.sort()[0:3]\n    top3\n"
+        expect(has(results_for("/tmp/coll022_dirty_slice.spl", src), "COLL022")).to_equal(true)
+
+    it "stays silent on .take(k) without a preceding sort":
+        step("stays silent on .take(k) without a preceding sort")
+        val src = "fn top_fast(xs: [i64]) -> [i64]:\n    val top3 = xs.take(3)\n    top3\n"
+        expect(has(results_for("/tmp/coll022_clean.spl", src), "COLL022")).to_equal(false)

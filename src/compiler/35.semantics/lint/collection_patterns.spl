@@ -12,9 +12,26 @@
 # COLL008: Unbounded global .push()    no reset or capacity-return guard MEDIUM
 # COLL019: Mutation through indexed    d[k].push(x)             HIGH
 #          access is silently lost     a[i].field.push(x)
-#          (ADR-004 value semantics; COLL009-018 are reserved for the
-#          collection-planner diagnostics, see doc/01_research/compiler/
-#          collection_planner/collection_plan_ir_2026-07-31.md section 7)
+#          (ADR-004 value semantics; COLL009-014 and COLL017-018 are still
+#          reserved for the collection-planner diagnostics, see
+#          doc/01_research/compiler/collection_planner/
+#          collection_plan_ir_2026-07-31.md section 7. COLL015 and COLL016
+#          now carry their reserved meanings below.)
+# COLL015: accidental_cartesian_product nested for a in A: for b in B: with an
+#          == between an a-expr and a b-expr                    ADVISORY
+# COLL016: missing_index               .find/.filter linear scan correlated
+#          to the outer loop variable                           ADVISORY
+# COLL020: manual_distinct             growing array used as its own seen-set
+#          (.contains guard + .push of the same value)          MEDIUM, fix
+# COLL021: manual_group                scan a keys array for a slot index,
+#          then push into a parallel bucket array               ADVISORY
+# COLL022: sort_then_take              .sort...().take(k) or [0:k] after sort ADVISORY
+#
+# COLL020-022 message + fix design: doc/05_design/compiler/collection_planner/
+# adaptive_collections_typed_query_design.md section 10.3. Only COLL002 and
+# COLL020 get a machine-applicable (Certain) fix; every other rule above stays
+# hint-only — see the confidence-policy note in that section and in
+# entry_and_fixes.spl.
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
@@ -23,6 +40,7 @@ use compiler.core.ast_expr.{
     EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_INT_LIT, EXPR_IDENT,
     EXPR_COMPOUND_ASSIGN, EXPR_SLICE, EXPR_STRING_LIT,
     EXPR_INTERPOLATED_STRING, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_DICT_LIT,
+    EXPR_UNARY, EXPR_LAMBDA, EXPR_CALL,
     expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts
 }
 use compiler.core.types.{TYPE_TEXT, TYPE_DICT, TYPE_DICT_BASE, TYPE_TUPLE_BASE}
@@ -35,7 +53,7 @@ use compiler.core.ast.{
     DECL_FN, DECL_VAR, decl_get_tag, decl_get_name, decl_get_body,
     decl_get_param_names, decl_get_param_types
 }
-use compiler.core.tokens.{TOK_PLUS, TOK_GT_EQ}
+use compiler.core.tokens.{TOK_PLUS, TOK_GT_EQ, TOK_NOT, TOK_EQ}
 
 # ============================================================================
 # Warning Struct
@@ -80,6 +98,31 @@ fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
     # COLL019: mutation through indexed access (not loop-dependent)
     val coll019 = check_index_mutation_all(decl_indices)
     for w in coll019:
+        warnings.push(w)
+
+    # COLL015: accidental cartesian product (nested loops + cross ==)
+    val coll015 = check_cartesian_all(decl_indices)
+    for w in coll015:
+        warnings.push(w)
+
+    # COLL016: missing index (.find/.filter correlated to the outer loop var)
+    val coll016 = check_missing_index_all(decl_indices)
+    for w in coll016:
+        warnings.push(w)
+
+    # COLL020: manual distinct-by-membership loop
+    val coll020 = check_manual_distinct_all(decl_indices)
+    for w in coll020:
+        warnings.push(w)
+
+    # COLL021: manual grouping via a scanned keys array + parallel bucket
+    val coll021 = check_manual_group_all(decl_indices)
+    for w in coll021:
+        warnings.push(w)
+
+    # COLL022: sort(...).take(k) / sort(...)[0:k]
+    val coll022 = check_sort_then_take_all(decl_indices)
+    for w in coll022:
         warnings.push(w)
 
     warnings
@@ -241,13 +284,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
 
                 # COLL002: .contains() on array in loop
                 if is_contains_call(e):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL002",
-                        severity: "HIGH",
-                        message: ".contains() on array inside loop (O(n) per iteration)",
-                        hint: "use a Dict/Set for O(1) lookup",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll002_warning(fn_name))
 
                 # COLL003: .remove(0) queue drain
                 if is_remove_zero_call(e):
@@ -274,13 +311,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
             val cond = stmt_get_expr(s)
             if cond >= 0:
                 if is_contains_call(cond):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL002",
-                        severity: "HIGH",
-                        message: ".contains() on array inside loop (O(n) per iteration)",
-                        hint: "use a Dict/Set for O(1) lookup",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll002_warning(fn_name))
 
         # COLL001 via val/var decl with concat
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
@@ -336,6 +367,17 @@ fn is_concat_assign_expr(e: i64) -> bool:
             return true
 
     false
+
+# COLL002 message (design doc section 10.3's message-form contract: name the
+# std.common.frame call, the inline Dict form, and say "dataframe-able").
+fn coll002_warning(fn_name: text) -> CollectionLintWarning:
+    CollectionLintWarning(
+        code: "COLL002",
+        severity: "HIGH",
+        message: ".contains() on array inside loop is O(n) per iteration; switch to key_set(xs, key) (std.common.frame) — dataframe-able. Inline form: build a Dict<T, bool> membership set before the loop and check it instead of scanning",
+        hint: "use key_set or an inline Dict<T,bool> membership set",
+        item_name: fn_name
+    )
 
 # COLL002: Detect .contains() call
 fn is_contains_call(e: i64) -> bool:
@@ -924,6 +966,499 @@ fn check_stmts_for_index_mutation(stmts: [i64], fn_name: text, dict_vars: [text]
         if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
             val nested = check_stmts_for_index_mutation(stmt_get_body(s), fn_name, dict_vars)
             for w in nested:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# Shared expression-walking helpers (COLL015/016/020/021/022)
+# ============================================================================
+
+fn real_stmts(stmts: [i64]) -> [i64]:
+    var out: [i64] = []
+    for s in stmts:
+        if s >= 0:
+            out.push(s)
+    out
+
+fn expr_equal_idents(a: i64, b: i64) -> bool:
+    if a < 0 or b < 0:
+        return false
+    if expr_get_tag(a) != EXPR_IDENT or expr_get_tag(b) != EXPR_IDENT:
+        return false
+    expr_get_str(a) == expr_get_str(b)
+
+# Conservative recursive "does this expression mention identifier `name`"
+# walker over the arena-AST shapes this file already handles. Missing a
+# reference (false negative) only means a rule stays silent; it never
+# fabricates a match.
+fn expr_mentions_ident(e: i64, name: text) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_IDENT:
+        return expr_get_str(e) == name
+    if tag == EXPR_BINARY or tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN or tag == EXPR_INDEX:
+        if expr_mentions_ident(expr_get_left(e), name):
+            return true
+        return expr_mentions_ident(expr_get_right(e), name)
+    if tag == EXPR_UNARY or tag == EXPR_FIELD_ACCESS:
+        return expr_mentions_ident(expr_get_left(e), name)
+    if tag == EXPR_METHOD_CALL:
+        if expr_mentions_ident(expr_get_left(e), name):
+            return true
+        for a in expr_get_args(e):
+            if expr_mentions_ident(a, name):
+                return true
+        return false
+    if tag == EXPR_CALL:
+        for a in expr_get_args(e):
+            if expr_mentions_ident(a, name):
+                return true
+        return false
+    if tag == EXPR_LAMBDA:
+        for a in expr_get_stmts(e):
+            if expr_mentions_ident(a, name):
+                return true
+        return false
+    false
+
+# ============================================================================
+# COLL015: accidental_cartesian_product (advisory, no fix)
+# ============================================================================
+#
+# `for a in A: for b in B: if <a-expr> == <b-expr>: ...` where the b-loop is
+# nested directly in the a-loop's body and the equality compares one side
+# reachable from `a` against one side reachable from `b`. This is the shape a
+# `semi_join`/`index_by` join replaces; detection is a pure syntactic name
+# check, so it does not know whether the comparison is actually the join key
+# — a false positive here just produces an extra hint, never a fix.
+
+fn has_cross_equality(stmts: [i64], var_a: text, var_b: text) -> bool:
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        var cond = -1
+        if tag == STMT_IF:
+            cond = stmt_get_expr(s)
+        if cond >= 0 and expr_get_tag(cond) == EXPR_BINARY and expr_get_int(cond) == TOK_EQ:
+            val left = expr_get_left(cond)
+            val right = expr_get_right(cond)
+            if (expr_mentions_ident(left, var_a) and expr_mentions_ident(right, var_b)) or
+               (expr_mentions_ident(left, var_b) and expr_mentions_ident(right, var_a)):
+                return true
+        if tag == STMT_IF or tag == STMT_BLOCK:
+            if has_cross_equality(stmt_get_body(s), var_a, var_b):
+                return true
+    false
+
+fn cartesian_warning(fn_name: text) -> CollectionLintWarning:
+    CollectionLintWarning(
+        code: "COLL015",
+        severity: "HIGH",
+        message: "nested loops compared by == look like an accidental cartesian product, O(n*m); switch to semi_join(l, r, lk, rk) or index_by(r, rk) (std.common.frame) — dataframe-able. Inline form: build a Dict<K, i64> from the inner collection keyed by the join field, then look up by key instead of scanning",
+        hint: "use semi_join/index_by or an inline Dict<K,i64> keyed by the join field",
+        item_name: fn_name
+    )
+
+fn check_cartesian_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_FOR:
+            val outer_var = stmt_get_name(s)
+            val outer_body = stmt_get_body(s)
+            if outer_var != "":
+                for inner_s in real_stmts(outer_body):
+                    if stmt_get_tag(inner_s) == STMT_FOR:
+                        val inner_var = stmt_get_name(inner_s)
+                        if inner_var != "" and inner_var != outer_var:
+                            if has_cross_equality(stmt_get_body(inner_s), outer_var, inner_var):
+                                warnings.push(cartesian_warning(fn_name))
+            val nested = check_cartesian_stmts(outer_body, fn_name)
+            for w in nested:
+                warnings.push(w)
+        elif tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_WHILE:
+            val nested = check_cartesian_stmts(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+fn check_cartesian_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val fn_name = decl_get_name(idx)
+            val ws = check_cartesian_stmts(decl_get_body(idx), fn_name)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# COLL016: missing_index (advisory, no fix)
+# ============================================================================
+#
+# `.find`/`.filter` inside a loop whose predicate lambda mentions the outer
+# loop variable: a linear re-scan repeated once per outer iteration.
+
+fn is_missing_index_call(e: i64, iter_var: text) -> bool:
+    if e < 0 or expr_get_tag(e) != EXPR_METHOD_CALL:
+        return false
+    val method = expr_get_str(e)
+    if method != "find" and method != "filter":
+        return false
+    val receiver = expr_get_left(e)
+    if receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT and expr_get_str(receiver) == iter_var:
+        return false
+    val args = expr_get_args(e)
+    if args.len() != 1 or args[0] < 0 or expr_get_tag(args[0]) != EXPR_LAMBDA:
+        return false
+    expr_mentions_ident(args[0], iter_var)
+
+fn missing_index_warning(fn_name: text) -> CollectionLintWarning:
+    CollectionLintWarning(
+        code: "COLL016",
+        severity: "MEDIUM",
+        message: ".find()/.filter() inside a loop is re-scanned once per outer iteration, O(n*m); switch to index_by(xs, key) or group_by_key(xs, key) (std.common.frame) — dataframe-able. Inline form: build a Dict<K, i64> (or Dict<K, [T]>) before the loop and look up by key instead of scanning",
+        hint: "use index_by/group_by_key or an inline Dict keyed by the lookup field",
+        item_name: fn_name
+    )
+
+fn check_missing_index_stmts(stmts: [i64], iter_var: text, fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        var candidate = -1
+        if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_IF:
+            candidate = stmt_get_expr(s)
+        if is_missing_index_call(candidate, iter_var):
+            warnings.push(missing_index_warning(fn_name))
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            val nested = check_missing_index_stmts(stmt_get_body(s), iter_var, fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+fn check_missing_index_outer(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_FOR:
+            val iter_var = stmt_get_name(s)
+            val loop_body = stmt_get_body(s)
+            if iter_var != "":
+                val ws = check_missing_index_stmts(loop_body, iter_var, fn_name)
+                for w in ws:
+                    warnings.push(w)
+            val nested = check_missing_index_outer(loop_body, fn_name)
+            for w in nested:
+                warnings.push(w)
+        elif tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_WHILE:
+            val nested = check_missing_index_outer(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+fn check_missing_index_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val fn_name = decl_get_name(idx)
+            val ws = check_missing_index_outer(decl_get_body(idx), fn_name)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# COLL020: manual_distinct (fix-eligible; the fix itself lives in
+# entry_and_fixes.spl, which has the source text this AST pass does not)
+# ============================================================================
+#
+# Loop body is EXACTLY one statement: `if not <arr>.contains(<x>):
+# <arr>.push(<x>)`, guard and push on the SAME array and the SAME identifier.
+# This is the narrow single-array form of the pattern (the array is both its
+# own seen-set and the result); a `seen` array distinct from `result` is a
+# different (two-array) shape this detector deliberately does not claim,
+# since matching it reliably needs alias analysis this AST walker lacks. A
+# trailing `else` branch on the guard, if present, is not inspected by this
+# accessor and is not excluded — documented limitation, not a silent gap.
+
+fn is_not_contains_call(e: i64) -> i64:
+    if e < 0 or expr_get_tag(e) != EXPR_UNARY:
+        return -1
+    if expr_get_int(e) != TOK_NOT:
+        return -1
+    val inner = expr_get_left(e)
+    if inner < 0 or expr_get_tag(inner) != EXPR_METHOD_CALL or expr_get_str(inner) != "contains":
+        return -1
+    inner
+
+fn is_manual_distinct_loop(loop_body: [i64]) -> bool:
+    val real = real_stmts(loop_body)
+    if real.len() != 1:
+        return false
+    val only = real[0]
+    if stmt_get_tag(only) != STMT_IF:
+        return false
+    val contains_call = is_not_contains_call(stmt_get_expr(only))
+    if contains_call < 0:
+        return false
+    val recv = expr_get_left(contains_call)
+    if recv < 0 or expr_get_tag(recv) != EXPR_IDENT:
+        return false
+    val recv_name = expr_get_str(recv)
+    val call_args = expr_get_args(contains_call)
+    if call_args.len() != 1:
+        return false
+    val guarded_val = call_args[0]
+    val if_body = real_stmts(stmt_get_body(only))
+    if if_body.len() != 1:
+        return false
+    val push_stmt = if_body[0]
+    if stmt_get_tag(push_stmt) != STMT_EXPR:
+        return false
+    val push_expr = stmt_get_expr(push_stmt)
+    if push_expr < 0 or expr_get_tag(push_expr) != EXPR_METHOD_CALL or expr_get_str(push_expr) != "push":
+        return false
+    val push_recv = expr_get_left(push_expr)
+    if push_recv < 0 or expr_get_tag(push_recv) != EXPR_IDENT or expr_get_str(push_recv) != recv_name:
+        return false
+    val push_args = expr_get_args(push_expr)
+    if push_args.len() != 1:
+        return false
+    expr_equal_idents(guarded_val, push_args[0])
+
+fn manual_distinct_warning(fn_name: text) -> CollectionLintWarning:
+    CollectionLintWarning(
+        code: "COLL020",
+        severity: "MEDIUM",
+        message: "manual dedup loop (.contains guard + .push on the same array) is O(n^2); switch to distinct_by(xs, key) or unique() (std.common.frame) — dataframe-able. Inline form: build a Dict<T, bool> membership set before the loop and check/insert into it instead of the array",
+        hint: "use distinct_by/unique or an inline Dict<T,bool> membership set",
+        item_name: fn_name
+    )
+
+fn check_manual_distinct_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_FOR:
+            val loop_body = stmt_get_body(s)
+            if is_manual_distinct_loop(loop_body):
+                warnings.push(manual_distinct_warning(fn_name))
+            val nested = check_manual_distinct_stmts(loop_body, fn_name)
+            for w in nested:
+                warnings.push(w)
+        elif tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_WHILE:
+            val nested = check_manual_distinct_stmts(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+fn check_manual_distinct_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val fn_name = decl_get_name(idx)
+            val ws = check_manual_distinct_stmts(decl_get_body(idx), fn_name)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# COLL021: manual_group (advisory, no fix — narrow shape, see note)
+# ============================================================================
+#
+# Canonical shape: `for row in rows: <idx> = -1  for j in <range/keys>: if
+# <keys>[j] == <expr>: <idx> = j   if <idx> < 0: <keys>.push(...); ...`. This
+# detector matches only the inner "scan for a matching slot index" half (a
+# nested loop whose body assigns an index variable inside an `==` comparison
+# against an indexed array element) followed, later in the SAME outer body,
+# by an `if <idx> <cmp> 0`-shaped guard. It does not verify the parallel
+# bucket push, which would need cross-statement alias tracking this walker
+# does not have. Conservative on purpose: this narrower shape still requires
+# both halves together, so a plain linear search with no follow-up guard does
+# not fire.
+
+# `name = value` as the single-line body of an `if:` parses as STMT_EXPR
+# wrapping EXPR_ASSIGN, not as STMT_ASSIGN directly (the same duality COLL001's
+# check_loop_body already handles for `arr = arr + [x]`). Check both shapes.
+fn stmt_assigns_to(s: i64, name: text) -> bool:
+    val tag = stmt_get_tag(s)
+    if tag == STMT_ASSIGN:
+        return stmt_get_name(s) == name
+    if tag == STMT_EXPR:
+        val e = stmt_get_expr(s)
+        if e >= 0 and expr_get_tag(e) == EXPR_ASSIGN:
+            val target = expr_get_left(e)
+            if target >= 0 and expr_get_tag(target) == EXPR_IDENT:
+                return expr_get_str(target) == name
+    false
+
+fn is_index_assign_from_equality(s: i64, idx_name: text, scan_var: text) -> bool:
+    if stmt_get_tag(s) != STMT_IF:
+        return false
+    val cond = stmt_get_expr(s)
+    if cond < 0 or expr_get_tag(cond) != EXPR_BINARY or expr_get_int(cond) != TOK_EQ:
+        return false
+    val left = expr_get_left(cond)
+    val right = expr_get_right(cond)
+    val one_side_indexed = (left >= 0 and expr_get_tag(left) == EXPR_INDEX) or
+        (right >= 0 and expr_get_tag(right) == EXPR_INDEX)
+    if not one_side_indexed:
+        return false
+    for body_stmt in real_stmts(stmt_get_body(s)):
+        if stmt_assigns_to(body_stmt, idx_name):
+            return true
+    false
+
+fn has_index_scan_assign(stmts: [i64], idx_name: text, scan_var: text) -> bool:
+    for s in stmts:
+        if s < 0:
+            continue
+        if is_index_assign_from_equality(s, idx_name, scan_var):
+            return true
+        val tag = stmt_get_tag(s)
+        if tag == STMT_IF or tag == STMT_BLOCK:
+            if has_index_scan_assign(stmt_get_body(s), idx_name, scan_var):
+                return true
+    false
+
+fn has_negative_guard_on(stmts: [i64], idx_name: text) -> bool:
+    for s in stmts:
+        if s < 0:
+            continue
+        if stmt_get_tag(s) == STMT_IF:
+            val cond = stmt_get_expr(s)
+            if cond >= 0 and expr_mentions_ident(cond, idx_name):
+                return true
+    false
+
+fn check_manual_group_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_FOR:
+            val loop_body = real_stmts(stmt_get_body(s))
+            var i = 0
+            while i < loop_body.len():
+                val inner = loop_body[i]
+                if stmt_get_tag(inner) == STMT_FOR or stmt_get_tag(inner) == STMT_WHILE:
+                    val scan_var = stmt_get_name(inner)
+                    # Try every var/assign target seen so far in this loop body
+                    # as a candidate index variable — conservative in scope
+                    # (this loop body only), not in shape (still needs both
+                    # the scan-assign AND a later negative guard on it).
+                    var j = 0
+                    while j < i:
+                        val cand = loop_body[j]
+                        val cand_tag = stmt_get_tag(cand)
+                        var idx_name = ""
+                        if cand_tag == STMT_VAL_DECL or cand_tag == STMT_VAR_DECL:
+                            idx_name = stmt_get_name(cand)
+                        if idx_name != "":
+                            if has_index_scan_assign(stmt_get_body(inner), idx_name, scan_var):
+                                if has_negative_guard_on(_slice_from(loop_body, i + 1), idx_name):
+                                    warnings.push(CollectionLintWarning(
+                                        code: "COLL021",
+                                        severity: "MEDIUM",
+                                        message: "manual group-by (scan a keys array for a slot index, then push into a parallel bucket) is O(n*m); switch to group_by_key(xs, key) (std.common.frame) — dataframe-able. Inline form: a Dict<K, i64> key->slot plus parallel keys/members arrays, zipped at the end",
+                                        hint: "use group_by_key or the Dict-index + parallel-array idiom",
+                                        item_name: fn_name
+                                    ))
+                        j = j + 1
+                i = i + 1
+            val nested = check_manual_group_stmts(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+        elif tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_WHILE:
+            val nested = check_manual_group_stmts(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+fn _slice_from(items: [i64], start: i64) -> [i64]:
+    var out: [i64] = []
+    var i = start
+    while i < items.len():
+        out.push(items[i])
+        i = i + 1
+    out
+
+fn check_manual_group_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val fn_name = decl_get_name(idx)
+            val ws = check_manual_group_stmts(decl_get_body(idx), fn_name)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# COLL022: sort_then_take (advisory, no fix — tie order vs. a stable sort is
+# not proven, see design doc section 10.3)
+# ============================================================================
+
+fn is_sort_method_name(name: text) -> bool:
+    name.starts_with("sort")
+
+fn is_sort_then_take(e: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_METHOD_CALL and expr_get_str(e) == "take":
+        val receiver = expr_get_left(e)
+        if receiver >= 0 and expr_get_tag(receiver) == EXPR_METHOD_CALL and is_sort_method_name(expr_get_str(receiver)):
+            return true
+        return false
+    if tag == EXPR_SLICE:
+        val receiver = expr_get_left(e)
+        if receiver >= 0 and expr_get_tag(receiver) == EXPR_METHOD_CALL and is_sort_method_name(expr_get_str(receiver)):
+            return true
+    false
+
+fn sort_then_take_warning(fn_name: text) -> CollectionLintWarning:
+    CollectionLintWarning(
+        code: "COLL022",
+        severity: "MEDIUM",
+        message: "full sort followed by take/slice is O(n log n) when only the top k are kept; switch to top_k_by(xs, k, score) (std.common.frame) — dataframe-able. Inline form: keep a small sorted k-buffer instead of sorting the whole collection",
+        hint: "use top_k_by or a bounded k-buffer instead of a full sort",
+        item_name: fn_name
+    )
+
+fn check_sort_then_take_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val e = stmt_get_expr(s)
+            if e >= 0 and is_sort_then_take(e):
+                warnings.push(sort_then_take_warning(fn_name))
+        if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
+            val nested = check_sort_then_take_stmts(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+fn check_sort_then_take_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val fn_name = decl_get_name(idx)
+            val ws = check_sort_then_take_stmts(decl_get_body(idx), fn_name)
+            for w in ws:
                 warnings.push(w)
     warnings
 

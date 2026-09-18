@@ -29,24 +29,29 @@ describe "collection lint auto-fix":
 
     it "keeps the AST fallback advisory and exposes its uncertainty":
         """A source-shape match lacks the typed/effect/alias proof required for
-        a machine-applicable rewrite."""
+        a machine-applicable rewrite. COLL001 is not in the §10.3 exception
+        list (only COLL002 and COLL020 get a Certain fix in this lane), so it
+        stays hint-only: a fix_hint string, never an easy_fix."""
         step("Inspect the COLL001 evidence contract")
         var found = false
+        var has_fix = false
+        var hint = ""
         for result in lint_cli_source(Linter.new(), "/tmp/coll_push2.spl", CONCAT_SRC):
             if result.lint.code == "COLL001":
+                found = true
                 match result.lint.easy_fix:
-                    case Some(fix):
-                        for rep in easyfix_replacements(fix):
-                            replacements = replacements + 1
-                            new_text = rep.new_text
-                            applied = CONCAT_SRC.slice(0, rep.start) + rep.new_text + CONCAT_SRC.slice(rep.end)
+                    case Some(_):
+                        has_fix = true
                     case nil:
                         val _ = 0
-        assert_equal(replacements, 1)
-        expect(new_text).to_equal("out.push(x)")
-        step("The spliced source keeps the indentation and drops the concat")
-        expect(applied).to_contain("        out.push(x)\n")
-        assert_false(applied.contains("out + [x]"))
+                match result.lint.fix_hint:
+                    case Some(h):
+                        hint = h
+                    case nil:
+                        val _ = 0
+        assert_true(found)
+        assert_false(has_fix)
+        assert_equal(hint, "use .push() instead of arr = arr + [x]")
 
     it "warns without a fix when the concat appends more than one element":
         # @req REQ-SSPEC-COMPILER
@@ -71,25 +76,147 @@ describe "collection lint auto-fix":
         """The bug report and this rule's own header comment wrote the
         fixture with `..` (arr[0..arr.len()-1]); that is not valid slice
         syntax (`..` builds a Range, not a slice — indexing by one errors
-        at runtime), so neither the warning nor the fix could ever see it.
-        The rule fires on the real colon slice form, and the fix must
-        offer the matching rewrite."""
+        at runtime), so neither the warning nor a fix could ever see it.
+        The rule fires on the real colon slice form. COLL007 is not in the
+        §10.3 exception list either, so — like COLL001 above — it stays
+        hint-only rather than offering a machine-applicable rewrite."""
         step("Lint a loop that rebuilds arr via arr[0:arr.len()-1]")
-        var replacements = 0
-        var new_text = ""
-        var applied = ""
+        var found = false
+        var has_fix = false
+        var hint = ""
         for result in lint_cli_source(Linter.new(), "/tmp/coll_pop.spl", POP_SRC):
             if result.lint.code == "COLL007":
+                found = true
                 match result.lint.easy_fix:
-                    case Some(fix):
-                        for rep in easyfix_replacements(fix):
-                            replacements = replacements + 1
-                            new_text = rep.new_text
-                            applied = POP_SRC.slice(0, rep.start) + rep.new_text + POP_SRC.slice(rep.end)
+                    case Some(_):
+                        has_fix = true
                     case nil:
                         val _ = 0
-        assert_equal(replacements, 1)
-        expect(new_text).to_equal("arr.pop()")
-        step("The spliced source keeps the indentation and drops the rebuild")
-        expect(applied).to_contain("        arr.pop()\n")
-        assert_false(applied.contains("arr[0:arr.len()-1]"))
+                match result.lint.fix_hint:
+                    case Some(h):
+                        hint = h
+                    case nil:
+                        val _ = 0
+        assert_true(found)
+        assert_false(has_fix)
+        assert_equal(hint, "use .pop() instead of rebuilding array")
+
+# ---------------------------------------------------------------------------
+# COLL002 upgrade: a Certain fix, but only when every §10.3 precondition
+# holds (arr declared file-unique with a real element type, not mutated in
+# the loop, and the `.contains(` call itself file-unique).
+# ---------------------------------------------------------------------------
+
+val COLL002_FIX_SRC = "fn search_slow(targets: [i64]) -> [i64]:\n    var out: [i64] = []\n    var arr: [i64] = [1, 2, 3]\n    for t in targets:\n        if arr.contains(t):\n            out.push(t)\n    out\n"
+val COLL002_TEXT_RECEIVER_SRC = "fn search_text(targets: [text]) -> [text]:\n    var out: [text] = []\n    var arr: text = \"hello\"\n    for t in targets:\n        if arr.contains(t):\n            out.push(t)\n    out\n"
+val COLL002_MUTATED_SRC = "fn search_mutate(targets: [i64]) -> [i64]:\n    var out: [i64] = []\n    var arr: [i64] = [1, 2, 3]\n    for t in targets:\n        if arr.contains(t):\n            out.push(t)\n        arr.push(t)\n    out\n"
+val COLL002_AMBIGUOUS_SRC = "fn search_twice(targets: [i64]) -> [i64]:\n    var out: [i64] = []\n    var arr: [i64] = [1, 2, 3]\n    var other: [i64] = [4, 5, 6]\n    for t in targets:\n        if arr.contains(t):\n            out.push(t)\n        if other.contains(t):\n            out.push(t)\n    out\n"
+
+fn coll002_fix_of(path: text, src: text) -> EasyFix?:
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == "COLL002":
+            match result.lint.easy_fix:
+                case Some(fix): return Some(fix)
+                case nil: val _ = 0
+    nil
+
+fn coll002_warned(path: text, src: text) -> bool:
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == "COLL002":
+            return true
+    false
+
+describe "COLL002 upgrade — Certain fix under §10.3 preconditions":
+    it "hoists a file-unique, non-mutated array into a membership Dict":
+        step("hoists a file-unique, non-mutated array into a membership Dict")
+        match coll002_fix_of("/tmp/coll002_fix.spl", COLL002_FIX_SRC):
+            case Some(fix):
+                val replacements = easyfix_replacements(fix)
+                assert_equal(replacements.len(), 2)
+                var sorted = easyfix_sort_replacements_descending(replacements)
+                val applied = easyfix_apply_sorted_replacements(COLL002_FIX_SRC, sorted)
+                expect(applied).to_contain("var arr_set: Dict<i64, bool> = {}")
+                expect(applied).to_contain("for _v in arr: arr_set[_v] = true")
+                expect(applied).to_contain("if arr_set.contains_key(t):")
+                assert_false(applied.contains("arr.contains(t)"))
+            case nil:
+                assert_true(false)
+
+    it "stays hint-only when the receiver is declared as text, not an array":
+        step("stays hint-only when the receiver is declared as text, not an array")
+        """is_contains_call has no receiver type; a text receiver means
+        `.contains` is a substring search, and rewriting it to a Dict lookup
+        would change behavior — so this must warn without a fix."""
+        assert_true(coll002_warned("/tmp/coll002_text.spl", COLL002_TEXT_RECEIVER_SRC))
+        match coll002_fix_of("/tmp/coll002_text.spl", COLL002_TEXT_RECEIVER_SRC):
+            case Some(_): assert_true(false)
+            case nil: val _ = 0
+
+    it "stays hint-only when the array is mutated inside the loop":
+        step("stays hint-only when the array is mutated inside the loop")
+        """A hoisted-before-the-loop Dict snapshot would go stale the moment
+        the loop pushes onto `arr`, so a mutated receiver must not get a
+        machine-applied fix."""
+        assert_true(coll002_warned("/tmp/coll002_mutate.spl", COLL002_MUTATED_SRC))
+        match coll002_fix_of("/tmp/coll002_mutate.spl", COLL002_MUTATED_SRC):
+            case Some(_): assert_true(false)
+            case nil: val _ = 0
+
+    it "stays hint-only when more than one .contains( line exists in the file":
+        step("stays hint-only when more than one .contains( line exists in the file")
+        """Two candidate call sites make the textual location recovery
+        ambiguous — the same file-uniqueness rule COLL001/COLL007 already
+        rely on."""
+        assert_true(coll002_warned("/tmp/coll002_ambiguous.spl", COLL002_AMBIGUOUS_SRC))
+        match coll002_fix_of("/tmp/coll002_ambiguous.spl", COLL002_AMBIGUOUS_SRC):
+            case Some(_): assert_true(false)
+            case nil: val _ = 0
+
+# ---------------------------------------------------------------------------
+# COLL020 manual_distinct: a Certain fix, but only for the fresh-local,
+# single-array shape §10.3 describes.
+# ---------------------------------------------------------------------------
+
+val COLL020_FIX_SRC = "fn distinct_slow(xs: [i64]) -> [i64]:\n    var result: [i64] = []\n    for x in xs:\n        if not result.contains(x):\n            result.push(x)\n    result\n"
+val COLL020_PREFILLED_SRC = "fn distinct_prefilled(xs: [i64]) -> [i64]:\n    var result: [i64] = [0]\n    for x in xs:\n        if not result.contains(x):\n            result.push(x)\n    result\n"
+
+fn coll020_fix_of(path: text, src: text) -> EasyFix?:
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == "COLL020":
+            match result.lint.easy_fix:
+                case Some(fix): return Some(fix)
+                case nil: val _ = 0
+    nil
+
+fn coll020_warned(path: text, src: text) -> bool:
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == "COLL020":
+            return true
+    false
+
+describe "COLL020 manual_distinct — Certain fix under §10.3 preconditions":
+    it "adds a membership Dict kept in step with the growing array":
+        step("adds a membership Dict kept in step with the growing array")
+        match coll020_fix_of("/tmp/coll020_fix.spl", COLL020_FIX_SRC):
+            case Some(fix):
+                val replacements = easyfix_replacements(fix)
+                assert_equal(replacements.len(), 3)
+                val sorted = easyfix_sort_replacements_descending(replacements)
+                val applied = easyfix_apply_sorted_replacements(COLL020_FIX_SRC, sorted)
+                expect(applied).to_contain("var result_set: Dict<i64, bool> = {}")
+                expect(applied).to_contain("if not result_set.contains_key(x):")
+                expect(applied).to_contain("result.push(x)")
+                expect(applied).to_contain("result_set[x] = true")
+                assert_false(applied.contains("result.contains(x)"))
+            case nil:
+                assert_true(false)
+
+    it "stays hint-only when the array is not a fresh empty-literal local":
+        step("stays hint-only when the array is not a fresh empty-literal local")
+        """§10.3 requires `result` to start as `[]`; a prefilled literal means
+        the array already has content the hoisted Dict would not have been
+        built from, so it must not get a machine-applied fix."""
+        assert_true(coll020_warned("/tmp/coll020_prefilled.spl", COLL020_PREFILLED_SRC))
+        match coll020_fix_of("/tmp/coll020_prefilled.spl", COLL020_PREFILLED_SRC):
+            case Some(_): assert_true(false)
+            case nil: val _ = 0
