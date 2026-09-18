@@ -191,10 +191,27 @@ struct Series:
             j = j + 1
         Series(name: self.name, values: array(out), dtype: DType.F64, missing: new_missing)
 
+    # Dict membership replaces the former inner scan (`f64_group_index`) over
+    # `seen`, which made this O(n^2). Uses only the verified-safe Dict subset:
+    # `d[k] = v` / `d.contains_key(k)` (never `.set()`/`.get()` — see
+    # doc/07_guide/language/dict_native_pitfalls.md and the idiom in
+    # src/lib/gc_async_mut/pure/collections.spl:55-68).
+    #
+    # Float key semantics are chosen to reproduce `f64_group_index`'s
+    # `keys[i] == value` scan EXACTLY, not a Dict's native key equality
+    # (measured bitwise/bit-pattern, not IEEE `==` — see
+    # doc/08_tracking/bug/ for the probe): a Dict key is only used for
+    # ordinary (non-zero, non-NaN) values, `0.0`/`-0.0` are folded onto a
+    # single canonical `+0.0` key before the Dict lookup (matching `0.0 ==
+    # -0.0`), and NaN bypasses the Dict entirely — `f64_group_index` never
+    # matches NaN to any prior value (`NaN != NaN`), so every NaN occurrence
+    # is unconditionally treated as new, which is exactly what skipping the
+    # membership check does (still O(1) per element, not a linear fallback).
     fn unique_f64(self) -> Series:
         var seen: [Float64] = []
         var seen_missing = false
         var out_missing: [Bool] = []
+        var seen_index: Dict<f64, bool> = {}
         var i = 0
         while i < self.values.len().value:
             if self.missing[i].value:
@@ -204,10 +221,17 @@ struct Series:
                     out_missing.push(Bool.new(true))
             else:
                 val v = self.values.flat_f64(Index.new(i))
-                val found = f64_group_index(seen, v) >= 0
-                if not found:
+                if v.value.is_nan():
+                    # NaN: f64_group_index never matches NaN to anything, so
+                    # this is always a new entry.
                     seen.push(v)
                     out_missing.push(Bool.new(false))
+                else:
+                    val key = if v.value == 0.0: 0.0 else: v.value
+                    if not seen_index.contains_key(key):
+                        seen_index[key] = true
+                        seen.push(v)
+                        out_missing.push(Bool.new(false))
             i = i + 1
         Series(name: self.name, values: array(seen), dtype: DType.F64, missing: out_missing)
 
@@ -215,6 +239,7 @@ struct Series:
         var seen: [Int64] = []
         var seen_missing = false
         var out_missing: [Bool] = []
+        var seen_index: Dict<i64, bool> = {}
         var i = 0
         while i < self.values.len().value:
             if self.missing[i].value:
@@ -224,8 +249,8 @@ struct Series:
                     out_missing.push(Bool.new(true))
             else:
                 val v = self.values.flat_i64(Index.new(i))
-                val found = i64_group_index(seen, v) >= 0
-                if not found:
+                if not seen_index.contains_key(v.value):
+                    seen_index[v.value] = true
                     seen.push(v)
                     out_missing.push(Bool.new(false))
             i = i + 1
@@ -691,33 +716,45 @@ fn value_counts(series: Series) -> DataFrame:
     if series.dtype == DType.I64:
         var keys: [Int64] = []
         var counts: [Int64] = []
+        var slot_of: Dict<i64, i64> = {}
         var i = 0
         while i < series.values.len().value:
             if not series.missing[i].value:
                 val v = series.values.flat_i64(Index.new(i))
-                val idx = i64_group_index(keys, v)
-                if idx < 0:
+                if slot_of.contains_key(v.value):
+                    val idx = slot_of[v.value]
+                    counts[idx] = Int64.new(counts[idx].value + 1)
+                else:
+                    slot_of[v.value] = keys.len()
                     keys.push(v)
                     counts.push(Int64.new(1))
-                else:
-                    counts[idx] = Int64.new(counts[idx].value + 1)
             i = i + 1
         val key_col = Series(name: series.name, values: array_i64(keys), dtype: DType.I64, missing: no_missing_values(keys.len()))
         val cnt_col = Series(name: Symbol.from("count"), values: array_i64(counts), dtype: DType.I64, missing: no_missing_values(counts.len()))
         DataFrame(columns_internal: [key_col, cnt_col])
     else:
+        # Same Dict-membership rewrite as unique_f64: NaN bypasses the Dict
+        # (f64_group_index never matches NaN, so it is always a fresh key),
+        # and 0.0/-0.0 are folded onto one canonical key before lookup.
         var keys: [Float64] = []
         var counts: [Int64] = []
+        var slot_of: Dict<f64, i64> = {}
         var i = 0
         while i < series.values.len().value:
             if not series.missing[i].value:
                 val v = series.values.flat_f64(Index.new(i))
-                val idx = f64_group_index(keys, v)
-                if idx < 0:
+                if v.value.is_nan():
                     keys.push(v)
                     counts.push(Int64.new(1))
                 else:
-                    counts[idx] = Int64.new(counts[idx].value + 1)
+                    val key = if v.value == 0.0: 0.0 else: v.value
+                    if slot_of.contains_key(key):
+                        val idx = slot_of[key]
+                        counts[idx] = Int64.new(counts[idx].value + 1)
+                    else:
+                        slot_of[key] = keys.len()
+                        keys.push(v)
+                        counts.push(Int64.new(1))
             i = i + 1
         val key_col = Series(name: series.name, values: array(keys), dtype: DType.F64, missing: no_missing_values(keys.len()))
         val cnt_col = Series(name: Symbol.from("count"), values: array_i64(counts), dtype: DType.I64, missing: no_missing_values(counts.len()))
