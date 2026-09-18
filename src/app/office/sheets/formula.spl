@@ -3245,6 +3245,13 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
 
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
+    # SUBTOTAL/AGGREGATE take a function NUMBER plus ranges whose values
+    # depend on row visibility (101-111 skip hidden rows), so they must see
+    # the raw tokens rather than eagerly-flattened f64 args.
+    if name == "SUBTOTAL":
+        return _eval_subtotal(tokens, pos, sheet, depth)
+    if name == "AGGREGATE":
+        return _eval_aggregate(tokens, pos, sheet, depth)
     # Collect arguments separated by commas
     # Each argument can be a range (A1:B3) or an expression
     var args: [[f64]] = []
@@ -3278,7 +3285,7 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     # Keep the ubiquitous range average on the compact evaluation path.  This
     # also makes AVG an exact alias of AVERAGE before the large family
     # dispatcher, which is important for narrow native application closures.
-    if name == "AVERAGE":
+    if name == "AVERAGE" or name == "AVG":
         val values = _flatten_args(args)
         if values.len() == 0:
             return EvalResult(
