@@ -1,5 +1,141 @@
 # Duplicate `impl` method definitions across files — silent, no dedup, no error
 
+Status: RESOLVED (2026-09-18) — the duplicate half was an ORPHANED file that
+nothing ever imported; it has been deleted. See "Resolution 2026-09-18" below.
+
+## Resolution 2026-09-18 — and two corrections to this record
+
+**The title is wrong about the mechanism, and the scope was understated by 12
+methods.** Both were established by measurement while closing this, and both are
+worth keeping because they change what the defect class actually is.
+
+### Correction 1 — it was never "first wins". The second file was never loaded.
+
+`src/compiler/50.mir/mir_lowering_expr.spl` re-exports exactly three modules:
+
+```
+export use compiler.mir._MirLoweringExpr.expr_dispatch.*
+export use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+export use compiler.mir._MirLoweringExpr.method_calls_literals.*
+```
+
+`literals` is **not among them**, and a tree-wide search found no `use` of
+`compiler.mir._MirLoweringExpr.literals` anywhere — only prose comments naming
+the path. The directory has no `__init__.spl` and no `FILE.md`. So
+`literals.spl` was not a shadowed duplicate that lost an ordering race: it was
+**717 lines of orphaned source that no build ever compiled**. That is a complete
+and sufficient explanation of this record's own marker evidence (the
+`literals.spl` marker fired 0 times, the sibling's fired 3), which the original
+write-up read as a load-order question.
+
+The ordering question is still worth answering, because it is what *would* have
+happened had the file been imported: method registration is a plain dict
+assignment with no duplicate detection —
+`src/compiler/20.hir/hir_lowering/_Items/class_declaration_lowering.spl:83` and
+`trait_impl_lowering.spl:224` both do `methods[name] = hir_fn.symbol`. A dict
+assignment is **last write wins**, not first. Nothing anywhere emits a
+diagnostic for a name that is already present.
+
+### Correction 2 — 13 methods, not one, and one had already begun to diverge
+
+`lower_tuple_lit` was not the only duplicate. Every one of the 13 methods
+`literals.spl` defined was also defined in `method_calls_literals.spl`:
+
+```
+lower_array_filter  lower_array_fold   lower_array_lit    lower_array_map
+lower_array_repeat  lower_const_expr   lower_dict_key     lower_dict_lit
+lower_set_lit       lower_tuple_lit    rt_array_get_operand
+rt_array_len_operand                   rt_array_push_operand
+```
+
+All 13 bodies were compared with docstrings, comments and blank lines stripped:
+**13 of 13 were code-identical**, 434 code lines in total.
+
+The decay this record predicted had already started, in comments rather than in
+code. `lower_dict_lit` and `lower_tuple_lit` carried the full rationale in
+`literals.spl` and an abbreviated stub in the live file that pointed at the dead
+one ("see the identical copy in _MirLoweringExpr/literals.spl; these two
+definitions are duplicates and must stay in sync"). So the only surviving copy
+of the reasoning behind two non-obvious fixes lived in the file nothing
+compiled, and five references across three other files sent readers there.
+
+### What was done
+
+- Ported the full rationale from `literals.spl` into the surviving
+  `method_calls_literals.spl` at the three sites that had been abbreviated to a
+  pointer (the `lower_tuple_lit` docstring, the `lower_dict_lit` Bug #189
+  rationale, and the "capture BEFORE box_runtime_value" note).
+- Deleted `src/compiler/50.mir/_MirLoweringExpr/literals.spl`.
+- Repointed the five remaining prose references that named the deleted path
+  (`expr_dispatch.spl` x2, `mir_lowering_stmts.spl` x2, and the in-file pointer
+  at the `.values()` registration site). No reference to the old path remains.
+
+The diff to the surviving file is docstrings and comments only — verified by
+diffing the before/after with comment and docstring lines removed, which comes
+back empty. No executable line changed anywhere in this change.
+
+### Verification, stated honestly
+
+These are compiler sources. `bin/simple` on this host is the Rust seed, which
+never loads them, so nothing short of a bootstrap exercises this edit. The
+semantic risk is nil by construction — the deleted file was unreachable, and
+every other edit is a comment — so what remained to check was mechanical, and
+was: the surviving file's triple-quote count is balanced (56) and the ported
+docstring closes correctly, and no `literals.spl` reference survives tree-wide.
+This change was **not** validated by a bootstrap or a compile of the compiler.
+
+### The deletion had a dependent surface outside `src/`, and it is cleaned up
+
+Nothing imported the file, but nine other places pinned its PATH, and in this
+repo a baseline that no longer describes the tree is itself a FAIL. Searching
+only `src/` would have missed every one of them:
+
+| pin | rows | action |
+|---|---|---|
+| `scripts/check/use_target_resolves_baseline.txt` | 9 | removed |
+| `scripts/check/raw_sffi_unsafe_baseline.tsv` | 3 | removed |
+| `scripts/check/silent_fail_open_baseline.txt` | 3 | removed |
+| `scripts/check/critical_wildcard_baseline.txt` | 1 | removed |
+| `scripts/check/fail_open_baseline.txt` | 1 | removed |
+| `test/01_unit/compiler/mir/value_access_ownership_spec.spl` | 1 | removed |
+| `scripts/audit/compiler-mir-literal-sffi-authority.shs` | whole file | deleted |
+| `scripts/check/guard_wiring_unwired_baseline.txt` | 1 | removed |
+| `sweep/seed.tsv` | 1 | left (historical measurement, not a gate) |
+
+Two of these are worth naming individually. The spec line is a clean deletion
+rather than a coverage loss: the line immediately above it already asserts the
+same property on `method_calls_literals.spl`, so the surviving file was always
+the one actually covered. The audit script was pinned to the dead file, is
+listed in `guard_wiring_unwired_baseline.txt` as never invoked, and has a
+sibling — `scripts/audit/compiler-mir-method-sffi-authority.shs` — that makes
+strictly stronger assertions about the surviving file. Left in place it would
+have become vacuous rather than failing, since `rg` on a missing file returns
+non-zero and its only test is an `if`.
+
+The `sweep/seed.tsv` row is retained deliberately and is corroborating evidence
+for this whole finding: a sweep recorded `literals.spl` as **compile failed**,
+`Undefined("undefined identifier: runtime_file_rename")`. The orphaned file did
+not merely go unused — it had stopped compiling at all, and nothing noticed,
+because nothing ever compiled it.
+
+### Still open, filed separately
+
+- **Four more orphaned part-files.** A census of all 246 `.spl` files under
+  `_<Name>/` part directories, against every `use` in the tree, found five never
+  imported by anything. Deleting `literals.spl` leaves four:
+  `src/app/io/_CliCompile/native_build.spl` (851 lines),
+  `src/os/_QemuRunner/guest_evidence_contract.spl`,
+  `src/os/_QemuRunner/vm_process_lifecycle.spl`,
+  `src/os/services/evidence/_verifier_owner/verifier_transactions.spl`.
+- **No duplicate-method diagnostic exists.** The one-line fix is a presence
+  check at the two `methods[name] =` assignments above. It is not done here
+  because it needs a bootstrap to verify and would land unverified.
+
+---
+
+## Original record (2026-08-08), retained
+
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
