@@ -4,7 +4,7 @@
 # loader/module and JIT flows do not duplicate mmap/write/protect lifecycle.
 
 use .exec_mapping.{exec_mapping_map_rx, exec_mapping_free}
-use .smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64, native_alloc_rw_memory}
+use .smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64, native_alloc_rw_memory, native_free_exec_memory}
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
 
@@ -21,6 +21,14 @@ struct SharedExecRecord:
     address: i64
     size: i64
     generation: i32
+    # Per-module GOT synthesized for this symbol's GotRel32 relocations
+    # (lane A4b), if any. 0/0 when the symbol has none. Owned by this
+    # record's lifetime: freed alongside `address` on replace and unmap so a
+    # GOTPCREL-bearing symbol cannot leak its slot page (doc/08_tracking/bug/
+    # smf_gotrel32_applied_as_symbol_value_2026-09-18.md, Fable review of
+    # lane A4b commit ac8b46d8af0).
+    got_base: i64
+    got_size: i64
 
 struct SharedExecMapperStats:
     mapped_symbols: i32
@@ -74,6 +82,21 @@ impl SharedExecMapper:
         else:
             self.owner_ref_counts[owner_id] = remaining
 
+    """Frees a record's code mapping and, if present, its per-module GOT
+    slot (lane A4b). Shared by the `map_symbol` replace path and
+    `unmap_symbol` so a GOTPCREL-bearing symbol's slot is released
+    everywhere its code mapping is -- see `SharedExecRecord.got_base`
+    doc comment and Fable review of lane A4b commit ac8b46d8af0."""
+    me _free_mapped_resources(rec: SharedExecRecord) -> bool:
+        val freed = exec_mapping_free(rec.address, rec.size)
+        if not freed:
+            return false
+        if rec.got_base != 0:
+            val got_freed = native_free_exec_memory(rec.got_base, rec.got_size)
+            if not got_freed:
+                return false
+        true
+
     me map_symbol(owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> Result<i64, text>:
         val code_size = code.len() as i64
         if code_size <= 0:
@@ -84,8 +107,7 @@ impl SharedExecMapper:
             if not allow_replace:
                 return Err("Symbol already mapped: {symbol}")
             val old = self.records[symbol]
-            val old_freed = exec_mapping_free(old.address, old.size)
-            if not old_freed:
+            if not self._free_mapped_resources(old):
                 return Err("Failed to free existing mapping for {symbol}")
             self.total_bytes = self.total_bytes - old.size
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
@@ -111,7 +133,9 @@ impl SharedExecMapper:
             symbol: symbol,
             address: fn_ptr,
             size: code_size,
-            generation: self.generation
+            generation: self.generation,
+            got_base: 0,
+            got_size: 0
         )
         self.mapped_symbol_count = self.mapped_symbol_count + 1
         self.track_owner(owner_id)
@@ -132,13 +156,30 @@ impl SharedExecMapper:
             return Some(self.records[symbol])
         nil
 
+    """Attach a GOT allocation (lane A4b) to an already-mapped symbol's
+    record, so it is freed alongside the code mapping on replace/unmap
+    instead of leaking. Returns false if the symbol has no mapping."""
+    me set_got(symbol: text, got_base: i64, got_size: i64) -> bool:
+        if not self.records.has(symbol):
+            return false
+        val rec = self.records[symbol]
+        self.records[symbol] = SharedExecRecord(
+            owner_id: rec.owner_id,
+            symbol: rec.symbol,
+            address: rec.address,
+            size: rec.size,
+            generation: rec.generation,
+            got_base: got_base,
+            got_size: got_size
+        )
+        true
+
     me unmap_symbol(symbol: text) -> bool:
         if not self.records.has(symbol):
             return false
 
         val rec = self.records[symbol]
-        val freed = exec_mapping_free(rec.address, rec.size)
-        if not freed:
+        if not self._free_mapped_resources(rec):
             return false
 
         self.total_bytes = self.total_bytes - rec.size
@@ -250,6 +291,14 @@ struct ResolvedSymbol:
     name: text
     address: i64
 
+"""Per-module GOT allocation synthesized for a symbol's GotRel32
+relocations (lane A4b). `base == 0` means no GOT was needed. The caller owns
+recording this against the symbol's mapping (`SharedExecMapper.set_got`) so
+it is freed alongside the code mapping instead of leaking."""
+struct GotAllocation:
+    base: i64
+    size: i64
+
 """Resolve a relocation's target symbol address, falling back to the global
 symbol table by name when the per-module resolution is unset (address 0)."""
 fn _resolve_smf_reloc_symbol(index: i64, symbols: [ResolvedSymbol], global_symbols: Dict<text, i64>) -> i64:
@@ -271,7 +320,11 @@ Args:
     global_symbols: Fallback global symbol table (name -> address)
 
 Returns:
-    Ok(()) on success, Err with message on failure.
+    Ok(GotAllocation) on success -- `base == 0` when no GOT was needed;
+    otherwise the caller MUST record it against the symbol's mapping (e.g.
+    `SharedExecMapper.set_got`) so it is freed alongside the code mapping.
+    Err with message on failure; any GOT already allocated in THIS call is
+    freed before returning Err, so a failed call never leaks.
 
 Converged (lane A4b, doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md
 §4) onto the shared value oracle `smf_reloc_compute_wire`
@@ -281,10 +334,14 @@ silent `as i32` truncation
 (doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md).
 
 GotRel32 (wire 4) additionally synthesizes a per-module GOT: one 8-byte RW
-slot per distinct target symbol, allocated once up front and never freed for
-the lifetime of the loaded code (same lifetime contract as the exec mapping
-itself). R_X86_64_GOTPCREL loads *through* a GOT slot, so S must be the
-slot's address (S == G), never the resolved symbol's own address.
+slot per distinct target symbol, allocated once up front. Lifetime is NOT
+owned by this function -- it has no notion of "the symbol's mapping" -- the
+returned `GotAllocation` must be attached to that mapping by the caller
+(Fable review of lane A4b commit ac8b46d8af0: the previous docstring's claim
+of "never freed for the lifetime of the loaded code (same lifetime contract
+as the exec mapping)" was false, since nothing recorded or freed it).
+R_X86_64_GOTPCREL loads *through* a GOT slot, so S must be the slot's
+address (S == G), never the resolved symbol's own address.
 """
 fn apply_smf_relocations(
     code_addr: i64,
@@ -292,7 +349,7 @@ fn apply_smf_relocations(
     relocs: [SmfRelocEntry],
     symbols: [ResolvedSymbol],
     global_symbols: Dict<text, i64>
-) -> Result<(), text>:
+) -> Result<GotAllocation, text>:
     # Synthesize a per-module GOT for wire-4 sites before patching anything.
     var got_slot_addr: Dict<i64, i64> = {}
     var got_target_indices: [i64] = []
@@ -300,45 +357,60 @@ fn apply_smf_relocations(
         if reloc.reloc_type == 4 and not got_slot_addr.has(reloc.symbol_index):
             got_slot_addr[reloc.symbol_index] = 0
             got_target_indices.push(reloc.symbol_index)
+
+    var got_base = 0i64
+    var got_size = 0i64
     if got_target_indices.len() > 0:
-        val got_base = native_alloc_rw_memory(got_target_indices.len() as i64 * 8)
+        got_size = got_target_indices.len() as i64 * 8
+        got_base = native_alloc_rw_memory(got_size)
         if got_base == 0:
             return Err("Failed to allocate GOT for GotRel32 relocations")
         var got_index = 0i64
+        var got_fill_error = ""
         for symbol_index in got_target_indices:
             val slot_addr = got_base + got_index * 8
             val got_target_addr = _resolve_smf_reloc_symbol(symbol_index, symbols, global_symbols)
             if got_target_addr == 0:
-                return Err("Unresolved GOT symbol at index {symbol_index}")
+                got_fill_error = "Unresolved GOT symbol at index {symbol_index}"
+                break
             unsafe(capabilities: [raw_ptr]):
                 native_reloc_write_i64(slot_addr, 0, got_target_addr)
             got_slot_addr[symbol_index] = slot_addr
             got_index = got_index + 1
+        if got_fill_error != "":
+            _ = native_free_exec_memory(got_base, got_size)
+            return Err(got_fill_error)
 
+    var patch_error = ""
     for reloc in relocs:
         # Validate the complete write width before deriving patch_addr. This
         # prevents both end-of-mapping overrun and address-addition overflow.
         val write_width = if reloc.reloc_type == 1: 8 else: 4
         if code_addr <= 0 or code_size < write_width or reloc.offset < 0 or reloc.offset > code_size - write_width:
-            return Err("Relocation offset {reloc.offset} with width {write_width} out of bounds (code_size={code_size})")
+            patch_error = "Relocation offset {reloc.offset} with width {write_width} out of bounds (code_size={code_size})"
+            break
         if code_addr > 0x7FFFFFFFFFFFFFFF - reloc.offset:
-            return Err("Relocation address overflow at offset {reloc.offset}")
+            patch_error = "Relocation address overflow at offset {reloc.offset}"
+            break
         val patch_addr = code_addr + reloc.offset
 
         var sym_addr = _resolve_smf_reloc_symbol(reloc.symbol_index, symbols, global_symbols)
         if sym_addr == 0:
-            return Err("Unresolved symbol at index {reloc.symbol_index}")
+            patch_error = "Unresolved symbol at index {reloc.symbol_index}"
+            break
 
         var reloc_s = sym_addr
         if reloc.reloc_type == 4:
             if not got_slot_addr.has(reloc.symbol_index):
-                return Err("GotRel32 requires GOT synthesis but no slot found for symbol index {reloc.symbol_index}")
+                patch_error = "GotRel32 requires GOT synthesis but no slot found for symbol index {reloc.symbol_index}"
+                break
             reloc_s = got_slot_addr[reloc.symbol_index]
 
         # Wire values: 1=Abs64, 2=Rel32/Pc32, 3=PltRel32/Plt32, 4=GotRel32/GotPcRel, 5=Abs32
         val computed = smf_reloc_compute_wire(reloc.reloc_type as i64, reloc_s, reloc.addend, patch_addr)
         if not computed.ok:
-            return Err("Relocation value out of range for wire type {reloc.reloc_type} (S={reloc_s}, A={reloc.addend}, P={patch_addr})")
+            patch_error = "Relocation value out of range for wire type {reloc.reloc_type} (S={reloc_s}, A={reloc.addend}, P={patch_addr})"
+            break
         match reloc.reloc_type:
             1:
                 unsafe(capabilities: [raw_ptr]):
@@ -356,9 +428,15 @@ fn apply_smf_relocations(
                 unsafe(capabilities: [raw_ptr]):
                     native_reloc_write_i32(code_addr, reloc.offset, computed.value as i32)
             _:
-                return Err("Unknown relocation type: {reloc.reloc_type}")
+                patch_error = "Unknown relocation type: {reloc.reloc_type}"
+                break
 
-    Ok(())
+    if patch_error != "":
+        if got_base != 0:
+            _ = native_free_exec_memory(got_base, got_size)
+        return Err(patch_error)
+
+    Ok(GotAllocation(base: got_base, size: got_size))
 
 # ============================================================================
 # Exports

@@ -37,9 +37,12 @@
 
 use std.spec
 use compiler.loader.module_loader_compat.{loader_smf_reloc_value}
-use compiler.loader.loader.object_mapper.{apply_smf_relocations, ResolvedSymbol}
+use compiler.loader.loader.object_mapper.{
+    apply_smf_relocations, ResolvedSymbol,
+    SharedExecMapper, SharedExecMapperConfig
+}
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
-use compiler.loader.smf_mmap_native.{native_alloc_rw_memory, native_mmap_read_bytes}
+use compiler.loader.smf_mmap_native.{native_alloc_rw_memory, native_mmap_read_bytes, native_exec_memory_count}
 
 # Manual little-endian decode, NOT `as i32`-and-shift: i32 arithmetic in
 # this language does not wrap at 32 bits under `<<`/`|`, so a naive decode
@@ -143,3 +146,104 @@ describe "loader wire-4 (GotRel32) via the real loader helper, with a synthesize
         val slot_bytes = native_mmap_read_bytes(derived_slot_addr, 0, 8)
         val slot_value = _wire4_bytes_to_i64_le(slot_bytes)
         expect(slot_value).to_equal(sym_addr)
+
+    # ------------------------------------------------------------------
+    # GOT lifetime (Fable review of lane A4b commit ac8b46d8af0, BLOCKING):
+    # apply_smf_relocations allocates the GOT but does not itself know "the
+    # symbol's mapping" -- SharedExecMapper does. The caller
+    # (module_loader.spl) now records a non-zero GotAllocation against the
+    # symbol's own SharedExecRecord via `set_got`, and both `map_symbol`'s
+    # replace path and `unmap_symbol` free `got_base`/`got_size` alongside
+    # `address`/`size` through a single shared helper,
+    # `_free_mapped_resources`, so a GOTPCREL-bearing symbol cannot leak its
+    # slot page. Probed via `native_exec_memory_count` -- the SAME
+    # allocation-tracking dict (`EXEC_MEMORY_ALLOCS`,
+    # compiler.loader.smf_mmap_native) that both the code mapping
+    # (`exec_mapping_map_rx`/`exec_mapping_free`) and the GOT
+    # (`native_alloc_rw_memory`/`native_free_exec_memory`) share, so a leaked
+    # GOT slot shows up directly as a stuck count.
+    #
+    # `map_symbol`'s NEW-mapping half (`exec_mapping_map_rx`) needs
+    # mprotect(PROT_EXEC), which this sandbox refuses (verified: even a
+    # from-scratch `map_symbol` call on a trivial 1-byte code blob fails
+    # with "Failed to switch RW->RX for <symbol>" -- a pre-existing,
+    # unrelated sandbox limitation, not a lane A4b defect; the object_mapper
+    # tests elsewhere in this test tree already show the same failure and
+    # are baselined). That half is not exercised here. What IS exercised,
+    # against the real methods with real allocated memory: `unmap_symbol`
+    # end to end (has-check, freeing, records-dict removal), and the shared
+    # `_free_mapped_resources` helper that `map_symbol`'s replace path calls
+    # with the exact same code -- so both call sites are covered without
+    # depending on the sandbox-blocked mprotect step.
+    # ------------------------------------------------------------------
+
+    it "unmap_symbol frees a GOTPCREL symbol's GOT slot, not just its code mapping":
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val baseline = native_exec_memory_count()
+
+        # Real allocated memory standing in for a mapped code region and its
+        # synthesized GOT slot -- what module_loader.spl would have produced
+        # via map_symbol + apply_smf_relocations + set_got, without needing
+        # the sandbox-blocked mprotect(PROT_EXEC) step.
+        val code_addr = native_alloc_rw_memory(8)
+        val got_addr = native_alloc_rw_memory(8)
+        expect(code_addr).to_not_equal(0)
+        expect(got_addr).to_not_equal(0)
+        expect(native_exec_memory_count()).to_equal(baseline + 2)
+
+        mapper.records["gotrel32_fn"] = SharedExecRecord(
+            owner_id: "owner_gotrel32", symbol: "gotrel32_fn",
+            address: code_addr, size: 8, generation: 1,
+            got_base: got_addr, got_size: 8)
+        expect(mapper.get_record("gotrel32_fn").unwrap().got_base).to_equal(got_addr)
+
+        expect(mapper.unmap_symbol("gotrel32_fn")).to_equal(true)
+        expect(mapper.get_record("gotrel32_fn")).to_equal(nil)
+        # Before the fix, unmap_symbol only freed `rec.address`/`rec.size`
+        # (the code mapping) -- the count would have stayed at baseline + 1,
+        # a leaked GOT page. It must return all the way to baseline.
+        expect(native_exec_memory_count()).to_equal(baseline)
+
+    it "the replace-path helper (_free_mapped_resources, shared with unmap_symbol) frees a GOT slot too":
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val baseline = native_exec_memory_count()
+
+        val code_addr = native_alloc_rw_memory(8)
+        val got_addr = native_alloc_rw_memory(8)
+        expect(native_exec_memory_count()).to_equal(baseline + 2)
+
+        val old_record = SharedExecRecord(
+            owner_id: "owner_gotrel32", symbol: "replace_fn",
+            address: code_addr, size: 8, generation: 1,
+            got_base: got_addr, got_size: 8)
+
+        # This is the EXACT call `map_symbol`'s replace branch makes on the
+        # outgoing record before attempting the new mapping -- unmodified
+        # copy-paste of the call site, not a re-implementation.
+        expect(mapper._free_mapped_resources(old_record)).to_equal(true)
+        # Both the old code mapping and its old GOT slot must be gone.
+        expect(native_exec_memory_count()).to_equal(baseline)
+
+    # ------------------------------------------------------------------
+    # module_loader_compat.spl's INLINE GOT synthesis (~1330-1420, in `me
+    # load_with_intent`) is NOT extracted into a standalone function the way
+    # object_mapper.spl's apply_smf_relocations is -- it needs the loader's
+    # own `symbols`/`ordered_symbols`/`self.global_symbols` state in place,
+    # so the only real entry point is `ModuleLoader.load(path)` on an actual
+    # SMF file. That path was attempted (compile a small `.c` fixture with
+    # `cc`, build an SMF via `build_smf_with_relocations`, force wire 4 via
+    # the same byte-patch technique `module_loader_relocation_spec.spl` uses
+    # for `symbol_index`) and is NOT reachable in this sandbox: even a
+    # completely vanilla fixture with ZERO relocations fails at the
+    # unconditional `native_make_executable` call that runs before any
+    # relocation code (module_loader_compat.spl:1327,
+    # "Failed to mark executable memory for main") -- mprotect(PROT_EXEC) is
+    # refused here, independent of anything this lane changed. This is also
+    # why `module_loader_relocation_spec.spl` fails today (compile-time,
+    # via a `use compiler.loader.*` wildcard pulling in an unrelated broken
+    # file) rather than at this same runtime step: it never gets far enough
+    # to hit it. Said precisely per the lane's own escape clause: coverage
+    # of module_loader_compat's inline GOT synthesis is therefore limited to
+    # `loader_reloc_oracle_spec.spl`'s formula-level tests of
+    # `loader_smf_reloc_value` and the first test in this file; nothing in
+    # this tree drives its GOT ALLOCATION/DICT-LOOKUP loop end to end.
