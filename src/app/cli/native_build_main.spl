@@ -1,7 +1,8 @@
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, cwd}
-use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
+use app.io.time_ops.{current_time_ms}
+use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query}
 use app.io.file_ops.{path_absolute}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
@@ -683,6 +684,72 @@ fn hir_shard_queue_dir() -> text:
         return ""
     dir
 
+# Per-shard wait budget for the HIR fill. DEFAULT_TIMEOUT_MS (6h) is the
+# orchestrator's whole-worker budget; a single stalled HIR shard must be
+# detected in minutes, not hours, or one bad shard holds the whole build
+# hostage until the whole-worker budget expires -- and the phase still fails,
+# because unlike the parse lane this path had no claim reclaim. Floor keeps
+# legitimately slow shards alive; override via SIMPLE_HIR_SHARD_WAIT_MS.
+fn hir_shard_wait_ms(count: i64, timeout_ms: i64) -> i64:
+    val override_ms = env_get("SIMPLE_HIR_SHARD_WAIT_MS") ?? ""
+    if override_ms != "":
+        val parsed = override_ms.to_i64() ?? 0
+        if parsed > 0:
+            return parsed
+    # Cold-pipeline shard children must re-run parse+surface themselves
+    # (~1.5-3.5h interpreted) before lowering anything; a tight floor kills
+    # them mid-surface and throws away their work (observed 2026-09-17:
+    # 5/10 shards timed out at a 30-min floor during surface_build).
+    val floor_ms = 7200000
+    val share = timeout_ms / count * 2
+    val budget = if share > floor_ms: share else: floor_ms
+    if budget > timeout_ms:
+        return timeout_ms
+    budget
+
+fn spawn_hir_shards(base: [text], indices: [i64], count: i64, simple_bin: text, wait_ms: i64, queue_dir: text) -> [i64]:
+    # One HIR shard child per index, bounded wait, and ALWAYS account for each
+    # child's status. On death/timeout: kill the straggler (a wait timeout
+    # returns while the child is still alive, burning a core), then release its
+    # queue claims so a retry shard -- or the real build's own lowering --
+    # picks the orphans up. Mirrors the parse-shard reclaim in
+    # spawn_parse_shards / run_parse_shards; this lane previously waited the
+    # full whole-worker budget with no reclaim and no per-shard status line.
+    var pids: [i64] = []
+    val spawn_started_ms = current_time_ms()
+    for i in indices:
+        var shard_args = base
+        shard_args = shard_args.push("--hir-shard={i}/{count}")
+        val pid = process_spawn_async(simple_bin, shard_args)
+        pids = pids.push(pid)
+    var failed: [i64] = []
+    var k = 0
+    while k < pids.len():
+        val i = indices[k]
+        val pid = pids[k]
+        # Deadline accounting: all shards spawned together share ONE budget
+        # window. Sequential full-budget waits cost N x budget (observed
+        # 2026-09-18: 4 shards x 3h = 12h before the real worker could boot).
+        # Wait each shard only until the shared deadline (+ reap grace), so
+        # the phase costs ~budget + N x grace total. process_wait(0) is
+        # avoided (unknown-blocking risk); 1 ms returns immediately.
+        val elapsed_ms = current_time_ms() - spawn_started_ms
+        var remaining_ms = wait_ms - elapsed_ms + 30000
+        if remaining_ms < 1:
+            remaining_ms = 1
+        val code = if pid > 0: process_wait(pid, remaining_ms) else: -1
+        if code != 0:
+            eprint "[hir-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}"
+            if pid > 0:
+                val _killed = process_kill(pid)
+            if queue_dir != "":
+                val _released = parse_shard_release_claims(queue_dir, ["{i}/{count}"])
+            failed = failed.push(i)
+        else:
+            print "[hir-shard] shard={i}/{count} pid={pid} exit=0"
+        k = k + 1
+    failed
+
 fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
@@ -691,24 +758,29 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     val old_queue = env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
     if queue_dir != "":
         env_set("SIMPLE_HIR_SHARD_QUEUE", queue_dir)
-    var pids: [i64] = []
+    var indices: [i64] = []
     var i: i64 = 0
     while i < count:
-        var shard_args = base
-        shard_args = shard_args.push("--hir-shard={i}/{count}")
-        val pid = process_spawn_async(simple_bin, shard_args)
-        if pid > 0:
-            pids = pids.push(pid)
+        indices = indices.push(i)
         i = i + 1
-    var done = 0
-    for pid in pids:
-        val code = process_wait(pid, timeout_ms)
-        if code == 0:
-            done = done + 1
+    val wait_ms = hir_shard_wait_ms(count, timeout_ms)
+    var failed = spawn_hir_shards(base, indices, count, simple_bin, wait_ms, queue_dir)
+    # One reclaim round, mirroring run_parse_shards: the retry shard claims
+    # exactly the released orphans. A second death degrades to the real build
+    # lowering the remainder itself (modules with no HIR cache entry).
+    if queue_dir != "" and failed.len() > 0:
+        print "[hir-shard] reclaim: {failed.len()} dead shard(s), retrying once"
+        var retry: [i64] = []
+        for f in failed:
+            retry = retry.push(f)
+        failed = spawn_hir_shards(base, retry, count, simple_bin, wait_ms, queue_dir)
+        if failed.len() > 0:
+            print "[hir-shard] degrade: {failed.len()} shard(s) still dead; real build lowers their modules inline"
     if queue_dir != "":
         env_set("SIMPLE_HIR_SHARD_QUEUE", old_queue)
         val _removed = dir_remove_all(queue_dir)
     val mode = if queue_dir != "": "queue" else: "static"
+    val done = count - failed.len()
     print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
 
 pub fn run_native_build_worker(args: [text]) -> i64:
