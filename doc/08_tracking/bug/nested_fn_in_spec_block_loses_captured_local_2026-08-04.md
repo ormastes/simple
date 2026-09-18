@@ -83,6 +83,40 @@ the letrec edit is pinned rather than assumed.
   `test/01_unit` use this shape, so a dispatch-precedence change has a wide blast
   radius.
 
+### A second defect the letrec edit repairs — on one route only
+
+A **recursive** nested `fn` inside a PLAIN function body (no lambda anywhere)
+was wholly broken, and not with a capture error:
+
+```simple
+fn outer() -> i64:
+    val base = 10
+    fn fact(n: i64) -> i64:
+        if n <= 1:
+            return base
+        n * fact(n - 1)
+    fact(4)
+```
+
+| route | deployed seed | rebuilt seed |
+|---|---|---|
+| `bin/simple run` | **`error[E1002]: function `fact` not found`** | **240, correct** |
+| spec runner (`test`) | `semantic: variable `base` not found` | `semantic: variable `base` not found` |
+
+On the `run` route this is a clean repair, and it comes from the letrec half
+of the change rather than the dispatch half: the plain-fn path binds only the
+environment, so the closure was the only registration and it could not see
+itself. Nothing in this record predicted it; it turned up because the shape was
+probed on both binaries rather than assumed to be covered.
+
+Through the **spec runner** the same code still fails, identically on both
+binaries. So the spec runner reaches a module-level function body by a path
+this change does not touch, and that path loses the enclosing `val` for a
+recursive nested `fn`. That is a remaining member of this family, measured but
+not diagnosed. The spec deliberately does not assert this example — asserting
+it would add a red, and dropping it silently would hide a real finding, so it
+is recorded here instead.
+
 ### What this does NOT fix, measured
 
 - **`test/01_unit/os/acpi/acpi_test.spl` still fails its same 3 examples.** This
