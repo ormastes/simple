@@ -1,0 +1,88 @@
+"""LinkReceiptV1 reports what a link job actually did (design §6.2, §8, D8).
+`outcome` and `accounting_class` are closed enums whose text names round-trip
+through their decoders, matching the `KpfStatus`-style vocabulary used
+throughout `common/kernel_plugin`."""
+
+use std.spec.*
+use std.common.kernel_plugin.ids.*
+use std.common.kernel_plugin.schema_header.*
+use std.common.linker.link_request_v1.LinkTargetV1
+use std.common.linker.link_receipt_v1.*
+
+val REQUIREMENT = KpfSchemaRequirementV1(
+    schema_id: KpfId128(hi: 1, lo: 3),
+    schema_major: 1,
+    minimum_minor: 0,
+    minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+    schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0)
+)
+
+fn valid_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: KpfId128(hi: 1, lo: 3),
+        schema_major: 1,
+        schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0),
+        reserved0: 0
+    )
+
+fn linux_x86_64() -> LinkTargetV1:
+    LinkTargetV1(arch: 1, os: 1, abi: 1, object_format: 1, endian: 1, address_width: 64)
+
+fn valid_receipt(outcome: LinkOutcomeV1) -> LinkReceiptV1:
+    LinkReceiptV1(
+        header: valid_header(), engine_id: "mold", host: linux_x86_64(), target: linux_x86_64(),
+        policy_digest: KpfDigest256(w0: 5, w1: 0, w2: 0, w3: 0),
+        accounting_class: LinkAccountingClassV1.MeasuredOnly,
+        measured_peak_bytes: 0, outcome: outcome
+    )
+
+describe "LinkOutcomeV1 and LinkAccountingClassV1 names":
+    it "round-trips every outcome name":
+        # @req REQ-LINKER-A2-RECEIPT
+        val outcomes = [
+            LinkOutcomeV1.Success, LinkOutcomeV1.UnsupportedFeature, LinkOutcomeV1.UnsupportedBudget,
+            LinkOutcomeV1.IncompleteDebugOutput, LinkOutcomeV1.InputError, LinkOutcomeV1.ResourceFailure,
+            LinkOutcomeV1.Cancelled
+        ]
+        for outcome in outcomes:
+            expect(link_outcome_v1_from_name(outcome.name())).to_equal(Some(outcome))
+        expect(link_outcome_v1_from_name("NotAnOutcome")).to_be_nil()
+
+    it "round-trips every accounting class name":
+        val classes = [
+            LinkAccountingClassV1.QualifiedJobScope, LinkAccountingClassV1.MeasuredOnly,
+            LinkAccountingClassV1.NotCertified
+        ]
+        for class_ in classes:
+            expect(link_accounting_class_v1_from_name(class_.name())).to_equal(Some(class_))
+        expect(link_accounting_class_v1_from_name("NotAClass")).to_be_nil()
+
+describe "LinkReceiptV1 validation":
+    it "accepts a well-formed success receipt":
+        expect(link_receipt_v1_validate(valid_receipt(LinkOutcomeV1.Success), REQUIREMENT)).to_equal("")
+
+    it "rejects an empty engine_id":
+        val receipt = LinkReceiptV1(
+            header: valid_header(), engine_id: "", host: linux_x86_64(), target: linux_x86_64(),
+            policy_digest: KpfDigest256(w0: 5, w1: 0, w2: 0, w3: 0),
+            accounting_class: LinkAccountingClassV1.NotCertified,
+            measured_peak_bytes: 0, outcome: LinkOutcomeV1.InputError
+        )
+        expect(link_receipt_v1_validate(receipt, REQUIREMENT)).to_contain("engine_id")
+
+    it "rejects a schema header that fails validation":
+        val bad_header = KpfSchemaHeaderV1(
+            abi_version: KPF_ABI_VERSION_V1, struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+            schema_id: KpfId128(hi: 4, lo: 4), schema_major: 1, schema_minor: 0,
+            schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0), reserved0: 0
+        )
+        val receipt = LinkReceiptV1(
+            header: bad_header, engine_id: "ld.lld", host: linux_x86_64(), target: linux_x86_64(),
+            policy_digest: KpfDigest256(w0: 5, w1: 0, w2: 0, w3: 0),
+            accounting_class: LinkAccountingClassV1.MeasuredOnly,
+            measured_peak_bytes: 0, outcome: LinkOutcomeV1.Success
+        )
+        expect(link_receipt_v1_validate(receipt, REQUIREMENT)).to_contain("schema header invalid")
