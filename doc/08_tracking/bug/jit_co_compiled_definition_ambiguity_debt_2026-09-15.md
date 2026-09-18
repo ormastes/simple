@@ -129,3 +129,14 @@ oracles — runner-environment dispatch skew, unconfirmed root cause.
    try_load_runtime_ttf leaves has_ttf=false. Candidates, SFFI backend
    (spl_fonts_call_*), and font bytes are all verified good. Same fix class
    as (2): dispatch by import path.
+4. `fill_series_spec` — cleanest reproduction (2026-09-19). The spec's
+   first `it` calls `detect_fill_pattern(_nums([1.0, 3.0]))` and matches
+   `FillPattern.Linear(start, step)`. The IDENTICAL code with the IDENTICAL
+   five-line import block passes in a 25-line probe file (start=1.0,
+   step=2.0, both patterns, named and positional). In the full 174-line
+   spec the same `it` falls through to `_:` (CopyCycle) — no
+   cross-family imports are involved; the wider closure alone tips the
+   co-compiled dispatch (number_cell or detect_fill_pattern $dup). Any
+   fix for the compiler debt should use this file as the regression test:
+   it is small, self-contained, and binary (pass in a stub file, fail in
+   the real one).
