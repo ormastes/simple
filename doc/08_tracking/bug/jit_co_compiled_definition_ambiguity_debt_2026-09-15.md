@@ -119,3 +119,13 @@ Also noted: cli_process_facade_source it2 ("facade contracts
 distinct/non-recursive") reports recursion-count 2 under the test runner
 while identical probes outside the runner give 1 on the same file and
 oracles — runner-environment dispatch skew, unconfirmed root cause.
+3. `FontRenderer.try_load_runtime_ttf` — third confirmed dispatch.
+   Isolated probe importing only std.nogc_sync_mut.text_layout.font_renderer
+   loads the bundled NotoSerifSC[wght].ttf fine (has_ttf=true). The
+   ui.chromium text_metrics spec (14 its, 13 failing with zero metrics)
+   imports common.text_layout.font_renderer (facade to the same canonical
+   module) PLUS std.gc_async_mut.gpu.browser_engine.text_painter, and the
+   wider closure dispatches a different FontRenderer variant whose
+   try_load_runtime_ttf leaves has_ttf=false. Candidates, SFFI backend
+   (spl_fonts_call_*), and font bytes are all verified good. Same fix class
+   as (2): dispatch by import path.
