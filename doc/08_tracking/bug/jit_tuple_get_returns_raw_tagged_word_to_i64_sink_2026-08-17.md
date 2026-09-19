@@ -146,3 +146,7 @@ every non-`ANY` scalar sink is affected, and `u64`/`i32` "passing" in the matrix
 probe is most likely those rows' sinks not being statically typed, not the
 defect being i64-specific. Not measured; stated as a prediction, not a finding.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

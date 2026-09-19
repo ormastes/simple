@@ -339,3 +339,11 @@ staged artifact; argv read through `rt_cli_get_args` rather than a same-named
 import). Ablation-verified: neutralising the native_build_main.spl guard takes
 that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

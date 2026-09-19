@@ -623,3 +623,7 @@ measurements will keep reproducing that bug instead of the payload-struct-name
 collision. The collision itself was NOT re-measured by this lane — its root
 cause is in `src/compiler/50.mir/**`, claimed by another lane. Status left OPEN
 unchanged.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

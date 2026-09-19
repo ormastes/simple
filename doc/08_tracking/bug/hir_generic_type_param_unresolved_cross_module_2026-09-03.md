@@ -106,3 +106,7 @@ Same class as
 cited in the materialization source itself (line ~1032). So fixing the HIR half
 may only move a generic-using program's failure to a codegen SEGV.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

@@ -305,3 +305,11 @@ that never ran, and in four of those the live interpreter had **no such arm at
 all** — so the true defect was consistently recorded as narrower than it was.
 When deleting a shadowed duplicate, sweep every doc that cites it in the same
 change.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
