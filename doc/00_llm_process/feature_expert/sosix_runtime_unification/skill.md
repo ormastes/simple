@@ -36,6 +36,7 @@ queues, QEMU serial-bytes-observed row (needs pure-Simple deploy).
 | SimpleOS shims | `src/os/sosix/core/*.spl`, `src/os/sosix/fs/operation_adapter.spl` |
 | Hosted capsule | `src/lib/nogc_async_mut/sosix/{__init__,host_facade,fs,sync,time,file_driver,posix}.spl` (`posix` re-exported since the 2026-09-05 deploy) |
 | Seed externs | `src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs`, `compiler/src/interpreter_extern/{file_io,mod}.rs`, `common/src/runtime_symbols.rs`, `runtime/src/security_runtime.rs`; C twin `src/runtime/runtime_native.c`; typed aliases `src/lib/nogc_sync_mut/sffi/fs.spl` |
+| File mapping (2026-09-19) | `src/lib/nogc_async_mut/sosix/file_map.spl` — `sosix_file_map`/`sosix_file_unmap` (ACTUAL access) and `sosix_file_map_prefetch` (CACHING; Windows no-op). Externs via `sffi/fs.spl` aliases only; `io.file_ops.file_mmap` deleted. C twin `runtime_native.c` `rt_mmap` (strong, core-C archive member; Windows `MapViewOfFile`); Rust owner keeps the sandbox gate. Gate `scripts/check/check-file-map-c.shs` (both C owners). Guide § "File mapping" |
 | Perf spec | `test/05_perf/lib/sosix_hosted_fs_perf_spec.spl` (mechanism assertions; prints ns/op) |
 | Specs | `test/01_unit/lib/common/contracts/sosix/*_spec.spl`, `test/01_unit/lib/nogc_async_mut/sosix/*_spec.spl`, `test/01_unit/os/sosix/operation_core_spec.spl` |
 | Gate | `scripts/check/check-sosix-capsule-boundaries.shs` (R1–R5, `--selftest`) |
