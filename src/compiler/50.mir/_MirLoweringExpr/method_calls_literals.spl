@@ -1457,7 +1457,8 @@ impl MirLowering:
             eprint("[mir-method-call] gpu-owner method={method}\n")
 
         # Pre-lower writeback origin for mutating methods on indexed/field receivers.
-        # wb_kind: 0 = none, 1 = indexed (rt_array_set), 2 = field (emit_set_field)
+        # wb_kind: 0 = none, 1 = indexed (rt_array_set), 2 = field (emit_set_field),
+        # 3 = dict slot (rt_dict_set), 4 = tuple raw-block slot (GEP store)
         var wb_kind: i64 = 0
         var wb_base: LocalId = 0
         var wb_index: LocalId = 0
@@ -2831,19 +2832,29 @@ impl MirLowering:
             match receiver.kind:
                 case Index(base, index):
                     wb_base = self.lower_expr(base)
-                    wb_index = self.lower_expr(index)
-                    if self.local_is_runtime_array(wb_base):
-                        val getter = MirOperand(kind: MirOperandKind.Const(
-                            MirConstValue.Str("rt_array_get"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-                        ))
-                        var wb_b = self.builder
-                        val loaded = wb_b.emit_call(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], receiver_type)
-                        self.builder = wb_b
-                        if val value = loaded:
-                            wb_receiver = value
-                            self.mark_runtime_value_local(value.id)
-                    else:
+                    if self.local_is_runtime_dict(wb_base):
+                        # Dict slot receiver (`c["k"].push(x)`): the slot is a
+                        # dict VALUE, not an array element. Load through the
+                        # same rt_dict_get read as `c[k]` (tagged-key
+                        # normalization included, via lower_dict_key) and mark
+                        # the slot for a rt_dict_set store-back. Without this
+                        # the dict handle fell into the raw GEP+load /
+                        # rt_array_set path below, which treats the hash table
+                        # as an element array: the pushed write never reached
+                        # the stored value (mutate_through_index_loses_write,
+                        # dict-value shape).
+                        wb_index = self.lower_dict_key(index)
+                        wb_receiver = self.lower_dict_runtime_get(base, wb_base, wb_index)
+                        wb_kind = 3
+                    elif self.writeback_index_base_is_tuple(wb_base, base):
+                        # Tuple positional-field receiver (`a[0].1.push(x)`:
+                        # `.N` desugars to Index on a Tuple-typed base). Tuple
+                        # storage is a raw rt_alloc field block with no SplArray
+                        # header, so rt_array_get/rt_array_set cannot address
+                        # it -- the same landmine the read path documents. Load
+                        # the field word with plain GEP+load and store it back
+                        # through the same slot (wb_kind 4).
+                        wb_index = self.lower_expr(index)
                         var wb_b = self.builder
                         val wb_ptr = wb_b.emit_gep(
                             mir_operand_copy(wb_base),
@@ -2852,7 +2863,30 @@ impl MirLowering:
                         )
                         wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
                         self.builder = wb_b
-                    wb_kind = 1
+                        wb_kind = 4
+                    else:
+                        wb_index = self.lower_expr(index)
+                        if self.local_is_runtime_array(wb_base):
+                            val getter = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_array_get"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var wb_b = self.builder
+                            val loaded = wb_b.emit_call(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], receiver_type)
+                            self.builder = wb_b
+                            if val value = loaded:
+                                wb_receiver = value
+                                self.mark_runtime_value_local(value.id)
+                        else:
+                            var wb_b = self.builder
+                            val wb_ptr = wb_b.emit_gep(
+                                mir_operand_copy(wb_base),
+                                [mir_operand_copy(wb_index)],
+                                MirType.ptr(receiver_type, false)
+                            )
+                            wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
+                            self.builder = wb_b
+                        wb_kind = 1
                 case Field(base, field_name, resolved):
                     wb_base = self.lower_expr(base)
                     wb_field_idx = self.resolve_field_index(base, wb_base, field_name, resolved)
@@ -3775,6 +3809,9 @@ impl MirLowering:
 
         wb_kind 1: `rt_array_set(base, index, receiver)` (indexed slot)
         wb_kind 2: `emit_set_field(base, field_idx, receiver)` (struct field)
+        wb_kind 3: `rt_dict_set(base, tagged_key, boxed_receiver)` (dict slot)
+        wb_kind 4: GEP+store into the tuple raw-block slot the receiver was
+                   loaded from (tuple positional field; raw word, no boxing)
         """
         if wb_kind == 1:
             val boxed_receiver = self.box_runtime_value(receiver_value)
@@ -3791,6 +3828,60 @@ impl MirLowering:
             var b = self.builder
             b.emit_set_field(mir_operand_copy(wb_base), wb_field_idx, mir_operand_copy(receiver_value))
             self.builder = b
+        else if wb_kind == 3:
+            # Dict VALUE slot: same runtime call and boxing as `.set(k, v)`
+            # and `d[k] = v` (mir_lowering_stmts.spl Index-assign). The key
+            # was normalized by lower_dict_key at pre-lower time, so it is
+            # already in the tagged representation rt_dict_set hashes by.
+            val boxed_receiver = self.box_runtime_value(receiver_value)
+            val set_operand = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_set"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b = self.builder
+            b.emit_call(set_operand, [
+                mir_operand_copy(wb_base),
+                mir_operand_copy(wb_index),
+                mir_operand_copy(boxed_receiver)
+            ], MirType.i64())
+            self.builder = b
+        else if wb_kind == 4:
+            # Tuple raw-block slot: mirror of the GEP+load the receiver was
+            # read with -- the same single-slot store the read path's
+            # else-branch implies. The receiver word (e.g. an array handle)
+            # passes through raw exactly like emit_set_field stores it.
+            var b = self.builder
+            val wb_ptr = b.emit_gep(
+                mir_operand_copy(wb_base),
+                [mir_operand_copy(wb_index)],
+                MirType.ptr(MirType.i64(), false)
+            )
+            b.emit_store(mir_operand_copy(wb_ptr), mir_operand_copy(receiver_value))
+            self.builder = b
+
+    me writeback_index_base_is_tuple(wb_base: LocalId, base_hir: HirExpr) -> bool:
+        """Whether an Index write-back receiver addresses a TUPLE positional
+        field (`a[0].1`, desugared to Index on a Tuple-typed base).
+
+        Probed HIR type first (HIR inference types the `a[0]` read), then the
+        lowered local's registered MIR type -- either is sufficient. This
+        MUST be checked before the runtime-array probe: a tuple temp whose
+        registered type was erased to the Array(i64) default would otherwise
+        mis-answer local_is_runtime_array and get routed through
+        rt_array_get/rt_array_set, which cannot address a raw tuple block
+        (its fields are not an SplArray header).
+        """
+        if base_hir.has_type_ == true and base_hir.type_ != nil:
+            match base_hir.type_.kind:
+                case HirTypeKind.Tuple(_):
+                    return true
+                case _: ()
+        if val wb_base_type = self.builder.local_type(wb_base):
+            match wb_base_type.kind:
+                case MirTypeKind.Tuple(_):
+                    return true
+                case _: ()
+        false
 
     me lower_gpu_intrinsic_call(name: text, args: [HirCallArg]) -> LocalId:
         """Lower GPU intrinsic function call to MIR GPU instruction."""
