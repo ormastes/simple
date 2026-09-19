@@ -293,3 +293,76 @@ describe "elf_boot_link - compound ASSERT":
         val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("kernel too big")
+
+# Review round 2: each case below was checked against ld.lld 23.1.0 on the same objects.
+val SAME_REGION_SCRIPT: text = """ENTRY(_start)
+MEMORY { RAM (rwx) : ORIGIN = 0x200000, LENGTH = 0x10000 }
+SECTIONS {
+    .text : { *(.text*) } > RAM AT> RAM
+    .rodata : { *(.rodata*) } > RAM AT> RAM
+    .data : { *(.data*) } > RAM AT> RAM
+    .bss : { *(.bss*) } > RAM
+    /DISCARD/ : { *(.comment) }
+}
+"""
+
+val NOBITS_AT_SCRIPT: text = """ENTRY(_start)
+MEMORY { ROM (rx) : ORIGIN = 0x100000, LENGTH = 0x10000  RAM (rwx) : ORIGIN = 0x200000, LENGTH = 0x10000 }
+SECTIONS {
+    .text : { *(.text*) } > ROM
+    .data : { *(.data*) } > RAM AT> ROM
+    .bss : { *(.bss*) } > RAM AT> ROM
+    .rodata : { *(.rodata*) } > ROM
+    /DISCARD/ : { *(.comment) }
+}
+"""
+
+val EXPLICIT_ADDR_SCRIPT: text = """ENTRY(_start)
+SECTIONS {
+    .text 0x200001 : ALIGN(16) { *(.text*) }
+    .rodata 0x200201 : { *(.rodata*) }
+    .data : { *(.data*) }
+    .bss : { *(.bss*) }
+    /DISCARD/ : { *(.comment) }
+}
+"""
+
+val TOP_REGION_SCRIPT: text = """ENTRY(_start)
+MEMORY { HI (rwx) : ORIGIN = 0xffffffff80000000, LENGTH = 0x60 }
+SECTIONS {
+    .text : { *(.text*) } > HI
+    .rodata : { *(.rodata*) } > HI
+    .data : { *(.data*) } > HI
+    .bss : { *(.bss*) } > HI
+    /DISCARD/ : { *(.comment) }
+}
+"""
+
+describe "elf_boot_link - region cursors and explicit addresses (lld 23 parity)":
+    it "a region used as both VMA and AT> region advances once":
+        val im = elf_boot_link_image(objs(), plan_of(SAME_REGION_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(sec_vma(im, ".rodata")).to_equal(0x200058)
+        expect(sec_vma(im, ".data")).to_equal(0x200060)
+        expect(sec_vma(im, ".bss")).to_equal(0x200068)
+
+    it "a NOBITS section with AT> still advances the load region":
+        val im = elf_boot_link_image(objs(), plan_of(NOBITS_AT_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(im.sec_lmas[1]).to_equal(0x100058)
+        expect(sec_vma(im, ".rodata")).to_equal(0x100068)
+
+    it "an explicit address is kept even with ALIGN() after the colon":
+        val im = elf_boot_link_image(objs(), plan_of(EXPLICIT_ADDR_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(sec_vma(im, ".text")).to_equal(0x200001)
+        expect(sec_size(im, ".text")).to_equal(0x5b)
+        expect(sec_vma(im, ".rodata")).to_equal(0x200201)
+
+    it "a top-of-memory region overflows at the right section, reported unsigned":
+        val r = elf_boot_link(objs(), plan_of(TOP_REGION_SCRIPT), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("section .data will not fit in region HI: overflowed by 8 bytes")
+
+    it "origin + length wrapping to 0 is rejected exactly as ld.lld 23 does":
+        val script = TOP_REGION_SCRIPT.replace("LENGTH = 0x60", "LENGTH = 0x80000000")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("section .text will not fit in region HI: overflowed by 18446744071562068056 bytes")
