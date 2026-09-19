@@ -1,5 +1,6 @@
 use compiler.core.parser.{
     parse_module_silent_checked, parser_has_errors, parser_set_had_error}
+use compiler.tools.lint.lint_parse_memo.{lint_parse_module_memo}
 use compiler.core.ast.{
     DECL_CLASS, DECL_STRUCT, decl_get_fields, decl_get_field_types,
     decl_get_name, decl_get_span, decl_get_tag, module_get_decls}
@@ -39,6 +40,15 @@ pub fn param_object_schemas_from_source(source: text, path: text) -> [ParamObjec
     parser_set_had_error(previous_parse_error)
     if parse_failed:
         return []
+    param_object_schemas_from_parsed_module()
+
+# Same projection as `param_object_schemas_from_source`, over the module the
+# parser arena ALREADY holds. Parsing a real compiler file costs ~12s under the
+# interpreted lint path, and `check_param_object_rules` used to pay it twice for
+# one file (once here, once again for the env walk below) on top of the parse
+# `lint_cli_source` had already done. Splitting the projection off the parse is
+# what lets the rule parse once.
+pub fn param_object_schemas_from_parsed_module() -> [ParamObjectSchema]:
     var result: [ParamObjectSchema] = []
     for declaration in module_get_decls():
         val tag = decl_get_tag(declaration)
@@ -138,7 +148,15 @@ fn _param_env_decl(declaration: i64, mut findings: [ParamObjectFinding]):
 
 pub fn check_param_object_rules(source: text, path: text) -> [ParamObjectFinding]:
     var findings: [ParamObjectFinding] = []
-    val structs = param_object_schemas_from_source(source, path)
+    # ONE parse for both halves of this rule. The env walk below used to
+    # re-parse the same source into the same arena; measured on
+    # src/compiler/50.mir/hwir/zca_rows.spl (1901 lines) the two parses cost
+    # 12.8s + 11.8s of the rule's 25.2s, with the projection and the walk
+    # together under 0.6s.
+    val parse_failed = lint_parse_module_memo(source, path)
+    if parse_failed:
+        return findings
+    val structs = param_object_schemas_from_parsed_module()
     for item in structs:
         val hdr_index = item.fields.index_of("hdr") ?? -1
         val ext_index = item.fields.index_of("ext") ?? -1
@@ -169,10 +187,6 @@ pub fn check_param_object_rules(source: text, path: text) -> [ParamObjectFinding
                     "PLUG-001", "{item.name} must evolve through its trailing ext field",
                     "Keep ext: [ParamExt] as the final field", item.line_num))
     if not path.starts_with("src/app/cli/") and not path.starts_with("src/app/io/"):
-        val previous_parse_error = parser_has_errors()
-        val parse_failed = parse_module_silent_checked(source, path)
-        parser_set_had_error(previous_parse_error)
-        if not parse_failed:
-            for declaration in module_get_decls():
-                _param_env_decl(declaration, findings)
+        for declaration in module_get_decls():
+            _param_env_decl(declaration, findings)
     findings
