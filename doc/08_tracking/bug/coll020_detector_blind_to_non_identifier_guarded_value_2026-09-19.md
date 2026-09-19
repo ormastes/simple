@@ -121,3 +121,38 @@ call anywhere in the condition. **Every COLL020 site is a negated filter** —
 widening makes COLL002 fire on all of them and every dedup site reports
 twice, once as O(n^2)-per-iteration and once as a manual dedup loop. A fix
 must exclude the guards COLL020 already claims.
+
+## RESOLVED 2026-09-19 — measured before/after
+
+Both matchers widened, warning-only. Diagnostic coverage measured by running
+`bin/simple lint` over the same 52 files at the commit before and after, and
+matching reported lines against the 68 known sites:
+
+| | sites diagnosed | raw COLL rows |
+|---|---|---|
+| before | 18 of 68 | 31 |
+| after | **37 of 68** | 60 |
+
+Fix coverage is **unchanged at 10 of 68**, verified site by site — the fix
+envelope was deliberately not widened with the detector.
+
+**Why 37 and not ~68, and it is not this rule.** Only 33 of the 52 files ever
+reach the COLL rules under `bin/simple lint`; the other 19 abort first on
+unrelated defects — e.g. `test/01_unit/compiler/30.types/
+simd_capabilities_extern_backing_spec.spl` dies with `error: semantic: string
+index out of bounds: index is 7628 but length is 7628`, and the same file's
+dedup site IS found by `simple fix`, which takes a parse-only path. Within the
+41 sites in files that demonstrably reached the rules, **37 are diagnosed
+(90%)**. The 27 unreached sites are a separate pre-existing bug in the lint
+front end, not detector blindness.
+
+The 4 residual misses in reachable files are both known and one of them is
+correct:
+
+- `src/os/port/build_tools/simple_make.spl:322` — the guard is OUTSIDE the
+  loop (recursive accumulation). Correctly silent; it is not quadratic.
+- `src/lib/common/diagram/__init__.spl:374`, `:479`, `:485` — the guard body
+  holds a push of a DIFFERENT value alongside the dedup push
+  (`lines.push("    participant {p}")`). That is the multi-statement
+  guard-body limit already recorded above, and widening it would mean proving
+  the extra statements are not part of the idiom.
