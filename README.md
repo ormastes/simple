@@ -808,34 +808,47 @@ style: write readable `step("...")` actions, keep executable assertions in the
 same scenario, and let docgen render compact manual steps with folded source.
 
 ```simple
-use std.spec.*
+use std.spec.{describe, expect, it, step}
+use std.common.spec.evidence.format.terminal_grid.{terminal_snapshot_from_rows}
 
-describe "Dashboard actions":
-    # @inline
-    it "operator has an authenticated session":
-        step("Open the sign-in page")
-        step("Submit valid credentials")
-
-    it "operator reviews dashboard actions":
-        # @include("operator has an authenticated session")
-        step("Open the actions panel")
-        expect("actions").to_equal("actions")
+describe "Release dashboard":
+  it "shows the current release rows in the terminal surface":
+    # @req REQ-RELEASE-DASHBOARD-001
+    val releases = [
+      ["Version", "Channel", "Status"],
+      ["1.0.0-beta.6", "beta", "ready"],
+      ["1.0.0", "stable", "pending"]
+    ]
+    step("Render the release table in the dashboard")
+    val screen = terminal_snapshot_from_rows([
+      "Release dashboard",
+      "Version       Channel  Status",
+      "1.0.0-beta.6 beta     ready",
+      "1.0.0        stable   pending"
+    ], 40)
+    step("Verify the table contains the current beta release")
+    expect(releases[1][0]).to_equal("1.0.0-beta.6")
+    expect(screen.rows).to_equal(4)
 ```
 
-Generated manual:
+The same fixture is readable in the generated manual and makes the rendered
+TUI state reviewable:
 
-```md
-1. Open the sign-in page
-2. Submit valid credentials
-3. Open the actions panel
-   - Expected: "actions" equals `actions`
+```text
+Release dashboard
+Version       Channel  Status
+1.0.0-beta.6 beta     ready
+1.0.0        stable   pending
 ```
 
 `Given_*`, `When_*`, and `Then_*` helper naming is legacy style. Use
 `step("...")` for new SSpec manuals. See the
 [SSpec Scenario Manual Guide](doc/07_guide/infra/sspec_scenario_manual.md).
 
-Generated docs land in the numbered documentation tree, primarily under `doc/06_spec/`, so the checked examples stay close to the current spec artifacts.
+Generated docs land in the numbered documentation tree under `doc/06_spec/`.
+Docgen mirrors a test path without its leading `test/` component; for example,
+`test/03_system/plan_acceptance/evidence_showcase_spec.spl` generates
+`doc/06_spec/03_system/plan_acceptance/evidence_showcase_spec.md`.
 
 ---
 
@@ -918,47 +931,59 @@ See [doc/README.md](doc/README.md), [doc/06_spec/README.md](doc/06_spec/README.m
 
 ```
 simple/
-├── bin/                      # CLI entry points
-│   ├── simple               # Main CLI (shell wrapper)
-│   └── release/             # Pre-built release binaries
-│       └── simple           # Pre-built runtime (33 MB)
+├── bin/                      # CLI wrappers and admitted binaries
+│   ├── simple                # Main CLI
+│   └── release/              # Release binaries by target
 │
-├── src/                      # Simple source code (100% Simple)
-│   ├── app/                  # Applications
-│   │   ├── cli/             # Main CLI dispatcher
-│   │   ├── build/           # Self-hosting build system
-│   │   ├── mcp/             # MCP server (Model Context Protocol)
-│   │   ├── lsp/             # Language server protocol
-│   │   ├── io/              # SFFI wrappers (file, process, etc.)
-│   │   └── ...              # 50+ tool modules
-│   ├── lib/                  # Libraries
-│   │   ├── database/        # Unified database (BugDB, TestDB, etc.)
-│   │   └── pure/            # Pure Simple DL (tensor, autograd, nn)
-│   ├── std/                  # Standard library
-│   │   ├── src/             # Library source
-│   │   └── test/            # Library tests
-│   └── compiler/             # Compiler infrastructure
-│       ├── backend/         # Code generation
-│       ├── inference/       # Type inference
-│       └── parser/          # Parser and treesitter
+├── src/                      # Product source
+│   ├── app/                  # CLI, build, MCP, LSP, test runner, tools
+│   ├── compiler/             # Numbered compiler layers
+│   │   ├── 00.common/        # Shared compiler contracts and cache keys
+│   │   ├── 10.frontend/      # Lexer, parser, AST, desugaring
+│   │   ├── 50.mir/           # Lowered intermediate representation
+│   │   ├── 70.backend/       # Native, LLVM, C, WASM, and linker backends
+│   │   ├── 80.driver/        # Build driver and incremental cache
+│   │   │   └── cache/reference/ # Reverse-reference scheduling and receipts
+│   │   ├── 95.interp/        # Interpreter execution layer
+│   │   └── 99.loader/        # Module resolution, loading, and JIT instantiation
+│   ├── compiler_rust/        # Rust seed bootstrap compiler
+│   ├── lib/                  # Standard library, imported as use std.X
+│   ├── runtime/              # Native runtime and support libraries
+│   └── verification/         # Formal verification
 │
-├── examples/                 # Example programs
-│   ├── pure_nn/             # Deep learning examples
-│   └── gpu/vulkan/          # GPU computing examples
+├── test/                     # Executable specifications
+│   ├── 01_unit/              # Unit tests
+│   ├── 02_integration/       # Integration tests
+│   ├── 03_system/            # System and feature tests
+│   ├── 04_smoke/             # Fast product smoke tests
+│   └── 05_perf/              # Performance tests
 │
-├── test/                     # Test suites
-│   ├── integration/         # Integration tests
-│   ├── system/              # System tests
-│   └── intensive/           # Intensive feature tests
+├── doc/                      # Numbered lifecycle documentation
+│   ├── 01_research/          # Research
+│   ├── 02_requirements/      # Requirements
+│   ├── 03_plan/              # Plans
+│   ├── 04_architecture/      # Architecture
+│   ├── 05_design/            # Detail design
+│   ├── 06_spec/              # Generated/manual SSpec documents
+│   └── 07_guide/             # User and contributor guides
 │
-├── doc/                      # Documentation
-│   ├── spec/                # Language specifications
-│   ├── guide/               # User guides
-│   ├── design/              # Design documents
-│   └── report/              # Session reports
-│
-└── src/verification/             # Lean 4 formal verification
+├── .scv/quarantine/          # Ignored local SCV/JIT/root artifacts
+├── build/                    # Ignored build output and bootstrap artifacts
+└── scratchpad/               # Mutable developer probes, not quarantine
 ```
+
+### Incremental Compile and Interpreter Boundaries
+
+The reverse-reference records under `src/compiler/80.driver/cache/reference/`
+map changed declarations and artifacts to their known consumers. The build
+driver uses them to select invalidation and reuse candidates; the loader uses
+the same dependency facts for scheduling. They make incremental compilation
+more selective when receipts and cache keys match, but do not alter language
+semantics or turn an interpreter run into a native compilation. Interpreter
+execution remains owned by `src/compiler/95.interp/`.
+
+The admission model and current evidence limits are documented in the
+[reverse-reference harmonization plan](doc/03_plan/compiler/macos_bootstrap_reverse_reference_harmonization_plan_2026-08-30.md).
 
 ---
 
