@@ -1,0 +1,303 @@
+#!/bin/sh
+# check-nested-fn-jit-lowering.shs
+#
+# Guard: a `fn` declared INSIDE another function body must be lowered, not
+# dropped -- so the module it lives in still compiles on the JIT/native lane.
+#
+# WHY THIS EXISTS
+# ---------------
+# `hir/lower/stmt_lowering.rs` answered `Node::Function(_f) => Ok(vec![])` with
+# the comment "Nested function definitions are ignored in native lowering for
+# now". Nothing was miscomputed -- the call site lowered to an unresolved
+# external symbol, the JIT dropped the WHOLE module to the tree-walk
+# interpreter, and the right answer still came out. That is exactly what made it
+# survive: measured 2026-09-19 on the deployed seed, all three of a
+# non-capturing, a capturing and a recursive nested fn printed correct values at
+# exit 0 while silently costing ~100-1000x. On the native lane, which has no
+# interpreter to fall back to, the same shape is a link error.
+#
+# 43 files under `src/` carry 157 such declarations, so the cliff is not rare.
+#
+# WHY `SIMPLE_JIT_STRICT=1` IS THE ORACLE, AND WHY A SPEC CANNOT BE
+# -----------------------------------------------------------------
+# `bin/simple test` runs specs on the INTERPRET route, where this defect does
+# not exist -- a spec asserting the values passes identically before and after
+# the fix (both measured). The discriminator is that under `SIMPLE_JIT_STRICT=1`
+# the silent fallback becomes a hard error, so exit 0 means the whole module
+# really was compiled. Note this is the OPPOSITE of
+# check-no-jit-module-drop.shs, whose defect class is caught at the semantic
+# gate and is explicitly NOT hardened by strict; that fence uses `compile` as
+# its oracle for reasons documented in its own header. Both are needed.
+#
+# THE RECURSIVE ROW IS PINNED AS STILL-FALLING-BACK, ON PURPOSE
+# -------------------------------------------------------------
+# A nested fn is lowered as a local closure binding, and HIR closures have no
+# letrec: inside the converted body the fn's own name is unbound. Converting a
+# self-recursive one would either fail to resolve or -- worse -- silently
+# resolve to a module-level function of the same name and compile a call to the
+# WRONG body. So self-recursion is detected at lowering time and deliberately
+# left on the fallback path, which answers correctly. This guard asserts that
+# state rather than ignoring it: if someone lands letrec for HIR closures the
+# recursive row starts compiling and this guard FAILS, which is the signal to
+# re-measure and update it -- the same two-way staleness rule the repo's
+# ratchets use. A guard that silently keeps passing through a semantic change
+# is how a fence stops fencing.
+#
+# Bug: doc/08_tracking/bug/nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
+#
+# usage: sh scripts/check/check-nested-fn-jit-lowering.shs [--binary PATH] [--selftest]
+# verdict (last line of stdout):
+#   PASS  — <n> shape(s) checked on <binary>, all lowered as expected
+#   FAIL  — <n> shape(s) checked, <k> wrong: <rows>
+#   ERROR — nothing was checked (<reason>)            [exit 2]
+set -u
+
+BINARY=""
+SELFTEST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY="${2:-}"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        -h|--help) sed -n '1,52p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"; exit 2; }
+
+# One shape per row: name, expected strict outcome (compiled|fallback), expected
+# value on the default lane. The capturing and capture-semantics rows are what
+# make this more than a smoke test -- a nested fn that reads an enclosing local
+# is the shape the interpreter defect was originally filed against, and `capsem`
+# additionally pins that the compiled closure snapshots the local at its
+# declaration point, exactly as the interpreter does. If those two lanes ever
+# disagree the value comparison below catches it.
+SHAPES="nocap cap capsem rec"
+
+expect_strict_for() {
+    case "$1" in
+        nocap|cap|capsem) echo "compiled" ;;
+        rec) echo "fallback" ;;
+        *) echo "" ;;
+    esac
+}
+
+expect_value_for() {
+    case "$1" in
+        nocap) echo "42" ;;
+        cap) echo "42" ;;
+        capsem) echo "1" ;;
+        rec) echo "24" ;;
+        *) echo "" ;;
+    esac
+}
+
+write_shape() {
+    case "$2" in
+        nocap) cat > "$1" <<'EOF'
+fn outer() -> i64:
+    fn helper(a: i64) -> i64:
+        a * 2
+    helper(21)
+
+fn main() -> i64:
+    print "value=" + outer().to_text()
+    0
+EOF
+        ;;
+        cap) cat > "$1" <<'EOF'
+fn outer() -> i64:
+    val k = 5
+    fn at(a: i64) -> i64:
+        a + k
+    at(37)
+
+fn main() -> i64:
+    print "value=" + outer().to_text()
+    0
+EOF
+        ;;
+        capsem) cat > "$1" <<'EOF'
+fn main() -> i64:
+    var x = 1
+    fn readx() -> i64:
+        x
+    x = 5
+    print "value=" + readx().to_text()
+    0
+EOF
+        ;;
+        rec) cat > "$1" <<'EOF'
+fn outer() -> i64:
+    fn fact(n: i64) -> i64:
+        if n <= 1:
+            return 1
+        n * fact(n - 1)
+    fact(4)
+
+fn main() -> i64:
+    print "value=" + outer().to_text()
+    0
+EOF
+        ;;
+        # Selftest-only fixtures.
+        must_fire) cat > "$1" <<'EOF'
+fn main() -> i64:
+    print "value=" + no_such_function_anywhere(1).to_text()
+    0
+EOF
+        ;;
+        must_be_clean) cat > "$1" <<'EOF'
+fn main() -> i64:
+    val k = 5
+    val f = \a: a + k
+    print "value=" + f(37).to_text()
+    0
+EOF
+        ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# Echoes "compiled" or "fallback". A module that compiles whole exits 0 under
+# strict; one that drops exits non-zero naming the unresolved symbol.
+strict_outcome() {
+    SIMPLE_JIT_STRICT=1 timeout 300 "$1" run "$2" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then echo "compiled"; else echo "fallback"; fi
+}
+
+# Echoes the printed value, or <missing> if the row never printed. An absent row
+# is a failure signal, not an excuse to skip: this defect family has dropped
+# whole print statements before.
+lane_value() {
+    _lv_line=$(SIMPLE_EXECUTION_MODE="$3" timeout 300 "$1" run "$2" 2>/dev/null | grep -m1 '^value=')
+    if [ -z "$_lv_line" ]; then echo "<missing>"; else echo "${_lv_line#value=}"; fi
+}
+
+check_binary() {
+    _cb_bin=$1
+    _cb_work=$(mktemp -d) || return 2
+    _cb_probe="$_cb_work/probe.spl"
+
+    # Liveness precondition: if the binary cannot run a trivial file at all,
+    # every row below would read as "fallback" and the guard would report a
+    # uniform, meaningless FAIL. Absence of a working compiler is ERROR.
+    write_shape "$_cb_probe" must_be_clean
+    if [ "$(lane_value "$_cb_bin" "$_cb_probe" jit)" != "42" ]; then
+        rm -rf "$_cb_work"; echo "binary cannot run a plain lambda probe"; return 2
+    fi
+
+    _cb_bad=""
+    for _cb_shape in $SHAPES; do
+        write_shape "$_cb_probe" "$_cb_shape"
+        _cb_got_strict=$(strict_outcome "$_cb_bin" "$_cb_probe")
+        _cb_want_strict=$(expect_strict_for "$_cb_shape")
+        _cb_jit=$(lane_value "$_cb_bin" "$_cb_probe" jit)
+        _cb_interp=$(lane_value "$_cb_bin" "$_cb_probe" interpret)
+        _cb_want_value=$(expect_value_for "$_cb_shape")
+
+        if [ "$_cb_got_strict" != "$_cb_want_strict" ]; then
+            _cb_bad="$_cb_bad ${_cb_shape}[strict=${_cb_got_strict};want=${_cb_want_strict}]"
+            continue
+        fi
+        if [ "$_cb_jit" != "$_cb_want_value" ]; then
+            _cb_bad="$_cb_bad ${_cb_shape}[value=${_cb_jit};want=${_cb_want_value}]"
+            continue
+        fi
+        if [ "$_cb_jit" != "$_cb_interp" ]; then
+            _cb_bad="$_cb_bad ${_cb_shape}[lanes-disagree;jit=${_cb_jit};interpret=${_cb_interp}]"
+        fi
+    done
+
+    rm -rf "$_cb_work"
+    if [ -n "$_cb_bad" ]; then echo "$_cb_bad"; return 1; fi
+    echo ""
+    return 0
+}
+
+selftest() {
+    _st_dir=$(mktemp -d) || { echo "selftest: mktemp failed"; return 1; }
+
+    # Fixture 1: the expectation tables must stay in sync with the shape list --
+    # a shape with no expected outcome or no expected value would be scanned and
+    # silently always pass.
+    for _st_s in $SHAPES; do
+        if [ -z "$(expect_strict_for "$_st_s")" ] || [ -z "$(expect_value_for "$_st_s")" ]; then
+            echo "selftest FAILED: shape '$_st_s' has no expectation"
+            rm -rf "$_st_dir"; return 1
+        fi
+        if ! write_shape "$_st_dir/x.spl" "$_st_s"; then
+            echo "selftest FAILED: shape '$_st_s' has no source"
+            rm -rf "$_st_dir"; return 1
+        fi
+    done
+    echo "selftest ok   [every scanned shape has a source and an expectation]"
+
+    # Fixture 2: the recursive row must be pinned as fallback. If someone edits
+    # it to 'compiled' without re-measuring, this states the requirement.
+    if [ "$(expect_strict_for rec)" != "fallback" ]; then
+        echo "selftest FAILED: the recursive row is no longer pinned as falling back"
+        rm -rf "$_st_dir"; return 1
+    fi
+    echo "selftest ok   [recursive nested fn is pinned as still falling back]"
+
+    # Fixture 3: a missing/non-executable binary must ERROR, never pass.
+    printf 'not a binary\n' > "$_st_dir/fake"; chmod 0644 "$_st_dir/fake"
+    check_binary "$_st_dir/fake" >/dev/null 2>&1
+    if [ $? -ne 2 ]; then
+        echo "selftest FAILED: a non-executable binary did not ERROR"
+        rm -rf "$_st_dir"; return 1
+    fi
+    echo "selftest ok   [a binary that cannot run is ERROR, not PASS]"
+
+    # Fixture 4: prove the detector can FIRE. A file whose callee exists nowhere
+    # must read as 'fallback' on a real binary; if it reads 'compiled', the
+    # strict oracle is not discriminating and every row above is vacuous.
+    if [ -n "${SELFTEST_BINARY:-}" ] && [ -x "${SELFTEST_BINARY:-}" ]; then
+        write_shape "$_st_dir/fire.spl" must_fire
+        if [ "$(strict_outcome "$SELFTEST_BINARY" "$_st_dir/fire.spl")" != "fallback" ]; then
+            echo "selftest FAILED: an unresolvable call did not read as a fallback"
+            rm -rf "$_st_dir"; return 1
+        fi
+        write_shape "$_st_dir/clean.spl" must_be_clean
+        if [ "$(strict_outcome "$SELFTEST_BINARY" "$_st_dir/clean.spl")" != "compiled" ]; then
+            echo "selftest FAILED: a plain capturing lambda did not read as compiled"
+            rm -rf "$_st_dir"; return 1
+        fi
+        echo "selftest ok   [strict oracle discriminates: bad=fallback, good=compiled]"
+    fi
+
+    rm -rf "$_st_dir"
+    echo "selftest: fixtures passed"
+    return 0
+}
+
+[ -z "$BINARY" ] && BINARY="$repo_root/bin/simple"
+SELFTEST_BINARY="$BINARY"
+export SELFTEST_BINARY
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "$SELFTEST" -eq 1 ] && exit 0
+
+if [ ! -e "$BINARY" ]; then
+    echo "ERROR — nothing was checked (no binary at $BINARY)"; exit 2
+fi
+if [ ! -x "$BINARY" ]; then
+    echo "ERROR — nothing was checked ($BINARY is not executable)"; exit 2
+fi
+
+offenders=$(check_binary "$BINARY")
+rc=$?
+shape_count=$(echo "$SHAPES" | wc -w | tr -d ' ')
+
+case "$rc" in
+    0) echo "PASS — $shape_count shape(s) checked on $BINARY, all lowered as expected"; exit 0 ;;
+    1)
+        bad_count=$(echo "$offenders" | tr ' ' '\n' | grep -c '\[')
+        echo "FAIL — $shape_count shape(s) checked, $bad_count wrong:$offenders"
+        echo "       See doc/08_tracking/bug/nested_fn_in_spec_block_loses_captured_local_2026-08-04.md"
+        exit 1 ;;
+    *) echo "ERROR — nothing was checked ($offenders)"; exit 2 ;;
+esac
