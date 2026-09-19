@@ -58,23 +58,23 @@ The "after" column is ONE harness run at `b7f472dfc2b`, `--runs 3`, load
 | | wall / RSS | 0.78 s / 166 MB | 0.85 s / 159 MB | 0.00 s / 25 MB | 0.01 s / 21 MB |
 | synth 20 objects | `elf_link` | 38.05 s | **0.36 s** (106x) | — | — |
 | synth 50 objects | `elf_link` | 227.27 s | **0.82 s** (278x) | — | — |
-| synth 200 objects | `elf_link` | >22 min (see below) | **4.46 s** (3.62 s at load 5) | — | — |
-| | wall / RSS | | 6.23 s / 522 MB | 0.00 s / 27 MB | 0.01 s / 23 MB |
+| synth 200 objects | `elf_link` | 4291.05 s (71.5 min) | **4.46 s** (962x; 3.62 s at load 5) | — | — |
+| | wall / RSS | 4292.86 s / 574 MB | 6.23 s / 522 MB | 0.00 s / 27 MB | 0.01 s / 23 MB |
 
 The baseline grows quadratically in input size (38.05 s at 20 objects,
-227.27 s at 50 — exponent 1.95 over a 2.5x input); the engine after this lane
-grows roughly linearly (0.36 s -> 0.82 s -> 4.46 s for 20 -> 50 -> 200).
+227.27 s at 50, 4291.05 s at 200 — exponent 1.95 over the 2.5x step and 2.10
+over the 4x step); the engine after this lane grows roughly linearly
+(0.36 s -> 0.82 s -> 4.46 s for 20 -> 50 -> 200).
 
-**The 200-object baseline has no number**: the first attempt was killed at
-1,325 s by this host's CPU watchdog (`kill_simple_monitor … age=1325s >=
-budget=900s while pegged above 95% CPU`; raise with
-`SIMPLE_TIMEOUT_SECONDS=<secs>` in the measured process's own environment).
-All that is established is ">22 min and still running". The quadratic fit
-above predicts roughly an hour, but that is an extrapolation and is not
-reported as a measurement.
+Trap for anyone re-running the baseline: the first 200-object attempt was
+KILLED at 1,325 s by this host's CPU watchdog —
+`kill_simple_monitor … age=1325s >= budget=900s while pegged above 95% CPU`.
+The measured 4291 s run needed `SIMPLE_TIMEOUT_SECONDS=0` in the measured
+process's own environment, and was run from a throwaway detached worktree at
+`7c875a81067` so the lane's own tree stayed at HEAD.
 
-Byte-identical outputs, before and after, for every input (sha256, first 16
-hex): static `cfd7235c285f5ca5`, PIE `4aef985c972e44cb`, dynamic
+Byte-identical outputs, before and after, for every input — including the
+71-minute baseline 200-object link (sha256, first 16 hex): static `cfd7235c285f5ca5`, PIE `4aef985c972e44cb`, dynamic
 `b1a7044961f4fa9f`, synth-20 `51373e104c901b2c`, synth-200 `32405fe5d2d28022`.
 Every output still runs and exits 42 (the dynamic one prints
 `hi from libc`).
