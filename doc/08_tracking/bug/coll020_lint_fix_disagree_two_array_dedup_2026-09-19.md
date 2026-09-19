@@ -1,0 +1,127 @@
+# COLL020: `simple lint` said "all files clean" on a shape `simple fix` rewrote as Certain
+
+**Status:** FIXED 2026-09-19 — one admission rule (`collection_certain_fixes`)
+for both paths; detector extended to the two-array shape.
+**Severity:** High — a machine-applicable rewrite offered for a finding the
+linter denied existed. An LLM (this rule family's stated audience) that runs
+`simple lint` and believes it has no collection problem gets its file
+rewritten by `simple fix` anyway.
+**Affected files:** `src/compiler/35.semantics/lint/collection_patterns.spl`,
+`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`,
+`src/compiler/90.tools/fix/main.spl`
+**Spec files:** `test/01_unit/compiler/lint/collection_two_array_dedup_spec.spl`
+(mirrored byte-identically at `test/unit/compiler/lint/`),
+`test/01_unit/compiler/lint/collection_frame_rules_spec.spl`
+**Path:** `bug` track. Found by a Fable audit of the LLM-safe-collections
+("dataframe way") feature.
+
+## Symptom
+
+Fixture (`coll020_two_array.spl`), the two-array dedup idiom — a `seen` guard
+array and a separate `out` result array, which is the most common dedup shape
+an LLM writes:
+
+```
+fn dedup2(xs: [i64]) -> [i64]:
+    var seen: [i64] = []
+    var out: [i64] = []
+    for x in xs:
+        if not seen.contains(x):
+            seen.push(x)
+            out.push(x)
+    out
+```
+
+Measured on the deployed Rust seed (`bin/simple`, v1.0.0-beta.12; note the
+seed does NOT carry the `lint --fix` flag patch, so the fix path was exercised
+through `simple fix`, not `simple lint --fix`):
+
+```
+$ bin/simple lint .../coll020_two_array.spl
+Lint passed: all files clean
+
+$ bin/simple fix .../coll020_two_array.spl --dry-run
+Dry run for .../coll020_two_array.spl:
+  1 fix(es) applied
+  [COLL020] track membership in `seen_set` Dict instead of `.contains` on `seen`
+```
+
+Reproduced twice in the audit. The applied rewrite was, as it happens,
+correct — which is worse, not better: nothing about the arrangement made it
+so, and there was no gate that would have stopped a wrong one.
+
+## Cause
+
+Two callers of one generator with two different admission rules.
+
+- `simple lint` produced the COLL020 diagnostic from the AST detector
+  (`check_collection_patterns`) and attached `collection_020_fix` only when
+  that detector fired (`entry_and_fixes.spl`, the `warning.code == "COLL020"`
+  arm).
+- `simple fix` called `collection_020_fix` **directly** on the raw source
+  text, with no AST gate at all (`fix/main.spl`, the
+  `if source.contains(".contains(")` block).
+- The detector (`is_manual_distinct_loop`) required the loop body to be
+  EXACTLY one statement and the guard's receiver to be the only array pushed
+  to, and its header comment explicitly disclaimed the two-array shape as
+  "a different (two-array) shape this detector deliberately does not claim,
+  since matching it reliably needs alias analysis this AST walker lacks".
+
+The disclaimer was only ever true of the detector. `collection_020_fix` is
+textual and never read it.
+
+## Fix
+
+One truth, in the detector's favour.
+
+1. `is_manual_distinct_guard` (replacing `is_manual_distinct_loop`) recognises
+   a guard `if not <seen>.contains(<x>):` whose then-branch is a run of
+   `<array>.push(<x>)` statements — every one pushing the value the guard
+   tested, at least one onto the guard's own receiver. No alias analysis was
+   needed: the shape is defined by the VALUE, not by any claim about how the
+   two arrays relate. Guards nested inside `if`/block wrappers count, and
+   `while` bodies are scanned like `for` bodies (the textual generator already
+   accepted a `while ` header).
+2. `collection_certain_fixes` (`entry_and_fixes.spl`) is now the single door
+   to the COLL002/COLL020 Certain fixes: detector first, then the generator's
+   textual preconditions, fix only when both agree. `simple fix` calls it
+   instead of the raw generators. Lint warning WITHOUT a fix stays normal
+   (hint-only); a fix without a warning is now impossible.
+3. `collection_020_fix` gained the call-argument aliasing check COLL002 has
+   had since its a23 fixture. `grow(seen, x)` in the loop can mutate the array
+   through the callee where `collection_range_mutates` cannot see it, leaving
+   the hoisted Dict out of step — a real hole in a fix claiming Certain,
+   independent of the disagreement above.
+
+`collection_frame_rules_spec.spl`'s example asserting COLL020 "stays silent on
+the two-array seen/result shape (documented scope limit)" is flipped, with the
+reason recorded in the example body.
+
+## Verification
+
+```
+$ bin/simple lint .../coll020_two_array.spl
+.../coll020_two_array.spl:5:9: warning[COLL020]: manual dedup loop (.contains
+guard + .push of the guarded value) is O(n^2); switch to distinct_by(xs, key)
+or unique() (std.common.frame) — dataframe-able. ...
+  fix: available [COLL020] (certain)
+Found 0 error(s), 1 warning(s), 1 auto-fix(es) available
+
+$ bin/simple fix .../coll020_two_array.spl --dry-run
+  1 fix(es) applied
+  [COLL020] track membership in `seen_set` Dict instead of `.contains` on `seen`
+```
+
+Specs: `collection_two_array_dedup_spec` 8/8 (including a battery invariant —
+every id `collection_certain_fixes` offers must be a code `lint_cli_source`
+reported, across 7 fixtures, with a non-vacuity check), `collection_frame_rules_spec`
+21/21, `collection_easy_fix_spec` 10/10, `collection_fix_adversarial_spec`
+19/19, `lint_fix_apply_spec` 3/3, `collection_patterns_lint_spec` 12/12.
+
+## Known limit, stated rather than papered over
+
+`collection_020_fix` on its own still accepts shapes the detector refuses
+(e.g. an early `break` inside the guard). Those rewrites happen to be
+equivalent, but they are no longer reachable from either CLI, because the
+door gates them. `collection_two_array_dedup_spec`'s T3 example asserts BOTH
+facts, so the day the generator changes, the spec says so.

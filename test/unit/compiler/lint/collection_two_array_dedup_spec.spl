@@ -1,0 +1,176 @@
+# COLL020 two-array dedup: lint and fix must agree, and the adversarial
+# shapes around it must not be rewritten wrongly.
+#
+# The audited defect (doc/08_tracking/bug/
+# coll020_lint_fix_disagree_two_array_dedup_2026-09-19.md): on the most
+# common dedup shape an LLM writes —
+#
+#     var seen: [i64] = []
+#     var out: [i64] = []
+#     for x in xs:
+#         if not seen.contains(x):
+#             seen.push(x)
+#             out.push(x)
+#
+# `bin/simple lint` printed "Lint passed: all files clean" while
+# `bin/simple fix --dry-run` printed
+# "[COLL020] track membership in `seen_set` Dict instead of `.contains` on
+# `seen`" and applied it. Two admission rules for one fix: lint gated the
+# generator on the AST detector, `simple fix` called it on raw text with no
+# gate at all, and the detector explicitly disclaimed this shape.
+#
+# The invariant this file pins is the one that makes them one tool:
+# `collection_certain_fixes` — the single door both paths now use — offers a
+# fix for a code ONLY when `lint_cli_source` reports that code. The reverse
+# (a warning with no fix) is the normal hint-only case and is not a defect.
+use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source, collection_020_fix, collection_certain_fixes}
+use std.tooling.easy_fix.*
+
+fn lint_codes(path: text, src: text) -> [text]:
+    var codes: [text] = []
+    for result in lint_cli_source(Linter.new(), path, src):
+        codes.push(result.lint.code)
+    codes
+
+fn has(codes: [text], code: text) -> bool:
+    for c in codes:
+        if c == code:
+            return true
+    false
+
+fn fix_ids(path: text, src: text) -> [text]:
+    var ids: [text] = []
+    for fix in collection_certain_fixes(path, src):
+        ids.push(easyfix_id(fix))
+    ids
+
+fn fix020(src: text) -> EasyFix?:
+    collection_020_fix("/tmp/two_array.spl", src.split("\n"))
+
+fn is_some(fix: EasyFix?) -> bool:
+    match fix:
+        case Some(_): true
+        case nil: false
+
+fn applied020(src: text) -> text:
+    match fix020(src):
+        case Some(fix):
+            easyfix_apply_sorted_replacements(
+                src, easyfix_sort_replacements_descending(easyfix_replacements(fix)))
+        case nil:
+            ""
+
+# The audit fixture, byte for byte.
+val TWO_ARRAY_SRC = "fn dedup2(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n    out\n"
+
+# Adversarial neighbours. Each is a shape the textual generator used to be
+# able to reach; every one of them must now either be refused outright or
+# produce a rewrite that is provably equivalent.
+#
+# T1 aliasing: `grow(seen, x)` can mutate the array through the callee, which
+#    no textual mutation scan sees, so the hoisted Dict would drift.
+val T1_ALIAS_SRC = "fn grow(a: [i64], v: i64):\n    a.push(v)\n\nfn dedup_alias(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        grow(seen, x)\n    out\n"
+# T2 different key: the guard tests `x`, the seen-set records `y`. Not dedup.
+val T2_DIFF_KEY_SRC = "fn dedup_diffkey(xs: [i64], ys: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for i in 0..xs.len():\n        val x = xs[i]\n        val y = ys[i]\n        if not seen.contains(x):\n            seen.push(y)\n            out.push(x)\n    out\n"
+# T3 early break inside the guard: the loop stops at the first new value, so
+#    it is not a dedup pass over the input.
+val T3_BREAK_SRC = "fn first_new(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n            break\n    out\n"
+# T4 the result array is itself read inside the loop, adding a second
+#    `.contains(` call to the file.
+val T4_OUT_READ_SRC = "fn dedup_out_read(xs: [i64]) -> i64:\n    var seen: [i64] = []\n    var out: [i64] = []\n    var dups = 0\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        if out.contains(x):\n            dups = dups + 1\n    dups\n"
+# T5 non-adjacent: the seen-set is fed unconditionally, outside the guard.
+val T5_NON_ADJACENT_SRC = "fn dedup_non_adjacent(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            out.push(x)\n        seen.push(x)\n    out\n"
+
+describe "COLL020 two-array dedup is reported by lint":
+    it "fires, and offers the Certain fix through the shared door":
+        step("fires, and offers the Certain fix through the shared door")
+        """Red before this lane: lint said "all files clean" here while
+        `simple fix --dry-run` reported the same fix this asserts."""
+        expect(has(lint_codes("/tmp/two_array.spl", TWO_ARRAY_SRC), "COLL020")).to_equal(true)
+        expect(has(fix_ids("/tmp/two_array.spl", TWO_ARRAY_SRC), "COLL020")).to_equal(true)
+
+    it "rewrites it to a membership Dict without touching the result array":
+        step("rewrites it to a membership Dict without touching the result array")
+        val applied = applied020(TWO_ARRAY_SRC)
+        expect(applied).to_contain("var seen_set: Dict<i64, bool> = {}")
+        expect(applied).to_contain("if not seen_set.contains_key(x):")
+        expect(applied).to_contain("seen.push(x)")
+        expect(applied).to_contain("seen_set[x] = true")
+        expect(applied).to_contain("out.push(x)")
+        assert_false(applied.contains("seen.contains(x)"))
+
+describe "COLL020 adversarial two-array neighbours are not rewritten":
+    it "T1: refuses when the seen-set is passed to a call that can mutate it":
+        step("T1: refuses when the seen-set is passed to a call that can mutate it")
+        """COLL002 has refused this shape since its a23 fixture; COLL020 had
+        no such check, so a Certain fix could be emitted for an array the
+        callee grows behind the Dict's back."""
+        assert_false(is_some(fix020(T1_ALIAS_SRC)))
+
+    it "T2: refuses when the guarded value differs from the recorded value":
+        step("T2: refuses when the guarded value differs from the recorded value")
+        assert_false(is_some(fix020(T2_DIFF_KEY_SRC)))
+        expect(has(lint_codes("/tmp/t2.spl", T2_DIFF_KEY_SRC), "COLL020")).to_equal(false)
+
+    it "T3: offers nothing for an early break inside the guard":
+        step("T3: offers nothing for an early break inside the guard")
+        """This is the case that shows why the shared door is the fix and
+        tightening one generator would not have been. The TEXTUAL generator
+        still accepts this shape (asserted below, so the day that changes this
+        spec says so) — and its rewrite would in fact be equivalent, since the
+        Dict is updated at exactly the program point the array is. But the
+        loop stops at the first new value, so it is not the dedup pass the
+        advice describes; the detector refuses it, and because the detector is
+        now the admission rule, nothing is offered."""
+        assert_true(is_some(fix020(T3_BREAK_SRC)))
+        expect(has(lint_codes("/tmp/t3.spl", T3_BREAK_SRC), "COLL020")).to_equal(false)
+        expect(has(fix_ids("/tmp/t3.spl", T3_BREAK_SRC), "COLL020")).to_equal(false)
+
+    it "T4: fixes the seen-set but never the second .contains( call":
+        step("T4: fixes the seen-set but never the second .contains( call")
+        """The result array is read in the loop too, so the file has two
+        `.contains(` calls. The dedup guard is still unambiguous and its
+        rewrite is still correct, so COLL020 is offered — but COLL002's
+        unique-line precondition is now ambiguous, and it must stay
+        hint-only rather than guess which call it meant."""
+        expect(has(lint_codes("/tmp/t4.spl", T4_OUT_READ_SRC), "COLL020")).to_equal(true)
+        expect(has(fix_ids("/tmp/t4.spl", T4_OUT_READ_SRC), "COLL020")).to_equal(true)
+        expect(has(fix_ids("/tmp/t4.spl", T4_OUT_READ_SRC), "COLL002")).to_equal(false)
+        val applied = applied020(T4_OUT_READ_SRC)
+        expect(applied).to_contain("if not seen_set.contains_key(x):")
+        expect(applied).to_contain("seen_set[x] = true")
+        expect(applied).to_contain("if out.contains(x):")
+
+    it "T5: offers nothing when the seen-set is fed outside the guard":
+        step("T5: offers nothing when the seen-set is fed outside the guard")
+        """The guard body pushes only `out`, so the guard's own receiver is
+        never recorded there — not the shape the detector claims, and so not
+        a shape the shared door may fix either."""
+        expect(has(lint_codes("/tmp/t5.spl", T5_NON_ADJACENT_SRC), "COLL020")).to_equal(false)
+        expect(has(fix_ids("/tmp/t5.spl", T5_NON_ADJACENT_SRC), "COLL020")).to_equal(false)
+
+describe "one truth: no Certain COLL fix without the matching lint finding":
+    # The whole battery above plus the single-array baseline, checked as one
+    # invariant rather than case by case: whatever `collection_certain_fixes`
+    # offers, `lint_cli_source` must have reported. This is the assertion that
+    # fails if either side ever grows an admission rule the other lacks.
+    it "every offered fix id is a code lint also reported, on every fixture":
+        step("every offered fix id is a code lint also reported, on every fixture")
+        val single = "fn dedup(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        if not out.contains(x):\n            out.push(x)\n    out\n"
+        val sources = [
+            single, TWO_ARRAY_SRC, T1_ALIAS_SRC, T2_DIFF_KEY_SRC,
+            T3_BREAK_SRC, T4_OUT_READ_SRC, T5_NON_ADJACENT_SRC]
+        var checked = 0
+        var offered = 0
+        for src in sources:
+            val path = "/tmp/agree_" + checked.to_text() + ".spl"
+            val codes = lint_codes(path, src)
+            for id in fix_ids(path, src):
+                offered = offered + 1
+                expect(has(codes, id)).to_equal(true)
+            checked = checked + 1
+        # Non-vacuity: a run where nothing was offered would pass the loop
+        # above without proving anything.
+        expect(checked).to_equal(7)
+        expect(offered > 0).to_equal(true)
