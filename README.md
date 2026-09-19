@@ -807,38 +807,71 @@ scenarios. SPipe is the related runner/docgen process; SSpec is the authoring
 style: write readable `step("...")` actions, keep executable assertions in the
 same scenario, and let docgen render compact manual steps with folded source.
 
+### Example 1: TUI Selection
+
+This follows the real Code Actions picker flow exercised by
+`test/03_system/gui/editor_controller_spec.spl`: populate a selectable panel,
+choose a row, and apply it with Enter. Keep the interaction and its visible
+selection contract together.
+
 ```simple
 use std.spec.{describe, expect, it, step}
-use std.common.spec.evidence.format.terminal_grid.{terminal_snapshot_from_rows}
 
-describe "Release dashboard":
-  it "shows the current release rows in the terminal surface":
-    # @req REQ-RELEASE-DASHBOARD-001
-    val releases = [
-      ["Version", "Channel", "Status"],
-      ["1.0.0-beta.6", "beta", "ready"],
-      ["1.0.0", "stable", "pending"]
+describe "Code action picker":
+  it "selects and applies the requested repair":
+    # @req REQ-EDITOR-CODE-ACTION-001
+    val actions = [
+      ["First fix", "Rename first now"],
+      ["Second fix", "Rename second now"]
     ]
-    step("Render the release table in the dashboard")
-    val screen = terminal_snapshot_from_rows([
-      "Release dashboard",
-      "Version       Channel  Status",
-      "1.0.0-beta.6 beta     ready",
-      "1.0.0        stable   pending"
-    ], 40)
-    step("Verify the table contains the current beta release")
-    expect(releases[1][0]).to_equal("1.0.0-beta.6")
-    expect(screen.rows).to_equal(4)
+    step("Open the Code Actions menu")
+    step("Select \"Second fix\"")
+    val selected_index = 1
+    step("Press Enter to apply the selected action")
+    expect(actions[selected_index][0]).to_equal("Second fix")
+    expect(actions[selected_index][1]).to_equal("Rename second now")
 ```
 
-The same fixture is readable in the generated manual and makes the rendered
-TUI state reviewable:
+Generated operator manual:
 
 ```text
-Release dashboard
-Version       Channel  Status
-1.0.0-beta.6 beta     ready
-1.0.0        stable   pending
+1. Open the Code Actions menu
+2. Select "Second fix"
+3. Press Enter to apply the selected action
+```
+
+### Example 2: Tabular Output
+
+This is shortened from the dashboard HTML rendering system spec at
+`test/03_system/feature/app/web_dashboard/dashboard_render_spec.spl`. It is the
+same table-shaped contract useful for compression, storage/NVMe, security, and
+HTML test reports: stable columns, representative rows, and assertions over
+the generated surface.
+
+```simple
+use std.spec.{describe, expect, it, step}
+use app.dashboard.render.table.{render_html_table}
+
+describe "Artifact verification table":
+  it "renders each artifact result as a table row":
+    val headers = ["Artifact", "Integrity", "Status"]
+    val rows = [
+      ["firmware.bin", "sha256", "passed"],
+      ["policy.sdn", "signature", "blocked"]
+    ]
+    step("Render the artifact verification table")
+    val html = render_html_table(headers, rows)
+    step("Verify the blocked policy result remains visible")
+    expect(html).to_contain("policy.sdn")
+    expect(html).to_contain("blocked")
+```
+
+Generated QA evidence can retain the compact tabular result:
+
+```text
+Artifact     | Integrity | Status
+firmware.bin | sha256    | passed
+policy.sdn   | signature | blocked
 ```
 
 `Given_*`, `When_*`, and `Then_*` helper naming is legacy style. Use
