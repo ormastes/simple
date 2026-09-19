@@ -284,6 +284,16 @@ Traps worth knowing:
   `libraries`/`library_paths`/`runtime_path`/`runtime_bundle` left the list
   when `internal_link_plan` started honouring them; `extra_flags`,
   `retained_symbols`, `strip_output`, `debug` stay.
+- BOTH entry points must go through `internal_link_plan`: `link_native_unix`'s
+  internal arm AND `link_engine_external.link_request_internal`. Calling
+  `internal_link_native` with its defaults drops every support table on that
+  route while the docstring still claims one shared implementation.
+- `--as-needed` is the AND over ALL occurrences of a name, not
+  first-occurrence-wins: ld records DT_NEEDED when any occurrence is outside an
+  as-needed region, in either order.
+- `-l` search order is crt.lib_dirs then config.library_paths, matching the
+  external arm's `-L` order. ld takes the first directory with a match, so
+  reversing them can select a different file for the same `-l`.
 - `-l` resolution mirrors ld EXACTLY: `lib<name>.so`, then `lib<name>.a`,
   then error. Never guess a versioned file — a longest/lexical heuristic picks
   `libssl.so.1.1` over `libssl.so.3`, and the resulting DT_NEEDED still looks

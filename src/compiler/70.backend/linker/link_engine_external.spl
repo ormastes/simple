@@ -37,7 +37,7 @@ use std.log.{debug}
 # the facade (`link_to_native` per the original A3 plan row; `internal_link_native`
 # is lane B3's shared SIMPLE_LINKER=internal implementation, reused here
 # instead of duplicated).
-use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, native_linker_abi_for_target, internal_link_native}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, native_linker_abi_for_target, internal_link_native, internal_link_plan}
 
 # `find_linker_path`/`linker_type_for_path`/`LinkerType` are read directly
 # from `mold.spl` (not re-imported through the facade) purely to report
@@ -315,7 +315,7 @@ fn classify_internal_error(message: text) -> LinkOutcomeV1:
     """Map an `internal_link_native`/`elf_link` Err payload to a LinkOutcomeV1."""
     if message.contains("UnsupportedFeature") or message.contains("unsupported") or message.contains("slice 1"):
         return LinkOutcomeV1.UnsupportedFeature
-    if message.contains("undefined symbol") or message.contains("duplicate symbol") or message.contains("entry symbol") or message.contains("not a relocatable") or message.contains("e_machine") or message.contains("cannot be read"):
+    if message.contains("undefined symbol") or message.contains("root symbol not defined") or message.contains("duplicate symbol") or message.contains("entry symbol") or message.contains("not a relocatable") or message.contains("e_machine") or message.contains("cannot be read"):
         return LinkOutcomeV1.InputError
     LinkOutcomeV1.ResourceFailure
 
@@ -324,12 +324,12 @@ fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
     """SIMPLE_LINKER=internal: link with internal:elf or return a named
     UnsupportedFeature receipt. Never falls back to an external linker.
 
-    Delegates the actual CRT-discovery/elf_link/write/chmod sequence to
-    `native_linking.internal_link_native` (lane B3), reached through the
-    `linker_wrapper` facade -- the single internal-ELF-link implementation,
-    shared with `link_to_native`'s own SIMPLE_LINKER=internal routing, so
-    there is exactly one place that does this rather than two that could
-    drift. Only the `object_format` check stays local: `internal_link_native`
+    Delegates BOTH halves to native_linking, reached through the
+    `linker_wrapper` facade: `internal_link_plan` assembles the archives,
+    libraries, roots and runpath, and `internal_link_native` runs the
+    CRT-discovery/elf_link/write/chmod sequence. Calling only the second half
+    is what made this route silently drop every support table while claiming
+    to share one implementation. Only the `object_format` check stays local: `internal_link_native`
     takes a plain (os, arch) pair with no `object_format` concept, and
     `LinkTargetV1` is the only caller shape whose `object_format` can vary
     independently of os/arch (e.g. a Mach-O target that otherwise looks like
@@ -339,8 +339,23 @@ fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
         debug("link-engine-external", "UnsupportedFeature: {reason}")
         return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
     val config = link_request_to_native_config(req, policy)
+    val os_text = link_os_text(req.target.os)
+    # Same assembly step link_native_unix's internal arm performs. Calling
+    # internal_link_native with its defaults instead would drop the standard
+    # library table, the native_all table (including
+    # `-u rt_vulkan_provider_is_available`) and `-rpath` on this route only --
+    # a second behaviour for the same engine, which is exactly the drift this
+    # adapter exists to avoid.
+    val planned = internal_link_plan(object_files, config, os_text)
+    if planned.is_err():
+        val plan_message = planned.unwrap_err()
+        debug("link-engine-external", "internal:elf plan failed: {plan_message}")
+        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, classify_internal_error(plan_message), LinkAccountingClassV1.NotCertified)
+    val plan = planned.unwrap()
     val linked = internal_link_native(
-        link_os_text(req.target.os), link_arch_text(req.target.arch), config.pie, object_files, output)
+        os_text, link_arch_text(req.target.arch), config.pie, object_files, output,
+        plan.archives, plan.libraries, plan.roots, plan.lib_dirs,
+        plan.as_needed, plan.runpath)
     if linked.is_err():
         val message = linked.unwrap_err()
         val outcome = classify_internal_error(message)

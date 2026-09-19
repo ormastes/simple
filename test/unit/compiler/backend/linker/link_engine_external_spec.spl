@@ -239,6 +239,40 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
             expect(run.stdout).to_equal("hi from libc\n")
         )
 
+    it "the LinkRequestV1 route applies the same support tables as link_to_native":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        # link_request_internal used to call internal_link_native with the bare
+        # defaults (libraries=[], roots=[], runpath=""), bypassing
+        # internal_link_plan entirely -- so a LinkRequestV1 silently dropped
+        # the standard-library table, the native_all table (including
+        # `-u rt_vulkan_provider_is_available`) and `-rpath`, where ld.lld for
+        # the same argv emits NEEDED libc.so.6/libm.so.6 plus RUNPATH. That
+        # made "exactly one place that does this" false as written.
+        #
+        # Discriminator: with SIMPLE_RUNTIME_PATH naming a directory whose
+        # core-c-bootstrap pair exists, the native_all table arms and demands
+        # the root. Nothing in this fixture defines it, so the link must be
+        # REFUSED. Bypassing the plan produces no root and links cleanly, so
+        # Success here is exactly the old bug.
+        step("SIMPLE_RUNTIME_PATH arms the native_all table on the adapter route; its -u root is then demanded, not dropped")
+        val runtime_dir = "/tmp/link_engine_external_spec_runtime"
+        # Real (empty) ar archives, not zero-byte files: an unparseable
+        # archive would fail with "bad magic" before the root check, which
+        # proves only that SOMETHING reached the engine. Empty-but-valid
+        # archives parse, contribute no member, and let the refusal be the
+        # precise one this row is about.
+        shell("mkdir -p '{runtime_dir}' && rm -f '{runtime_dir}'/*.a && ar rc '{runtime_dir}/libsimple_compiler_backfill.a' && ar rc '{runtime_dir}/libsimple_native_all.a'")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            with_env("SIMPLE_RUNTIME_PATH", runtime_dir, fn():
+                val receipt = link_request_to_native(
+                    request_for(linux_aarch64()), fast_policy(),
+                    ["test/fixtures/linker/elf/hello_libc_a64.o"],
+                    "/tmp/link_engine_external_spec_tables_out")
+                expect(receipt.engine_id).to_equal("internal:elf")
+                expect(receipt.outcome.name()).to_equal("InputError")
+            )
+        )
+
     it "link_request_to_native reports a missing input as InputError from internal:elf":
         # @req REQ-LINKER-A3-INTERNAL-ALIAS
         step("End-to-end: internal override + unreadable object -> InputError, never an external fallback")

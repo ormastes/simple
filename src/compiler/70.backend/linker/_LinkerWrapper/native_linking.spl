@@ -561,10 +561,14 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
     """Fold one external-path arg list into the plan, or name the first entry
     the internal engine cannot express.
 
-    This is the single place a `-l`/`-u`/`--as-needed` list is translated, so
-    the native_all table and native_link_std_lib_args cannot drift apart or be
-    dropped independently -- dropping the std-lib list silently is the same
-    defect class this route already had for the native_all table."""
+    Every `-l`/`-u`/`--as-needed` list on the internal route is folded through
+    here -- native_link_std_lib_args, native_all_gnu_support_args and
+    config.libraries -- and both callers of the route reach it through
+    `internal_link_plan` (`link_native_unix`'s internal arm and
+    `link_engine_external.link_request_internal`). So the tables cannot drift
+    apart or be dropped independently; dropping the std-lib list silently is
+    the same defect class this route already had for the native_all table,
+    and calling `internal_link_native` WITHOUT the plan reintroduces it."""
     var libraries = plan.libraries
     var as_needed = plan.as_needed
     var roots = plan.roots
@@ -587,8 +591,17 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
             i = i + 2
             continue
         if tok.starts_with("-l") and tok.len() > 2:
-            libraries = libraries.push(tok.substring(2, tok.len()))
-            as_needed = as_needed.push(region_as_needed)
+            val lib_name = tok.substring(2, tok.len())
+            # ld records DT_NEEDED when ANY occurrence of a name is outside an
+            # --as-needed region, in either order, so the flag is the AND over
+            # occurrences -- NOT first-occurrence-wins, which made the answer
+            # depend on the order the tables happen to be folded in.
+            val existing = libraries.index_of(lib_name)
+            if existing >= 0:
+                as_needed[existing] = as_needed[existing] and region_as_needed
+            else:
+                libraries = libraries.push(lib_name)
+                as_needed = as_needed.push(region_as_needed)
             i = i + 1
             continue
         return Err("internal engine: unsupported {origin} entry '{tok}' (internal:elf honours only '-u <sym>', '-l<name>', '--as-needed' and '--no-as-needed')")
@@ -641,14 +654,13 @@ pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
     plan = internal_absorb_link_args(
         plan, native_all_gnu_support_args(support_inputs, os, brew_prefix),
         "native_all support table")?
-    var libraries = plan.libraries
-    var as_needed = plan.as_needed
+    # config.libraries is a plain `-l` list with no --as-needed region, folded
+    # through the same translator so the AND-over-occurrences rule applies to
+    # it too rather than being re-implemented here.
+    var config_args: [text] = []
     for lib in config.libraries:
-        libraries = libraries.push(lib)
-        as_needed = as_needed.push(false)
-    Ok(InternalLinkPlan(archives: plan.archives, libraries: libraries,
-        as_needed: as_needed, roots: plan.roots, lib_dirs: plan.lib_dirs,
-        runpath: plan.runpath))
+        config_args = config_args.push("-l" + lib)
+    internal_absorb_link_args(plan, config_args, "config.libraries")
 
 fn internal_file_is_elf(path: text) -> bool:
     val head = file_read_bytes(path)
@@ -783,13 +795,16 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
         if not file_exists(archive):
             return Err("internal engine: archive {archive} cannot be read")
         archives = archives.push(internal_link_native_read_i64(archive))
-    # `-l` resolution: crt.lib_dirs is the same set the external direct-ld arm
-    # emits as `-L` (the crt directory plus the gcc lib dirs), and ld.lld has
-    # no built-in search path, so this is what makes -lstdc++ resolvable at all.
+    # `-l` search path, in the SAME ORDER the external direct-ld arm emits its
+    # `-L` flags: crt.lib_dirs (the crt directory plus the gcc lib dirs) and
+    # then config.library_paths. Order is not cosmetic -- ld takes the first
+    # directory that has a match, so reversing these can select a different
+    # file for the same `-l`. ld.lld has no built-in search path, which is why
+    # crt.lib_dirs is what makes -lstdc++ resolvable at all.
     var search_dirs: [text] = []
-    for dir in extra_lib_dirs:
-        search_dirs = search_dirs.push(dir)
     for dir in crt.lib_dirs:
+        search_dirs = search_dirs.push(dir)
+    for dir in extra_lib_dirs:
         search_dirs = search_dirs.push(dir)
     if not search_dirs.contains(libdir):
         search_dirs = search_dirs.push(libdir)
@@ -818,7 +833,13 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
             archives = archives.push(internal_link_native_read_i64(path))
             continue
         val key = internal_shared_dedupe_key(path)
-        if seen_shared.contains(key):
+        val seen_at = seen_shared.index_of(key)
+        if seen_at >= 0:
+            # Same file reached under two `-l` names: AND the flags, for the
+            # same reason internal_absorb_link_args does across occurrences of
+            # one name. The explicit libc at index 0 is already false, so a
+            # later as-needed `-lc` cannot withhold its DT_NEEDED.
+            shared_as_needed[seen_at] = shared_as_needed[seen_at] and want_as_needed
             continue
         seen_shared = seen_shared.push(key)
         shared_objects = shared_objects.push(file_read_bytes(path))

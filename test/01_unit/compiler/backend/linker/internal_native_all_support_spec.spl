@@ -289,3 +289,43 @@ describe "internal ELF engine - DT_RUNPATH and --as-needed DT_NEEDED":
             runpath: "/opt/simple/runtime"))
         expect(linked.is_err()).to_equal(true)
         expect(linked.unwrap_err()).to_contain("runpath")
+
+describe "internal ELF route - as-needed ANDs across occurrences of one name":
+    it "a later non-as-needed occurrence clears an earlier --as-needed one":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("ld.lld records NEEDED when ANY occurrence is non-as-needed, in BOTH orders; first-occurrence-wins withheld it and diverged")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        cfg.libraries = ["m"]
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        val plan = planned.unwrap()
+        # `m` occurs twice: inside the std table's --as-needed region, and
+        # again from config.libraries, which is never as-needed. It collapses
+        # to ONE entry (4 standard + 8 native_all), with the flag ANDed off.
+        expect(plan.libraries.len()).to_equal(12)
+        expect(plan.as_needed.len()).to_equal(12)
+        expect(plan.as_needed[plan.libraries.index_of("m")]).to_equal(false)
+
+    it "an earlier non-as-needed occurrence survives a later --as-needed one":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The reverse order must give the same answer, or the rule is order-dependent rather than an AND")
+        val folded = internal_absorb_link_args(
+            empty_plan(), ["-lbar", "--as-needed", "-lbar", "--no-as-needed"],
+            "order probe")
+        expect(folded.is_ok()).to_equal(true)
+        expect(folded.unwrap().libraries).to_equal(["bar"])
+        expect(folded.unwrap().as_needed).to_equal([false])
+
+    it "keeps as-needed when every occurrence of the name is as-needed":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The flag is only kept when nothing ever asked for an unconditional DT_NEEDED")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        val plan = planned.unwrap()
+        expect(plan.as_needed[plan.libraries.index_of("m")]).to_equal(true)
+        expect(plan.as_needed[plan.libraries.index_of("c")]).to_equal(false)
