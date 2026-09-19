@@ -257,6 +257,9 @@ wall=247.31s rss=26942684kB rc=1
 # after rm -rf build/scv .simple:
 SCV-E-SNAPSHOT: snapshot-inventory-unavailable
 wall=157.82s rss=28078696kB rc=1
+# third attempt, adding the documented remedy SIMPLE_SCV_FREEZE_FALLBACK=1:
+SCV-E-ADMISSION: filesystem-event-journal-missing
+wall=356.55s rss=26520188kB rc=1        # no output file produced
 ```
 
 Two things worth recording independently of the linker: the SCV cursor
@@ -282,3 +285,15 @@ Red → green: `native_linking_internal_spec` 13/14 → 14/14, both trees
 identical. The real bootstrap link config passes `libraries: []`, so this was
 not on the critical path — it was on the path of anything that starts passing
 `-l` names, which is where this lane is heading.
+
+Three attempts, three refusals, 158-357 s and 26-28 GB RSS each, none of them
+reaching the link step. The cursor is republished with `filesystem_rows=1` and
+no journal on every run, so wiping `build/scv` does not clear it. The guard is
+right to refuse and there is a way to make it pass — write an empty
+`.scv/journal/events.log`, whose sha256 is exactly the `filesystem_digest` the
+cursor already carries — but that is fabricating the state a fail-closed guard
+exists to check, so it was not done. **`SIMPLE_LINKER=internal` has therefore
+never been exercised end to end through `native-build` on this host; every
+internal-engine result in this lane comes from `link_to_native` driven
+directly by a spec.** Filing the SCV cursor defect belongs to whoever owns
+`src/app/compiler_entrypoint/inventory_events.spl`.
