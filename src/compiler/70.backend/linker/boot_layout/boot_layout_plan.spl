@@ -34,6 +34,28 @@ struct BootSegment:
     name: text
     phdr_type: text      # e.g. "PT_LOAD"
     flags: i64           # p_flags (PF_X=1, PF_W=2, PF_R=4) or -1 if not given
+    filehdr: bool        # FILEHDR: the ELF header is loaded by this segment
+    phdrs_hdr: bool      # PHDRS keyword: the program header table is loaded by this segment
+    at_expr: text        # AT(expr) physical address or ""
+
+# Ordered operation kinds (BootOp.kind), SECTIONS level and output-section body.
+val BOOT_OP_SECTION: i64 = 0   # index = sections[index]
+val BOOT_OP_DOT: i64 = 1       # `. = expr` (expr)
+val BOOT_OP_SYMBOL: i64 = 2    # index = symbols[index]
+val BOOT_OP_ASSERT: i64 = 3    # index = assertions[index]
+val BOOT_OP_INPUT: i64 = 4     # body input statement (file_pattern, patterns, keep)
+val BOOT_OP_PAD: i64 = 5       # body `. += n` / `. = . + n` (value)
+val BOOT_OP_ALIGN: i64 = 6     # body `. = ALIGN(n)` (value)
+
+struct BootOp:
+    """One ordered layout operation; the order is what the layout engine replays."""
+    kind: i64
+    index: i64
+    expr: text
+    file_pattern: text
+    patterns: [text]
+    keep: bool
+    value: i64
 
 struct BootSectionPlan:
     """One output section of the boot image."""
@@ -53,6 +75,7 @@ struct BootSectionPlan:
     region: text         # MEMORY region or ""
     discard: bool        # /DISCARD/
     defined_symbols: [text]  # symbols assigned inside the body
+    body: [BootOp]       # ordered body: INPUT / PAD / ALIGN / SYMBOL / ASSERT
 
 struct BootSymbol:
     """A symbol assignment (plain or PROVIDE)."""
@@ -79,6 +102,11 @@ struct BootLayoutPlan:
     gc_roots: [text]     # union of all KEEP globs, in order
     extern_symbols: [text]   # EXTERN(...) — forced-undefined symbols (link roots)
     discard_patterns: [text]
+    ops: [BootOp]        # SECTIONS commands in source order: SECTION / DOT / SYMBOL / ASSERT
+    top_ops: [BootOp]    # statements outside SECTIONS (SYMBOL / ASSERT), evaluated after layout
+
+fn _boot_op(kind: i64, index: i64) -> BootOp:
+    BootOp(kind: kind, index: index, expr: "", file_pattern: "", patterns: [], keep: false, value: 0)
 
 # ============================================================================
 # Constant-expression evaluator
@@ -135,8 +163,16 @@ fn _boot_eval_primary(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
     if tok.kind == LdTokenKind.Minus:
         val inner = _boot_eval_primary(toks, pos + 1, ctx)
         return _BootEv(pos: inner.pos, value: 0 - inner.value, err: inner.err)
+    if tok.kind == LdTokenKind.Op and (tok.value == "!" or tok.value == "~"):
+        val inner = _boot_eval_primary(toks, pos + 1, ctx)
+        if inner.err != "":
+            return inner
+        if tok.value == "!":
+            val nv: i64 = if inner.value == 0: 1 else: 0
+            return _BootEv(pos: inner.pos, value: nv, err: "")
+        return _BootEv(pos: inner.pos, value: -1 - inner.value, err: "")
     if tok.kind == LdTokenKind.LParen:
-        val inner = _boot_eval_sum(toks, pos + 1, ctx)
+        val inner = _boot_eval_rel(toks, pos + 1, ctx)
         if inner.err != "":
             return inner
         if _boot_tok(toks, inner.pos).kind != LdTokenKind.RParen:
@@ -153,13 +189,27 @@ fn _boot_eval_primary(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
                 if not found:
                     return _boot_fail(pos, "unknown {fname}({arg.value})")
                 return _BootEv(pos: pos + 4, value: v, err: "")
-            if fname == "ALIGN":
-                val arg = _boot_eval_sum(toks, pos + 2, ctx)
+            if fname == "ALIGN" or fname == "MAX" or fname == "MIN":
+                val arg = _boot_eval_rel(toks, pos + 2, ctx)
                 if arg.err != "":
                     return arg
-                if _boot_tok(toks, arg.pos).kind != LdTokenKind.RParen:
-                    return _boot_fail(arg.pos, "ALIGN takes one argument")
-                return _BootEv(pos: arg.pos + 1, value: boot_align_up(ctx.dot, arg.value), err: "")
+                if _boot_tok(toks, arg.pos).kind == LdTokenKind.RParen:
+                    if fname != "ALIGN":
+                        return _boot_fail(arg.pos, "{fname} takes two arguments")
+                    return _BootEv(pos: arg.pos + 1, value: boot_align_up(ctx.dot, arg.value), err: "")
+                if _boot_tok(toks, arg.pos).kind != LdTokenKind.Comma:
+                    return _boot_fail(arg.pos, "expected ',' or ')' in {fname}()")
+                val arg2 = _boot_eval_rel(toks, arg.pos + 1, ctx)
+                if arg2.err != "":
+                    return arg2
+                if _boot_tok(toks, arg2.pos).kind != LdTokenKind.RParen:
+                    return _boot_fail(arg2.pos, "{fname} takes at most two arguments")
+                var v2 = boot_align_up(arg.value, arg2.value)
+                if fname == "MAX":
+                    v2 = if arg.value > arg2.value: arg.value else: arg2.value
+                if fname == "MIN":
+                    v2 = if arg.value < arg2.value: arg.value else: arg2.value
+                return _BootEv(pos: arg2.pos + 1, value: v2, err: "")
             return _boot_fail(pos, "unsupported function {fname}")
         if tok.value == ".":
             return _BootEv(pos: pos + 1, value: ctx.dot, err: "")
@@ -169,13 +219,79 @@ fn _boot_eval_primary(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
         return _BootEv(pos: pos + 1, value: v, err: "")
     _boot_fail(pos, "expected expression")
 
+fn _boot_is_mul(tok: LdToken) -> bool:
+    tok.kind == LdTokenKind.Star or (tok.kind == LdTokenKind.Op and (tok.value == "/" or tok.value == "%"))
+
 fn _boot_eval_term(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
     var acc = _boot_eval_primary(toks, pos, ctx)
-    while acc.err == "" and _boot_tok(toks, acc.pos).kind == LdTokenKind.Star:
+    while acc.err == "" and _boot_is_mul(_boot_tok(toks, acc.pos)):
+        val op = _boot_tok(toks, acc.pos)
         val rhs = _boot_eval_primary(toks, acc.pos + 1, ctx)
         if rhs.err != "":
             return rhs
-        acc = _BootEv(pos: rhs.pos, value: acc.value * rhs.value, err: "")
+        var v = acc.value * rhs.value
+        if op.kind == LdTokenKind.Op:
+            if rhs.value == 0:
+                return _boot_fail(acc.pos, "division by zero")
+            v = if op.value == "/": acc.value / rhs.value else: acc.value % rhs.value
+        acc = _BootEv(pos: rhs.pos, value: v, err: "")
+    acc
+
+fn _boot_ult(a: i64, b: i64) -> bool:
+    """Unsigned a < b (addresses are unsigned: the higher half is negative as i64)."""
+    if (a < 0) == (b < 0):
+        return a < b
+    b < 0
+
+fn _boot_is_rel(tok: LdToken) -> bool:
+    if tok.kind == LdTokenKind.Less or tok.kind == LdTokenKind.GreaterThan:
+        return true
+    tok.kind == LdTokenKind.Op and tok.value != "!" and tok.value != "~" and tok.value != "/" and tok.value != "%"
+
+fn _boot_rel_apply(op: text, a: i64, b: i64) -> Result<i64, text>:
+    var r = false
+    if op == "<":
+        r = _boot_ult(a, b)
+    else if op == ">":
+        r = _boot_ult(b, a)
+    else if op == "<=":
+        r = not _boot_ult(b, a)
+    else if op == ">=":
+        r = not _boot_ult(a, b)
+    else if op == "==":
+        r = a == b
+    else if op == "!=":
+        r = a != b
+    else if op == "&&":
+        r = a != 0 and b != 0
+    else if op == "||":
+        r = a != 0 or b != 0
+    else if op == "&":
+        return Ok(a & b)
+    else if op == "|":
+        return Ok(a | b)
+    else if op == "<<":
+        return Ok(a << b)
+    else if op == ">>":
+        return Ok(a >> b)
+    else:
+        return Err("unsupported operator {op}")
+    if r:
+        return Ok(1)
+    Ok(0)
+
+fn _boot_eval_rel(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    """One left-associative level for comparisons, shifts, bitwise and logical ops
+    (the same single level ld_parse_expr prints)."""
+    var acc = _boot_eval_sum(toks, pos, ctx)
+    while acc.err == "" and _boot_is_rel(_boot_tok(toks, acc.pos)):
+        val op = _boot_tok(toks, acc.pos).value
+        val rhs = _boot_eval_sum(toks, acc.pos + 1, ctx)
+        if rhs.err != "":
+            return rhs
+        match _boot_rel_apply(op, acc.value, rhs.value):
+            case Ok(v): acc = _BootEv(pos: rhs.pos, value: v, err: "")
+            case Err(e): return _boot_fail(acc.pos, e)
     acc
 
 fn _boot_eval_sum(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
@@ -192,7 +308,7 @@ fn _boot_eval_sum(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
 fn boot_eval(expr: text, ctx: BootEvalCtx) -> Result<i64, text>:
     """Evaluate a canonical linker-script expression (numbers, + - *, ., ALIGN, ADDR, symbols)."""
     val toks = ld_tokenize(expr)
-    val r = _boot_eval_sum(toks, 0, ctx)
+    val r = _boot_eval_rel(toks, 0, ctx)
     if r.err != "":
         return Err("cannot evaluate '{expr}': {r.err}")
     if _boot_tok(toks, r.pos).kind != LdTokenKind.Eof:
@@ -247,13 +363,16 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
             match boot_eval(h.flags_expr, boot_eval_ctx(0)):
                 case Ok(v): flags = v
                 case Err(e): return Err("boot layout: PHDRS {h.name}: {e}")
-        segments = segments.push(BootSegment(name: h.name, phdr_type: h.phdr_type, flags: flags))
+        segments = segments.push(BootSegment(name: h.name, phdr_type: h.phdr_type, flags: flags,
+            filehdr: h.filehdr, phdrs_hdr: h.phdrs, at_expr: h.at_expr))
 
     var sections: [BootSectionPlan] = []
     var symbols: [BootSymbol] = []
     var assertions: [BootAssertion] = []
     var gc_roots: [text] = []
     var discard: [text] = []
+    var ops: [BootOp] = []
+    var top_ops: [BootOp] = []
     var start_expr = ""
     var seen_section = false
     var sticky_segment = ""
@@ -267,8 +386,10 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
             for sym in st.patterns:
                 externs = externs.push(sym)
         else if st.kind == LdStmtKind.Assert:
+            top_ops = top_ops.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
             assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
         else if st.symbol != ".":
+            top_ops = top_ops.push(_boot_op(BOOT_OP_SYMBOL, symbols.len()))
             symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
                 provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
 
@@ -278,17 +399,22 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
             if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
                 return Err("boot layout: INCLUDE/EXTERN inside SECTIONS is not modelled; plan the expanded script")
             if st.kind == LdStmtKind.Assert:
+                ops = ops.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
                 assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
             else if st.symbol == ".":
-                if st.kind != LdStmtKind.Assign:
-                    return Err("boot layout: location-counter statement '. += {st.expr}' between output sections is not modelled")
+                var dexpr = st.expr
+                if st.kind == LdStmtKind.AddAssign:
+                    dexpr = ". + (" + st.expr + ")"
+                else if st.kind != LdStmtKind.Assign:
+                    return Err("boot layout: unsupported location-counter statement '. {st.expr}' between output sections")
+                ops = ops.push(BootOp(kind: BOOT_OP_DOT, index: -1, expr: dexpr, file_pattern: "", patterns: [], keep: false, value: 0))
+                # dot_expr / start_expr keep the rung-2 view (last before the first section, first between sections); `ops` is the replayable order.
                 if not seen_section:
-                    start_expr = st.expr
-                else:
-                    if pending_dot != "":
-                        return Err("boot layout: two location-counter assignments between output sections")
-                    pending_dot = st.expr
+                    start_expr = dexpr
+                else if pending_dot == "":
+                    pending_dot = dexpr
             else:
+                ops = ops.push(_boot_op(BOOT_OP_SYMBOL, symbols.len()))
                 symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
                     provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
             continue
@@ -301,8 +427,11 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
         var pad: i64 = 0
         var aligns: [i64] = []
         var defined: [text] = []
+        var body: [BootOp] = []
         for st in sec.body:
             if st.kind == LdStmtKind.Input or st.kind == LdStmtKind.Keep:
+                body = body.push(BootOp(kind: BOOT_OP_INPUT, index: -1, expr: "", file_pattern: st.file_pattern,
+                    patterns: st.patterns, keep: st.kind == LdStmtKind.Keep, value: 0))
                 for pat in st.patterns:
                     inputs = inputs.push(pat)
                     if st.kind == LdStmtKind.Keep:
@@ -312,27 +441,35 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
                     if is_discard:
                         discard = discard.push(pat)
             else if st.kind == LdStmtKind.Assert:
+                body = body.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
                 assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
             else if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
                 return Err("boot layout: {sec.name}: INCLUDE/EXTERN inside an output section is not modelled")
             else if st.symbol == ".":
                 if st.kind == LdStmtKind.AddAssign:
                     match boot_eval(st.expr, boot_eval_ctx(0)):
-                        case Ok(v): pad = pad + v
+                        case Ok(v):
+                            pad = pad + v
+                            body = body.push(BootOp(kind: BOOT_OP_PAD, index: -1, expr: "", file_pattern: "", patterns: [], keep: false, value: v))
                         case Err(e): return Err("boot layout: {sec.name}: {e}")
                 else:
                     # Only `. = ALIGN(n)` and `. = . + n` are modelled inside a section body.
                     val toks = ld_tokenize(st.expr)
                     if toks.len() == 4 and toks[0].value == "." and toks[1].kind == LdTokenKind.Plus:
                         match boot_eval(toks[2].value, boot_eval_ctx(0)):
-                            case Ok(v): pad = pad + v
+                            case Ok(v):
+                                pad = pad + v
+                                body = body.push(BootOp(kind: BOOT_OP_PAD, index: -1, expr: "", file_pattern: "", patterns: [], keep: false, value: v))
                             case Err(e): return Err("boot layout: {sec.name}: {e}")
                         continue
                     if toks.len() != 5 or toks[0].value != "ALIGN":
                         return Err("boot layout: {sec.name}: unsupported location-counter assignment '. = {st.expr}'")
-                    aligns = aligns.push(ld_parse_number(toks[2].value))
+                    val n = ld_parse_number(toks[2].value)
+                    aligns = aligns.push(n)
+                    body = body.push(BootOp(kind: BOOT_OP_ALIGN, index: -1, expr: "", file_pattern: "", patterns: [], keep: false, value: n))
             else:
                 defined = defined.push(st.symbol)
+                body = body.push(_boot_op(BOOT_OP_SYMBOL, symbols.len()))
                 symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
                     provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: sec.name))
 
@@ -351,19 +488,29 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
                 return Err("boot layout: allocated section {sec.name} has no PHDRS segment")
 
         val (has_bias, bias) = _boot_lma_bias(sec.name, sec.lma_expr)
+        ops = ops.push(_boot_op(BOOT_OP_SECTION, sections.len()))
         sections = sections.push(BootSectionPlan(name: sec.name, vma_expr: sec.address_expr, dot_expr: pending_dot,
             align_expr: sec.align_expr, lma_expr: sec.lma_expr, has_lma_bias: has_bias, lma_bias: bias,
             input_patterns: inputs, keep_patterns: keeps, noload: sec.section_type == "NOLOAD",
             pad_bytes: pad, inner_aligns: aligns, segment: segment, region: sec.region,
-            discard: is_discard, defined_symbols: defined))
+            discard: is_discard, defined_symbols: defined, body: body))
         pending_dot = ""
 
-    if pending_dot != "":
-        return Err("boot layout: trailing location-counter assignment '. = {pending_dot}' after the last output section")
     Ok(BootLayoutPlan(output_format: script.output_format, output_arch: script.output_arch,
         entry: script.entry, start_expr: start_expr, regions: regions, segments: segments,
         sections: sections, symbols: symbols, assertions: assertions, gc_roots: gc_roots,
-        extern_symbols: externs, discard_patterns: discard))
+        extern_symbols: externs, discard_patterns: discard, ops: ops, top_ops: top_ops))
+
+fn boot_layout_add_defsym(plan: BootLayoutPlan, name: text, expr: text) -> BootLayoutPlan:
+    """`--defsym=name=expr`: a top-level assignment evaluated after layout."""
+    var top = plan.top_ops
+    top = top.push(_boot_op(BOOT_OP_SYMBOL, plan.symbols.len()))
+    BootLayoutPlan(output_format: plan.output_format, output_arch: plan.output_arch,
+        entry: plan.entry, start_expr: plan.start_expr, regions: plan.regions, segments: plan.segments,
+        sections: plan.sections, symbols: plan.symbols.push(BootSymbol(name: name, expr: expr, provide: false, section: "")),
+        assertions: plan.assertions, gc_roots: plan.gc_roots, extern_symbols: plan.extern_symbols,
+        discard_patterns: plan.discard_patterns, ops: plan.ops, top_ops: top)
+
 
 fn boot_layout_from_text(input: text) -> Result<BootLayoutPlan, text>:
     """Parse a linker script and build its BootLayoutPlan."""
@@ -389,3 +536,5 @@ export BootRegion, BootSegment, BootSectionPlan, BootSymbol, BootAssertion, Boot
 export BootEvalCtx, boot_eval_ctx, boot_eval_bind, boot_eval, boot_align_up
 export boot_layout_from_script, boot_layout_from_text, boot_layout_find_section
 export boot_layout_start_address
+export BootOp, boot_layout_add_defsym
+export BOOT_OP_SECTION, BOOT_OP_DOT, BOOT_OP_SYMBOL, BOOT_OP_ASSERT, BOOT_OP_INPUT, BOOT_OP_PAD, BOOT_OP_ALIGN

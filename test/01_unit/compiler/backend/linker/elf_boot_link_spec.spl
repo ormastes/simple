@@ -1,0 +1,242 @@
+# elf_boot_link — internal link driven by a BootLayoutPlan (lane A9 rung 3)
+#
+# Links the checked-in aarch64 fixtures (start_a64.o + lib_a64.o: .text,
+# .rodata, .data, .bss) with a small higher-half script that uses PHDRS +
+# FLAGS, AT(expr) and AT(ADDR(sec) - C), NOLOAD, `. +=`, inner ALIGN,
+# PROVIDE, symbol assignments and ASSERT. Every expected number below was
+# produced by `ld.lld --no-relax -T <BOOT_SCRIPT>` (LLD 23.1.0) on the same
+# two objects and read back with llvm-readelf; the .text bytes are lld's.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
+# @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
+
+use compiler.backend.linker.elf.elf_boot_link.{ElfBootImage, elf_boot_link, elf_boot_link_image}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{BootLayoutPlan, boot_layout_from_text, boot_layout_add_defsym}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+# 0xffffffff80000000 as a two's-complement i64.
+val HH: i64 = -2147483648
+
+val BOOT_SCRIPT: text = """ENTRY(_start)
+PHDRS {
+    text PT_LOAD FLAGS(5);
+    data PT_LOAD FLAGS(6);
+}
+SECTIONS {
+    . = 0xffffffff80200000;
+    _kernel_start = .;
+    .text : AT(0x40200000) { *(.text*) } :text
+    . = ALIGN(0x1000);
+    .rodata : AT(ADDR(.rodata) - 0xffffffff40000000) { *(.rodata*) } :data
+    .data : { *(.data*) . += 0x10; . = ALIGN(0x20); _data_end = .; } :data
+    .bss (NOLOAD) : { _bss_start = .; *(.bss*) _bss_end = .; }
+    PROVIDE(_used_provide = 0x1234);
+    PROVIDE(_unused_provide = 0x5678);
+    _kernel_end = .; _probe = _used_provide + 1; PROVIDE(base = 0x999);
+    /DISCARD/ : { *(.comment) }
+}
+ASSERT(_kernel_end - _kernel_start <= 0x100000, "kernel too big")
+"""
+
+val LLD_TEXT: [i64] = [253, 123, 191, 169, 32, 0, 128, 82, 1, 0, 0, 176, 33, 0, 0, 145, 8, 8, 128, 82, 98, 0, 128, 82, 1, 0, 0, 212, 0, 5, 128, 82, 253, 3, 0, 145, 6, 0, 0, 148, 168, 11, 128, 82, 225, 3, 31, 170, 226, 3, 31, 170, 1, 0, 0, 212, 0, 0, 0, 20, 9, 0, 0, 176, 232, 3, 0, 170, 10, 0, 0, 176, 41, 5, 64, 249, 72, 17, 0, 249, 32, 1, 0, 139, 192, 3, 95, 214]
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn objs() -> [[i64]]:
+    [load_fixture("start_a64.o"), load_fixture("lib_a64.o")]
+
+fn plan_of(script: text) -> BootLayoutPlan:
+    boot_layout_from_text(script).unwrap()
+
+fn u64_at(b: [i64], off: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = (v << 8) | (b[off + i] & 0xff)
+        i = i - 1
+    v
+
+fn u32_at(b: [i64], off: i64) -> i64:
+    b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)
+
+# Program header i field at byte offset f (Elf64_Phdr).
+fn ph(b: [i64], i: i64, f: i64) -> i64:
+    val phoff = u64_at(b, 32)
+    u64_at(b, phoff + i * 56 + f)
+
+fn ph32(b: [i64], i: i64, f: i64) -> i64:
+    val phoff = u64_at(b, 32)
+    u32_at(b, phoff + i * 56 + f)
+
+fn img() -> ElfBootImage:
+    elf_boot_link_image(objs(), plan_of(BOOT_SCRIPT), RelocArch.AArch64).unwrap()
+
+fn sym(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sym_names.len():
+        if im.sym_names[i] == name:
+            return im.sym_values[i]
+        i = i + 1
+    -1
+
+fn has_sym(im: ElfBootImage, name: text) -> bool:
+    im.sym_names.contains(name)
+
+fn sec_vma(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            return im.sec_vmas[i]
+        i = i + 1
+    -1
+
+fn sec_size(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            return im.sec_sizes[i]
+        i = i + 1
+    -1
+
+describe "elf_boot_link - PHDRS segments with AT() load addresses":
+    it "emits exactly the two PHDRS PT_LOADs with FLAGS":
+        val b = img().bytes
+        expect(b[16] | (b[17] << 8)).to_equal(2)            # ET_EXEC
+        expect(b[56] | (b[57] << 8)).to_equal(2)            # e_phnum
+        expect(ph32(b, 0, 0)).to_equal(1)                   # PT_LOAD
+        expect(ph32(b, 0, 4)).to_equal(5)                   # R+X
+        expect(ph32(b, 1, 0)).to_equal(1)
+        expect(ph32(b, 1, 4)).to_equal(6)                   # R+W
+
+    it "text segment: higher-half VMA, AT() physical address, 64K-congruent offset":
+        val b = img().bytes
+        expect(ph(b, 0, 8)).to_equal(0x10000)               # p_offset
+        expect(ph(b, 0, 16)).to_equal(HH + 0x200000)        # p_vaddr
+        expect(ph(b, 0, 24)).to_equal(0x40200000)           # p_paddr
+        expect(ph(b, 0, 32)).to_equal(0x58)                 # p_filesz
+        expect(ph(b, 0, 40)).to_equal(0x58)                 # p_memsz
+        expect(ph(b, 0, 48)).to_equal(0x10000)              # p_align
+
+    it "data segment: AT(ADDR - C) physical address, NOLOAD .bss has no file bytes":
+        val b = img().bytes
+        expect(ph(b, 1, 8)).to_equal(0x11000)
+        expect(ph(b, 1, 16)).to_equal(HH + 0x201000)
+        expect(ph(b, 1, 24)).to_equal(0x40201000)
+        expect(ph(b, 1, 32)).to_equal(0x20)
+        expect(ph(b, 1, 40)).to_equal(0x28)
+
+    it "entry point is _start":
+        val b = img().bytes
+        expect(u64_at(b, 24)).to_equal(HH + 0x200000)
+
+describe "elf_boot_link - section placement":
+    it "places sections at the script's addresses with lld's sizes":
+        val im = img()
+        expect(sec_vma(im, ".text")).to_equal(HH + 0x200000)
+        expect(sec_size(im, ".text")).to_equal(0x58)
+        expect(sec_vma(im, ".rodata")).to_equal(HH + 0x201000)
+        expect(sec_size(im, ".rodata")).to_equal(4)
+        expect(sec_vma(im, ".data")).to_equal(HH + 0x201008)
+        expect(sec_size(im, ".data")).to_equal(0x18)       # 8 bytes + `. += 0x10`
+        expect(sec_vma(im, ".bss")).to_equal(HH + 0x201020)
+        expect(sec_size(im, ".bss")).to_equal(8)
+
+    it "relocated .text bytes equal ld.lld --no-relax":
+        val b = img().bytes
+        var got: [i64] = []
+        var i: i64 = 0
+        while i < LLD_TEXT.len():
+            got = got.push(b[0x10000 + i])
+            i = i + 1
+        expect(got).to_equal(LLD_TEXT)
+
+    it ".data carries the initialised value followed by the pad":
+        val b = img().bytes
+        expect(u64_at(b, 0x11008)).to_equal(2)
+        expect(u64_at(b, 0x11010)).to_equal(0)
+
+describe "elf_boot_link - script symbols":
+    it "location-counter symbols follow the replayed order":
+        val im = img()
+        expect(sym(im, "_kernel_start")).to_equal(HH + 0x200000)
+        expect(sym(im, "_data_end")).to_equal(HH + 0x201020)
+        expect(sym(im, "_bss_start")).to_equal(HH + 0x201020)
+        expect(sym(im, "_bss_end")).to_equal(HH + 0x201028)
+        expect(sym(im, "_kernel_end")).to_equal(HH + 0x201028)
+
+    it "PROVIDE defines only referenced symbols and never overrides an object definition":
+        val im = img()
+        expect(sym(im, "_used_provide")).to_equal(0x1234)
+        expect(sym(im, "_probe")).to_equal(0x1235)
+        expect(has_sym(im, "_unused_provide")).to_equal(false)
+        expect(sym(im, "base")).to_equal(HH + 0x201008)
+
+    it "--defsym is a top-level assignment evaluated after layout":
+        val plan = boot_layout_add_defsym(plan_of(BOOT_SCRIPT), "_alias", "add_val")
+        val im = elf_boot_link_image(objs(), plan, RelocArch.AArch64).unwrap()
+        expect(sym(im, "_alias")).to_equal(HH + 0x20003c)
+
+describe "elf_boot_link - fail-closed":
+    it "a failing ASSERT is an Err carrying its message":
+        val script = BOOT_SCRIPT.replace("<= 0x100000", "<= 0x10")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("kernel too big")).to_equal(true)
+
+    it "an allocatable input no statement places is an orphan Err":
+        val script = BOOT_SCRIPT.replace("*(.data*)", "*(.nothing)")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("orphan")).to_equal(true)
+
+    it "an undefined entry symbol is an Err":
+        val script = BOOT_SCRIPT.replace("ENTRY(_start)", "ENTRY(no_such_entry)")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("no_such_entry")).to_equal(true)
+
+# lld-verified: PT_PHDR + FILEHDR PHDRS load (headers mapped at the load base).
+val HDR_SCRIPT: text = """ENTRY(_start)
+PHDRS {
+    headers PT_PHDR PHDRS;
+    text PT_LOAD FILEHDR PHDRS FLAGS(5);
+    data PT_LOAD FLAGS(6);
+}
+SECTIONS {
+    . = 0x400000 + SIZEOF_HEADERS;
+    .text : { *(.text*) *(.rodata*) } :text
+    . = ALIGN(0x10000);
+    .data : { *(.data*) } :data
+    .bss : { *(.bss*) }
+    /DISCARD/ : { *(.comment) }
+}
+"""
+
+describe "elf_boot_link - FILEHDR / PHDRS keywords":
+    it "PT_PHDR describes the table inside the FILEHDR load":
+        val b = elf_boot_link(objs(), plan_of(HDR_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(b[56] | (b[57] << 8)).to_equal(3)
+        expect(ph32(b, 0, 0)).to_equal(6)                   # PT_PHDR
+        expect(ph(b, 0, 8)).to_equal(0x40)
+        expect(ph(b, 0, 16)).to_equal(0x400040)
+        expect(ph(b, 0, 32)).to_equal(0xa8)
+
+    it "the FILEHDR load starts at file offset 0 at the load base":
+        val b = elf_boot_link(objs(), plan_of(HDR_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(ph(b, 1, 8)).to_equal(0)
+        expect(ph(b, 1, 16)).to_equal(0x400000)
+        expect(ph(b, 1, 32)).to_equal(0x144)
+        expect(ph(b, 2, 8)).to_equal(0x10000)
+        expect(ph(b, 2, 16)).to_equal(0x410000)
+        expect(ph(b, 2, 32)).to_equal(8)
+        expect(ph(b, 2, 40)).to_equal(0x10)

@@ -1,4 +1,4 @@
-# Boot layout (lane A9): internal-linker boot rungs 3-4 not reached; board run blocked
+# Boot layout (lane A9): internal-linker rungs 3-4 reached on QEMU real firmware; board run blocked
 
 Status: OPEN (P2)
 **Date:** 2026-09-19
@@ -12,8 +12,8 @@ Status: OPEN (P2)
 |---|---|---|
 | 1. `ld_parse` round-trips all 6 `src/os/kernel/arch/*/linker.ld` | **PASS** | `test/01_unit/compiler/backend/linker/linker_script_spec.spl` 44/44. Before this change: 31 pass, 12 fail (PHDRS, AT, KEEP, NOLOAD, `+=`, OUTPUT_FORMAT, PROVIDE, ASSERT, round-trip) |
 | 2. Typed `BootLayoutPlan` | **PASS** | `test/01_unit/compiler/backend/linker/boot_layout_plan_spec.spl` 22/22, with values worked out by hand for x86_64 (higher half) and arm64 (MEMORY/NOLOAD). A mutation run flipped 3 expectations and all 3 went red |
-| 3. `llvm-readelf -l -S` parity: internal engine vs `ld.lld -T` | **NOT REACHED** (not blocked) | See below |
-| 4. Real-firmware QEMU boot with the internally linked kernel | **NOT REACHED** (depends on rung 3) | See below |
+| 3. `llvm-readelf -l -S` parity: internal engine vs `ld.lld -T` | **PASS** (2026-09-19, lane B1) | See "Rung 3 evidence" |
+| 4. Real-firmware QEMU boot with the internally linked kernel | **PASS** for the hello kernel (EDK2 -> Limine -> `kernel.elf`) | See "Rung 4 evidence" |
 | Board boot | **BLOCKED** | This host has no board access |
 
 Rung 1 is not vacuous. `ld_tokens_equivalent` compares the source token stream with the
@@ -21,7 +21,76 @@ printed token stream (comments and `;` are ignored), and the spec checks that it
 when one `AT()` bias is dropped. The parser is fail-closed: an unknown directive is an
 `Err`, not a skipped token.
 
-## Why rung 3 is not reached
+## Rung 3 evidence (2026-09-19, lane B1)
+
+The engine is `src/compiler/70.backend/linker/elf/elf_boot_link.spl` (`elf_boot_link`,
+`elf_boot_link_image`, `elf_boot_link_named`). It replays `BootLayoutPlan.ops` in source order.
+`BootLayoutPlan` now keeps that order (`ops`, `top_ops`, and a `body` for each section).
+`elf_exec_writer` now writes `p_paddr`. Specs:
+
+- `elf_boot_link_spec`: 15 examples. Every expected number comes from `ld.lld --no-relax -T`.
+- `boot_layout_ops_spec`: 9 examples.
+
+**Objects.** The seed `native-build` from the hello build script was run with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_KEEP_NATIVE_OBJS=1 ... --verbose`. This keeps the object directory and
+prints the exact `ld.lld` command: 5 objects, 3 `--defsym`, `--gc-sections`.
+
+**Comparison.** The same objects, script and defsyms were linked two ways:
+
+- (a) `ld.lld -O0 --no-relax -T linker_limine.ld`, without `--gc-sections`.
+- (b) The internal engine, with `boot_layout_add_defsym` for each defsym. This took 75 s in the
+  interpreter.
+
+**Results:**
+
+- **Program headers:** identical.
+  - `LOAD` at 0x10000, VMA 0xffffffff80100000, PA 0x40100000, size 0xa83c, `R E`.
+  - `LOAD` at 0x1b000, VMA 0xffffffff8010b000, PA 0x4010b000, size 0x3010, `RW`.
+  - Both segments have alignment 0x10000.
+- **Sections:** `.text`, `.rodata`, `.data`, `.bss` (NOBITS) and `.got` have the same address,
+  offset, size and alignment.
+- **Entry:** identical.
+- **Symbols:** all 359 defined globals have the same value.
+- **Bytes:** the file range 0x10000-0x1e010, which covers every loaded byte, is byte-identical.
+- **Remaining differences:**
+  - `.rodata` `sh_flags` is `A` here and `AMS` in lld.
+  - `e_shoff` and the layout of the non-loaded `.symtab` differ. The internal output emits globals
+    only.
+- **Two lld behaviours matter for byte parity:**
+  - GOT slot order. lld orders slots by the symbol table, not by relocation order. The engine now
+    does the same.
+  - String order. At its default `-O1`, lld reorders the strings of a `SHF_MERGE|SHF_STRINGS`
+    input (`.rodata.str1.1`) through its hash-sharded string table. The size is unchanged, but the
+    string order and every reference to it differ. So byte parity holds against `-O0`. Against
+    lld's default output, only the layout and the symbols match.
+- **Not compared:** the `--gc-sections` image that the build ships. The engine has no GC.
+
+## Rung 4 evidence (2026-09-19, lane B1)
+
+The command:
+
+```sh
+OUT_DIR=<d> ART_DIR=<d> WORK_DIR=<d>/work KERNEL_ELF=<internally linked kernel.elf> \
+AAVMF_CODE=~/.local/share/qemu/edk2-aarch64-code.fd AAVMF_VARS=~/.local/share/qemu/edk2-arm-vars.fd \
+  sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+```
+
+The boot chain is EDK2 pflash, then `BOOTAA64.EFI` (Limine), then the internally linked
+`kernel.elf`. No `-kernel` was used. The serial log shows:
+
+```
+[hello] serial up, invoking the Simple hello-world program
+HELLO_NATIVE_SIMPLEOS_AARCH64_OK hello world from Simple
+HELLO_NATIVE_SIMPLEOS_AARCH64 second line proves the program kept running
+[hello] native program exited rc=0
+[hello] parking
+```
+
+These lines are identical to the output of the externally linked (`--gc-sections`) kernel on the
+same gate. Both gate verdicts are FAIL, which is expected. The gate waits for the full kernel's
+`[BOOT] Memory map:` marker, and the hello kernel does not print it.
+
+## Why rung 3 was not reached before lane B1 (historical)
 
 This is unimplemented engine work. It is not a tooling block. The internal ELF engine
 (`src/compiler/70.backend/linker/elf/elf_static_link.spl` and `elf_exec_writer.spl`) does
@@ -75,6 +144,87 @@ kernel in about 0.2 s with the Rust seed. Two limits apply:
    - NOLOAD sections as `SHT_NOBITS`
    - KEEP globs as `--gc-sections` roots
    - symbol assignment
-2. Add a keep-objects path to the SimpleOS native link, then compare `llvm-readelf -l -S` against `ld.lld -T` on the same objects (rung 3).
-3. Substitute the internally linked kernel via `KERNEL_ELF=` in the EFI gate (rung 4).
+2. Done (lane B1): keep objects with `SIMPLE_KEEP_NATIVE_OBJS=1`, and rung-3 parity. Still open:
+   - Section GC (KEEP roots), so the engine can match the shipped `--gc-sections` image.
+   - lld's `-O1` string-merge order.
+   - A committed parity script (`scripts/check/check-boot-layout-parity.shs`) and its CI step.
+3. Done (lane B1): rung 4 with the hello kernel. Still open: rung 4 with the full kernel. That
+   needs its objects, and the full kernel prints the gate's `[BOOT]` markers.
 4. Close this record with a board transcript.
+
+## Appendix: reproducing rungs 3-4
+
+Step 1. Build the objects and keep them. Run this from the repo root with the seed at `$SEED`:
+
+```sh
+SIMPLE_BOOTSTRAP=1 SIMPLE_KEEP_NATIVE_OBJS=1 $SEED native-build --backend cranelift --entry-closure \
+  --timeout 1200 --entry examples/09_embedded/simple_os/arch/aarch64/hello_world_efi_entry.spl \
+  --target aarch64-unknown-none-elf \
+  --linker-script examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld \
+  --verbose -o kernel_ext.elf
+# The output prints "Keeping native object files in <dir>" and the "Freestanding link command".
+```
+
+Step 2. Produce the external reference. This is the same command without `--gc-sections`:
+
+```sh
+E=examples__09_embedded__simple_os__arch__aarch64__hello_world_efi_entry___start
+ld.lld -O0 --no-relax -T<script> -o ext_O0.elf <dir>/_boot_freestanding_runtime.o <dir>/mod_0.o \
+  <dir>/mod_1.o <dir>/_init_all.o <dir>/_stubs_freestanding.o --entry=_start \
+  --defsym=_start=$E --defsym=__simple_entry_start=$E --defsym=spl_start=$E
+```
+
+Step 3. Produce the internal link. Save the driver below as `bootlink_driver.spl` and run
+`bin/simple run bootlink_driver.spl kernel_int.elf <script> aarch64 --defsym=... <objects in the same order>`.
+
+Step 4. Compare the two images. Use `llvm-readelf -l -S -s` and `cmp` over the loaded file range.
+Then run rung 4 with the command in "Rung 4 evidence".
+
+```simple
+# usage: bin/simple run bootlink_driver.spl <out> <script> <arch> [--defsym=a=b ...] obj...
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_named}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read, file_read_bytes, file_write_bytes, sys_get_args}
+
+fn main():
+    val args = sys_get_args()
+    var i: i64 = 0
+    while i < args.len() and not args[i].ends_with("bootlink_driver.spl"):
+        i = i + 1
+    val out = args[i + 1]
+    val script = args[i + 2]
+    val arch = args[i + 3]
+    var plan = boot_layout_from_text(file_read(script)).unwrap()
+    var objs: [[i64]] = []
+    var names: [text] = []
+    var j = i + 4
+    while j < args.len():
+        val a = args[j]
+        if a.starts_with("--defsym="):
+            val kv = a[9:]
+            var eq: i64 = 0
+            while kv[eq:eq + 1] != "=":
+                eq = eq + 1
+            plan = boot_layout_add_defsym(plan, kv[0:eq], kv[eq + 1:])
+        else:
+            val raw = file_read_bytes(a)
+            var o: [i64] = []
+            var k: i64 = 0
+            while k < raw.len():
+                o = o.push(raw[k] as i64)
+                k = k + 1
+            objs = objs.push(o)
+            names = names.push(a)
+        j = j + 1
+    val target = if arch == "x86_64": RelocArch.X86_64 else: RelocArch.AArch64
+    match elf_boot_link_named(objs, names, plan, target):
+        case Ok(im):
+            var b: [u8] = []
+            for x in im.bytes:
+                b = b.push(x as u8)
+            file_write_bytes(out, b)
+            print "bootlink: wrote {out} ({im.bytes.len()} bytes)"
+        case Err(e):
+            print "bootlink: ERROR {e}"
+```

@@ -21,7 +21,7 @@ use compiler.backend.linker.elf_writer.{
     ElfLayoutSection,
     strtab_new, strtab_add, strtab_find, align_up,
     write_zeros, write_bytes,
-    emit_elf_header_full, emit_program_header, emit_section_header_at,
+    emit_elf_header_full, emit_section_header_at, write_u32_le, write_u64_le,
     ELF64_PHDR_SIZE
 }
 use compiler.backend.linker.elf_inspect.{ELF64_HEADER_SIZE, ELF64_SHDR_SIZE}
@@ -75,6 +75,7 @@ struct ElfExecSegment:
     p_flags: i64
     p_offset: i64
     p_vaddr: i64
+    p_paddr: i64       # physical (load) address; == p_vaddr except for AT()-placed boot images
     p_filesz: i64
     p_memsz: i64
     p_align: i64
@@ -211,7 +212,7 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
                 filesz = off
                 memsz = off
             loads = loads.push(ElfExecSegment(p_type: PT_LOAD, p_flags: elf_exec_seg_flags(seg), p_offset: seg_off,
-                p_vaddr: seg_v, p_filesz: filesz, p_memsz: memsz, p_align: page))
+                p_vaddr: seg_v, p_paddr: seg_v, p_filesz: filesz, p_memsz: memsz, p_align: page))
             vend = seg_v + memsz
             file_end = off
         seg = seg + 1
@@ -221,12 +222,12 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     if has_interp:
         val phsz = phnum * ELF64_PHDR_SIZE
         segs = segs.push(ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: ELF64_HEADER_SIZE,
-            p_vaddr: base + ELF64_HEADER_SIZE, p_filesz: phsz, p_memsz: phsz, p_align: 8))
+            p_vaddr: base + ELF64_HEADER_SIZE, p_paddr: base + ELF64_HEADER_SIZE, p_filesz: phsz, p_memsz: phsz, p_align: 8))
     var k: i64 = 0
     while k < secs.len():
         if secs[k].name == ".interp":
             segs = segs.push(ElfExecSegment(p_type: PT_INTERP, p_flags: PF_R, p_offset: offsets[k],
-                p_vaddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: 1))
+                p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: 1))
         k = k + 1
     for l in loads:
         segs = segs.push(l)
@@ -234,15 +235,15 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     while k < secs.len():
         if secs[k].name == ".dynamic":
             segs = segs.push(ElfExecSegment(p_type: PT_DYNAMIC, p_flags: PF_R | PF_W, p_offset: offsets[k],
-                p_vaddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: 8))
+                p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: 8))
         k = k + 1
-    segs = segs.push(ElfExecSegment(p_type: PT_GNU_STACK, p_flags: PF_R | PF_W, p_offset: 0, p_vaddr: 0,
+    segs = segs.push(ElfExecSegment(p_type: PT_GNU_STACK, p_flags: PF_R | PF_W, p_offset: 0, p_vaddr: 0, p_paddr: 0,
         p_filesz: 0, p_memsz: 0, p_align: 0))
     k = 0
     while k < secs.len():
         if secs[k].sh_type == SHT_NOTE_E:
             segs = segs.push(ElfExecSegment(p_type: PT_NOTE, p_flags: PF_R, p_offset: offsets[k],
-                p_vaddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: secs[k].align))
+                p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: secs[k].align))
         k = k + 1
 
     Ok(ElfExecPlan(secs: secs, offsets: offsets, vaddrs: vaddrs, segments: segs, file_end: file_end))
@@ -268,7 +269,14 @@ fn elf_write_image(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExecPlan,
     var b: [i64] = []
     b = emit_elf_header_full(b, e_type, e_machine, e_entry, ELF64_HEADER_SIZE, shoff, phnum, shnum, shnum - 1)
     for seg in plan.segments:
-        b = emit_program_header(b, seg.p_type, seg.p_flags, seg.p_offset, seg.p_vaddr, seg.p_filesz, seg.p_memsz, seg.p_align)
+        b = write_u32_le(b, seg.p_type)
+        b = write_u32_le(b, seg.p_flags)
+        b = write_u64_le(b, seg.p_offset)
+        b = write_u64_le(b, seg.p_vaddr)
+        b = write_u64_le(b, seg.p_paddr)
+        b = write_u64_le(b, seg.p_filesz)
+        b = write_u64_le(b, seg.p_memsz)
+        b = write_u64_le(b, seg.p_align)
 
     var i: i64 = 0
     while i < plan.secs.len():
