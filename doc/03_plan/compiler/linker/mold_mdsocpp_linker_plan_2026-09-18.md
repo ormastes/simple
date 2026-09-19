@@ -151,3 +151,17 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
 Next: RELRO, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed.
+
+## 13. Lane status — 2026-09-19 (fourth wave: C1)
+
+| Lane | Result | Evidence |
+|---|---|---|
+| C1 RELRO / section GC / string merge | **pass** (3 commits on `work/lnk-c1`) | **RELRO:** `elf_exec_plan` splits the RW class at a `.relro_padding` NOBITS marker — RELRO load padded to the 4 KiB common page, the rest at the next 64 KiB max-page, `PT_GNU_RELRO` (R, align 1) after `PT_DYNAMIC`. RW section order, page ends and segment shape match `ld.lld-23 -z relro` on the new `relro_a64.o`; dynamic PIE/exec, static PIE and static-with-`.got` all still run (exit 42). Absolute sizes differ from lld only through two PRE-EXISTING gaps (no symbol versioning: 3 fewer `.dynamic` tags; no `__gmon_start__` export: one fewer PLT slot), so the spec derives them from our own headers. `elf_relro_spec` 9/9 (8 red before). **GC:** new `elf/gc_sections.spl`, opt-in via `ElfLinkRequest.gc_sections`; roots are ld.lld `isReserved` + entry. Kept sizes byte-identical to `ld.lld --gc-sections` on `gc_a64.o` (`.rodata` 0x4 / `.text` 0x80 / `.init` 8 / `.init_array` 8 / `.data` 8 / `.bss` 0x10), lld's `--print-gc-sections` list matches the symbols that leave our `.symtab`. `.eh_frame` per-FDE liveness, `SHT_GROUP` and `SHF_LINK_ORDER` are named errors. `elf_gc_sections_spec` 8/8 (5 red before). **Merge:** new `elf/merge_sections.spl`, on by default like lld `-O1`; same group key and placement as lld's `MergeSyntheticSection`, addend folded through the piece map. Merged `.rodata` is 0x19 bytes with the same four literals as `ld.lld -O1` (0x22 with `-O0`), and the executed exit status discriminates: 42 merged / 40 not. `elf_merge_strings_spec` 7/7, mutation-proved. |
+
+Known gap (filed, not masked): the merged blob's BYTE ORDER is
+first-appearance, while ld.lld orders pieces by the top bits of an XXH3-64
+hash across 32 shards —
+`doc/08_tracking/bug/elf_merge_string_order_not_lld_shard_order_2026-09-19.md`.
+
+19 linker specs green on this lane. Next: x86_64 execution proof (lane C2),
+symbol versioning, `-z now`/`DF_BIND_NOW`, ICF, and the XXH3 shard order above.
