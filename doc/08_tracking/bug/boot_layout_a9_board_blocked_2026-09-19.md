@@ -140,8 +140,13 @@ linked by ANY linker, and because the fixes are what this claim rests on.
 | Kernel | Linker | Size | sha256 |
 |---|---|---|---|
 | `kernel_ext.elf` | `ld.lld --gc-sections` (the producer's own link) | 128232 | `7615ee42f03d7e5c35f90c9067ce206779ce7040671ea0fdf0558c94395c916d` |
-| `ext_O0.elf` | `ld.lld -O0 --no-relax`, no GC | 222176 | `58ca725ad2da6bbd48583390bc8585799af5329a1fa22a1c2814df17f75fb60f` |
-| `kernel_int.elf` | `elf_boot_link` (internal engine, no GC) | 204640 | `e35a777892b0e9afd79481edd6d437d1303be9e04123113975ea0ae289679719` |
+| `ext_O0.elf` | `ld.lld -O0 --no-relax`, no GC | 222176 | `73283884a4dc5906f144b0ae4691d5229ee925bf3ad26751c844bff2859743e7` |
+| `kernel_int.elf` | `elf_boot_link` (internal engine, no GC) | 204640 | `ea0de1d162623105d1169e1519ea3399155c1955fd82a89efca55bb61969a589` |
+
+Measured after the `tlbi vmalle1` fix below. `kernel_ext.elf`'s hash is unchanged by that fix,
+because `--gc-sections` discards `rt_arm64_tlbi_alle1` — nothing on the gated path calls it. The
+two no-GC hashes moved. Pre-fix hashes, for the record: `ext_O0.elf` `58ca725a…`, `kernel_int.elf`
+`e35a7778…`.
 
 `ext_O0.elf` is the comparison target, because the engine has no section GC. The
 file sizes differ only in the non-loaded `.symtab`.
@@ -157,10 +162,13 @@ defsyms:**
 - Entry identical: 0xffffffff80109a14.
 - **Loaded bytes byte-identical**: `cmp` over 0x10000..0x253d0 (87056 bytes) and
   0x26000..0x29020 (12320 bytes), i.e. every byte either `LOAD` segment covers.
-- Symbols: 492 of ld.lld's 495 defined globals match by value. The 3 that do not are
-  `_start`, `__simple_entry_start` and `spl_start` — the `--defsym` aliases, which
-  the engine resolves (the entry address is identical) but does not re-emit into
-  `.symtab`.
+- Symbols: `llvm-nm -g --defined-only` lists **626 in each**, with identical names and
+  identical values — `diff` over (value, name) is empty, and that includes `_start`,
+  `__simple_entry_start` and `spl_start`. Two entries differ only in nm's type letter:
+  `_bss_end` and `_kernel_end` are `B` from ld.lld and `A`/`D` from the engine, i.e.
+  the same addresses classified into a different section. (An earlier version of this
+  record said "492 of 495, the three `--defsym` aliases missing" — that came from a
+  mis-parsed `readelf -s` column and is withdrawn.)
 
 **Gate, run once per kernel** (EDK2/AAVMF pflash -> `BOOTAA64.EFI` -> `kernel.elf`,
 no `-kernel`, no `isa-debug-exit`):
@@ -174,7 +182,7 @@ AAVMF_VARS=~/.local/share/qemu/edk2-arm-vars.fd BOOT_TIMEOUT=90 \
 
 | Kernel | Verdict |
 |---|---|
-| `kernel_int.elf` (internal) | `PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64 boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit), 91 serial line(s) captured` (exit 0) |
+| `kernel_int.elf` (internal) | `PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64 boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit), 91 serial line(s) captured` (exit 0; re-run after the `tlbi` fix, same verdict) |
 | `ext_O0.elf` (ld.lld, no GC) | same verdict, 92 serial line(s) (exit 0) |
 | `kernel_ext.elf` (ld.lld --gc-sections) | same verdict, 91 serial line(s) (exit 0) |
 
@@ -280,6 +288,26 @@ kernel's relocations are 1127 `ABS64`, 680 `CALL26`, 143 `ADR_PREL_PG_HI21`, 140
    reported `FAIL — aarch64 kernel never printed 'SIMPLEOS-AARCH64-LIMINE-KERNEL-OK'` with the
    transcript stopping at `[BOOT] PMM probe: allocated pfn=262156`; the abort was identified by
    re-running the same ESP under `qemu -d int,guest_errors`.
+
+**Accessor audit (Fable review, 2026-09-19).** The review caught one wrong instruction: the first
+version of `rt_arm64_tlbi_alle1` emitted `tlbi alle1`, which is op1=4 and executes only at
+EL2/EL3. Limine hands over at EL1, where it is UNDEFINED and traps. It boots today only because
+the callers (`arch/arm64/paging.spl:459` on MMU-enable and `:578` in `switch_address_space`) are
+not on the gated path. Fixed to the EL1 form `tlbi vmalle1`, which
+`src/lib/nogc_async_mut_noalloc/baremetal/arm64/barrier.spl:64` and
+`arch/arm64/boot/baremetal_stubs.c:4390` already use; `cpu.spl`'s `tlbi_alle1` docstring now says
+so, since the extern keeps the `alle1` name. Every other accessor was re-checked for the same class
+of error: `CurrentEL`, `MPIDR_EL1`, `TTBR0/1_EL1`, `TCR_EL1`, `MAIR_EL1`, `SCTLR_EL1`, `VBAR_EL1`
+and `DAIF` are all EL1-accessible with the encoding `mrs`/`msr` selects by name; `tlbi vae1, Xt` is
+the EL1 form; `isb`, `dsb sy`, `dmb sy`, `wfi`, `wfe` are unprivileged or EL1-legal. All are
+`__asm__ volatile`; every write and every barrier carries a `"memory"` clobber, reads do not need
+one. The `dsb`/`isb` after a TLBI or an `SCTLR_EL1` write stay with the caller, matching the
+twin's contract (`paging.spl:460-461`). The `tlbi` fix is NOT exercised by this gate — no gated
+path enables paging — so it rests on the ARM ARM and the two in-tree precedents, not on a run.
+
+**Two non-blocking findings, recorded rather than fixed:** freestanding `rt_native_eq` does not
+know the UINT box, so two boxed u64 compare by handle while hosted `rt_value_eq` compares by
+value; and each erased u64 leaks 16 bytes on the bump heap, which never frees.
 
 Section GC is still absent from the engine, so all 23 symbols had to resolve rather than the 3 that
 `--gc-sections` keeps reachable. That is why the engine links `ext_O0.elf`'s shape, not the shipped

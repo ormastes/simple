@@ -39,18 +39,26 @@ needs a heap-boxed initializer keeps its `.bss` zero. `llvm-nm` on the kernel sh
 The writes in `_pmm_reset_contiguous_registry` hid the problem: `rt_array_set` on a non-array
 returns 0, so resetting the registry is a silent no-op, and only the first READ faults.
 
-## Workaround in place
+## Fix
 
 `examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl` declares
 `extern fn __simple_call_module_inits()` and calls it first in `_start`. The gate then passes
 (`PASS — 4 boot-stage marker(s) checked ... 91 serial line(s)`).
 
-This fixes one entry file. Every other freestanding entry in the tree has the same hole, and a new
-one starts with it.
+**Correction (Fable review, 2026-09-19).** An earlier version of this record claimed every other
+freestanding entry has the same hole. That is false, and the opposite is the point: calling it
+explicitly is the tree convention, and the aarch64 Limine entry was the one that had not adopted
+it. 19 files reference the symbol, including `arch/riscv64/boot/boot_entry.c:82,98` (weak
+declaration plus a null-checked call), `arch/riscv64/gui_entry_desktop.spl:38,48` and the
+`starfive`/x86_64 `crt0` paths. So this is a missing call in one entry, not a missing mechanism.
 
-## Required fix
+## Still open
 
-Emit the call from the freestanding boot path itself — either in the generated boot glue, or by
-rooting `__simple_call_module_inits` as a `KEEP` target and calling it before the entry symbol — so
-that no entry author has to know about it. Until then, a freestanding entry that relies on any
-module-level initializer is silently broken.
+The convention is unwritten and unenforced: nothing fails when a new freestanding entry omits the
+call, and the failure mode is a NULL global that faults much later, far from the cause. Either emit
+the call from the generated freestanding boot glue, or add a check that a freestanding entry
+references the symbol.
+
+See also `freestanding_entry_module_val_initializers_never_run_2026-07-06.md`, the same class one
+level down: there `__module_init_*` was never EMITTED for entry-module `val`s, whereas here the
+functions exist and are simply never called.

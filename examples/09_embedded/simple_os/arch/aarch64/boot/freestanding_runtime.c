@@ -2094,8 +2094,15 @@ void rt_arm64_wfe(void) {
     __asm__ volatile("wfe" ::: "memory");
 }
 
+/* `tlbi alle1` is op1=4 and executes only at EL2/EL3. Limine hands this kernel
+ * over at EL1, where that encoding is UNDEFINED and traps. The EL1 instruction
+ * that invalidates the whole stage-1 TLB for the current VMID is
+ * `tlbi vmalle1` — the same text `src/lib/nogc_async_mut_noalloc/baremetal/
+ * arm64/barrier.spl:64` and `arch/arm64/boot/baremetal_stubs.c:4390` already
+ * use. The extern keeps its `alle1` name (cpu.spl:37, paging.spl:459,578).
+ * Callers issue the required `dsb`/`isb` themselves (paging.spl:460-461). */
 void rt_arm64_tlbi_alle1(void) {
-    __asm__ volatile("tlbi alle1" ::: "memory");
+    __asm__ volatile("tlbi vmalle1" ::: "memory");
 }
 
 /* The operand is already VA >> 12; cpu.spl's tlbi_vae1 wrapper shifts it. */
