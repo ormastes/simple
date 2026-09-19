@@ -39,25 +39,23 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
     # Host requirement: aarch64 Linux with glibc (crt_discovery finds
     # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them) -- same requirement
     # as link_engine_external_spec.spl's internal-engine specs.
-    it "routes to the internal engine and surfaces its named refusal, never an external fallback":
+    it "links a Linux aarch64 ELF object internally, hardened, and the output runs":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
         step("SIMPLE_LINKER=internal routes link_to_native to the internal ELF engine end to end, carrying the platform flags")
         with_env("SIMPLE_LINKER", "internal", fn():
             val out = "/tmp/native_linking_internal_spec_hello"
             val cfg = NativeLinkConfig.default()
             val result = link_to_native([HELLO_A64_OBJ], out, cfg)
-            # Was: Success, output runs, exit 42. That was only true while the
-            # route DROPPED native_direct_platform_flags. Now `--gc-sections`
-            # is honoured, and elf_gc_reject refuses an input carrying
-            # `.eh_frame` because it does not model per-FDE liveness. The
-            # binary is still produced by internal_link_native when the caller
-            # does not ask for GC (see internal_native_all_support_spec's
-            # BIND_NOW row, which links this same object and runs it); what
-            # cannot happen yet is a DEFAULT-config link through the route.
-            # doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md
-            expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err()).to_contain("internal engine:")
-            expect(result.unwrap_err()).to_contain("gc_sections")
+            # Default config now carries the platform producer's flags, so
+            # this is a HARDENED link: DT_BIND_NOW from `-z now`, and
+            # `--gc-sections` applied with `.eh_frame` retained as an
+            # unconditional root (gc_sections.spl).
+            expect(result.is_ok()).to_equal(true)
+            val dyn = shell("readelf -d '{out}'")
+            expect(dyn.stdout).to_contain("BIND_NOW")
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("hi from libc\n")
         )
 
     it "reports a missing input as a named internal-engine error, never a silent external fallback":

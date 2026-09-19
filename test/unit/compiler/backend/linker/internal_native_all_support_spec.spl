@@ -51,7 +51,7 @@ use compiler.backend.linker._LinkerWrapper.native_linking.{native_direct_platfor
 use compiler.backend.linker._LinkerWrapper.native_linking.{internal_link_plan, internal_resolve_library, internal_absorb_link_args, internal_link_native, InternalLinkPlan, InternalResolvedLib}
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 use compiler.backend.linker.linker_wrapper.{link_to_native}
-use std.io_runtime.{file_read_bytes, shell}
+use std.io_runtime.{file_read_bytes, file_read, shell}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
@@ -358,9 +358,9 @@ describe "internal ELF route - the runtime provider is demanded, not skipped":
             expect(result.unwrap_err()).to_contain("simple_compiler")
         )
 
-    it "gets past the provider check when that directory carries the provider":
+    it "links when that same directory carries the provider the external arm names":
         # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
-        step("With libsimple_compiler.a present the auto bundle selects it as an archive input and no -lsimple_compiler is emitted, so resolution moves on")
+        step("With libsimple_compiler.a present the auto bundle selects it as an archive input and no -lsimple_compiler is emitted, so the link proceeds")
         val filled_dir = "{SANDBOX}/runtime_filled"
         shell("mkdir -p '{filled_dir}' && rm -f '{filled_dir}'/*.a && ar rc '{filled_dir}/libsimple_compiler.a'")
         var cfg = NativeLinkConfig.default()
@@ -368,15 +368,7 @@ describe "internal ELF route - the runtime provider is demanded, not skipped":
         with_internal_linker(fn():
             val result = link_to_native([HELLO_A64_OBJ],
                 "{SANDBOX}/runtime_filled_out", cfg)
-            # It stops LATER, and loudly: the platform producer's
-            # `--gc-sections` is now honoured, and elf_gc_reject refuses to
-            # garbage-collect an input carrying .eh_frame because it does not
-            # model per-FDE liveness. That is a named engine refusal, which is
-            # the correct D4 outcome -- the point of this row is that the
-            # runtime provider is no longer what fails.
-            expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err().contains("simple_compiler")).to_equal(false)
-            expect(result.unwrap_err()).to_contain("gc_sections")
+            expect(result.is_ok()).to_equal(true)
         )
 
 describe "internal ELF route - the hardening flags reach the output binary":
@@ -414,3 +406,43 @@ describe "internal ELF route - the hardening flags reach the output binary":
         expect(folded.is_err()).to_equal(true)
         expect(folded.unwrap_err()).to_contain("--g1probe-flag")
         expect(folded.unwrap_err()).to_contain("refused rather than ignored")
+
+describe "internal ELF route - --gc-sections works on input carrying .eh_frame":
+    it "links and runs an object with .eh_frame instead of refusing it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Honouring --gc-sections made elf_gc_reject refuse every real object; .eh_frame is now an unconditional root, which is the safe subset of lld's per-FDE liveness")
+        val out = "{SANDBOX}/gc_ehframe_out"
+        val linked = internal_link_native("linux", "aarch64", true,
+            ["test/fixtures/linker/elf/gc_ehframe_a64.o"], out,
+            [], [], [], [], [], "", true, true)
+        expect(linked.is_ok()).to_equal(true)
+        val run = shell("'{out}'")
+        expect(run.exit_code).to_equal(42)
+
+    it "retains .eh_frame while still collecting what nothing reaches":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Retaining a section lld might drop only makes the image larger; the GC must still do real work, or 'honoured' would mean 'ignored'")
+        val out_on = "{SANDBOX}/gc_ehframe_on"
+        val out_off = "{SANDBOX}/gc_ehframe_off"
+        val on = internal_link_native("linux", "aarch64", true,
+            ["test/fixtures/linker/elf/gc_ehframe_a64.o"], out_on,
+            [], [], [], [], [], "", true, true)
+        val off = internal_link_native("linux", "aarch64", true,
+            ["test/fixtures/linker/elf/gc_ehframe_a64.o"], out_off,
+            [], [], [], [], [], "", false, true)
+        expect(on.is_ok()).to_equal(true)
+        expect(off.is_ok()).to_equal(true)
+        val sections = shell("readelf -SW '{out_on}'")
+        expect(sections.stdout).to_contain(".eh_frame")
+        # GC with the unwind root still collects unreferenced sections, so the
+        # image is strictly smaller than the same link with GC off.
+        val smaller = shell("test $(stat -c%s '{out_on}') -lt $(stat -c%s '{out_off}')")
+        expect(smaller.exit_code).to_equal(0)
+
+    it "still refuses the cases that genuinely are unmodelled":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The retention subset must not widen: SHT_GROUP and SHF_LINK_ORDER stay named refusals")
+        val source = file_read("src/compiler/70.backend/linker/elf/gc_sections.spl")
+        expect(source.contains("does not model SHT_GROUP")).to_equal(true)
+        expect(source.contains("does not model SHF_LINK_ORDER")).to_equal(true)
+        expect(source.contains("does not model per-FDE")).to_equal(false)
