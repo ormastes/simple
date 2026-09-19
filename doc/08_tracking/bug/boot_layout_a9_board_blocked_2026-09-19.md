@@ -87,7 +87,22 @@ HELLO_NATIVE_SIMPLEOS_AARCH64 second line proves the program kept running
 ```
 
 These lines are identical to the output of the externally linked (`--gc-sections`) kernel on the
-same gate. Both gate verdicts are FAIL, which is expected. The gate waits for the full kernel's
+same gate.
+
+**Binary identity (re-run after the Fable review).** The hashes below tie each log to its ELF. Each
+image's copy inside `esp.img` was located at the ELF magic (offset 1326080) and hashed over the
+file's length.
+
+| Kernel | Size | sha256 of the ELF = sha256 of the copy in `esp.img` |
+|---|---|---|
+| Internal (`elf_boot_link`) | 139752 | `cbca17524b077710c8aa31cfc5ae04b56e3943820098448e9e24071a656e0269` |
+| ld.lld (`--gc-sections`) | 73584 | `b1eef582ffca0bfd3a7793334968cd035da42102ca9dc10411c154ab751aa832` |
+
+The two full serial logs are byte-identical (sha256 prefix `ca096ec8f4144032`).
+- Logs: `build/os/b1/{int,ext}.serial.log`
+- Hashes: `build/os/b1/boot_hashes.txt`
+- Gate: the command above, with `BOOT_TIMEOUT=60`, run once for each kernel.
+- The ESP images were deleted after the run. Both gate verdicts are FAIL, which is expected. The gate waits for the full kernel's
 `[BOOT] Memory map:` marker, and the hello kernel does not print it.
 
 ## Why rung 3 was not reached before lane B1 (historical)

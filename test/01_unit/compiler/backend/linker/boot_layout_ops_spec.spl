@@ -77,3 +77,30 @@ describe "boot_layout - evaluator operators":
         expect(boot_eval("0x100 / 4", boot_eval_ctx(0)).unwrap()).to_equal(64)
         expect(boot_eval("ALIGN(0x1001, 0x1000)", boot_eval_ctx(0)).unwrap()).to_equal(8192)
         expect(boot_eval("MAX(3, 9) + MIN(3, 9)", boot_eval_ctx(0)).unwrap()).to_equal(12)
+
+describe "boot_layout - C operator precedence (ld semantics)":
+    it "&& binds looser than comparisons":
+        expect(boot_eval("1 < 2 && 5 < 3", boot_eval_ctx(0)).unwrap()).to_equal(0)
+        expect(boot_eval("1 < 2 && 5 > 3", boot_eval_ctx(0)).unwrap()).to_equal(1)
+
+    it "& binds looser than ==":
+        expect(boot_eval("6 & 2 == 2", boot_eval_ctx(0)).unwrap()).to_equal(0)
+        expect(boot_eval("(6 & 2) == 2", boot_eval_ctx(0)).unwrap()).to_equal(1)
+
+    it "|| is looser than &&, | looser than ^, shifts tighter than ==":
+        expect(boot_eval("1 || 0 && 0", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("1 | 2 ^ 3", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("0x10 >> 4 == 1", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("1 + 2 << 1", boot_eval_ctx(0)).unwrap()).to_equal(6)
+
+    it ">> is a logical (unsigned) shift":
+        expect(boot_eval("0xffffffffffffffff >> 60", boot_eval_ctx(0)).unwrap()).to_equal(15)
+
+describe "boot_layout - AT> load region":
+    it "carries the AT> region":
+        val plan = boot_layout_from_text("ENTRY(s) MEMORY { ROM : ORIGIN = 0x1000, LENGTH = 4K RAM : ORIGIN = 0x8000, LENGTH = 4K } SECTIONS { .d : { *(.data) } > RAM AT> ROM }").unwrap()
+        expect(boot_layout_find_section(plan, ".d").unwrap().lma_region).to_equal("ROM")
+
+    it "rejects an undeclared AT> region and AT() together with AT>":
+        expect(boot_layout_from_text("ENTRY(s) MEMORY { RAM : ORIGIN = 0x8000, LENGTH = 4K } SECTIONS { .d : { *(.data) } > RAM AT> ROM }").is_err()).to_equal(true)
+        expect(boot_layout_from_text("ENTRY(s) MEMORY { RAM : ORIGIN = 0x8000, LENGTH = 4K } SECTIONS { .d : AT(0x10) { *(.data) } > RAM AT> RAM }").is_err()).to_equal(true)

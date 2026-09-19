@@ -73,6 +73,7 @@ struct BootSectionPlan:
     inner_aligns: [i64]  # `. = ALIGN(n)` inside the body, in order
     segment: text        # PHDRS segment ("" when PHDRS is not used or section is discarded/non-alloc)
     region: text         # MEMORY region or ""
+    lma_region: text     # AT> region (load addresses allocated from that region's cursor) or ""
     discard: bool        # /DISCARD/
     defined_symbols: [text]  # symbols assigned inside the body
     body: [BootOp]       # ordered body: INPUT / PAD / ALIGN / SYMBOL / ASSERT
@@ -243,10 +244,35 @@ fn _boot_ult(a: i64, b: i64) -> bool:
         return a < b
     b < 0
 
-fn _boot_is_rel(tok: LdToken) -> bool:
-    if tok.kind == LdTokenKind.Less or tok.kind == LdTokenKind.GreaterThan:
-        return true
-    tok.kind == LdTokenKind.Op and tok.value != "!" and tok.value != "~" and tok.value != "/" and tok.value != "%"
+fn _boot_bin_op(tok: LdToken) -> text:
+    """Binary operator text below the additive level, or "" when tok is not one."""
+    if tok.kind == LdTokenKind.Less:
+        return "<"
+    if tok.kind == LdTokenKind.GreaterThan:
+        return ">"
+    if tok.kind == LdTokenKind.Op and tok.value != "!" and tok.value != "~" and tok.value != "/" and tok.value != "%":
+        return tok.value
+    ""
+
+fn _boot_prec(op: text) -> i64:
+    """C precedence below + and - (higher binds tighter); 0 = not a binary operator."""
+    if op == "<<" or op == ">>":
+        return 8
+    if op == "<" or op == ">" or op == "<=" or op == ">=":
+        return 7
+    if op == "==" or op == "!=":
+        return 6
+    if op == "&":
+        return 5
+    if op == "^":
+        return 4
+    if op == "|":
+        return 3
+    if op == "&&":
+        return 2
+    if op == "||":
+        return 1
+    0
 
 fn _boot_rel_apply(op: text, a: i64, b: i64) -> Result<i64, text>:
     var r = false
@@ -270,10 +296,17 @@ fn _boot_rel_apply(op: text, a: i64, b: i64) -> Result<i64, text>:
         return Ok(a & b)
     else if op == "|":
         return Ok(a | b)
+    else if op == "^":
+        return Ok((a | b) - (a & b))
     else if op == "<<":
         return Ok(a << b)
     else if op == ">>":
-        return Ok(a >> b)
+        # logical shift: linker-script values are unsigned
+        if b <= 0:
+            return Ok(a)
+        if b >= 64:
+            return Ok(0)
+        return Ok((a >> b) & (((1 << (63 - b)) - 1) * 2 + 1))
     else:
         return Err("unsupported operator {op}")
     if r:
@@ -281,12 +314,24 @@ fn _boot_rel_apply(op: text, a: i64, b: i64) -> Result<i64, text>:
     Ok(0)
 
 fn _boot_eval_rel(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
-    """One left-associative level for comparisons, shifts, bitwise and logical ops
-    (the same single level ld_parse_expr prints)."""
+    """Full expression: shifts, comparisons, bitwise and logical ops with C
+    precedence (ld_parse_expr prints them as one flat level in source order,
+    so precedence is recovered here from the token stream)."""
+    _boot_eval_bin(toks, pos, ctx, 1)
+
+fn _boot_eval_bin(toks: [LdToken], pos: i64, ctx: BootEvalCtx, min_prec: i64) -> _BootEv:
+    """Precedence climbing over the binary operators below + and -."""
     var acc = _boot_eval_sum(toks, pos, ctx)
-    while acc.err == "" and _boot_is_rel(_boot_tok(toks, acc.pos)):
-        val op = _boot_tok(toks, acc.pos).value
-        val rhs = _boot_eval_sum(toks, acc.pos + 1, ctx)
+    while acc.err == "":
+        val op = _boot_bin_op(_boot_tok(toks, acc.pos))
+        val prec = _boot_prec(op)
+        if op == "":
+            break
+        if prec == 0:
+            return _boot_fail(acc.pos, "unsupported operator {op}")
+        if prec < min_prec:
+            break
+        val rhs = _boot_eval_bin(toks, acc.pos + 1, ctx, prec + 1)
         if rhs.err != "":
             return rhs
         match _boot_rel_apply(op, acc.value, rhs.value):
@@ -475,6 +520,10 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
 
         if sec.region != "" and not _boot_find_region(regions, sec.region):
             return Err("boot layout: {sec.name} placed in undeclared region '{sec.region}'")
+        if sec.lma_region != "" and not _boot_find_region(regions, sec.lma_region):
+            return Err("boot layout: {sec.name} loads into undeclared region '{sec.lma_region}' (AT>)")
+        if sec.lma_region != "" and sec.lma_expr != "":
+            return Err("boot layout: {sec.name} has both AT() and AT>")
         for ph in sec.phdrs:
             if not _boot_find_segment(segments, ph):
                 return Err("boot layout: {sec.name} placed in undeclared segment '{ph}'")
@@ -492,7 +541,7 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
         sections = sections.push(BootSectionPlan(name: sec.name, vma_expr: sec.address_expr, dot_expr: pending_dot,
             align_expr: sec.align_expr, lma_expr: sec.lma_expr, has_lma_bias: has_bias, lma_bias: bias,
             input_patterns: inputs, keep_patterns: keeps, noload: sec.section_type == "NOLOAD",
-            pad_bytes: pad, inner_aligns: aligns, segment: segment, region: sec.region,
+            pad_bytes: pad, inner_aligns: aligns, segment: segment, region: sec.region, lma_region: sec.lma_region,
             discard: is_discard, defined_symbols: defined, body: body))
         pending_dot = ""
 

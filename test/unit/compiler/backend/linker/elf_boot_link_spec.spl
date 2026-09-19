@@ -240,3 +240,56 @@ describe "elf_boot_link - FILEHDR / PHDRS keywords":
         expect(ph(b, 2, 16)).to_equal(0x410000)
         expect(ph(b, 2, 32)).to_equal(8)
         expect(ph(b, 2, 40)).to_equal(0x10)
+
+# lld-verified: MEMORY regions with `> RAM AT> ROM` (.data loads right after .rodata in ROM).
+val REGION_SCRIPT: text = """ENTRY(_start)
+MEMORY {
+    ROM (rx) : ORIGIN = 0x100000, LENGTH = 0x10000
+    RAM (rwx) : ORIGIN = 0x200000, LENGTH = 0x10000
+}
+SECTIONS {
+    .text : { *(.text*) } > ROM
+    .rodata : { *(.rodata*) } > ROM
+    .data : { _sdata = .; *(.data*) } > RAM AT> ROM
+    _sidata = LOADADDR(.data);
+    .bss : { *(.bss*) } > RAM
+    /DISCARD/ : { *(.comment) }
+}
+"""
+
+describe "elf_boot_link - MEMORY regions and AT>":
+    it "allocates .data's load address from the ROM cursor":
+        val im = elf_boot_link_image(objs(), plan_of(REGION_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(sec_vma(im, ".rodata")).to_equal(0x100058)
+        expect(sec_vma(im, ".data")).to_equal(0x200000)
+        expect(sym(im, "_sidata")).to_equal(0x100060)
+        expect(sec_vma(im, ".bss")).to_equal(0x200008)
+
+    it "emits lld's four PT_LOADs (LMA change and AT> reset split segments)":
+        val b = elf_boot_link(objs(), plan_of(REGION_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(b[56] | (b[57] << 8)).to_equal(4)
+        expect(ph(b, 1, 8)).to_equal(0x10058)
+        expect(ph(b, 2, 8)).to_equal(0x20000)
+        expect(ph(b, 2, 16)).to_equal(0x200000)
+        expect(ph(b, 2, 24)).to_equal(0x100060)
+        expect(ph(b, 3, 24)).to_equal(0x200008)
+        expect(ph(b, 3, 32)).to_equal(0)
+
+    it "a section overflowing its region is an Err naming both":
+        val script = REGION_SCRIPT.replace("ORIGIN = 0x100000, LENGTH = 0x10000", "ORIGIN = 0x100000, LENGTH = 0x50")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("section .text will not fit in region ROM: overflowed by 8 bytes")
+
+    it "overlapping section VMAs are an Err naming both":
+        val script = REGION_SCRIPT.replace(".bss : { *(.bss*) } > RAM", ".bss 0x200004 : { *(.bss*) }")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain(".data virtual address range overlaps with .bss")
+
+describe "elf_boot_link - compound ASSERT":
+    it "a false compound ASSERT is an Err (&& binds looser than <=)":
+        val script = BOOT_SCRIPT.replace("_kernel_end - _kernel_start <= 0x100000", "_kernel_end > _kernel_start && _kernel_end - _kernel_start <= 0x10")
+        val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("kernel too big")

@@ -373,6 +373,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
     var dot: i64 = 0
     var lma_off: i64 = 0
     var last_segment = ""
+    var prev_region = ""
+    var prev_lma_region = ""
 
     for op in plan.ops:
         if op.kind == BOOT_OP_DOT:
@@ -429,10 +431,31 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                 val a2 = boot_eval(sec.align_expr, _bl_ctx_at(ctx, dot))?
                 if a2 > align:
                     align = a2
-            val addr = boot_align_up(dot, align)
+            # lld keeps an explicit output-section address as written (it only warns
+            # when it is misaligned); otherwise the location counter is aligned.
+            var addr = boot_align_up(dot, align)
+            if sec.vma_expr != "" and sec.align_expr == "":
+                addr = dot
             ctx = boot_eval_bind(ctx, "ADDR({sec.name})", addr)
+            # lld (Output-Section-LMA heuristics): AT() or AT> recompute the lma offset;
+            # otherwise it carries over only while the VMA region is unchanged and the
+            # previous section had no AT> region, else it resets to 0.
+            var lma_ri: i64 = -1
+            ri = 0
+            while ri < plan.regions.len():
+                if plan.regions[ri].name == sec.lma_region:
+                    lma_ri = ri
+                ri = ri + 1
             if sec.lma_expr != "":
                 lma_off = boot_eval(sec.lma_expr, _bl_ctx_at(ctx, addr))? - addr
+            else if lma_ri >= 0:
+                val lstart = boot_align_up(region_cur[lma_ri], align)
+                region_cur[lma_ri] = lstart
+                lma_off = lstart - addr
+            else if prev_region != sec.region or prev_lma_region != "":
+                lma_off = 0
+            prev_region = sec.region
+            prev_lma_region = sec.lma_region
 
             # Body, in order.
             var cur: i64 = 0
@@ -494,6 +517,10 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
             dot = addr + cur
             if region_idx >= 0:
                 region_cur[region_idx] = dot
+                _bl_region_fits(plan, region_idx, dot, sec.name)?
+            if lma_ri >= 0 and sh_type != SHT_NOBITS_E:
+                region_cur[lma_ri] = region_cur[lma_ri] + cur
+                _bl_region_fits(plan, lma_ri, region_cur[lma_ri], sec.name)?
 
     # Synthetic .got: lld's orphan position — after every command, in the last segment.
     if got_size > 0:
@@ -527,7 +554,39 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
             if boot_eval(a.expr, ctx)? == 0:
                 return Err("elf_boot_link: ASSERT failed: {a.message}")
 
+    _bl_check_overlaps(outs)?
     Ok(_BootLayout(outs: outs, plan_to_out: plan_to_out, ctx: ctx, sym_names: sym_names, sym_values: sym_values, ins: ins))
+
+fn _bl_region_fits(plan: BootLayoutPlan, ri: i64, end: i64, sec_name: text) -> Result<bool, text>:
+    """lld: a section that pushes a MEMORY region cursor past ORIGIN + LENGTH is an error."""
+    val r = plan.regions[ri]
+    val limit = r.origin + r.length
+    if _bl_ult(limit, end):
+        return Err("elf_boot_link: section {sec_name} will not fit in region {r.name}: overflowed by {end - limit} bytes")
+    Ok(true)
+
+fn _bl_ranges_overlap(a0: i64, an: i64, b0: i64, bn: i64) -> bool:
+    """[a0, a0+an) and [b0, b0+bn) intersect (unsigned addresses, empty ranges never do)."""
+    if an <= 0 or bn <= 0:
+        return false
+    _bl_ult(a0, b0 + bn) and _bl_ult(b0, a0 + an)
+
+fn _bl_check_overlaps(outs: [_BootOut]) -> Result<bool, text>:
+    """lld: overlapping VMA ranges, or overlapping load (LMA) ranges of file-backed
+    sections, are errors."""
+    var i: i64 = 0
+    while i < outs.len():
+        var j = i + 1
+        while j < outs.len():
+            val a = outs[i]
+            val b = outs[j]
+            if _bl_ranges_overlap(a.vma, a.size, b.vma, b.size):
+                return Err("elf_boot_link: section {a.name} virtual address range overlaps with {b.name}")
+            if a.sh_type != SHT_NOBITS_E and b.sh_type != SHT_NOBITS_E and _bl_ranges_overlap(a.lma, a.size, b.lma, b.size):
+                return Err("elf_boot_link: section {a.name} load address range overlaps with {b.name}")
+            j = j + 1
+        i = i + 1
+    Ok(true)
 
 # ============================================================================
 # Segments and file offsets
@@ -677,6 +736,16 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
                 p_vaddr: hdr_load_vaddr + BOOT_EHDR, p_paddr: hdr_load_paddr + BOOT_EHDR,
                 p_filesz: sz, p_memsz: sz, p_align: 8)
         sj = sj + 1
+    var pa: i64 = 0
+    while pa < segs.len():
+        var pb = pa + 1
+        while pb < segs.len():
+            val x = segs[pa]
+            val y = segs[pb]
+            if x.p_type == PT_LOAD and y.p_type == PT_LOAD and _bl_ranges_overlap(x.p_vaddr, x.p_memsz, y.p_vaddr, y.p_memsz):
+                return Err("elf_boot_link: PT_LOAD segments {pa} and {pb} overlap in virtual memory")
+            pb = pb + 1
+        pa = pa + 1
     Ok(_BootSegs(segs: segs, offsets: offsets, seg_of: seg_of, file_end: cur))
 
 # ============================================================================
