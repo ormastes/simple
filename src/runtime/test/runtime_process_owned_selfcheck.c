@@ -1,5 +1,7 @@
 #include "runtime.h"
 
+#if !defined(_WIN32)
+
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -356,3 +358,19 @@ int main(void) {
     puts("runtime_process_owned_selfcheck: PASS");
     return 0;
 }
+
+#else /* defined(_WIN32) */
+
+/* POSIX-only behavioural proof: the fixtures are /bin/sh scripts, signals
+ * (SIGKILL/kill), rusage evidence, and ESTALE -- none of which exist on
+ * Windows.  The _WIN32 branch of runtime_process_owned.c has its own proof in
+ * rt_process_owned_win32_selfcheck.c beside this file.  Without this guard
+ * the TU does not even parse on Windows, which left the push-blocking
+ * C-runtime gate RED on every Windows host. */
+#include <stdio.h>
+int main(void) {
+    fprintf(stderr, "SKIP: POSIX-only selfcheck; see rt_process_owned_win32_selfcheck.c\n");
+    return 0;
+}
+
+#endif

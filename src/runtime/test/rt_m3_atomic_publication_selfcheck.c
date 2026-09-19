@@ -10,6 +10,25 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+/* The push-blocking C-runtime gate compiles every src/runtime TU with the
+ * host compiler; these fixtures are POSIX-shaped (mkdir with a mode, symlink),
+ * so give them Windows bodies.  Symlink creation needs a privilege Windows
+ * console sessions often lack, so the link-dependent rejection check degrades
+ * to a printed note instead of a hard failure. */
+#include <direct.h>
+#include <windows.h>
+static int make_dir(const char* path) { return _mkdir(path); }
+static int create_symlink(const char* target, const char* linkpath) {
+    return CreateSymbolicLinkA(linkpath, target, 0) ? 0 : -1;
+}
+#else
+static int make_dir(const char* path) { return mkdir(path, 0700); }
+static int create_symlink(const char* target, const char* linkpath) {
+    return symlink(target, linkpath);
+}
+#endif
+
 static int write_fixture(const char* path, const char* content) {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) return 0;
@@ -33,7 +52,7 @@ int main(void) {
     char root[PATH_MAX];
     if (snprintf(root, sizeof(root), "/tmp/simple-m3-publication.%ld",
             (long)getpid()) < 0) return 10;
-    if (mkdir(root, 0700) != 0) return 10;
+    if (make_dir(root) != 0) return 10;
 
     char source[PATH_MAX];
     char staging[PATH_MAX];
@@ -76,13 +95,20 @@ int main(void) {
             final_path, (int64_t)strlen(final_path))) return 20;
     if (!content_equals(final_path, admitted)) return 21;
 
-    if (symlink(source, source_link) != 0) return 22;
-    if (rt_file_copy_create_excl_no_follow(
-            source_link, (int64_t)strlen(source_link),
-            rejected_staging, (int64_t)strlen(rejected_staging))) return 23;
-    if (access(rejected_staging, F_OK) == 0 || errno != ENOENT) return 24;
+    if (create_symlink(source, source_link) != 0) {
+#if defined(_WIN32)
+        fprintf(stderr, "note: symlink creation unavailable; skipping no-follow-through-link rejection check\n");
+#else
+        return 22;
+#endif
+    } else {
+        if (rt_file_copy_create_excl_no_follow(
+                source_link, (int64_t)strlen(source_link),
+                rejected_staging, (int64_t)strlen(rejected_staging))) return 23;
+        if (access(rejected_staging, F_OK) == 0 || errno != ENOENT) return 24;
+        unlink(source_link);
+    }
 
-    unlink(source_link);
     unlink(conflict_staging);
     unlink(conflict_source);
     unlink(final_path);

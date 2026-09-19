@@ -9,6 +9,25 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+/* The push-blocking C-runtime gate compiles every src/runtime TU with the
+ * host compiler; these fixtures are POSIX-shaped (mkdir with a mode, symlink),
+ * so give them Windows bodies.  Symlink creation needs a privilege Windows
+ * console sessions often lack, so the link-dependent assertions degrade to a
+ * printed note instead of a hard failure. */
+#include <direct.h>
+#include <windows.h>
+static int make_dir(const char* path) { return _mkdir(path); }
+static int create_symlink(const char* target, const char* linkpath) {
+    return CreateSymbolicLinkA(linkpath, target, 0) ? 0 : -1;
+}
+#else
+static int make_dir(const char* path) { return mkdir(path, 0700); }
+static int create_symlink(const char* target, const char* linkpath) {
+    return symlink(target, linkpath);
+}
+#endif
+
 typedef struct { const uint8_t *data; int64_t len; } TestText;
 
 const uint8_t *rt_string_data(int64_t value) { return ((TestText *)(uintptr_t)value)->data; }
@@ -43,12 +62,19 @@ int main(void) {
     snprintf(nested, sizeof(nested), "%s/nested", root);
     snprintf(file, sizeof(file), "%s/data.bin", nested);
     snprintf(link_path, sizeof(link_path), "%s/link.bin", nested);
-    assert(mkdir(nested, 0700) == 0);
+    assert(make_dir(nested) == 0);
     int fd = open(file, O_CREAT | O_EXCL | O_WRONLY, 0600);
     assert(fd >= 0);
     assert(write(fd, "abcdef", 6) == 6);
     assert(close(fd) == 0);
-    assert(symlink("data.bin", link_path) == 0);
+#if defined(_WIN32)
+    int symlink_made = (create_symlink("data.bin", link_path) == 0);
+    if (!symlink_made)
+        fprintf(stderr, "note: symlink creation unavailable; skipping no-follow-link assertions\n");
+#else
+    int symlink_made = 1;
+    assert(create_symlink("data.bin", link_path) == 0);
+#endif
 
     TestText root_text = text(root), path_text = text("nested/data.bin");
     int64_t handle = rt_file_view_open_beneath_no_follow_v1(
@@ -68,9 +94,11 @@ int main(void) {
     assert(rt_file_view_close_v1(handle));
     assert(!rt_file_view_close_v1(handle));
 
-    TestText link_text = text("nested/link.bin");
-    assert(rt_file_view_open_beneath_no_follow_v1(
-        (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&link_text) == -3);
+    if (symlink_made) {
+        TestText link_text = text("nested/link.bin");
+        assert(rt_file_view_open_beneath_no_follow_v1(
+            (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&link_text) == -3);
+    }
     TestText escape_text = text("../data.bin");
     assert(rt_file_view_open_beneath_no_follow_v1(
         (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&escape_text) == -2);
@@ -83,7 +111,7 @@ int main(void) {
     assert(rt_file_view_open_beneath_no_follow_v1(
         (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&invalid_path) == -2);
 
-    assert(unlink(link_path) == 0);
+    if (symlink_made) assert(unlink(link_path) == 0);
     assert(unlink(file) == 0);
     assert(rmdir(nested) == 0);
     assert(rmdir(root) == 0);
