@@ -30,7 +30,7 @@ use compiler.backend.linker.coff.coff_object.{
 }
 use compiler.backend.linker.coff.coff_layout.{
     CoffOutSec, CoffPlacement, coff_place_inputs, coff_sort_outs, coff_reindex,
-    coff_assign_addresses, coff_out_find, coff_reserved_out_count,
+    coff_assign_addresses, coff_out_find, coff_reserved_out_count, coff_drop_empty_outs,
     coff_reloc_section_characteristics,
     PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT,
 }
@@ -312,8 +312,45 @@ struct CoffPatched:
     contents: [[i64]]
     base_relocs: [PeBaseReloc]
 
+fn coff_emits_base_relocs(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
+                          image_base: i64) -> Result<bool, text>:
+    """Will this link produce a non-empty `.reloc`?
+
+    Needed BEFORE relocations are applied, because a SECTION relocation against
+    an absolute symbol takes the value `numOutputSections + 1` and lld counts
+    the synthesized `.reloc` in that total (measured: 0x0003 without one,
+    0x0004 with). Deriving the count from `place.outs` alone is off by one
+    exactly when a base relocation exists. This is a pure predicate over the
+    same ADDR64-and-not-absolute condition the apply loop uses."""
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            if place.sec_out[oi][si] >= 0:
+                for r in obj.sections[si].relocs:
+                    if coff_reloc_needs_base_reloc(r.rtype):
+                        if r.sym_index >= obj.symbols.len():
+                            return Err("coff: {obj.origin}: relocation symbol index {r.sym_index} is past the {obj.symbols.len()}-slot symbol table")
+                        val tgt = coff_lookup(objects, place, res, image_base, oi, obj.symbols[r.sym_index])
+                        if tgt.is_err():
+                            return Err(tgt.unwrap_err())
+                        if not tgt.unwrap().is_absolute:
+                            return Ok(true)
+            si = si + 1
+        oi = oi + 1
+    Ok(false)
+
+fn coff_abs_section_index(place: CoffPlacement, emits_reloc: bool) -> i64:
+    """The value lld writes for a SECTION relocation against an absolute
+    symbol: one past the last output section index, counting `.reloc`."""
+    var n = place.outs.len()
+    if emits_reloc:
+        n = n + 1
+    n + 1
+
 fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
-                          image_base: i64, contents: [[i64]]) -> Result<CoffPatched, text>:
+                          image_base: i64, contents: [[i64]], abs_sec_index: i64) -> Result<CoffPatched, text>:
     var bufs = contents
     var brs: [PeBaseReloc] = []
     var oi: i64 = 0
@@ -342,8 +379,13 @@ fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymR
                         return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()}: {coff_reloc_type_name(r.rtype)} cannot be applied to absolute symbol {obj.symbols[r.sym_index].name}")
                     val field_off = member_off + r.vaddr
                     val p = image_base + place.outs[k].rva + field_off
+                    var sec_idx = t.sec_index
+                    if t.is_absolute:
+                        # An absolute symbol has no section; lld writes one
+                        # past the last output section index here.
+                        sec_idx = abs_sec_index
                     val ar = coff_reloc_apply(bufs[k], field_off, r.rtype, t.va, p,
-                        image_base, t.sec_va, t.sec_index)
+                        image_base, t.sec_va, sec_idx)
                     if not ar.success:
                         return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()} -> {obj.symbols[r.sym_index].name}: {ar.error}")
                     bufs[k] = coff_reloc_patch_bytes(bufs[k], field_off, coff_reloc_width(r.rtype), ar.value)
@@ -393,7 +435,8 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
     val placed = coff_place_inputs(objects)
     if placed.is_err():
         return Err(placed.unwrap_err())
-    var place = coff_reindex(placed.unwrap(), coff_sort_outs(placed.unwrap().outs))
+    var place = coff_reindex(placed.unwrap(),
+        coff_drop_empty_outs(coff_sort_outs(placed.unwrap().outs)))
 
     # SizeOfHeaders is reserved from the PRE-removal section count, exactly as
     # lld-link does it (see coff_reserved_out_count for the measurement), so it
@@ -409,8 +452,13 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
         return Err(a1.unwrap_err())
     place = CoffPlacement(outs: a1.unwrap(), sec_out: place.sec_out, sec_off: place.sec_off)
 
+    val emits = coff_emits_base_relocs(objects, place, res, req.image_base)
+    if emits.is_err():
+        return Err(emits.unwrap_err())
+    val abs_sec_index = coff_abs_section_index(place, emits.unwrap())
+
     val contents = coff_section_contents(objects, place)
-    val patched = coff_apply_relocations(objects, place, res, req.image_base, contents)
+    val patched = coff_apply_relocations(objects, place, res, req.image_base, contents, abs_sec_index)
     if patched.is_err():
         return Err(patched.unwrap_err())
     val pt = patched.unwrap()
@@ -461,29 +509,42 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
 # From coff_layout.spl (place):    the output-section map is a CLOSED set —
 #   only .text, .rdata, .data, .bss and .xdata are laid out. .idata, .edata,
 #   .didat, .00cfg, .gfids, .tls, .pdata, .rsrc, an input .reloc and ANY
-#   unrecognised name are named Errs, deliberately including names lld-link
-#   would merge into .rdata. Two inputs that merge to one output NAME with
-#   different masked Characteristics are also an Err (lld would emit two
-#   same-named output sections; duplicate output names are not modelled).
-#   would merge into .rdata: merging .idata without building an import
+#   unrecognised name are named Errs. That deliberately includes names lld-link
+#   would happily merge into .rdata: merging .idata without building an import
 #   directory, or laying out a writable .CRT$XCU with guessed read-only
-#   Characteristics, links successfully and produces a wrong image, which is
-#   the silent success D4 exists to forbid. Also: SectionAlignment <
-#   FileAlignment; a section needing more alignment than SectionAlignment.
+#   Characteristics, links successfully and produces a WRONG image, which is
+#   the silent success D4 exists to forbid. Two inputs that merge to one output
+#   NAME with different masked Characteristics are also an Err (lld emits two
+#   same-named output sections; duplicate output names are not modelled). Also:
+#   the PE alignment rules (FileAlignment not a power of two or outside
+#   512..65536, SectionAlignment not a power of two or below FileAlignment, and
+#   below a 4096-byte page FileAlignment != SectionAlignment or a section whose
+#   RVA and file offset differ); a section needing more alignment than
+#   SectionAlignment.
 # From smf_reloc_formulas.spl:     IMAGE_REL_AMD64_ADDR32, SECREL7, TOKEN,
 #   SREL32, PAIR, SSPAN32, UNKNOWN_<n>; every width overflow (REL32 family
 #   signed-32, ADDR32NB and SECREL unsigned-32, SECTION unsigned-16).
 # From this file:                  no inputs; no /entry; entry not defined;
-#   more output sections than SizeOfHeaders reserved room for; a section-
-#   relative relocation (SECREL/SECTION/SECREL7) applied to an ABSOLUTE symbol,
-#   which lld-link also refuses outright;
-#   undefined symbol; duplicate symbol (via sym_resolver); a .lib without ar
+#   more output sections than SizeOfHeaders reserved room for; SECREL or
+#   SECREL7 applied to an ABSOLUTE symbol, which lld-link also refuses outright
+#   ("SECREL relocation cannot be applied to absolute symbols"). NOTE that
+#   SECTION against an absolute symbol is NOT an Err: lld links it with rc=0,
+#   writing numOutputSections + 1, and so do we (coff_abs_section_index).
+#   Also: undefined symbol; duplicate symbol (via sym_resolver); a .lib without ar
 #   magic; a relocation on a zero-fill section; a relocation symbol index past
 #   the symbol table; a definition in a section that was not laid out.
 # From pe_exec_writer.spl:         section/content count mismatch; zero
 #   sections; a section name over 8 bytes; a SizeOfHeaders that cannot hold the
 #   section table or is not FileAlignment-aligned; optional-header size drift;
 #   overlapping file offsets; content longer than SizeOfRawData.
+#
+# KNOWN DIVERGENCE, pre-existing and deliberate: IMAGE_REL_AMD64_ADDR32NB
+# against an ABSOLUTE symbol. The formula is S - ImageBase, which for a small
+# constant is negative, so the oracle's unsigned-32 check rejects it by name.
+# lld instead lets it wrap and writes 0xC0001234 for absval = 0x1234 at the
+# default base. Rejecting is the safer reading of an image-relative field, but
+# it IS a divergence from the oracle and is recorded rather than implied away:
+# doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md § 4.
 #
 # Not modelled at all, and therefore not reachable rather than wrong: imports
 # and the IAT, exports, delay imports, resources, exception tables, TLS
@@ -495,4 +556,5 @@ export coff_link_request, coff_static_link
 export coff_resolve, coff_undefined, coff_sym_entries, coff_sym_binding, coff_sym_is_linkable
 export coff_archive_closure, coff_ar_is_object_member, coff_ar_member_bytes
 export coff_section_contents, coff_apply_relocations, coff_target_of, coff_lookup
+export coff_emits_base_relocs, coff_abs_section_index
 export coff_member_va

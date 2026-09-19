@@ -135,11 +135,11 @@ lld-link /entry:ab_entry /subsystem:console /nodefaultlib /timestamp:0 \
 # its .rdata Characteristics 0x40100040 -> 0xC0100040 (MEM_WRITE set). The
 # assembler will not emit a writable .rdata, so the flag is set by patching.
 cp secrel_x64.obj wrdata_x64.obj
-printf '\xc0' | dd of=wrdata_x64.obj bs=1 seek=179 count=1 conv=notrunc
+printf '\300' | dd of=wrdata_x64.obj bs=1 seek=179 count=1 conv=notrunc
 lld-link /entry:anchor /subsystem:console /nodefaultlib /timestamp:0 \
          /out:wrdata_x64.lld.exe wrdata_x64.obj
 clang -c --target=x86_64-windows-msvc wrdata2_x64.s -o wrdata2_x64.obj
-printf '\xc0' | dd of=wrdata2_x64.obj bs=1 seek=179 count=1 conv=notrunc
+printf '\300' | dd of=wrdata2_x64.obj bs=1 seek=179 count=1 conv=notrunc
 ```
 
 | fixture | what it pins |
@@ -151,3 +151,36 @@ printf '\xc0' | dd of=wrdata2_x64.obj bs=1 seek=179 count=1 conv=notrunc
 
 `absuse_x64.lld.exe` and `wrdata_x64.lld.exe` are goldens 4 and 5; the engine is
 byte-identical to all five.
+
+The `printf '\300'` above is OCTAL on purpose: `\xNN` is not POSIX and `dash`
+(`/bin/sh` on Debian and Ubuntu) writes a literal `\`, `x`, `c`, `0` for it, so
+the recipe as first written did not reproduce the committed objects under
+`sh`. Verified: `dash -c "printf '\300'" | od -An -tx1` prints `c0`.
+
+## SECTION against an absolute symbol (goldens 6 and 7)
+
+```
+clang -c --target=x86_64-windows-msvc secidx_x64.s  -o secidx_x64.obj
+clang -c --target=x86_64-windows-msvc secidx2_x64.s -o secidx2_x64.obj
+lld-link /entry:ab_entry /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:secidx_x64.lld.exe  secidx_x64.obj  absdef_x64.obj
+lld-link /entry:ab_entry /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:secidx2_x64.lld.exe secidx2_x64.obj absdef_x64.obj
+```
+
+lld does NOT refuse `.secidx` against an absolute symbol — it exits 0 and
+writes `numOutputSections + 1`. `secidx_x64` has 2 output sections and the
+value `0x0003`; `secidx2_x64` adds an ADDR64 so a `.reloc` exists, making 3
+sections and the value `0x0004` — i.e. the synthesized `.reloc` is counted.
+
+These two also pinned a placement rule the earlier fixtures never exercised:
+**a zero-size input section is still placed, and its alignment advances the
+output size.** `secidx_x64.obj`'s 2-byte `.data` plus `absdef_x64.obj`'s 0-byte
+4-aligned `.data` give lld a 4-byte output `.data`, not 2. Sections that are
+still empty after every contribution are then removed from the table, which is
+lld's create-then-remove order and is why `SizeOfHeaders` is reserved from the
+pre-removal count.
+
+There are SEVEN goldens in total and the engine is byte-identical to all of
+them: `hello_x64`, `secrel_x64`, `chain_x64`, `absuse_x64`, `wrdata_x64`,
+`secidx_x64` and `secidx2_x64`.

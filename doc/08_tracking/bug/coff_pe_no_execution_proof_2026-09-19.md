@@ -76,3 +76,31 @@ an MSVC-produced object, which typically does use `.text$mn`. Closing it needs
 either an MSVC-built fixture or a hand-assembled `$`-grouped object, plus a
 sort key that still places zero-fill members last; recorded here so the gap is
 not mistaken for parity that was measured.
+
+## 4. ADDR32NB against an absolute symbol: we reject, lld wraps
+
+`IMAGE_REL_AMD64_ADDR32NB` is `S - ImageBase`. For an absolute symbol `S` is a
+small constant, so at the default base `0x140000000` the result is negative and
+the oracle's unsigned-32 width check rejects it by name.
+
+lld-link does not reject it: it lets the subtraction wrap and writes
+`0xC0001234` for `absval = 0x1234`.
+
+Rejecting is the safer reading — an image-relative field that is not inside the
+image is almost always a mistake, and D4 says reject rather than mask. But it
+IS a measured divergence from the oracle, it is pre-existing (it predates the
+absolute-symbol work in this lane), and it is recorded here rather than left
+implied. If a real corpus ever needs lld's behaviour, the change belongs in
+`coff_reloc_compute` with a golden, not in a caller.
+
+## 5. SECTION against an absolute symbol is implemented, SECREL is not
+
+Resolved, and noted here because the first version of this lane got it wrong in
+a way worth remembering: the D4 footer claimed lld "also refuses outright" for
+the whole section-relative family. Measured, that is false for
+`IMAGE_REL_AMD64_SECTION` — lld exits 0 and writes `numOutputSections + 1`
+(`COFF/Chunks.cpp` `applySecIdx`, "required for compatibility with MSVC").
+`coff_abs_section_index` now reproduces it, including the detail that the
+synthesized `.reloc` COUNTS toward the total (`0x0003` for a 2-section image,
+`0x0004` when a base relocation adds `.reloc`). Goldens: `secidx_x64.lld.exe`
+and `secidx2_x64.lld.exe`. Only SECREL/SECREL7 remain Errs, matching lld.
