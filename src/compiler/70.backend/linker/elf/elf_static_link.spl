@@ -59,7 +59,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
 }
 use compiler.backend.linker.elf.elf_exec_writer.{
     ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image,
-    ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW,
+    ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW, ELF_RELRO_PADDING,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
 }
 use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_bytes, write_u32_le, write_u64_le}
@@ -287,14 +287,10 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
         return 24
     if s.sh_type == SHT_NOBITS_E:
         return 40
-    if n == ".preinit_array":
+    # ld.lld: the non-synthetic RELRO sections share one rank (input order),
+    # then .dynamic, then .got; the non-RELRO sections follow
+    if elf_is_relro_input(n):
         return 30
-    if n == ".init_array":
-        return 31
-    if n == ".fini_array":
-        return 32
-    if n == ".data.rel.ro":
-        return 33
     if n == ".dynamic":
         return 34
     if n == ".got":
@@ -304,6 +300,32 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
     if n == ".got.plt":
         return 37
     38
+
+fn elf_is_relro_input(name: text) -> bool:
+    name == ".preinit_array" or name == ".init_array" or name == ".fini_array" or name == ".data.rel.ro"
+
+fn elf_is_relro(s: ElfOutSec) -> bool:
+    """PT_GNU_RELRO member (ld.lld -z relro with lazy binding: .got.plt stays writable)."""
+    s.seg == ELF_SEG_RW and (elf_is_relro_input(s.name) or s.name == ".dynamic" or s.name == ".got")
+
+fn elf_add_relro_padding(secs: [ElfOutSec]) -> [ElfOutSec]:
+    """Insert ELF_RELRO_PADDING after the last RELRO section of sorted secs (none: unchanged)."""
+    var last: i64 = -1
+    var i: i64 = 0
+    while i < secs.len():
+        if elf_is_relro(secs[i]):
+            last = i
+        i = i + 1
+    if last < 0:
+        return secs
+    var out: [ElfOutSec] = []
+    i = 0
+    while i < secs.len():
+        out = out.push(secs[i])
+        if i == last:
+            out = out.push(elf_out_sec(ELF_RELRO_PADDING, SHT_NOBITS_E, SHF_ALLOC | SHF_WRITE, 1, 0, ELF_SEG_RW))
+        i = i + 1
+    out
 
 fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:
     """Stable insertion sort by elf_out_rank."""
@@ -958,7 +980,7 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
         if dynamic:
             dlink = ".dynstr"
         secs = secs.push(elf_sec_with(elf_out_sec(".dynamic", SHT_DYNAMIC_S, SHF_ALLOC | SHF_WRITE, 8, ntags * 16, ELF_SEG_RW), 16, dlink, 0))
-    secs = elf_sort_outs(secs)
+    secs = elf_add_relro_padding(elf_sort_outs(secs))
     # .rela.plt's sh_info names .got.plt (section header index = position + 1)
     var si: i64 = 0
     while si < secs.len():
@@ -1092,6 +1114,8 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
                 out = out.push(elf_build_gotplt_x64(nplt, plt_v, elf_plan_addr(plan, ".dynamic")))
         else if n == ".got":
             out = out.push(got)
+        else if n == ELF_RELRO_PADDING:
+            out = out.push([])
         else if n == ".dynamic":
             out = out.push(elf_build_dynamic(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays)))
         else:

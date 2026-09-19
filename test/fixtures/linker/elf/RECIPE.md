@@ -89,3 +89,26 @@ The x86_64 dynamic outputs are compared with
 `ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
 (`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
 executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
+
+## Lane C1 fixture (RELRO)
+
+`relro_a64.o` gives a dynamic PIE one input section for every PT_GNU_RELRO
+member ld.lld places: `.init_array` (constructor), `.fini_array` (destructor),
+`.data.rel.ro` (a `const` table of code pointers), plus `.got`/`.dynamic` from
+the link itself and a non-RELRO `.data`/`.got.plt`/`.bss`. It prints
+`relro ok` and exits 42. Same compiler as above, run from this directory:
+
+```
+clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables \
+    -fno-unwind-tables relro_a64.c -o relro_a64.o
+```
+
+RELRO oracle for `elf_relro_spec` (needs the host glibc startup objects, like
+`hello_libc_a64.o`):
+
+```
+ld.lld-23 -pie -dynamic-linker /lib/ld-linux-aarch64.so.1 \
+    /usr/lib/aarch64-linux-gnu/Scrt1.o /usr/lib/aarch64-linux-gnu/crti.o \
+    relro_a64.o /usr/lib/aarch64-linux-gnu/crtn.o \
+    /usr/lib/aarch64-linux-gnu/libc.so.6 -o rpie_lld
+```
