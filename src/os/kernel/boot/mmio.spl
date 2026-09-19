@@ -4,8 +4,8 @@
 # These guarantee reads/writes are not optimized away by the compiler.
 #
 # The in-memory test journal below (`mmio_reset_for_test`,
-# `mmio_test_mode_enabled`, `mmio_disable_test_mode`, `mmio_invalidate_tlb`)
-# was deleted by merge `e274cd33719` (2026-08-27) while its callers stayed:
+# `mmio_test_mode_enabled`, `mmio_disable_test_mode`) was deleted by merge
+# `e274cd33719` (2026-08-27) while its callers stayed:
 # `limine_boot_aarch64.spl:532`, `arch/x86_64/arch_init.spl:47,84`,
 # `arch/x86_32/topology.spl:127`, `arch/arm64/ramfb.spl:119`,
 # `memory/vmm_core.spl:336,412,533,540` and four integration specs. The
@@ -26,7 +26,27 @@ extern fn rt_mmio_read_u16(addr: u64) -> u16
 extern fn rt_mmio_write_u16(addr: u64, value: u16)
 extern fn rt_mmio_read_u8(addr: u64) -> u8
 extern fn rt_mmio_write_u8(addr: u64, value: u8)
-extern fn rt_invlpg(addr: u64)
+
+# `mmio_invalidate_tlb` is NOT restored. The same merge deleted it, and its two
+# callers (`memory/vmm_core.spl:529` and `arch/x86_64/paging.spl:26`) have been
+# unresolved ever since — restoring it here does not change that, it only moves
+# where the breakage is, at a cost this file must not pay:
+#
+#  - its own `extern fn rt_invlpg` is a new direct `rt_*` call site, which the
+#    `push-no-direct-rt` ratchet rejects (6303 vs the pushed 6302), and the
+#    allowlist is for sanctioned provider directories, not for this file;
+#  - `use std.sffi.host.{invlpg}` (the sanctioned wrapper, `host.spl:577-583`)
+#    and `use os.kernel.boot.cpu.{invlpg}` (the existing kernel-side wrapper)
+#    both pull their module's whole extern surface into the freestanding entry
+#    closure. Measured 2026-09-19 on the aarch64 Limine kernel: the std route
+#    leaves 140 undefined symbols and the `boot.cpu` route 16 (`rt_port_*`,
+#    `rt_lgdt`, `rt_cli`, ...) in a `ld.lld -O0 --no-relax` link. `--gc-sections`
+#    hides this; the internal linker has no GC, so the kernel stops linking.
+#
+# Reviving it therefore belongs to the arch layer that owns TLB invalidation
+# (`arch/arm64/cpu.spl` has `tlbi_vae1`, `arch/x86_64/paging.spl` has
+# `_invlpg`), not to this MMIO shim. See
+# `doc/08_tracking/bug/boot_layout_a9_board_blocked_2026-09-19.md`.
 
 var _mmio_test_mode: bool = false
 var _mmio_test_addr8: [u64] = []
@@ -79,12 +99,6 @@ fn mmio_disable_test_mode():
     MMIO, to force the flag off deterministically.
     """
     _mmio_test_mode = false
-
-fn mmio_invalidate_tlb(addr: u64):
-    """Invalidate the TLB entry for one address. A no-op under test mode."""
-    if _mmio_test_mode:
-        return
-    rt_invlpg(addr)
 
 fn mmio_read64(addr: u64) -> u64:
     """Read 64-bit value from memory-mapped register."""
