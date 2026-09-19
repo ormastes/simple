@@ -78,20 +78,31 @@ Census of owned source (`src/**/*.spl`, comment-embedded `simple`/`spl`/
 `sdoctest` fences): **89 fences across 36 files**.
 
 With the flag **on**, files that demonstrably contain such fences still execute
-nothing:
+nothing. This was first seen on two files and then settled exhaustively: **all
+36** fence-carrying files were swept, one invocation each.
 
 ```
-SIMPLE_SDOCTEST_SPL=1 bin/simple test src/lib/nogc_sync_mut/concurrent/channel.spl
-  VERDICT: outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples
+SWEPT=36 TOTAL_EXECUTED=0
+no-verdict files: 0
 
-SIMPLE_SDOCTEST_SPL=1 bin/simple test src/lib/gc_async_mut/platform/mod.spl
-  VERDICT: outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples
+distinct verdict shapes across all 36:
+     36  executed=0 passed=0 failed=1
 ```
 
-Two independent files, both carrying real fences, both `executed=0`. So the
-opt-in flag is not the whole gate: even opted in, the comment extractor yields
-no examples. The `reason=zero-examples` verdict is at least honest — it reports
-`ERROR`, not a pass — but nothing routinely runs it, so nobody sees it.
+Not one file varied. Every file produced a verdict — none was skipped, timed
+out, or returned nothing — so this is a **measured zero**, not an absence of
+measurement. (That distinction is load-bearing: earlier in the same session a
+missing result was briefly misread as a behavioural difference, so the sweep
+records `NO-VERDICT` explicitly rather than letting a silent skip look like a
+pass. There were none.)
+
+So the opt-in flag is not the gate that matters: even opted in, the comment
+extractor yields no examples for any owned file. The `reason=zero-examples`
+verdict is at least honest — it reports `ERROR`, not a pass — but nothing
+routinely runs it, so nobody sees it.
+
+Sweep detail: `SIMPLE_SDOCTEST_SPL=1 bin/simple test <file>` over every path
+matching `^\s*(#|///)\s*```(simple|spl|sdoctest)` under `src/`.
 
 ## What this is NOT
 
