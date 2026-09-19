@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, file_read_nullable, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -304,7 +304,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
         if trace:
             print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine"
-        return internal_link_native(os, arch, config.pie, object_files, output)
+        return internal_link_native_libs(os, arch, config.pie, object_files, output,
+            config.libraries, config.library_paths)
 
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
@@ -517,11 +518,13 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 # First NativeLinkConfig field the internal engine would silently ignore, or ""
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
+#
+# `libraries` and `library_paths` were on this list until lane F1 and are not
+# any more: they are HONOURED now (internal_resolve_library below). Linking the
+# real `simple` binary needs library search names -- its own DT_NEEDED set is
+# libm/libgcc_s/libc -- so rejecting them made the self-host link unreachable
+# by construction rather than by a missing capability.
 fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
-    if config.libraries.len() > 0:
-        return "libraries"
-    if config.library_paths.len() > 0:
-        return "library_paths"
     if config.runtime_path != "":
         return "runtime_path"
     if config.runtime_bundle != "":
@@ -536,6 +539,93 @@ fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
         return "debug"
     ""
 
+fn internal_ld_script_members(script: text) -> [text]:
+    """Absolute member paths of a GNU ld script's top-level GROUP()/INPUT(), in
+    order. glibc ships `libm.so`/`libc.so` as such scripts rather than as ELF
+    files, so `-lm` cannot be resolved without following them.
+
+    AS_NEEDED(...) members are deliberately NOT returned. This engine emits one
+    DT_NEEDED per shared input unconditionally (elf_static_link
+    `elf_dynamic_tags`), so pulling an AS_NEEDED member in would record a
+    DT_NEEDED that ld, which emits it only when a symbol is actually used,
+    would have omitted -- a silent divergence from the external linker. A
+    symbol that lives only in an AS_NEEDED member therefore stays undefined
+    and the link fails loudly by name: reject, never mask."""
+    var out: [text] = []
+    var i: i64 = 0
+    val n = script.len()
+    var depth_skip: i64 = -1   # paren depth at which an AS_NEEDED body started
+    var depth: i64 = 0
+    var word_start: i64 = -1
+    while i <= n:
+        var ch = " "
+        if i < n:
+            ch = script[i:i + 1]
+        val is_sep = i >= n or ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "(" or ch == ")" or ch == ","
+        if not is_sep:
+            if word_start < 0:
+                word_start = i
+            i = i + 1
+            continue
+        var word = ""
+        if word_start >= 0:
+            word = script[word_start:i]
+            word_start = -1
+        if word != "" and depth_skip < 0 and depth > 0 and word[0:1] == "/":
+            out = out.push(word)
+        if ch == "(":
+            depth = depth + 1
+            if word == "AS_NEEDED" and depth_skip < 0:
+                depth_skip = depth
+        elif ch == ")":
+            if depth_skip == depth:
+                depth_skip = -1
+            depth = depth - 1
+        i = i + 1
+    out
+
+fn internal_library_search_dirs(library_paths: [text], libdir: text) -> [text]:
+    """`library_paths` first (caller order, like -L), then the host crt libdir
+    the CRT objects were found in. No other implicit directory: an implicit
+    /usr/lib fallback would let a link succeed against a library the external
+    linker would not have chosen, which is the kind of quiet divergence this
+    engine exists to avoid."""
+    var dirs: [text] = []
+    for d in library_paths:
+        if d != "":
+            dirs = dirs.push(d)
+    if libdir != "":
+        dirs = dirs.push(libdir)
+    dirs
+
+fn internal_is_elf_file(path: text) -> bool:
+    """True when `path` starts with the ELF magic (so it is not an ld script)."""
+    val raw = file_read_bytes(path)
+    raw.len() >= 4 and raw[0] == 0x7f and raw[1] == 0x45 and raw[2] == 0x4c and raw[3] == 0x46
+
+fn internal_resolve_library(name: text, dirs: [text]) -> Result:
+    """Resolve one library SEARCH name to concrete input files, ld's order:
+    each directory in turn, `lib<name>.so` before `lib<name>.a`. A `.so` that
+    is a GNU ld script is followed to its GROUP() members (see
+    internal_ld_script_members). Returns Ok([paths]) or a named Err."""
+    for dir in dirs:
+        val so = "{dir}/lib{name}.so"
+        if file_exists(so):
+            if internal_is_elf_file(so):
+                return Ok([so])
+            val script = file_read_nullable(so) ?? ""
+            val members = internal_ld_script_members(script)
+            if members.len() == 0:
+                return Err("internal engine: library '{name}' at {so} is neither ELF nor a GNU ld script with GROUP()/INPUT() members")
+            for m in members:
+                if not file_exists(m):
+                    return Err("internal engine: library '{name}': ld-script member {m} (from {so}) does not exist")
+            return Ok(members)
+        val a = "{dir}/lib{name}.a"
+        if file_exists(a):
+            return Ok([a])
+    Err("internal engine: unresolved library '{name}' (searched {dirs.join(\", \")})")
+
 fn internal_link_native_read_i64(path: text) -> [i64]:
     """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
     val raw = file_read_bytes(path)
@@ -547,6 +637,12 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
     out
 
 fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text) -> Result:
+    """internal_link_native_libs with no library search names (kept so callers
+    that have no `libraries`/`library_paths` to pass read unchanged)."""
+    internal_link_native_libs(os, arch, pie, object_files, output, [], [])
+
+fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [text], output: text,
+        libraries: [text], library_paths: [text]) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -589,13 +685,35 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
     val nonshared = "{libdir}/libc_nonshared.a"
     if file_exists(nonshared):
         archives = archives.push(internal_link_native_read_i64(nonshared))
+    # Library SEARCH names (NativeLinkConfig.libraries / library_paths), lane
+    # F1. Resolved like ld -- caller -L order, then the crt libdir -- and then
+    # classified by what the file actually IS, not by its extension: ar magic
+    # goes to the archive fixpoint, ET_DYN to the shared-input set. An input
+    # that is neither is a named error, never a silently dropped -l.
+    var extra_shared: [[u8]] = []
+    for libname in libraries:
+        val resolved = internal_resolve_library(libname,
+            internal_library_search_dirs(library_paths, libdir))
+        if resolved.is_err():
+            return Err(resolved.unwrap_err())
+        for path in resolved.unwrap():
+            val raw = file_read_bytes(path)
+            if raw.len() >= 8 and raw[0] == 0x21 and raw[1] == 0x3c and raw[2] == 0x61 and raw[3] == 0x72:
+                archives = archives.push(internal_link_native_read_i64(path))
+            elif raw.len() >= 4 and raw[0] == 0x7f and raw[1] == 0x45 and raw[2] == 0x4c and raw[3] == 0x46:
+                extra_shared = extra_shared.push(raw)
+            else:
+                return Err("internal engine: library '{libname}' resolved to {path}, which is neither an ar archive nor an ELF file")
     var target_arch = RelocArch.X86_64
     if norm_arch == "aarch64":
         target_arch = RelocArch.AArch64
     var mode = ELF_LINK_DYNAMIC_EXEC
     if pie:
         mode = ELF_LINK_DYNAMIC_PIE
-    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [file_read_bytes(libc)],
+    var shared_inputs: [[u8]] = [file_read_bytes(libc)]
+    for so in extra_shared:
+        shared_inputs = shared_inputs.push(so)
+    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_inputs,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")

@@ -49,6 +49,7 @@ clang --target=aarch64-linux-gnu $PIE lib_a64.c   -o pie_lib_a64.o
 clang --target=x86_64-linux-gnu  $PIE start_x64.c -o pie_start_x64.o
 clang --target=x86_64-linux-gnu  $PIE lib_x64.c   -o pie_lib_x64.o
 clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libc.c -o hello_libc_a64.o
+clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libm.c -o hello_libm_a64.o
 ```
 
 | object | relocations |
@@ -89,3 +90,10 @@ The x86_64 dynamic outputs are compared with
 `ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
 (`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
 executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
+
+`hello_libm_a64.o` (lane F1) additionally calls `sqrt`, so it links only when the
+linker resolves a library SEARCH name: `NativeLinkConfig.libraries = ["m"]` plus
+`library_paths`, or `-lm` externally. On glibc hosts `libm.so` is a GNU ld script
+(`GROUP ( /lib/<triple>/libm.so.6 AS_NEEDED ( ... ) )`), not an ELF file, so
+resolving it exercises the internal engine's ld-script member handling. It prints
+`sqrt=42` and exits 42. Linked by `native_linking_internal_spec`.

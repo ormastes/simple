@@ -34,6 +34,7 @@ fn with_env(key: text, value: text, block: fn()):
     rt_env_set(key, previous)
 
 val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
+val LIBM_A64_OBJ: text = "test/fixtures/linker/elf/hello_libm_a64.o"
 
 describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
     # Host requirement: aarch64 Linux with glibc (crt_discovery finds
@@ -65,17 +66,17 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
             expect(result.unwrap_err()).to_contain("cannot be read")
         )
 
-    it "rejects a config field the internal engine would silently ignore (libraries), naming it":
+    it "rejects a config field the internal engine would silently ignore (strip_output), naming it":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
-        step("SIMPLE_LINKER=internal + libraries=[m] -> named 'unsupported config field' error, not a silent drop")
+        step("SIMPLE_LINKER=internal + strip_output -> named 'unsupported config field' error, not a silent drop")
         with_env("SIMPLE_LINKER", "internal", fn():
             var cfg = NativeLinkConfig.default()
-            cfg.libraries = ["m"]
+            cfg.strip_output = true
             val result = link_to_native(
                 ["test/fixtures/linker/elf/hello_libc_a64.o"],
                 "/tmp/native_linking_internal_spec_libs_out", cfg)
             expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err()).to_contain("unsupported config field 'libraries'")
+            expect(result.unwrap_err()).to_contain("unsupported config field 'strip_output'")
         )
 
     it "SIMPLE_LINKER unset still resolves through the external path unchanged":
@@ -121,3 +122,65 @@ describe "native_linking - single-SMF create_temp_dir Result unwrap (bug fix)":
         val run = shell("'{out}'")
         expect(run.exit_code).to_equal(42)
         expect(run.stdout).to_equal("hi from libc\n")
+
+describe "native_linking - internal engine library search (NativeLinkConfig.libraries)":
+    # Lane F1: linking the real `simple` binary needs library SEARCH names --
+    # its own DT_NEEDED set is libm/libgcc_s/libc -- so `libraries` /
+    # `library_paths` stopped being a reject (lane B3 listed both) and became
+    # a capability. Resolution mirrors ld: each `library_paths` entry then the
+    # host crt libdir, `lib<name>.so` before `lib<name>.a`, and a `lib<name>.so`
+    # that is a GNU ld script (glibc's libm.so is one) is followed to its
+    # GROUP() members. Anything unresolvable is a named error, never a silent
+    # drop and never an external fallback.
+    it "resolves libraries=[m] through the host libm.so GNU ld script and the output runs":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("SIMPLE_LINKER=internal + libraries=[m] links an object that calls sqrt; the binary prints sqrt=42 and exits 42")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_libm"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["m"]
+            val result = link_to_native([LIBM_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("sqrt=42\n")
+        )
+
+    it "resolves a static archive by search name from library_paths":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[chain_a64] + library_paths=[test/fixtures/linker/elf] selects libchain_a64.a for the archive fixpoint")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_archive_by_name"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["chain_a64"]
+            cfg.library_paths = ["test/fixtures/linker/elf"]
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+    it "reports an unresolvable library search name, listing the directories searched":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[definitely_not_a_library] -> 'internal engine: unresolved library' naming the name and the search path")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["definitely_not_a_library_f1"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "/tmp/native_linking_internal_spec_unresolved_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("internal engine: unresolved library 'definitely_not_a_library_f1'")
+            expect(result.unwrap_err()).to_contain("searched")
+        )
+
+    it "still rejects extra_flags by name - library support did not widen the accepted config":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("SIMPLE_LINKER=internal + extra_flags=[-Wl,-z,relro] -> named 'unsupported config field' error (reject, never mask)")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.extra_flags = ["-Wl,-z,relro"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "/tmp/native_linking_internal_spec_flags_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'extra_flags'")
+        )
