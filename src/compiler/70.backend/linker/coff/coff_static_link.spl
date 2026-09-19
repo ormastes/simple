@@ -31,6 +31,7 @@ use compiler.backend.linker.coff.coff_object.{
 use compiler.backend.linker.coff.coff_layout.{
     CoffOutSec, CoffPlacement, coff_place_inputs, coff_sort_outs, coff_reindex,
     coff_assign_addresses, coff_out_find, coff_reserved_out_count,
+    coff_reloc_section_characteristics,
     PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT,
 }
 use compiler.backend.linker.coff.pe_exec_writer.{
@@ -44,7 +45,8 @@ use compiler.backend.linker.reloc_engine.{
     coff_reloc_apply, coff_reloc_patch_bytes,
 }
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
-    coff_reloc_needs_base_reloc, coff_reloc_width,
+    coff_reloc_needs_base_reloc, coff_reloc_width, coff_reloc_type_name,
+    coff_reloc_is_section_relative,
 }
 use compiler.backend.linker.archive_parser.{ArMember, ar_parse, ar_check_magic}
 use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_fill}
@@ -257,6 +259,7 @@ struct CoffTarget:
     va: i64          # resolved virtual address of the symbol
     sec_va: i64      # virtual address of the output section it lands in
     sec_index: i64   # 1-based output section index
+    is_absolute: bool # COFF section -1: a constant, in no section at all
 
 fn coff_member_va(place: CoffPlacement, image_base: i64, oi: i64, si: i64) -> i64:
     val k = place.sec_out[oi][si]
@@ -269,7 +272,7 @@ fn coff_target_of(objects: [CoffObject], place: CoffPlacement, image_base: i64,
     if e.section_idx == -1:
         # An absolute symbol (COFF section -1, e.g. clang's @feat.00) has no
         # section, so SECREL/SECTION over it cannot be expressed.
-        return Ok(CoffTarget(va: e.offset, sec_va: 0, sec_index: 0))
+        return Ok(CoffTarget(va: e.offset, sec_va: 0, sec_index: 0, is_absolute: true))
     if e.section_idx < 0:
         return Err("coff: undefined symbol: {e.name}")
     if e.obj_idx >= objects.len():
@@ -281,6 +284,7 @@ fn coff_target_of(objects: [CoffObject], place: CoffPlacement, image_base: i64,
         va: coff_member_va(place, image_base, e.obj_idx, e.section_idx) + e.offset,
         sec_va: image_base + place.outs[k].rva,
         sec_index: k + 1,
+        is_absolute: false,
     ))
 
 fn coff_lookup(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
@@ -297,7 +301,7 @@ fn coff_lookup(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
         if res.defined.has(sym.name):
             return coff_target_of(objects, place, image_base, res.defined[sym.name])
     if sym.is_absolute:
-        return Ok(CoffTarget(va: sym.value, sec_va: 0, sec_index: 0))
+        return Ok(CoffTarget(va: sym.value, sec_va: 0, sec_index: 0, is_absolute: true))
     if sym.section_number <= 0:
         return Err("coff: undefined symbol: {sym.name}")
     coff_target_of(objects, place, image_base, SymEntry(
@@ -329,6 +333,13 @@ fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymR
                     if tgt.is_err():
                         return Err(tgt.unwrap_err())
                     val t = tgt.unwrap()
+                    if t.is_absolute and coff_reloc_is_section_relative(r.rtype):
+                        # lld-link: "SECREL relocation cannot be applied to
+                        # absolute symbols" (rc=1). An absolute symbol is in no
+                        # section, so there is no section base to subtract and
+                        # no section index to name; we used to link SECREL as
+                        # `value - 0`, i.e. silently emit the raw constant.
+                        return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()}: {coff_reloc_type_name(r.rtype)} cannot be applied to absolute symbol {obj.symbols[r.sym_index].name}")
                     val field_off = member_off + r.vaddr
                     val p = image_base + place.outs[k].rva + field_off
                     val ar = coff_reloc_apply(bufs[k], field_off, r.rtype, t.va, p,
@@ -336,7 +347,7 @@ fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymR
                     if not ar.success:
                         return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()} -> {obj.symbols[r.sym_index].name}: {ar.error}")
                     bufs[k] = coff_reloc_patch_bytes(bufs[k], field_off, coff_reloc_width(r.rtype), ar.value)
-                    if coff_reloc_needs_base_reloc(r.rtype):
+                    if coff_reloc_needs_base_reloc(r.rtype) and not t.is_absolute:
                         brs = brs.push(PeBaseReloc(rva: place.outs[k].rva + field_off, kind: IMAGE_REL_BASED_DIR64))
             si = si + 1
         oi = oi + 1
@@ -409,7 +420,7 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
     val reloc_bytes = pe_build_reloc_section(pt.base_relocs, PE_SECTION_ALIGNMENT)
     if reloc_bytes.len() > 0:
         outs = outs.push(CoffOutSec(name: ".reloc",
-            characteristics: 0x42000040, align: 4,
+            characteristics: coff_reloc_section_characteristics(), align: 4,
             init_size: reloc_bytes.len(), total_size: reloc_bytes.len(),
             rva: 0, file_offset: 0, raw_size: 0))
         bufs = bufs.push(reloc_bytes)
@@ -451,6 +462,9 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
 #   only .text, .rdata, .data, .bss and .xdata are laid out. .idata, .edata,
 #   .didat, .00cfg, .gfids, .tls, .pdata, .rsrc, an input .reloc and ANY
 #   unrecognised name are named Errs, deliberately including names lld-link
+#   would merge into .rdata. Two inputs that merge to one output NAME with
+#   different masked Characteristics are also an Err (lld would emit two
+#   same-named output sections; duplicate output names are not modelled).
 #   would merge into .rdata: merging .idata without building an import
 #   directory, or laying out a writable .CRT$XCU with guessed read-only
 #   Characteristics, links successfully and produces a wrong image, which is
@@ -460,7 +474,9 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
 #   SREL32, PAIR, SSPAN32, UNKNOWN_<n>; every width overflow (REL32 family
 #   signed-32, ADDR32NB and SECREL unsigned-32, SECTION unsigned-16).
 # From this file:                  no inputs; no /entry; entry not defined;
-#   more output sections than SizeOfHeaders reserved room for;
+#   more output sections than SizeOfHeaders reserved room for; a section-
+#   relative relocation (SECREL/SECTION/SECREL7) applied to an ABSOLUTE symbol,
+#   which lld-link also refuses outright;
 #   undefined symbol; duplicate symbol (via sym_resolver); a .lib without ar
 #   magic; a relocation on a zero-fill section; a relocation symbol index past
 #   the symbol table; a definition in a section that was not laid out.

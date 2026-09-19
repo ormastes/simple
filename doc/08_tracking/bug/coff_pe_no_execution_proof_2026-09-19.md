@@ -62,3 +62,17 @@ formulas are therefore covered by spec-level unit tests only. This is recorded
 rather than papered over: a reader must not assume the REL32_N rows have the
 same evidence class as REL32, ADDR64, ADDR32NB, SECREL and SECTION, which are
 all driven through a real link against the lld-link golden.
+
+## 3. `$`-grouped section contributions are not ordered by full name
+
+lld sorts the contributions inside one output section by their FULL input
+section name, so `.text$mn` precedes `.text$zz`. This capsule keeps input order
+within each of its two placement phases (file-backed, then zero-fill).
+
+No fixture in the tree uses `$`-grouped sections — clang does not emit them for
+these programs — so the two agree byte-for-byte on everything measured here.
+They would differ in member ORDER (not in the section set, sizes or flags) on
+an MSVC-produced object, which typically does use `.text$mn`. Closing it needs
+either an MSVC-built fixture or a hand-assembled `$`-grouped object, plus a
+sort key that still places zero-fill members last; recorded here so the gap is
+not mistaken for parity that was measured.

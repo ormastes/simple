@@ -16,6 +16,7 @@
 
 use compiler.backend.linker.coff.coff_static_link.{coff_link_request, coff_static_link}
 use compiler.backend.linker.coff.coff_layout.{coff_out_name, CoffOutSec, coff_assign_addresses}
+use compiler.backend.linker.coff.coff_object.{coff_section_align}
 use compiler.backend.linker.coff.pe_exec_writer.{PeImageRequest, pe_write_image}
 use std.io_runtime.{file_read_bytes}
 
@@ -474,3 +475,91 @@ describe "pe_write_image - the writer re-checks what it is handed":
             entry_rva: 0x1000, image_base: IMAGE_BASE, sec_align: 0x200,
             file_align: 0x1000, timestamp: 0, header_size: 0x400))
         expect(r.is_err()).to_equal(true)
+
+# ============================================================================
+# Cases where lld-link contradicts us (review of aa746213a1e)
+# ============================================================================
+# Each of these produced a silently WRONG image: it linked, and the result
+# disagreed with the oracle. Fixtures and goldens are in RECIPE.md.
+
+describe "coff_static_link - absolute symbols":
+    it "an ADDR64 to an absolute symbol gets NO base relocation":
+        # lld (COFF/Chunks.cpp, DefinedAbsolute is skipped in addBaserels)
+        # emits an EMPTY base-reloc table here: an absolute symbol is a
+        # constant, so rebasing it would add the image delta to 0x1234.
+        val r = coff_static_link(coff_link_request(
+            [load("absuse_x64.obj"), load("absdef_x64.obj")],
+            ["absuse_x64.obj", "absdef_x64.obj"], [], [], "ab_entry"))
+        if r.is_err():
+            print "absuse link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val ours = r.unwrap()
+        val gold = load("absuse_x64.lld.exe")
+        expect(sec_count(ours)).to_equal(2)
+        expect(data_dir(ours, 5, 0)).to_equal(0)
+        expect(data_dir(ours, 5, 1)).to_equal(0)
+        expect(ours.len()).to_equal(gold.len())
+        var diffs: i64 = 0
+        var i: i64 = 0
+        while i < gold.len() and i < ours.len():
+            if ours[i] != gold[i]:
+                diffs = diffs + 1
+            i = i + 1
+        if diffs > 0:
+            print "absuse image diverges in {diffs} byte(s)"
+        expect(diffs).to_equal(0)
+
+    it "a SECREL to an absolute symbol is a named Err, as lld-link refuses it":
+        # lld-link rc=1: "SECREL relocation cannot be applied to absolute
+        # symbols". An absolute symbol is in no section, so there is no
+        # section base to subtract; we used to link it as 0x1234 - 0.
+        val r = coff_static_link(coff_link_request(
+            [load("absuse2_x64.obj"), load("absdef_x64.obj")],
+            ["absuse2_x64.obj", "absdef_x64.obj"], [], [], "ab_entry"))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("absolute")).to_equal(true)
+
+describe "coff_static_link - output flags come from the input Characteristics":
+    it "a .rdata carrying MEM_WRITE stays writable in the output":
+        # Deriving flags from the section NAME alone wrote 0x40000040 and the
+        # image faults on the first write. lld reports 0xC0000040.
+        val r = coff_static_link(coff_link_request(
+            [load("wrdata_x64.obj")], ["wrdata_x64.obj"], [], [], "anchor"))
+        if r.is_err():
+            print "wrdata link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val ours = r.unwrap()
+        val gold = load("wrdata_x64.lld.exe")
+        expect(sec_name(ours, 1)).to_equal(".rdata")
+        expect(sec_field(ours, 1, 4)).to_equal(0xc0000040)
+        expect(sec_field(ours, 1, 4)).to_equal(sec_field(gold, 1, 4))
+        expect(ours.len()).to_equal(gold.len())
+        var diffs: i64 = 0
+        var i: i64 = 0
+        while i < gold.len() and i < ours.len():
+            if ours[i] != gold[i]:
+                diffs = diffs + 1
+            i = i + 1
+        if diffs > 0:
+            print "wrdata image diverges in {diffs} byte(s)"
+        expect(diffs).to_equal(0)
+
+    it "two inputs merging to one output name with different flags is a named Err":
+        # lld bins by (name, characteristics & 0xFE0000E0) and would emit TWO
+        # output sections both called .rdata; this capsule does not model
+        # duplicate output names, so it refuses instead of picking one.
+        val r = coff_static_link(coff_link_request(
+            [load("secrel_x64.obj"), load("wrdata2_x64.obj")],
+            ["secrel_x64.obj", "wrdata2_x64.obj"], [], [], "anchor"))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("Characteristics")).to_equal(true)
+
+describe "coff_section_align - IMAGE_SCN_TYPE_NO_PAD":
+    it "NO_PAD means 1-byte alignment, not the unspecified default of 16":
+        # llvm treats TYPE_NO_PAD (0x8) as align 1; reading it as "unspecified"
+        # gave .text 0x3f where lld gives 0x34.
+        expect(coff_section_align(0x00000008)).to_equal(1)
+        expect(coff_section_align(0x60000028)).to_equal(1)
+        expect(coff_section_align(0x60000020)).to_equal(16)
+        expect(coff_section_align(0x60500020)).to_equal(16)
+        expect(coff_section_align(0x60300020)).to_equal(4)

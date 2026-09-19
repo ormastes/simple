@@ -50,6 +50,7 @@
 #   * the `.reloc` base-relocation table, which has no ELF equivalent in a
 #     non-PIE static link.
 
+use std.common.algorithm_utils.{stable_order_by_key}
 use compiler.backend.linker.elf_writer.{align_up}
 use compiler.backend.linker.coff.coff_object.{
     CoffObject, CoffSection, coff_is_bss, coff_name_starts_with,
@@ -69,6 +70,11 @@ val PE_FILE_ALIGNMENT: i64 = 0x200
 val PE_PAGE_SIZE: i64 = 0x1000
 val PE_FILE_ALIGN_MIN: i64 = 512
 val PE_FILE_ALIGN_MAX: i64 = 65536
+
+# lld bins input sections by (name, characteristics & this mask) and carries the
+# masked value into the output: CNT_* content bits (0xE0) plus MEM_* attribute
+# bits (0xFE000000). Alignment and every LNK_* bit are dropped.
+val COFF_OUT_CHAR_MASK: i64 = 0xFE0000E0
 
 # ============================================================================
 # Types
@@ -94,9 +100,17 @@ struct CoffPlacement:
 # ============================================================================
 
 fn coff_strip_grouped(name: text) -> text:
-    """`.text$mn` -> `.text`. COFF grouped sections carry a `$suffix` that
-    orders contributions within one output section and is not part of the
-    output name."""
+    """`.text$mn` -> `.text`: the `$suffix` of a COFF grouped section is not
+    part of the OUTPUT name.
+
+    It does carry ordering information, and this capsule does not use it. lld
+    sorts the contributions inside one output section by their FULL input
+    section name (so `.text$mn` precedes `.text$zz`), whereas this engine keeps
+    input order within each of its two placement phases. The two agree on every
+    fixture here because none uses `$`-grouped sections, and they would differ by the
+    member order — not the section set — on an MSVC-produced object.
+    Recorded, not silently assumed:
+    doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md § 3."""
     var i: i64 = 0
     while i < name.len():
         if name[i..i + 1] == "$":
@@ -142,18 +156,30 @@ fn coff_out_name(name: text, characteristics: i64) -> Result<text, text>:
         return Err("section {name}: an input .reloc section cannot be relinked; base relocations are synthesized")
     Err("section {name}: unmodelled output section; only .text, .rdata, .data, .bss and .xdata are laid out")
 
-fn coff_out_characteristics(name: text) -> i64:
-    """Output section Characteristics, exactly the values lld-link writes
-    (alignment and all LNK_* bits are dropped from the output). Total over the
-    names `coff_out_name` can return, so the trailing row is `.rdata`, not a
-    guess for an arbitrary name."""
-    if name == ".text":
-        return IMAGE_SCN_CNT_CODE_C | IMAGE_SCN_MEM_EXECUTE_C | IMAGE_SCN_MEM_READ_C
-    if name == ".data":
-        return IMAGE_SCN_CNT_INITIALIZED_DATA_C | IMAGE_SCN_MEM_READ_C | IMAGE_SCN_MEM_WRITE_C
-    if name == ".reloc":
-        return IMAGE_SCN_CNT_INITIALIZED_DATA_C | IMAGE_SCN_MEM_DISCARDABLE_C | IMAGE_SCN_MEM_READ_C
-    IMAGE_SCN_CNT_INITIALIZED_DATA_C | IMAGE_SCN_MEM_READ_C
+fn coff_out_characteristics(input_chars: i64) -> i64:
+    """Output section Characteristics, derived from the INPUT section's flags.
+
+    lld bins input sections by `(name, characteristics & 0xFE0000E0)` and
+    carries that masked value into the output, which is why the mask is the
+    authority here and the section NAME is not. Deriving flags from the name
+    instead wrote a `.rdata` that carries IMAGE_SCN_MEM_WRITE as read-only
+    (`0x40000040` where lld reports `0xC0000040`); the image then links and
+    faults on the first write, so this was a silent-wrong-output defect, not a
+    cosmetic one. Fixture: `wrdata_x64.obj` + `wrdata_x64.lld.exe`.
+
+    The mask keeps the CNT_* content bits (0xE0) and the MEM_* attribute bits
+    (0xFE000000) and drops alignment and every LNK_* bit, none of which belong
+    in an image. The single transform on top of the mask is the `.bss` fold:
+    CNT_UNINITIALIZED becomes CNT_INITIALIZED, because `.bss` merges into
+    `.data` and the golden's `.data` is `0xC0000040`, not `0xC0000080`."""
+    var c = input_chars & COFF_OUT_CHAR_MASK
+    if (c & IMAGE_SCN_CNT_UNINITIALIZED_DATA_C) != 0:
+        c = (c & (0 - 1 - IMAGE_SCN_CNT_UNINITIALIZED_DATA_C)) | IMAGE_SCN_CNT_INITIALIZED_DATA_C
+    c
+
+fn coff_reloc_section_characteristics() -> i64:
+    """The synthesized `.reloc` has no input section to derive flags from."""
+    IMAGE_SCN_CNT_INITIALIZED_DATA_C | IMAGE_SCN_MEM_DISCARDABLE_C | IMAGE_SCN_MEM_READ_C
 
 fn coff_out_rank(name: text) -> i64:
     """Output section order, matching lld-link: code, read-only, writable,
@@ -236,13 +262,21 @@ fn coff_place_inputs(objects: [CoffObject]) -> Result<CoffPlacement, text>:
                     if oname.is_err():
                         return Err("coff: {obj.origin}: {oname.unwrap_err()}")
                     val name = oname.unwrap()
+                    val chars = coff_out_characteristics(sec.characteristics)
                     var k = coff_find_out(outs, name)
                     if k < 0:
                         outs = outs.push(CoffOutSec(name: name,
-                            characteristics: coff_out_characteristics(name),
+                            characteristics: chars,
                             align: 1, init_size: 0, total_size: 0,
                             rva: 0, file_offset: 0, raw_size: 0))
                         k = outs.len() - 1
+                    elif outs[k].characteristics != chars:
+                        # lld would emit TWO output sections both named `name`
+                        # here (it bins by name AND masked characteristics).
+                        # This capsule does not model duplicate output section
+                        # names, so it refuses rather than silently picking one
+                        # set of flags for both.
+                        return Err("coff: {obj.origin}: section {sec.name} merges into {name} with Characteristics 0x{chars.to_hex()}, but an earlier input gave it 0x{outs[k].characteristics.to_hex()}; duplicate output section names are not modelled")
                     var al = sec.align
                     if al < 1:
                         al = 1
@@ -301,28 +335,16 @@ fn coff_name_index(names: [text], name: text) -> i64:
     -1
 
 fn coff_sort_outs(outs: [CoffOutSec]) -> [CoffOutSec]:
-    """Stable insertion sort by coff_out_rank. Callers must re-point
-    placement indices through coff_reindex after sorting."""
-    var sorted: [CoffOutSec] = []
+    """Stable sort by coff_out_rank, via the shared
+    std.common.algorithm_utils permutation. Callers must re-point placement
+    indices through coff_reindex after sorting."""
+    var keys: [i64] = []
     for s in outs:
-        var at = sorted.len()
-        var i: i64 = 0
-        while i < sorted.len():
-            if coff_out_rank(s.name) < coff_out_rank(sorted[i].name):
-                at = i
-                break
-            i = i + 1
-        var next: [CoffOutSec] = []
-        var k: i64 = 0
-        while k < sorted.len():
-            if k == at:
-                next = next.push(s)
-            next = next.push(sorted[k])
-            k = k + 1
-        if at >= sorted.len():
-            next = next.push(s)
-        sorted = next
-    sorted
+        keys = keys.push(coff_out_rank(s.name))
+    var out: [CoffOutSec] = []
+    for idx in stable_order_by_key(keys):
+        out = out.push(outs[idx])
+    out
 
 fn coff_reindex(place: CoffPlacement, sorted: [CoffOutSec]) -> CoffPlacement:
     """Re-point sec_out from the unsorted `place.outs` order to `sorted`."""
@@ -436,6 +458,7 @@ fn coff_out_find(outs: [CoffOutSec], name: text) -> i64:
 
 export CoffOutSec, CoffPlacement
 export coff_out_name, coff_out_characteristics, coff_out_rank, coff_strip_grouped
+export coff_reloc_section_characteristics, COFF_OUT_CHAR_MASK
 export coff_place_inputs, coff_grow_out, coff_member_offset, coff_find_out
 export coff_reserved_out_count, coff_name_index
 export coff_sort_outs, coff_reindex

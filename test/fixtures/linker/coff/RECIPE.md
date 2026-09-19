@@ -122,3 +122,32 @@ ends up empty — and removes the empty ones afterwards:
 
 `coff_layout.coff_reserved_out_count` reproduces this, which is what makes the
 engine a drop-in for lld-link rather than only a valid-PE writer.
+
+## Review fixtures (three cases where lld-link contradicted us)
+
+```
+clang -c --target=x86_64-windows-msvc absuse_x64.s  -o absuse_x64.obj
+clang -c --target=x86_64-windows-msvc absdef_x64.s  -o absdef_x64.obj
+clang -c --target=x86_64-windows-msvc absuse2_x64.s -o absuse2_x64.obj
+lld-link /entry:ab_entry /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:absuse_x64.lld.exe absuse_x64.obj absdef_x64.obj
+# wrdata_x64.obj is secrel_x64.obj with byte 179 patched 0x40 -> 0xC0, i.e.
+# its .rdata Characteristics 0x40100040 -> 0xC0100040 (MEM_WRITE set). The
+# assembler will not emit a writable .rdata, so the flag is set by patching.
+cp secrel_x64.obj wrdata_x64.obj
+printf '\xc0' | dd of=wrdata_x64.obj bs=1 seek=179 count=1 conv=notrunc
+lld-link /entry:anchor /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:wrdata_x64.lld.exe wrdata_x64.obj
+clang -c --target=x86_64-windows-msvc wrdata2_x64.s -o wrdata2_x64.obj
+printf '\xc0' | dd of=wrdata2_x64.obj bs=1 seek=179 count=1 conv=notrunc
+```
+
+| fixture | what it pins |
+|---|---|
+| `absuse_x64` + `absdef_x64` | an ADDR64 to an ABSOLUTE symbol gets **no** base relocation — the golden is 1536 B / 2 sections with an EMPTY base-reloc table. We emitted 3 sections / 2048 B with a DIR64 at `0x2000`, so under dynamic base the loader added the image delta to the constant `0x1234` |
+| `absuse2_x64` | a SECREL to an ABSOLUTE symbol: `lld-link` exits 1, "SECREL relocation cannot be applied to absolute symbols". We linked it as `0x1234 - 0` |
+| `wrdata_x64` | output flags come from the input **Characteristics**, not the section NAME: lld reports `.rdata` `0xC0000040`, we reported `0x40000040` and the image would fault on the first write |
+| `wrdata2_x64` | paired with `secrel_x64.obj` (no symbol in common), two inputs merging to one output name with different masked Characteristics |
+
+`absuse_x64.lld.exe` and `wrdata_x64.lld.exe` are goldens 4 and 5; the engine is
+byte-identical to all five.
