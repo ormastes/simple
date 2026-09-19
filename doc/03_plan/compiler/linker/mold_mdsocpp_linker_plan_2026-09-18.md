@@ -256,3 +256,284 @@ VERNEEDNUM. The one shared call site, `elf_static_place`, takes C1's
 keeps C2's ordering. What remains unsupported after the merge: COMDAT dedup,
 locally defined IFUNC (no IRELATIVE), property-note merging, explicit
 `.symver`, TLS, COMMON, copy relocations / canonical PLTs and text relocs.
+## 16. Lane status — 2026-09-19 (F1: linking the `simple` binary itself)
+
+**Which linker links the `simple` binary today.** The question had two
+candidate routes and the answer is the Simple one, which is the opposite of
+**CORRECTED 2026-09-19 (round 2, Fable block).** The first version of this
+section said both stage binaries link through the Simple-side wrapper. That is
+wrong for stage 2, and the two stages do not even share a chain.
+
+* **Stage 2 links through the RUST path.**
+  `scripts/bootstrap/bootstrap-from-scratch.sh:2945` sets
+  `SIMPLE_NATIVE_BUILD_RUST=1` (and `:2958` `SIMPLE_BINARY=<seed>`) for the
+  `:2959` `native-build`, which `driver/src/main.rs:168-178` routes to the Rust
+  handler -> `native_build.rs:662` -> `native_project/mod.rs:1216 link_objects`
+  -> `linker.rs:1165` -> `:54`, where `linker_alias` answers
+  `Unsupported SIMPLE_LINKER value: internal`. So the Rust linker links the
+  stage-2 OBJECTS, not merely the cargo artifacts, and **a real
+  `SIMPLE_LINKER=internal` bootstrap dies at stage 2 before stage 3 is ever
+  reached.** Closing this needs either the Rust path taught to delegate to the
+  internal engine, or the bootstrap taught to use the Simple path for stage 2.
+* **Stage 3 is Simple-side**, and `:3036` does NOT set
+  `SIMPLE_NATIVE_BUILD_RUST`. It is driven by the stage-2 binary, i.e. the
+  bootstrap CLI: `src/app/cli/bootstrap_main.spl:385` ->
+  `run_exact_stage3_focused_capsule` / `bootstrap_focused_native_build` ->
+  `compiler.driver.bootstrap_api_fixed.aot_native_project_with_backend_fixed`
+  -> `driver_aot_native_output` -> `llvm_native_link_orchestrator.spl:648`
+  `link_to_native(all_objects, output, link_config)`. **Not**
+  `native_build_main.spl` / `native_build_worker.spl`, which is what the first
+  version of this section claimed. Even here the internal route is refused, by
+  `retained_symbols` in the config built at `orchestrator:633-640`.
+* The Rust seed's `linker.rs` is therefore the route for the cargo artifacts
+  **and for stage 2**. Its reject is correct — there is no internal engine on
+  the Rust side — but it is a hard stop for this lane's goal, not a detail.
+
+what the seed's presence suggests:
+
+* The sanctioned bootstrap links stage2 and stage3 `simple` with
+  `native-build --target <triple> --backend llvm --runtime-bundle
+  core-c-bootstrap --source src/compiler --source src/app --source src/lib
+  --entry-closure --runtime-path <stage2-runtime-authority> --entry
+  src/app/cli/bootstrap_main.spl -o <stage bin>`
+  (`scripts/bootstrap/bootstrap-from-scratch.sh:2959` and `:3036`). Observed
+  live on this host on 2026-09-19 as a real stage-3 process from a parallel
+  bootstrap lane, so this is not a reading of the script alone.
+* `native-build` is **Simple**, interpreted by the seed:
+  `src/app/cli/native_build_main.spl` → `native_build_worker.spl` →
+  `cli_native_build_with_environment_variant_policy_v1` ->
+  `driver_aot_native_output.spl:2235` `link_llvm_native(object_files, output,
+  llvm_opts)` -> `llvm_native_link.spl` -> `llvm_native_link_orchestrator.spl:648`
+  `link_to_native(all_objects, output, link_config)` (every arrow grepped, not
+  inferred). That is the Simple-side
+  wrapper, so lane B3's `SIMPLE_LINKER=internal` route **is** on the path that
+  links the compiler itself.
+* The Rust seed's own `native_project/linker.rs` is therefore **not** the route
+  for the stage binaries. It is still the route for the Rust artifacts the
+  bootstrap consumes (`cargo build -p simple-driver / simple-native-all /
+  simple-runtime / simple-compiler-backfill`, linked by rustc's own `cc`), and
+  it rejects `internal` outright: `linker_alias` (`linker.rs:43-56`) accepts
+  only `mold`/`lld`/`ld.lld`/`lld-link`/`ld`/`gnu`/`bfd` and answers
+  `Unsupported SIMPLE_LINKER value: internal`. That reject is correct — there
+  is no internal engine on the Rust side — and it means `SIMPLE_LINKER=internal`
+  can never apply to the Rust half of the bootstrap.
+
+| Lane | Result | Evidence |
+|---|---|---|
+| F1 library search | **pass** | `NativeLinkConfig.libraries`/`library_paths` were lane B3 rejects and are now honoured: caller `-L` entries in order, then the host crt libdir, `lib<name>.so` before `lib<name>.a`. That trailing crt libdir is an IMPLICIT DEFAULT that ld.lld does not have -- measured, `ld.lld-23 ... -lc` with no `-L` fails `unable to find library -lc` while this engine links -- so on that one point the engine follows ld.bfd, not lld. Deliberate and kept; named here because "ld's order" overclaimed it, a `lib<name>.so` that is a GNU ld script followed to its `GROUP()` members (required on glibc — `/usr/lib/aarch64-linux-gnu/libm.so` is a script, not ELF), inputs classified by ar/ELF magic rather than extension. `libraries=["m"]` links `hello_libm_a64.o` and the binary prints `sqrt=42`, exit 42 |
+| F1 DT_NEEDED parity | **pass, and it caught a real defect** | The first `GROUP()` parser also returned the `AS_NEEDED()` member, because the keyword and its `(` are separated by whitespace in glibc's script. Result was an extra `DT_NEEDED libmvec.so.1` that `ld.lld` does not emit — found by diffing `readelf -dW` against an external link, not by reading the code. Fixed and pinned by a parity spec |
+| F1 `runtime_path: "none"` | **pass** | The bootstrap stage link's own `NativeLinkConfig` carries `runtime_path: "none"`, the documented sentinel for "the LLVM pipeline supplies the runtime objects directly". Rejecting it was a false reject with nothing to honour, and it stopped the internal route at the one call site that links the compiler. A real `runtime_path` still rejects by name |
+| F1 full self-host link | **NOT achieved — blocked, stated as such** | See the ranked gap list below. No partial result is reported as a success |
+
+`native_linking_internal_spec` 5/14 → 14/14 (both trees byte-identical; the
+last two examples were added later in the lane, hence the 13/13 and 14/14
+figures below — the numbers are chronological). All 27
+linker specs re-run individually at `9782b90b0b3`: 27/27 `outcome=OK`, 0
+failed. The only two that import the changed file
+(`native_linking_internal_spec`, `link_engine_external_spec`) were re-run at
+the lane tip; the other 25 do not import it.
+
+### Ranked gaps for a full self-host internal link
+
+1. **`retained_symbols` has no engine input.** It is the remaining hard reject
+   on the real bootstrap link config (`llvm_external_provider_retained_symbols`
+   fills it). `ElfLinkRequest` carries only `entry` — there is no extra-GC-roots
+   field — so a retained symbol living in an otherwise-unneeded archive member
+   would be dropped by the fixpoint. Needs an `elf_static_link.spl` change
+   (lane A7's file), not a `native_linking.spl` one.
+2. **No `--allow-multiple-definition` mode.** The real stage config sets
+   `allow_duplicate_definitions: not stage4_requested` = `true`, and the
+   external path honours it by passing `--allow-multiple-definition`
+   (`native_linking.spl:140,145,1462`). The compiler corpus genuinely carries
+   duplicates — one native-build run on this host warned about `shell` x4,
+   `process_wait` x3, `process_run_with_limits` x3, `env_vars` x2,
+   `file_read_text_at` x2, `rotr32` x2, `sha256_process_block` x2. The
+   internal engine has no such mode and treats a duplicate strong definition
+   as a loud error, which is exactly why lane B3 left this field off the
+   reject list — so the real link fails on the first duplicate. Loud is
+   correct; it is still a blocker, and it is not currently rejected by name.
+3. **TLS.** The deployed `simple` has `FLAGS BIND_NOW STATIC_TLS`; TLS
+   relocations are a named `UnsupportedFeature` in the engine (plan §11).
+4. **Interpreted-engine cost at real scale.** Measured on this host: the
+   per-byte `[i64]` widening `internal_link_native_read_i64` performs runs
+   100 MB in 9.2 s at 1.28 GB RSS under the JIT. The stage-3 link's inputs are
+   411 MB of archives (`libsimple_native_all.a` 390 MB,
+   `libsimple_compiler_backfill.a` 21 MB, `deps/libsimple_runtime.a` 43 MB),
+   so widening alone projects to ~40 s and >5 GB before any resolution,
+   fixpoint or relocation work — and the engine body runs interpreted, not
+   JIT-compiled. Plan §11 already names "running the engine natively instead
+   of in the interpreter" as required work; this is the measurement for it.
+5. **RELRO, symbol versions, section GC, `-O1` string merge** — already named
+   in §11/§12 as next work; the compiler's own link needs at least RELRO
+   (`BIND_NOW` is set on the shipped binary).
+6. **The stage-link inputs are not fully retained on this host.** The stage-3
+   directory keeps the three archives but not the generated entry object, and
+   no archive defines `main` (`nm --defined-only` over all three finds none),
+   so the real stage link cannot be reconstructed from retained artifacts — it
+   has to be re-driven through `native-build`.
+
+### Internal vs external, same object, measured 2026-09-19 (aarch64 host)
+
+`hello_libm_a64.o` + `libraries=["m"]`, internal (`SIMPLE_LINKER=internal`,
+through `link_to_native`) against `ld.lld 23` with the equivalent argv.
+
+| | internal | ld.lld |
+|---|---|---|
+| runs | `sqrt=42`, exit 42 | `sqrt=42`, exit 42 |
+| size | 4,392 B | 5,352 B |
+| `DT_NEEDED` | `libc.so.6`, `libm.so.6` | `libc.so.6`, `libm.so.6` (identical **after** the AS_NEEDED fix; before it the internal output carried a third, `libmvec.so.1`) |
+| segments | `PHDR INTERP NOTE LOAD×3 DYNAMIC GNU_STACK` | same plus `GNU_RELRO`, `LOAD×4` |
+| sections only in ld.lld's output | — | `.gnu.version`, `.gnu.version_r`, `.relro_padding`, `.comment` |
+
+**CORRECTED (round 2).** The row above compared the DT_NEEDED SET and the
+sentence that stood here -- "the DT_NEEDED set matches byte for byte ... nothing
+here is a silent difference" -- was false, because it never compared ORDER.
+Order is load-bearing: the loader resolves a symbol from the FIRST DT_NEEDED
+entry that defines it. This engine seeded its shared-input list with libc
+FIRST, where ld.lld emits the `-l` libraries first and libc last. On this very
+fixture, MEASURED: ld.lld emits `libm.so.6 libc.so.6`; ours emitted
+`libc.so.6 libm.so.6` before the fix and `libm.so.6 libc.so.6` after it. (An
+earlier draft of this line claimed lld emitted `libm libmvec libc` -- that was
+not measured and is wrong: libmvec is AS_NEEDED and unused here, so lld emits
+no entry for it. The `libmvec` in the round-1 record belongs to OUR pre-fix
+output, not to lld's.)
+Measured consequence, not a theoretical one: an object calling `atoi` linked
+with a library whose `atoi` returns 42 exits **1** under the old order (libc
+wins) and **42** under ld.lld. Fixed, and pinned by a spec that asserts the
+ORDER and the exit status. The remaining structural deltas are the
+already-named gaps: no RELRO (hence 3 `PT_LOAD` instead of 4 and no
+`.relro_padding`) and no symbol versions.
+
+### What was NOT done, stated plainly
+
+No internally linked `simple` binary exists, so `<out> --version`, a hello-world
+compile with it, and a spec run on it **did not happen**. The end-to-end
+`native-build` run that would have produced one is blocked on this host before
+the link step by SCV source-inventory admission, not by the linker:
+
+```
+$ SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_BOOTSTRAP=1 SIMPLE_LINKER=internal \
+    bin/simple native-build hello.spl -o hello_internal
+SCV-E-ADMISSION: filesystem-event-journal-missing        # cursor claims filesystem_rows=1 with the empty-string digest and no .scv/journal/events.log
+wall=247.31s rss=26942684kB rc=1
+# after rm -rf build/scv .simple:
+SCV-E-SNAPSHOT: snapshot-inventory-unavailable
+wall=157.82s rss=28078696kB rc=1
+# third attempt, adding the documented remedy SIMPLE_SCV_FREEZE_FALLBACK=1:
+SCV-E-ADMISSION: filesystem-event-journal-missing
+wall=356.55s rss=26520188kB rc=1        # no output file produced
+```
+
+Two things worth recording independently of the linker: the SCV cursor
+`build/scv/compile-events/CURRENT` published `filesystem_rows=1` with
+`filesystem_digest` = the sha256 of the empty string and no journal file, which
+is a state the guard correctly refuses and nothing here can repair; and the
+interpreted native-build worker peaked at **27 GB RSS for a two-line hello
+world**, which is the same class of problem as gap 3 above.
+
+A full self-host internal link does **not** need a deployed pure-Simple binary
+— the seed interprets `native-build`, and that is the path to `link_to_native`.
+The wall is the interpreted engine's cost at 411 MB of archive input, plus
+`retained_symbols` and TLS.
+
+### Second parity defect, also found by comparison rather than by reading
+
+`libraries=["c"]` emitted **two** `DT_NEEDED libc.so.6` entries. The implicit
+libc input is `{libdir}/libc.so.6` while `libc.so`'s `GROUP()` names
+`/lib/<triple>/libc.so.6` — textually different, the same file — and this
+engine writes one `DT_NEEDED` per shared input, whereas `ld.lld` keys on
+SONAME and emits one. Shared inputs are now de-duplicated by content digest.
+Red → green: `native_linking_internal_spec` 13/14 → 14/14, both trees
+identical. The real bootstrap link config passes `libraries: []`, so this was
+not on the critical path — it was on the path of anything that starts passing
+`-l` names, which is where this lane is heading.
+
+Three attempts, three refusals, 158-357 s and 26-28 GB RSS each, none of them
+reaching the link step. The cursor is republished with `filesystem_rows=1` and
+no journal on every run, so wiping `build/scv` does not clear it. The guard is
+right to refuse and there is a way to make it pass — write an empty
+`.scv/journal/events.log`, whose sha256 is exactly the `filesystem_digest` the
+cursor already carries — but that is fabricating the state a fail-closed guard
+exists to check, so it was not done. **`SIMPLE_LINKER=internal` has therefore
+never been exercised end to end through `native-build` on this host; every
+internal-engine result in this lane comes from `link_to_native` driven
+directly by a spec.** Filing the SCV cursor defect belongs to whoever owns
+`src/app/compiler_entrypoint/inventory_events.spl`.
+
+### Round 2 (Fable block): what was fixed, what is still a gap
+
+Fixed, each with a red→green spec in `native_linking_internal_spec` (20
+examples, both trees byte-identical):
+
+| | before | after |
+|---|---|---|
+| DT_NEEDED order | libc first; a shadowing `-l` library lost, exit **1** | `-l` libraries first, libc last, exit **42** — same order as ld.lld. Dedup keeps the FIRST occurrence, as ld does by SONAME, so an explicit `-lc` keeps its own position |
+| `-l:<file>` literal form | searched for `lib:libfoo.a.so`, unresolvable | resolves that exact file name; the error names the literal form |
+| relative ld-script members | `libgcc_s.so` = `GROUP ( libgcc_s.so.1 -lgcc )` reported "neither ELF nor a GNU ld script" | relative members resolve against the script's own directory then the search path; `-lNAME` members re-enter the search (depth-bounded, cycles named) |
+| `OUTPUT_FORMAT` argument | would have been collected as a member once non-absolute tokens were accepted | members are collected only inside `GROUP()`/`INPUT()` |
+| all-AS_NEEDED script | "neither ELF nor a GNU ld script" — the wrong cause | names AS_NEEDED, lists the members, and says it is a capability gap |
+
+Still gaps, both located in `elf_static_link.spl` / `ElfLinkRequest` (lane A7's
+file), not in `native_linking.spl`, and both measured against ld.lld:
+
+1. **`.so` with no usable DT_SONAME.** Two sub-cases; this entry previously
+   collapsed them into one.
+   * **No DT_SONAME at all** — MEASURED: ld.lld records the FILE NAME
+     (`DT_NEEDED libemptyson_f1.so`); this engine answers `internal engine:
+     shared object 0: shared object has no DT_SONAME (needed for DT_NEEDED)`.
+     `ElfLinkRequest.shared` carries bytes only — no file name — so the
+     fallback cannot be supplied from the wrapper (lane A7's file).
+   * **DT_SONAME present but the empty string** — reported to make ld.lld emit
+     `DT_NEEDED ""` and de-duplicate two such libraries ON that empty string.
+     NOT verified here: GNU ld refuses to write one ("SONAME must not be empty
+     string; ignored"), so producing the input needs a hand-built ELF. If that
+     is right, our content-digest fallback diverges for this sub-case too — it
+     keys such libraries apart where lld merges them. Recorded, not claimed
+     fixed.
+2. **AS_NEEDED member whose symbol IS used.** ld.lld keeps the library
+   (measured: `DT_NEEDED libneeded_f1.so`); this engine cannot, because it
+   emits one DT_NEEDED per shared input unconditionally. Real as-needed needs
+   a per-library flag on `ElfLinkRequest.shared` so DT_NEEDED is written only
+   when the resolver actually took a symbol from that library. The error now
+   names this instead of misreporting the script as malformed.
+
+All 27 linker specs re-run individually at `f38a070708b` (the round-2 fix):
+27/27 `outcome=OK`, 0 failed — not just the two importers, because the round-2
+change altered shared-input ordering, which any spec that links could see.
+
+### Round 3 (Fable block): dedup keys on SONAME, not bytes
+
+The round-2 dedup keyed on `file_hash_sha256` while its own comment claimed
+"as ld does by SONAME" — the code and the claim disagreed, the same defect
+class as round 2's "matches byte for byte". Two DIFFERENT files can carry the
+SAME SONAME (a script member given by an absolute path plus a `-l` to a local
+build of the same library — glibc's `libc.so` names `/lib/<triple>/libc.so.6`
+absolutely, so this is the ordinary shape, not a contrived one). Measured with
+`soname_alias/libother_a64.so` (different bytes, SONAME `libshadowatoi_a64.so`):
+
+| | before | after / ld.lld |
+|---|---|---|
+| `libraries=["shadowatoi_a64","other_a64"]`, two `-L` dirs | `libshadowatoi_a64.so libshadowatoi_a64.so libc.so.6` | `libshadowatoi_a64.so libc.so.6` |
+
+`internal_shared_dedup_key` now reads DT_SONAME via `elf_parse_shared` and
+falls back to the content digest only for a library with no SONAME. That
+fallback never decides a real link — a no-SONAME library is refused further
+down — it only keeps the function total so two such inputs cannot collide on
+the empty string.
+
+**It does not make the no-SONAME gap cheap to close, so that gap stays
+recorded.** `elf_static_link` needs a name to write into DT_NEEDED and
+`ElfLinkRequest.shared` carries bytes only; supplying ld's fallback (the file
+name) still needs a field on that struct, which is lane A7's file. Keying the
+*dedup* on SONAME is independent of that.
+
+`native_linking_internal_spec` 20/21 → 21/21, both trees byte-identical.
+
+All 27 linker specs re-run individually at `cc758db2ea5` (the round-3 SONAME
+dedup): 27/27 `outcome=OK`, 0 failed. The only later commit, `d2a5ba6fc98`, is
+comment-only.
+
+Verified under real concurrency rather than by inspection: both trees' copies
+of `native_linking_internal_spec` run at the same time now give
+`outcome=OK ... passed=21 failed=0` and rc 0, where the fixed `/tmp` names had
+each run linking over the other's binary mid-assertion.

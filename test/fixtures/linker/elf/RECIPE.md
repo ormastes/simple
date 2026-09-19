@@ -49,6 +49,7 @@ clang --target=aarch64-linux-gnu $PIE lib_a64.c   -o pie_lib_a64.o
 clang --target=x86_64-linux-gnu  $PIE start_x64.c -o pie_start_x64.o
 clang --target=x86_64-linux-gnu  $PIE lib_x64.c   -o pie_lib_x64.o
 clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libc.c -o hello_libc_a64.o
+clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libm.c -o hello_libm_a64.o
 ```
 
 | object | relocations |
@@ -270,3 +271,38 @@ clang --target=x86_64-linux-gnu --sysroot=$HOME/.cache/x64-sysroot/root $CF -ftl
 | ifunc_x64.o | a locally defined `STT_GNU_IFUNC` (`f`). ld.lld emits R_X86_64_IRELATIVE and the program exits 42; without one the address is the resolver's (measured rc=192), so `elf_link` rejects it by name |
 | tls_ie_x64.o | one R_X86_64_GOTTPOFF against an extern `__thread`. Kept as the shape that used to be misdiagnosed as "needs a copy relocation ... recompile with -fPIC"; the TLS classification is asserted directly in `elf_link_unsupported_spec` |
 | symver_x64.o | `__asm__(".symver realpath, realpath@GLIBC_2.2.5")`: an explicit, non-default symbol version. Refused by name — this linker binds every reference to its library's default version. Built with the same flags as `realpath_ver_x64.o` |
+
+`hello_libm_a64.o` (lane F1) additionally calls `sqrt`, so it links only when the
+linker resolves a library SEARCH name: `NativeLinkConfig.libraries = ["m"]` plus
+`library_paths`, or `-lm` externally. On glibc hosts `libm.so` is a GNU ld script
+(`GROUP ( /lib/<triple>/libm.so.6 AS_NEEDED ( ... ) )`), not an ELF file, so
+resolving it exercises the internal engine's ld-script member handling. It prints
+`sqrt=42` and exits 42. Linked by `native_linking_internal_spec`.
+
+`main_int_a64.o` + `libshadowatoi_a64.so` (lane F1, round 2) prove DT_NEEDED
+ORDER rather than the set. The library defines `atoi()` returning 42; libc's
+returns 1; `main_int.c` calls it through a global with `-fno-builtin` so the
+call cannot be constant-folded. The DT_NEEDED *set* is identical whichever
+order the linker emits, so only the exit status distinguishes them: 42 when the
+`-l` library precedes libc (ld.lld's order), 1 when libc precedes it.
+
+```
+clang --target=aarch64-linux-gnu -shared -fPIC -Wl,-soname,libshadowatoi_a64.so shadow_atoi.c -o libshadowatoi_a64.so
+clang --target=aarch64-linux-gnu -c -O1 -fno-builtin -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables main_int.c -o main_int_a64.o
+```
+
+`libshadowatoi_a64.so` must keep a bare `.so` name — `-l<name>` searches for
+exactly `lib<name>.so`, which is the point of the fixture — so unlike the
+sibling `.so.1` fixtures it is matched by `.gitignore:23 *.so` and was added
+with `git add -f`. If it is ever regenerated, re-add it the same way or the
+DT_NEEDED-order spec loses its library.
+
+`soname_alias/libother_a64.so` (lane F1, round 3) has DIFFERENT bytes from
+`libshadowatoi_a64.so` and the SAME `DT_SONAME`, which is what separates a
+SONAME-keyed dedup from a content-keyed one: ld records one DT_NEEDED for the
+pair, a digest records two. Like its sibling it needs a bare `.so` name and so
+was added with `git add -f` (`.gitignore:23 *.so`).
+
+```
+clang --target=aarch64-linux-gnu -shared -fPIC -Wl,-soname,libshadowatoi_a64.so soname_alias/other_atoi.c -o soname_alias/libother_a64.so
+```

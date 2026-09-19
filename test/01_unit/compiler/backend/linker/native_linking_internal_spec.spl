@@ -22,7 +22,7 @@ use std.spec.*
 
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
 use compiler.backend.linker.smf_writer.{SmfWriter}
-use std.io_runtime.{file_read_bytes, file_write_bytes, shell}
+use std.io_runtime.{file_read_bytes, file_write_bytes, shell, getpid}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
@@ -34,6 +34,15 @@ fn with_env(key: text, value: text, block: fn()):
     rt_env_set(key, previous)
 
 val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
+val LIBM_A64_OBJ: text = "test/fixtures/linker/elf/hello_libm_a64.o"
+val INT_A64_OBJ: text = "test/fixtures/linker/elf/main_int_a64.o"
+
+# Output paths are per-PROCESS. The two test trees (test/01_unit and
+# test/unit) hold byte-identical copies of this spec, so a fixed /tmp name is
+# written and executed by both whenever they run at the same time -- one run
+# links over the other run's binary mid-assertion. Keyed on the pid, which
+# differs between those two runs and between parallel suite invocations.
+val TMP: text = "/tmp/f1_native_linking_internal_{getpid()}"
 
 describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
     # Host requirement: aarch64 Linux with glibc (crt_discovery finds
@@ -43,7 +52,7 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
         step("SIMPLE_LINKER=internal routes link_to_native to the internal ELF engine end to end")
         with_env("SIMPLE_LINKER", "internal", fn():
-            val out = "/tmp/native_linking_internal_spec_hello"
+            val out = "{TMP}_hello"
             val cfg = NativeLinkConfig.default()
             val result = link_to_native([HELLO_A64_OBJ], out, cfg)
             expect(result.is_ok()).to_equal(true)
@@ -58,31 +67,31 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
         with_env("SIMPLE_LINKER", "internal", fn():
             val cfg = NativeLinkConfig.default()
             val result = link_to_native(
-                ["/tmp/native_linking_internal_spec_nonexistent.o"],
-                "/tmp/native_linking_internal_spec_missing_out", cfg)
+                ["{TMP}_nonexistent.o"],
+                "{TMP}_missing_out", cfg)
             expect(result.is_err()).to_equal(true)
             expect(result.unwrap_err()).to_contain("internal engine:")
             expect(result.unwrap_err()).to_contain("cannot be read")
         )
 
-    it "rejects a config field the internal engine would silently ignore (libraries), naming it":
+    it "rejects a config field the internal engine would silently ignore (strip_output), naming it":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
-        step("SIMPLE_LINKER=internal + libraries=[m] -> named 'unsupported config field' error, not a silent drop")
+        step("SIMPLE_LINKER=internal + strip_output -> named 'unsupported config field' error, not a silent drop")
         with_env("SIMPLE_LINKER", "internal", fn():
             var cfg = NativeLinkConfig.default()
-            cfg.libraries = ["m"]
+            cfg.strip_output = true
             val result = link_to_native(
                 ["test/fixtures/linker/elf/hello_libc_a64.o"],
-                "/tmp/native_linking_internal_spec_libs_out", cfg)
+                "{TMP}_libs_out", cfg)
             expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err()).to_contain("unsupported config field 'libraries'")
+            expect(result.unwrap_err()).to_contain("unsupported config field 'strip_output'")
         )
 
     it "SIMPLE_LINKER unset still resolves through the external path unchanged":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
         step("Unsetting SIMPLE_LINKER leaves the pre-existing mold/lld/ld resolution untouched (byte-identical argv builders)")
         with_env("SIMPLE_LINKER", "", fn():
-            val out = "/tmp/native_linking_internal_spec_external_hello"
+            val out = "{TMP}_external_hello"
             val cfg = NativeLinkConfig.default()
             val result = link_to_native([HELLO_A64_OBJ], out, cfg)
             expect(result.is_ok()).to_equal(true)
@@ -111,13 +120,300 @@ describe "native_linking - single-SMF create_temp_dir Result unwrap (bug fix)":
         while write_i < write_bytes.len():
             smf_bytes = smf_bytes.push(write_bytes[write_i] as u8)
             write_i = write_i + 1
-        val smf_path = "/tmp/native_linking_internal_spec_object.smf"
+        val smf_path = "{TMP}_object.smf"
         expect(file_write_bytes(smf_path, smf_bytes)).to_equal(true)
 
-        val out = "/tmp/native_linking_internal_spec_smf_hello"
+        val out = "{TMP}_smf_hello"
         val cfg = NativeLinkConfig.default()
         val result = link_to_native([smf_path], out, cfg)
         expect(result.is_ok()).to_equal(true)
         val run = shell("'{out}'")
         expect(run.exit_code).to_equal(42)
         expect(run.stdout).to_equal("hi from libc\n")
+
+describe "native_linking - internal engine library search (NativeLinkConfig.libraries)":
+    # Lane F1: linking the real `simple` binary needs library SEARCH names --
+    # its own DT_NEEDED set is libm/libgcc_s/libc -- so `libraries` /
+    # `library_paths` stopped being a reject (lane B3 listed both) and became
+    # a capability. Resolution mirrors ld: each `library_paths` entry then the
+    # host crt libdir, `lib<name>.so` before `lib<name>.a`, and a `lib<name>.so`
+    # that is a GNU ld script (glibc's libm.so is one) is followed to its
+    # GROUP() members. Anything unresolvable is a named error, never a silent
+    # drop and never an external fallback.
+    it "resolves libraries=[m] through the host libm.so GNU ld script and the output runs":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("SIMPLE_LINKER=internal + libraries=[m] links an object that calls sqrt; the binary prints sqrt=42 and exits 42")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_libm"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["m"]
+            val result = link_to_native([LIBM_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("sqrt=42\n")
+        )
+
+    it "resolves a static archive by search name from library_paths":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[chain_a64] + library_paths=[test/fixtures/linker/elf] selects libchain_a64.a for the archive fixpoint")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_archive_by_name"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["chain_a64"]
+            cfg.library_paths = ["test/fixtures/linker/elf"]
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+    it "reports an unresolvable library search name, listing the directories searched":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[definitely_not_a_library] -> 'internal engine: unresolved library' naming the name and the search path")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["definitely_not_a_library_f1"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{TMP}_unresolved_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("internal engine: unresolved library 'definitely_not_a_library_f1'")
+            expect(result.unwrap_err()).to_contain("searched")
+        )
+
+    it "still rejects extra_flags by name - library support did not widen the accepted config":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("SIMPLE_LINKER=internal + extra_flags=[-Wl,-z,relro] -> named 'unsupported config field' error (reject, never mask)")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.extra_flags = ["-Wl,-z,relro"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{TMP}_flags_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'extra_flags'")
+        )
+
+describe "native_linking - internal engine and the real bootstrap link config":
+    # Lane F1: the sanctioned bootstrap links stage2/stage3 `simple` with
+    # `native-build ... -o <stage bin>`, which reaches
+    # llvm_native_link_orchestrator's `link_to_native(all_objects, output,
+    # link_config)`. That link_config carries `runtime_path: "none"` -- the
+    # documented sentinel for "the LLVM pipeline supplies the runtime objects
+    # directly", not a path. Rejecting it stopped the internal route at the one
+    # call site that links the compiler itself, for a field with nothing to
+    # honour. A real runtime_path is still rejected.
+    it "accepts runtime_path=none, the sentinel the bootstrap stage link passes":
+        # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
+        step("SIMPLE_LINKER=internal + runtime_path='none' links and runs (not 'unsupported config field')")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_runtime_none"
+            var cfg = NativeLinkConfig.default()
+            cfg.runtime_path = "none"
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+    it "still rejects a real runtime_path by name":
+        # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
+        step("SIMPLE_LINKER=internal + runtime_path=/opt/simple/runtime -> named 'unsupported config field' error")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.runtime_path = "/opt/simple/runtime"
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{TMP}_runtime_real_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'runtime_path'")
+        )
+
+    it "names retained_symbols as unsupported - the engine has no GC-root input to honour them with":
+        # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
+        step("retained_symbols is the remaining hard reject on the real bootstrap link config: ElfLinkRequest has only `entry`, no extra-roots field, so a retained symbol living in an otherwise-unneeded archive member would be dropped by the fixpoint")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.retained_symbols = ["spl_init_args"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{TMP}_retained_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'retained_symbols'")
+        )
+
+describe "native_linking - internal engine DT_NEEDED parity with ld.lld on an ld-script library":
+    # Lane F1. Found by comparing the internal output against ld.lld rather
+    # than by reading the code: the first GROUP() parser also returned the
+    # AS_NEEDED() member, because the keyword and its `(` are separated by
+    # whitespace in glibc's own script. `-lm` then recorded
+    # DT_NEEDED libmvec.so.1, which ld.lld does not emit -- this engine writes
+    # one DT_NEEDED per shared input unconditionally, so an AS_NEEDED member
+    # must never become one.
+    it "records DT_NEEDED for libm.so.6 and libc.so.6 only, never the AS_NEEDED member":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[m] -> DT_NEEDED set matches ld.lld: libc.so.6 + libm.so.6, no libmvec.so.1")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_libm_needed"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["m"]
+            expect(link_to_native([LIBM_A64_OBJ], out, cfg).is_ok()).to_equal(true)
+            val needed = shell("readelf -dW '{out}' | grep NEEDED")
+            expect(needed.stdout).to_contain("libc.so.6")
+            expect(needed.stdout).to_contain("libm.so.6")
+            expect(needed.stdout.contains("libmvec")).to_equal(false)
+        )
+
+    it "does not duplicate DT_NEEDED when a library search name resolves to the implicit libc":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[c] resolves libc.so's GROUP() to the same libc.so.6 the engine already adds implicitly; exactly one DT_NEEDED libc.so.6, as ld.lld emits")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_libc_dedup"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["c"]
+            expect(link_to_native([HELLO_A64_OBJ], out, cfg).is_ok()).to_equal(true)
+            val needed = shell("readelf -dW '{out}' | grep -c 'libc.so.6'")
+            expect(needed.stdout.trim()).to_equal("1")
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+describe "native_linking - internal engine DT_NEEDED ORDER (not just the set)":
+    # Lane F1, round 2 (coordinator/Fable block). The earlier parity claim in
+    # plan §13 compared DT_NEEDED as a SET and called it "byte for byte" --
+    # it was not comparing ORDER, and order is load-bearing: the dynamic
+    # loader resolves a symbol from the FIRST DT_NEEDED entry that defines it.
+    # ld.lld emits the `-l` libraries first and libc last; this engine seeded
+    # its shared-input list with libc FIRST, so any `-l` library that shadows
+    # a libc symbol silently lost. Exactly the silent-difference class the
+    # reject-never-mask rule exists to prevent.
+    #
+    # libshadowatoi_a64.so defines atoi() returning 42; libc's returns 1.
+    # main_int_a64.o calls atoi through a global (no builtin folding), so the
+    # exit status names which library the loader searched first -- and the
+    # DT_NEEDED set is identical in both link orders.
+    it "emits -l libraries before libc, so a shadowing library wins as it does under ld.lld":
+        # @req REQ-LINKER-F1-INTERNAL-NEEDED-ORDER
+        step("libraries=[shadowatoi_a64] -> DT_NEEDED order libshadowatoi_a64.so then libc.so.6, and the program exits 42 (libc-first would exit 1)")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_needed_order"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["shadowatoi_a64"]
+            cfg.library_paths = ["test/fixtures/linker/elf"]
+            expect(link_to_native([INT_A64_OBJ], out, cfg).is_ok()).to_equal(true)
+            val order = shell("readelf -dW '{out}' | grep NEEDED | sed -n 's/.*\\[\\(.*\\)\\]/\\1/p' | tr '\\n' ' '")
+            expect(order.stdout.trim()).to_equal("libshadowatoi_a64.so libc.so.6")
+            val run = shell("LD_LIBRARY_PATH=test/fixtures/linker/elf '{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+describe "native_linking - internal engine ld-script member forms and the literal -l: form":
+    # Lane F1, round 2. Three member shapes occur in the host libraries this
+    # engine must link, and only the first was recognised:
+    #   absolute        glibc libc.so / libm.so
+    #   RELATIVE name   gcc libgcc_s.so -> GROUP ( libgcc_s.so.1 -lgcc )
+    #   -lNAME          the same libgcc_s.so
+    # libgcc_s is one of the three DT_NEEDED entries of the shipped `simple`
+    # binary, so this was directly on the target path -- and it failed with
+    # "neither ELF nor a GNU ld script", which named the wrong cause.
+    it "follows a script whose members are a relative name and a -lNAME (gcc libgcc_s.so)":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[gcc_s] resolves GROUP ( libgcc_s.so.1 -lgcc ): the relative member from the search path, the -lgcc member by re-entering the search")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val gccdir = shell("dirname \"$(ls -d /usr/lib/gcc/*/*/libgcc_s.so | head -1)\"").stdout.trim()
+            expect(gccdir).to_contain("/usr/lib/gcc/")
+            val out = "{TMP}_libgcc_s"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["gcc_s"]
+            cfg.library_paths = [gccdir]
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val needed = shell("readelf -dW '{out}' | grep NEEDED")
+            expect(needed.stdout).to_contain("libgcc_s.so.1")
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+    it "resolves the literal -l:<file> form to that exact file name":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[:libchain_a64.a] selects the file named exactly libchain_a64.a, with no lib/.so/.a decoration and no .so-before-.a preference")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_literal_l"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = [":libchain_a64.a"]
+            cfg.library_paths = ["test/fixtures/linker/elf"]
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            expect(shell("'{out}'").exit_code).to_equal(42)
+        )
+
+    it "names the literal form in its unresolved error instead of reporting a decorated name":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[:libnope_f1.a] -> error naming the literal form, not a search for lib:libnope_f1.a.so")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = [":libnope_f1.a"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{TMP}_literal_missing", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("literal form -l:libnope_f1.a")
+        )
+
+    it "does not mistake OUTPUT_FORMAT's argument for a GROUP member":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("glibc's libc.so has OUTPUT_FORMAT(elf64-littleaarch64) at the same paren depth as GROUP's members; only GROUP/INPUT contents are members")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_output_format"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["c"]
+            # If OUTPUT_FORMAT's argument were collected as a member, the
+            # resolver would fail with "member elf64-littleaarch64 ... not
+            # found in ... or the library search path". A clean link IS the
+            # assertion; the error text is checked so a future regression
+            # names itself rather than hiding behind a generic failure.
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            if result.is_err():
+                expect(result.unwrap_err()).to_not_contain("elf64")
+            expect(result.is_ok()).to_equal(true)
+            expect(shell("'{out}'").exit_code).to_equal(42)
+        )
+
+    it "names AS_NEEDED as the cause when skipping it leaves a script with no usable member":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("A script whose every member is inside AS_NEEDED() reports AS_NEEDED and the capability gap, not the wrong cause 'neither ELF nor a GNU ld script'")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val dir = "{TMP}_asn"
+            expect(shell("mkdir -p '{dir}' && cp test/fixtures/linker/elf/hello_libc_a64.o '{dir}/'").exit_code).to_equal(0)
+            expect(shell("printf '/* GNU ld script */\\nGROUP ( AS_NEEDED ( /usr/lib/aarch64-linux-gnu/libm.so.6 ) )\\n' > '{dir}/libasnonly_f1.so'").exit_code).to_equal(0)
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["asnonly_f1"]
+            cfg.library_paths = [dir]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{TMP}_asn_only", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("inside AS_NEEDED()")
+            expect(result.unwrap_err()).to_contain("capability gap")
+            expect(result.unwrap_err().contains("neither ELF")).to_equal(false)
+        )
+
+    it "de-duplicates shared inputs by DT_SONAME, not by file bytes":
+        # @req REQ-LINKER-F1-INTERNAL-NEEDED-ORDER
+        # Lane F1, round 3. Dedup keyed on file CONTENT, while the comment
+        # claimed "as ld does by SONAME" -- the code and the claim disagreed,
+        # the same defect class as round 2's "matches byte for byte".
+        # soname_alias/libother_a64.so has DIFFERENT bytes from
+        # libshadowatoi_a64.so and the SAME DT_SONAME. ld keys on SONAME and
+        # records one DT_NEEDED; a content digest sees two files and records
+        # two. Not contrived: glibc's own libc.so names /lib/<triple>/libc.so.6
+        # by absolute path, so a script member plus a `-l` to a local build of
+        # the same SONAME produces exactly this shape.
+        step("libraries=[shadowatoi_a64, other_a64] over two -L dirs -> one DT_NEEDED libshadowatoi_a64.so then libc.so.6, as ld.lld emits")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "{TMP}_soname_dedup"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["shadowatoi_a64", "other_a64"]
+            cfg.library_paths = ["test/fixtures/linker/elf", "test/fixtures/linker/elf/soname_alias"]
+            expect(link_to_native([INT_A64_OBJ], out, cfg).is_ok()).to_equal(true)
+            val order = shell("readelf -dW '{out}' | grep NEEDED | sed -n 's/.*\\[\\(.*\\)\\]/\\1/p' | tr '\\n' ' '")
+            expect(order.stdout.trim()).to_equal("libshadowatoi_a64.so libc.so.6")
+            # First occurrence wins, so the 42 build is the one kept.
+            val run = shell("LD_LIBRARY_PATH=test/fixtures/linker/elf '{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
