@@ -20,6 +20,32 @@ fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
 
+/// Resolve a POSIX absolute interpreter path (`/bin/sh`, `/bin/bash`,
+/// `/usr/bin/env`, ...) to something `std::process::Command` can actually
+/// spawn on Windows. Mirror of the SFFI-lane helper in
+/// `runtime/src/value/sffi/env_process.rs` (48f49e11883, 2026-08-09): on
+/// Windows `Command::new("/bin/sh")` treats the leading `/` as the current
+/// drive root (`C:in\sh`), and CreateProcess does not fall back to a
+/// PATH search once a separator is present — spawn fails with
+/// ERROR_FILE_NOT_FOUND. Bare names do PATH-search and resolve via Git
+/// Bash. Only rewrites well-known POSIX interpreter paths, only on
+/// Windows, and only when the literal path does not already exist.
+fn resolve_command_path(cmd: &str) -> &str {
+    #[cfg(windows)]
+    {
+        if std::path::Path::new(cmd).exists() {
+            return cmd;
+        }
+        match cmd {
+            "/bin/sh" | "/usr/bin/sh" => return "sh",
+            "/bin/bash" | "/usr/bin/bash" => return "bash",
+            "/bin/env" | "/usr/bin/env" => return "env",
+            _ => {}
+        }
+    }
+    cmd
+}
+
 #[cfg(unix)]
 fn configure_timeout_child_process_group(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -636,7 +662,7 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let output = command.args(&cmd_args).stdin(std::process::Stdio::null()).output();
 
@@ -684,7 +710,7 @@ pub fn rt_process_run_inherit(args: &[Value]) -> Result<Value, CompileError> {
             ))
         }
     };
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let code = command
         .args(cmd_args)
@@ -736,7 +762,7 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let status = command
         .args(&cmd_args)
@@ -801,7 +827,7 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     let mut child = match command
         .args(&cmd_args)
@@ -879,7 +905,7 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
     let child = match command
@@ -1163,7 +1189,7 @@ fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
 
     #[cfg(target_os = "linux")]
     let mut command = if guarded {
-        let mut shell = std::process::Command::new("/bin/sh");
+        let mut shell = std::process::Command::new(resolve_command_path("/bin/sh"));
         shell
             .arg("-c")
             .arg("child=; stop(){ [ -z \"$child\" ] || { kill -TERM -- \"-$child\" 2>/dev/null || true; sleep 0.1; kill -KILL -- \"-$child\" 2>/dev/null || true; }; }; die(){ sig=$1; stop; trap - \"$sig\"; kill \"-$sig\" \"$$\"; exit 143; }; trap 'die 1' HUP; trap 'die 2' INT; trap 'die 15' TERM; setsid /bin/sh -c 'sleep 3600 & exec \"$@\"' simple-guard-grp \"$@\" & child=$!; wait \"$child\"; code=$?; stop; if [ \"$code\" -gt 128 ]; then sig=$((code-128)); trap - \"$sig\"; kill \"-$sig\" \"$$\"; fi; exit \"$code\"")
@@ -1171,10 +1197,10 @@ fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
             .arg(&*cmd);
         shell
     } else {
-        std::process::Command::new(&*cmd)
+        std::process::Command::new(resolve_command_path(&*cmd))
     };
     #[cfg(not(target_os = "linux"))]
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     command
         .args(&cmd_args)
@@ -1458,7 +1484,7 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&*cmd);
+    let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
     command
         .args(&cmd_args)
@@ -1754,7 +1780,7 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 fn shell_command(cmd: &str) -> std::process::Command {
-    let mut command = std::process::Command::new("/bin/sh");
+    let mut command = std::process::Command::new(resolve_command_path("/bin/sh"));
     command.arg("-c").arg(cmd);
     command
 }
@@ -1878,7 +1904,7 @@ mod tests {
             let _guard = registry.lock().unwrap();
             panic!("poison process registry");
         }));
-        let child = std::process::Command::new("/bin/sh")
+        let child = std::process::Command::new(resolve_command_path("/bin/sh"))
             .args(["-c", "sleep 30"])
             .spawn()
             .expect("spawn sabotage child");
