@@ -279,3 +279,32 @@ describe "the negated filter form is seen too":
         val codes = results_for("/tmp/coll_once.spl", dedup)
         assert_true(has(codes, "COLL020"))
         assert_equal(0, count_of("/tmp/coll_once.spl", dedup, "COLL002"))
+
+# ---------------------------------------------------------------------------
+# Method bodies. Every rule walks the module's declarations and acts on
+# `DECL_FN`; a `fn` inside a `class`/`impl` is a CHILD of the enclosing
+# declaration, so the whole COLL family was silent on methods. In this
+# codebase most real logic lives in methods, which makes that the family's
+# largest blind spot rather than a corner case.
+# `coll_all_decls` flattens using `flat_decl_child_decls`, the arena's own
+# nested-declaration contract, so no container kind is enumerated here.
+# Record: doc/08_tracking/bug/coll_rules_do_not_walk_methods_2026-09-19.md
+# ---------------------------------------------------------------------------
+
+describe "the rules walk method bodies too":
+    it "COLL020 sees a dedup loop inside a method":
+        step("COLL020 sees a dedup loop inside a method")
+        val in_method = "class Box:\n    var items: [text]\n\n    fn uniq(self) -> [text]:\n        var seen: [text] = []\n        for it in self.items:\n            if not seen.contains(it):\n                seen.push(it)\n        seen\n"
+        assert_true(has(results_for("/tmp/coll_method.spl", in_method), "COLL020"))
+
+    it "a method and a free function with the same idiom each report once":
+        step("a method and a free function with the same idiom each report once")
+        """Flattening must not double-count: a declaration reachable both as
+        a module child and as a container child would report twice."""
+        val both = "class Box:\n    var items: [text]\n\n    fn uniq(self) -> [text]:\n        var seen: [text] = []\n        for it in self.items:\n            if not seen.contains(it):\n                seen.push(it)\n        seen\n\nfn toplevel(xs: [text]) -> [text]:\n    var seen: [text] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    seen\n"
+        assert_equal(2, count_of("/tmp/coll_both.spl", both, "COLL020"))
+
+    it "COLL002 sees a plain contains-in-loop inside a method":
+        step("COLL002 sees a plain contains-in-loop inside a method")
+        val filt = "class Box:\n    var allowed: [text]\n\n    fn hits(self, xs: [text]) -> i64:\n        var n = 0\n        for x in xs:\n            if self.allowed.contains(x):\n                n = n + 1\n        n\n"
+        assert_true(has(results_for("/tmp/coll_m2.spl", filt), "COLL002"))

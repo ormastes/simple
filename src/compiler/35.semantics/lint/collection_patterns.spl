@@ -66,7 +66,7 @@ use compiler.frontend.core.ast_stmt.{
     stmt_get_span, stmt_get_if_single_else,
     arm_get_pattern, arm_get_guard, arm_get_body, elif_get_else
 }
-use compiler.core.ast_traversal.{flat_stmt_child_exprs}
+use compiler.core.ast_traversal.{flat_stmt_child_exprs, flat_decl_child_decls}
 use compiler.core.ast.{
     DECL_FN, DECL_VAR, decl_get_tag, decl_get_name, decl_get_body,
     decl_get_param_names, decl_get_param_types
@@ -165,10 +165,35 @@ fn coll_warning(
 # Main Entry Point
 # ============================================================================
 
+# Every declaration these rules should inspect, with nested ones flattened in.
+#
+# Each rule below walks the module's declarations and acts on `DECL_FN`. A
+# `fn` inside a `class` or `impl` is NOT one of those — it is a child of the
+# enclosing declaration — so until now every COLL rule was silent on method
+# bodies. In this codebase most real logic lives in methods, so that was not a
+# corner: it made the whole family blind to the majority of the code it exists
+# to check. Measured on a 52-file sample it accounted for 2 missed dedup
+# sites, but the sample is mostly free functions and under-represents it.
+#
+# `flat_decl_child_decls` is the arena's own nested-declaration contract
+# (`DECL_IMPL` / `DECL_CLI` bodies, and a trait `DECL_STRUCT` body), so this
+# neither invents a traversal nor has to enumerate container kinds itself: a
+# container added later is picked up by fixing that one function. The walk is
+# depth-bounded by the tree and every declaration is yielded exactly once, so
+# a rule that filters for `DECL_FN` sees each function body once whatever its
+# nesting.
+fn coll_all_decls(decl_indices: [i64]) -> [i64]:
+    var out: [i64] = []
+    for idx in decl_indices:
+        out.push(idx)
+        for nested in coll_all_decls(flat_decl_child_decls(idx)):
+            out.push(nested)
+    out
+
 fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
 
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -706,7 +731,7 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
 
     # Collect module-level var names that are arrays (initialized with [])
     var global_arrays: [text] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_VAR:
             val init = decl_get_body(idx)
             # A module-level var with array init will have stmts list
@@ -718,7 +743,7 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
 
     # For each function, check if it pushes to a global array
     # without a reset/clear/trim or a dominating len >= capacity return guard
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -864,7 +889,7 @@ fn is_chained_filter(e: i64) -> bool:
 
 fn check_chained_filter_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -1036,7 +1061,7 @@ fn coll019_warning(kind: i64, fn_name: text, span_id: i64) -> CollectionLintWarn
 
 fn check_index_mutation_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -1327,7 +1352,7 @@ fn check_cartesian_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]
 
 fn check_cartesian_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_cartesian_stmts(decl_get_body(idx), fn_name)
@@ -1404,7 +1429,7 @@ fn check_missing_index_outer(stmts: [i64], fn_name: text) -> [CollectionLintWarn
 
 fn check_missing_index_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_missing_index_outer(decl_get_body(idx), fn_name)
@@ -1554,7 +1579,7 @@ fn check_manual_distinct_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWa
 
 fn check_manual_distinct_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_manual_distinct_stmts(decl_get_body(idx), fn_name)
@@ -1926,7 +1951,7 @@ fn collect_stmt_idents(stmts: [i64], acc: [text]) -> [text]:
 fn collection_module_names(decl_indices: [i64]) -> [text]:
     """Every identifier the module binds or mentions, for name-freshness proofs."""
     var names: [text] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         val n = decl_get_name(idx)
         if n != "":
             names.push(n)
@@ -2271,7 +2296,7 @@ fn collection_fix_proofs(decl_indices: [i64]) -> [CollectionFixProof]:
     yields an UNSAFE proof for each of its candidates rather than none.
     """
     var proofs: [CollectionFixProof] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val body = decl_get_body(idx)
             val inspectable = coll_stmts_inspectable(body)
@@ -2409,7 +2434,7 @@ fn _slice_from(items: [i64], start: i64) -> [i64]:
 
 fn check_manual_group_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_manual_group_stmts(decl_get_body(idx), fn_name)
@@ -2534,7 +2559,7 @@ fn check_sort_then_take_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWar
 
 fn check_sort_then_take_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_sort_then_take_stmts(decl_get_body(idx), fn_name)
