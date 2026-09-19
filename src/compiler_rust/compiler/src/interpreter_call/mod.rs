@@ -449,8 +449,27 @@ pub(crate) fn call_value_as_callable(
     }
 
     match val {
-        Value::Function { def, captured_env, .. } => {
+        Value::Function { name: fn_name, def, captured_env } => {
             let mut captured_env_clone = Env::clone(&captured_env);
+            // letrec: bind the function under its OWN name before running the body.
+            //
+            // `captured_env` was cloned by `exec_block_closure_into` BEFORE the
+            // closure was inserted into the block scope, so a nested `fn` cannot see
+            // itself. That was invisible while Priority 5 answered every call from
+            // the flat `functions` map; now that the closure wins (Priority 4.9), a
+            // recursive nested `fn` would fail with `variable <name> not found`
+            // unless it is bound here. Only fills a name the captured scope does not
+            // already define, so an outer binding of the same name still wins.
+            if !captured_env_clone.contains_key(&fn_name) {
+                captured_env_clone.insert(
+                    fn_name.clone(),
+                    Value::Function {
+                        name: fn_name.clone(),
+                        def: Arc::clone(&def),
+                        captured_env: Arc::clone(&captured_env),
+                    },
+                );
+            }
             Ok(Some(core::exec_function_with_captured_env(
                 &def,
                 args,
@@ -756,6 +775,40 @@ pub(crate) fn evaluate_call(
         if env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some() {
             if let Some(val) = env.get(name).cloned() {
                 if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
+                    return Ok(result);
+                }
+            }
+        }
+
+        // Priority 4.9: a nested `fn` declared inside a BLOCK CLOSURE (an `it`
+        // block, or any lambda body) is registered TWICE by
+        // `exec_block_closure_into`: once in `functions`, so the body can recurse,
+        // and once in `env` as a `Value::Function` closing over the block's locals.
+        // Priority 5 below finds the flat-map entry first and runs it against the
+        // CALLER's env, which silently discards that capture -- the block's own
+        // `val`s are simply not there, and the body dies with `variable ... not
+        // found` (or, in the callback shape, reads zero). A `fn` nested in a plain
+        // function body never hit this because that path (`node_exec.rs`) binds
+        // only `env`, so Priority 6 handled it correctly.
+        //
+        // Identity is established by pointer, not by a heuristic about whether the
+        // captured env `looks` non-empty: `CowEnv` is a copy-on-write overlay over
+        // a shared base, so an emptiness test says nothing about what the closure
+        // can actually see. When the env binding and the flat entry are the SAME
+        // `Arc<FunctionDef>`, they are by construction the two registrations of one
+        // nested definition, and the closure is the one that carries scope.
+        // See doc/08_tracking/bug/nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
+        let env_binding_is_same_nested_fn = match (env.get(name), functions.get(name)) {
+            (Some(Value::Function { def: env_def, .. }), Some(flat_def)) => {
+                Arc::ptr_eq(env_def, flat_def)
+            }
+            _ => false,
+        };
+        if env_binding_is_same_nested_fn {
+            if let Some(val) = env.get(name).cloned() {
+                if let Some(result) =
+                    call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)?
+                {
                     return Ok(result);
                 }
             }

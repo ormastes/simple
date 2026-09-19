@@ -47,7 +47,10 @@ QEMU_PACKAGE_TIMEOUT="${QEMU_PACKAGE_TIMEOUT:-1800}"
 QEMU_TRANSFER_TIMEOUT="${QEMU_TRANSFER_TIMEOUT:-1800}"
 QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-28800}"
 QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
-QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-18000}"
+QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-${QEMU_BOOTSTRAP_TIMEOUT}}"
+# The 30G overlay passed 10G during a full bootstrap (2026-09-18); qemu pauses the guest
+# forever if the host filesystem fills, so refuse to start below this floor.
+QEMU_MIN_FREE_GB="${QEMU_MIN_FREE_GB:-30}"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
 FREEBSD_MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
@@ -176,7 +179,10 @@ preflight_timeout() {
     is_positive_integer "$QEMU_TRANSFER_TIMEOUT" || return 1
     is_positive_integer "$QEMU_BOOTSTRAP_TIMEOUT" || return 1
     is_positive_integer "$QEMU_SMOKE_TIMEOUT" || return 1
-    is_positive_integer "$QEMU_FULL_TIMEOUT"
+    is_positive_integer "$QEMU_FULL_TIMEOUT" || return 1
+    # The checker SSH session is bounded by QEMU_FULL_TIMEOUT; a shorter value
+    # kills the guest bootstrap before its own budget expires.
+    [ "$QEMU_FULL_TIMEOUT" -ge "$QEMU_BOOTSTRAP_TIMEOUT" ]
 }
 
 preflight_architecture() {
@@ -293,7 +299,7 @@ if ! is_positive_integer "$QEMU_BUILD_JOBS"; then
     exit 1
 fi
 if ! preflight_timeout; then
-    printf 'A usable timeout command and positive command timeouts are required\n' >&2
+    printf 'A usable timeout command, positive command timeouts, and QEMU_FULL_TIMEOUT >= QEMU_BOOTSTRAP_TIMEOUT are required\n' >&2
     exit 1
 fi
 
@@ -426,7 +432,7 @@ reap_orphan_qemu() {
         pid=${proc#/proc/}
         pid=${pid%/cmdline}
         [ "$pid" = "$$" ] && continue
-        cmd=$(tr '\000' ' ' <"$proc" 2>/dev/null) || continue
+        cmd=$(tr '\000' ' ' 2>/dev/null <"$proc") || continue
         case "$cmd" in
             qemu-system-*"${OVERLAY_IMAGE}"*)
                 info "Reaping orphaned QEMU pid=$pid (holds ${OVERLAY_IMAGE})"
@@ -585,6 +591,10 @@ pass "Cloud-init ISO: $QEMU_CLOUDINIT_ISO"
 
 # ── Create Overlay ─────────────────────────────────────────────────────
 printf '[5/7] QEMU overlay + start\n'
+mkdir -p "$QEMU_RUNTIME_DIR"
+FREE_KB=$(df -Pk "$QEMU_RUNTIME_DIR" | awk 'NR==2 {print $4}')
+[ -n "$FREE_KB" ] && [ "$FREE_KB" -ge $((QEMU_MIN_FREE_GB * 1024 * 1024)) ] ||
+    fail "Only $((${FREE_KB:-0} / 1024 / 1024))G free for the overlay in $QEMU_RUNTIME_DIR (need ${QEMU_MIN_FREE_GB}G; set QEMU_RUNTIME_DIR to a larger filesystem)"
 
 rm -f "$OVERLAY_IMAGE"
 run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
@@ -610,7 +620,7 @@ if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" qemu-system-x86_64 \
     -cpu "$CPU_MODEL" \
     -m "$QEMU_MEM" \
     -smp "$QEMU_CPUS" \
-    -drive "file=${OVERLAY_IMAGE},format=qcow2,if=virtio" \
+    -drive "file=${OVERLAY_IMAGE},format=qcow2,if=virtio,werror=report,rerror=report" \
     -drive "file=${QEMU_CLOUDINIT_ISO},format=raw,if=virtio,media=cdrom" \
     -net nic,model=virtio \
     -net "user,hostfwd=tcp::${QEMU_PORT}-:22" \
@@ -857,9 +867,12 @@ else
     GUEST_BOOTSTRAP_OUTPUT="${VM_HOME}/simple/${GUEST_BOOTSTRAP_OUTPUT_RELATIVE}"
     info "Running native FreeBSD Stage 3 self-host checker (explicit output: ${GUEST_BOOTSTRAP_OUTPUT})..."
     EXACT_COMMAND="env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"
-    if ! $VM_SSH "cd ${VM_HOME}/simple && env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"; then
+    CHECKER_RC=0
+    $VM_SSH "cd ${VM_HOME}/simple && env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs" || CHECKER_RC=$?
+    if [ "$CHECKER_RC" -ne 0 ]; then
         copy_guest_bootstrap_logs
-        fail "Canonical FreeBSD Stage 3 self-host checker failed"
+        [ "$CHECKER_RC" -ne 124 ] || fail "Canonical FreeBSD Stage 3 self-host checker SSH timed out after ${QEMU_FULL_TIMEOUT}s"
+        fail "Canonical FreeBSD Stage 3 self-host checker failed (exit $CHECKER_RC)"
     fi
     STAGE_BIN="${GUEST_BOOTSTRAP_OUTPUT}/stage3/x86_64-unknown-freebsd/simple"
     STAGE_EXISTS=$($VM_SSH "test -x ${STAGE_BIN} && echo yes || echo no" 2>/dev/null)
