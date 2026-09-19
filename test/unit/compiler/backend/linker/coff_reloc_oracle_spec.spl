@@ -1,0 +1,102 @@
+# COFF/PE x86_64 relocation value oracle — lane E1
+#
+# Pins the IMAGE_REL_AMD64_* value formulas against the PE/COFF specification
+# (section 5.2.2, "Type Indicators", x64 processors). These are VALUE formulas
+# only — no byte patching; the encoders live in reloc_engine.spl (design D4:
+# one oracle, reject never mask).
+#
+# The COFF difference from ELF that this spec exists to pin: COFF has no
+# explicit addend field. `a` is whatever is already stored in the relocated
+# field, and the -4 of a RIP-relative displacement is NOT pre-baked into it —
+# so `REL32 = S + A - P - 4`, never the ELF `S + A - P`.
+#
+# @cover src/compiler/70.backend/linker/gpu_smf/smf_reloc_formulas.spl
+
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
+    coff_reloc_compute,
+    IMAGE_REL_AMD64_ABSOLUTE, IMAGE_REL_AMD64_ADDR64, IMAGE_REL_AMD64_ADDR32,
+    IMAGE_REL_AMD64_ADDR32NB, IMAGE_REL_AMD64_REL32, IMAGE_REL_AMD64_REL32_1,
+    IMAGE_REL_AMD64_REL32_2, IMAGE_REL_AMD64_REL32_3, IMAGE_REL_AMD64_REL32_4,
+    IMAGE_REL_AMD64_REL32_5, IMAGE_REL_AMD64_SECTION, IMAGE_REL_AMD64_SECREL,
+    IMAGE_REL_AMD64_SECREL7, IMAGE_REL_AMD64_TOKEN, IMAGE_REL_AMD64_SREL32,
+    IMAGE_REL_AMD64_PAIR, IMAGE_REL_AMD64_SSPAN32,
+}
+
+val BASE: i64 = 0x140000000
+
+# ctx(sec_va, sec_index) — the output section the *target symbol* lands in.
+fn v(rtype: i64, s: i64, a: i64, p: i64) -> i64:
+    coff_reloc_compute(rtype, s, a, p, BASE, BASE + 0x1000, 1).value
+
+fn ok(rtype: i64, s: i64, a: i64, p: i64) -> bool:
+    coff_reloc_compute(rtype, s, a, p, BASE, BASE + 0x1000, 1).ok
+
+fn err(rtype: i64, s: i64, a: i64, p: i64) -> text:
+    coff_reloc_compute(rtype, s, a, p, BASE, BASE + 0x1000, 1).err
+
+fn width(rtype: i64) -> i64:
+    coff_reloc_compute(rtype, BASE + 0x2000, 0, BASE + 0x1000, BASE, BASE + 0x1000, 1).width
+
+describe "coff_reloc_compute - absolute and 64-bit forms":
+    it "ABSOLUTE is a no-op that writes nothing":
+        expect(ok(IMAGE_REL_AMD64_ABSOLUTE, BASE + 0x2000, 0, BASE + 0x1000)).to_equal(true)
+        expect(width(IMAGE_REL_AMD64_ABSOLUTE)).to_equal(0)
+
+    it "ADDR64 is S + A as a full 64-bit virtual address":
+        expect(v(IMAGE_REL_AMD64_ADDR64, BASE + 0x2000, 0, BASE + 0x1000)).to_equal(BASE + 0x2000)
+        expect(v(IMAGE_REL_AMD64_ADDR64, BASE + 0x2000, 0x18, BASE + 0x1000)).to_equal(BASE + 0x2018)
+        expect(width(IMAGE_REL_AMD64_ADDR64)).to_equal(8)
+
+    it "ADDR32NB is the target RVA, S - ImageBase, and rejects above 4 GiB":
+        expect(v(IMAGE_REL_AMD64_ADDR32NB, BASE + 0x2000, 0, BASE + 0x1000)).to_equal(0x2000)
+        expect(v(IMAGE_REL_AMD64_ADDR32NB, BASE + 0x2000, 4, BASE + 0x1000)).to_equal(0x2004)
+        expect(width(IMAGE_REL_AMD64_ADDR32NB)).to_equal(4)
+        expect(ok(IMAGE_REL_AMD64_ADDR32NB, BASE - 1, 0, BASE)).to_equal(false)
+
+describe "coff_reloc_compute - RIP-relative family":
+    it "REL32 subtracts the 4-byte displacement itself: S + A - P - 4":
+        # lld-link: .text+0xA references add_val; the -4 is NOT pre-baked into A.
+        expect(v(IMAGE_REL_AMD64_REL32, BASE + 0x1040, 0, BASE + 0x100a)).to_equal(0x1040 - 0x100a - 4)
+        expect(v(IMAGE_REL_AMD64_REL32, BASE + 0x1040, 7, BASE + 0x100a)).to_equal(0x1040 + 7 - 0x100a - 4)
+        expect(width(IMAGE_REL_AMD64_REL32)).to_equal(4)
+
+    it "REL32_1..REL32_5 subtract 4 + N for the N trailing immediate bytes":
+        val s = BASE + 0x1040
+        val p = BASE + 0x1000
+        expect(v(IMAGE_REL_AMD64_REL32_1, s, 0, p)).to_equal(0x40 - 5)
+        expect(v(IMAGE_REL_AMD64_REL32_2, s, 0, p)).to_equal(0x40 - 6)
+        expect(v(IMAGE_REL_AMD64_REL32_3, s, 0, p)).to_equal(0x40 - 7)
+        expect(v(IMAGE_REL_AMD64_REL32_4, s, 0, p)).to_equal(0x40 - 8)
+        expect(v(IMAGE_REL_AMD64_REL32_5, s, 0, p)).to_equal(0x40 - 9)
+
+    it "REL32 rejects a displacement that does not fit a signed 32-bit field":
+        expect(ok(IMAGE_REL_AMD64_REL32, BASE + 0x100000000, 0, BASE)).to_equal(false)
+        expect(ok(IMAGE_REL_AMD64_REL32, BASE, 0, BASE + 0x100000000)).to_equal(false)
+
+describe "coff_reloc_compute - section-relative forms":
+    it "SECREL is the offset of the target within its own output section":
+        expect(v(IMAGE_REL_AMD64_SECREL, BASE + 0x1024, 0, BASE + 0x2000)).to_equal(0x24)
+        expect(width(IMAGE_REL_AMD64_SECREL)).to_equal(4)
+
+    it "SECREL rejects a target that lies below its own section base":
+        expect(ok(IMAGE_REL_AMD64_SECREL, BASE + 0x0fff, 0, BASE + 0x2000)).to_equal(false)
+
+    it "SECTION is the 1-based output section index in a 2-byte field":
+        expect(v(IMAGE_REL_AMD64_SECTION, BASE + 0x1024, 0, BASE + 0x2000)).to_equal(1)
+        expect(width(IMAGE_REL_AMD64_SECTION)).to_equal(2)
+
+describe "coff_reloc_compute - every unmodelled type is a named Err":
+    it "ADDR32 is rejected by name (needs a sub-4 GiB image base)":
+        expect(ok(IMAGE_REL_AMD64_ADDR32, BASE + 0x2000, 0, BASE)).to_equal(false)
+        expect(err(IMAGE_REL_AMD64_ADDR32, BASE + 0x2000, 0, BASE)).to_equal("IMAGE_REL_AMD64_ADDR32")
+
+    it "SECREL7, TOKEN, SREL32, PAIR and SSPAN32 are rejected by name":
+        expect(err(IMAGE_REL_AMD64_SECREL7, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_SECREL7")
+        expect(err(IMAGE_REL_AMD64_TOKEN, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_TOKEN")
+        expect(err(IMAGE_REL_AMD64_SREL32, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_SREL32")
+        expect(err(IMAGE_REL_AMD64_PAIR, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_PAIR")
+        expect(err(IMAGE_REL_AMD64_SSPAN32, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_SSPAN32")
+
+    it "an unknown type code is rejected by its numeric name, never defaulted":
+        expect(ok(0x7f, BASE, 0, BASE)).to_equal(false)
+        expect(err(0x7f, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_UNKNOWN_127")

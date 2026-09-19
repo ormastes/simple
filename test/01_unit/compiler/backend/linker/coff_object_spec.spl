@@ -1,0 +1,141 @@
+# COFF object reader — lane E1
+#
+# Parses the clang-produced x86_64-windows-msvc fixtures in
+# test/fixtures/linker/coff/ (recipe in RECIPE.md there) into the shared
+# section/symbol model the internal linker resolves over.
+#
+# Two COFF facts this spec exists to pin, because both are silent corrupters:
+#   1. a relocation's SymbolTableIndex is the RAW slot index and COUNTS aux
+#      records, so the symbol array must keep aux slots as placeholders;
+#   2. section alignment lives in Characteristics bits 20..23 as
+#      IMAGE_SCN_ALIGN_<n>BYTES, not in any size field.
+#
+# @cover src/compiler/70.backend/linker/coff/coff_object.spl
+
+use compiler.backend.linker.coff.coff_object.{
+    coff_parse_object, coff_section_index, coff_symbol_at, coff_link_sections,
+    coff_is_bss, IMAGE_FILE_MACHINE_AMD64_C,
+}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{IMAGE_REL_AMD64_REL32, IMAGE_REL_AMD64_ADDR64}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/coff"
+
+fn load(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn obj(name: text):
+    val r = coff_parse_object(load(name), name)
+    if r.is_err():
+        print "parse error: {r.unwrap_err()}"
+    r.unwrap()
+
+describe "coff_parse_object - file header and section table":
+    it "start_x64.obj is an AMD64 object with six sections":
+        val o = obj("start_x64.obj")
+        expect(o.machine).to_equal(IMAGE_FILE_MACHINE_AMD64_C)
+        expect(o.sections.len()).to_equal(6)
+
+    it "section alignment is decoded from Characteristics bits 20..23":
+        val o = obj("start_x64.obj")
+        # .text  0x60500020 -> ALIGN_16BYTES, .data 0xC0400040 -> ALIGN_8BYTES,
+        # .bss   0xC0300080 -> ALIGN_4BYTES,  .rdata 0x40300040 -> ALIGN_4BYTES
+        expect(o.sections[coff_section_index(o, ".text")].align).to_equal(16)
+        expect(o.sections[coff_section_index(o, ".data")].align).to_equal(8)
+        expect(o.sections[coff_section_index(o, ".bss")].align).to_equal(4)
+        expect(o.sections[coff_section_index(o, ".rdata")].align).to_equal(4)
+
+    it "section contents are sized from SizeOfRawData; .bss carries no file bytes":
+        val o = obj("lib_x64.obj")
+        val t = o.sections[coff_section_index(o, ".text")]
+        expect(t.raw_size).to_equal(15)
+        expect(t.data.len()).to_equal(15)
+        val b = o.sections[coff_section_index(o, ".bss")]
+        expect(coff_is_bss(b)).to_equal(true)
+        expect(b.raw_size).to_equal(4)
+        expect(b.data.len()).to_equal(0)
+
+    it "the section table keeps 1-based numbering even for discarded sections":
+        val o = obj("start_x64.obj")
+        # .debug$S is section 5 and .llvm_addrsig (IMAGE_SCN_LNK_REMOVE) is 6;
+        # both are dropped from the link but must not shift .rdata off index 3.
+        expect(o.sections[3].name).to_equal(".rdata")
+        expect(o.sections[4].keep).to_equal(false)
+        expect(o.sections[5].keep).to_equal(false)
+        expect(coff_link_sections(o).len()).to_equal(4)
+
+describe "coff_parse_object - relocations":
+    it ".text of start_x64.obj has three REL32 sites at the recorded offsets":
+        val o = obj("start_x64.obj")
+        val t = o.sections[coff_section_index(o, ".text")]
+        expect(t.relocs.len()).to_equal(3)
+        expect(t.relocs[0].vaddr).to_equal(0xa)
+        expect(t.relocs[1].vaddr).to_equal(0x10)
+        expect(t.relocs[2].vaddr).to_equal(0x17)
+        expect(t.relocs[0].rtype).to_equal(IMAGE_REL_AMD64_REL32)
+
+    it "a relocation's symbol index is the RAW slot index, counting aux records":
+        val o = obj("start_x64.obj")
+        val t = o.sections[coff_section_index(o, ".text")]
+        # llvm-readobj: `0xA IMAGE_REL_AMD64_REL32 add_val (14)` — slot 14 is
+        # only reachable if the six section symbols' aux records occupy slots.
+        expect(t.relocs[0].sym_index).to_equal(14)
+        expect(coff_symbol_at(o, 14).name).to_equal("add_val")
+        expect(t.relocs[1].sym_index).to_equal(15)
+        expect(coff_symbol_at(o, 15).name).to_equal("base")
+
+    it ".data of start_x64.obj holds the ADDR64 pointer to msg":
+        val o = obj("start_x64.obj")
+        val d = o.sections[coff_section_index(o, ".data")]
+        expect(d.relocs.len()).to_equal(1)
+        expect(d.relocs[0].vaddr).to_equal(0)
+        expect(d.relocs[0].rtype).to_equal(IMAGE_REL_AMD64_ADDR64)
+        expect(coff_symbol_at(o, d.relocs[0].sym_index).name).to_equal("msg")
+
+describe "coff_parse_object - symbols":
+    it "long names are read from the string table, short ones from the slot":
+        val o = obj("start_x64.obj")
+        expect(coff_symbol_at(o, 16).name).to_equal("msg_ptr")
+        expect(coff_symbol_at(o, 17).name).to_equal("msg")
+
+    it "an external symbol with section 0 is undefined, not a definition":
+        val o = obj("start_x64.obj")
+        val s = coff_symbol_at(o, 14)
+        expect(s.section_number).to_equal(0)
+        expect(s.is_defined).to_equal(false)
+
+    it "@feat.00 is an absolute symbol (section -1), not a section definition":
+        val o = obj("start_x64.obj")
+        var found = false
+        var i: i64 = 0
+        while i < o.symbols.len():
+            if o.symbols[i].name == "@feat.00":
+                found = true
+                expect(o.symbols[i].section_number).to_equal(-1)
+                expect(o.symbols[i].is_absolute).to_equal(true)
+            i = i + 1
+        expect(found).to_equal(true)
+
+    it "a truncated object is rejected by name, never parsed partially":
+        val raw = load("start_x64.obj")
+        var head: [i64] = []
+        var i: i64 = 0
+        while i < 12:
+            head = head.push(raw[i])
+            i = i + 1
+        val r = coff_parse_object(head, "truncated")
+        expect(r.is_err()).to_equal(true)
+
+    it "a non-AMD64 machine is rejected by name":
+        var raw = load("start_x64.obj")
+        raw[0] = 0x64   # IMAGE_FILE_MACHINE_ARM64 0xaa64
+        raw[1] = 0xaa
+        val r = coff_parse_object(raw, "arm64")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_equal("coff: arm64: unsupported machine 0xaa64 (lane E1 models x86_64 only)")

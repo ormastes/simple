@@ -1,0 +1,93 @@
+# COFF/PE linker fixtures (lane E1)
+
+Tiny freestanding x86_64 Windows COFF objects for the internal COFF→PE linker
+specs (`test/01_unit/compiler/backend/linker/coff_*_spec.spl` and
+`pe_exec_writer_spec.spl`), plus one **lld-link golden image** the writer's
+structural parity is measured against.
+
+Produced with `clang version 23.1.0 (ea7d852a70e8)`, `llvm-ar` and `lld-link`
+from `/home/yoon/dev/llvm/install/bin`, run from this directory. The build host
+is **aarch64 Linux**: clang cross-compiles to `x86_64-windows-msvc` and
+`lld-link` cross-links, with no MSVC headers and no CRT — every object is
+`-ffreestanding -nostdlib`, which is the whole reason the programs only compute
+and never call an imported function.
+
+```
+CF="-c -O1 -ffreestanding -fno-asynchronous-unwind-tables -fno-unwind-tables --target=x86_64-windows-msvc"
+clang $CF start_x64.c  -o start_x64.obj
+clang $CF lib_x64.c    -o lib_x64.obj
+clang $CF mid_x64.c    -o mid_x64.obj
+clang $CF leaf_x64.c   -o leaf_x64.obj
+clang $CF unused_x64.c -o unused_x64.obj
+clang $CF chain_x64.c  -o chain_x64.obj
+clang -c --target=x86_64-windows-msvc secrel_x64.s -o secrel_x64.obj
+llvm-ar rcs libchain_x64.lib mid_x64.obj leaf_x64.obj unused_x64.obj
+lld-link /entry:entry /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:hello_x64.lld.exe start_x64.obj lib_x64.obj
+```
+
+`/timestamp:0` is what makes the golden reproducible — lld-link's default
+`TimeDateStamp` is `time()`. `/Brepro` is deliberately NOT used: it would add a
+REPRO debug directory entry and a data directory this lane does not model.
+
+## Relocations exercised (`llvm-readobj --relocs`)
+
+| object | section | relocations |
+|---|---|---|
+| start_x64.obj | .text | REL32 `add_val` (+0xa), REL32 `base` (+0x10), REL32 `msg_ptr` (+0x17) |
+| start_x64.obj | .data | ADDR64 `msg` (+0x0) |
+| lib_x64.obj | .text | REL32 `scratch`, REL32 `base` |
+| mid_x64.obj | .text | REL32 `leaf_fn` (archive chain) |
+| secrel_x64.obj | .rdata | SECREL `anchor` (+0x0), SECTION `anchor` (+0x4), ADDR32NB `anchor` (+0x8) |
+
+`secrel_x64.s` is hand-written assembly on purpose: **clang never emits SECREL,
+SECTION or ADDR32NB from C on this target**, and the `.secrel32` / `.secidx` /
+`@IMGREL` directives are the only way to produce them here.
+
+**IMAGE_REL_AMD64_REL32_1 … REL32_5 have no fixture, and cannot have one from
+this toolchain.** LLVM's COFF assembler encodes `movl $imm, sym(%rip)` and
+friends as a plain `REL32` with the instruction-length bias pre-folded into the
+displacement field rather than emitting `REL32_4` (verified by
+`llvm-readobj --relocs` on a hand-written `.s` probe). Their value formulas are
+covered by `coff_reloc_oracle_spec.spl` only; nothing in this tree exercises
+them end to end.
+
+## Golden image facts (`llvm-readobj --file-headers --sections --coff-basereloc`)
+
+`hello_x64.lld.exe`, 3072 bytes, 4 sections, `TimeDateStamp` 0:
+
+| | |
+|---|---|
+| Machine / Magic | `0x8664` / `PE32+` (`0x20b`) |
+| Characteristics | `0x22` (EXECUTABLE_IMAGE \| LARGE_ADDRESS_AWARE) |
+| OptionalHeaderSize | 240, `NumberOfRvaAndSize` 16 |
+| ImageBase / SectionAlignment / FileAlignment | `0x140000000` / `0x1000` / `0x200` |
+| SizeOfHeaders / SizeOfImage | `0x400` / `0x5000` |
+| AddressOfEntryPoint / BaseOfCode | `0x1000` / `0x1000` |
+| Subsystem | `IMAGE_SUBSYSTEM_WINDOWS_CUI` (3), OS/Subsystem version 6.0 |
+| DllCharacteristics | `0x8160` (HIGH_ENTROPY_VA \| DYNAMIC_BASE \| NX_COMPAT \| TERMINAL_SERVER_AWARE) |
+| Stack / heap reserve, commit | 0x100000 / 0x1000 both |
+| Linker version | 14.0 |
+
+| # | section | VirtualSize | RVA | RawDataSize | PointerToRawData | Characteristics |
+|---|---|---|---|---|---|---|
+| 1 | `.text` | `0x3f` | `0x1000` | 512 | `0x400` | `0x60000020` |
+| 2 | `.rdata` | `0x4` | `0x2000` | 512 | `0x600` | `0x40000040` |
+| 3 | `.data` | `0x10` | `0x3000` | 512 | `0x800` | `0xc0000040` |
+| 4 | `.reloc` | `0xc` | `0x4000` | 512 | `0xa00` | `0x42000040` |
+
+Input `.bss` is folded into `.data` (`.data` VirtualSize `0x10` = `msg_ptr` 8 +
+`base` 4 + `scratch` 4), and `BaseRelocationTable` is RVA `0x4000` size `0xc`:
+one `DIR64` entry at RVA `0x3000` (the `msg_ptr` pointer) plus one `ABSOLUTE`
+pad entry, because a `.reloc` block's entry count must be even.
+
+The specs depend on the exact offsets in the tables above (e.g. the REL32 call
+at `.text+0xa`); if these objects are rebuilt with a different compiler, the
+specs' constants must be regenerated from a fresh `llvm-readobj` dump.
+
+## Not proven here
+
+There is **no wine and no Windows host on this machine**, so none of these
+images has ever been executed. Every claim in the COFF/PE specs is structural
+(headers, section table, data directories, base relocations, patched bytes) and
+measured against `lld-link` as the oracle. Runnability on Windows is unproven.

@@ -146,3 +146,172 @@ fn smf_reloc_compute_wire(wire: i64, s: i64, a: i64, p: i64) -> SmfRelocValue:
         smf_reloc_compute(RelocationType.Abs32, s, a, p)
     else:
         SmfRelocValue(ok: false, value: 0)
+
+# ============================================================================
+# COFF / PE x86_64 value oracle (lane E1)
+# ============================================================================
+# Same contract as smf_reloc_compute above: pure value computation, reject
+# never mask, total over the type space (design D4). Sources: PE/COFF
+# specification section 5.2.2 "Type Indicators" (x64 processors) and the
+# `IMAGE_REL_AMD64_*` names in winnt.h.
+#
+# The one COFF fact that makes these NOT reusable as the ELF/SMF rows above:
+# a COFF relocation carries no explicit addend. `a` is the value already
+# stored in the relocated field, and for the RIP-relative family the
+# instruction-length bias is NOT pre-baked into it — x64 RIP addressing is
+# relative to the END of the instruction, so the formula must subtract the
+# 4-byte displacement itself plus the N trailing immediate bytes:
+#
+#   Type      | Code | Formula                | Field | Width check
+#   ----------+------+------------------------+-------+---------------
+#   ABSOLUTE  | 0x00 | (no write)             |  0    | none
+#   ADDR64    | 0x01 | S + A                  |  8    | none (full i64)
+#   ADDR32    | 0x02 | S + A (32-bit VA)      |  4    | REJECTED by name
+#   ADDR32NB  | 0x03 | S + A - ImageBase      |  4    | unsigned 32-bit
+#   REL32     | 0x04 | S + A - P - 4          |  4    | signed 32-bit
+#   REL32_1   | 0x05 | S + A - P - 5          |  4    | signed 32-bit
+#   REL32_2   | 0x06 | S + A - P - 6          |  4    | signed 32-bit
+#   REL32_3   | 0x07 | S + A - P - 7          |  4    | signed 32-bit
+#   REL32_4   | 0x08 | S + A - P - 8          |  4    | signed 32-bit
+#   REL32_5   | 0x09 | S + A - P - 9          |  4    | signed 32-bit
+#   SECTION   | 0x0a | 1-based out sec index  |  2    | unsigned 16-bit
+#   SECREL    | 0x0b | S + A - SectionVA      |  4    | unsigned 32-bit
+#   SECREL7   | 0x0c | —                      |  —    | REJECTED by name
+#   TOKEN     | 0x0d | —                      |  —    | REJECTED by name
+#   SREL32    | 0x0e | —                      |  —    | REJECTED by name
+#   PAIR      | 0x0f | —                      |  —    | REJECTED by name
+#   SSPAN32   | 0x10 | —                      |  —    | REJECTED by name
+#
+# S and P are full virtual addresses (ImageBase + RVA), matching the ELF
+# convention above, so a caller never mixes RVA and VA in one formula.
+#
+# ADDR32 is rejected rather than implemented: it stores an absolute 32-bit VA,
+# which cannot represent the default x64 image base 0x140000000. lld-link only
+# accepts it under /highentropyva:no with a sub-4 GiB base, a mode this lane
+# does not model — so it is a named Err, not a silent success (design D4).
+
+val IMAGE_REL_AMD64_ABSOLUTE: i64 = 0x0000
+val IMAGE_REL_AMD64_ADDR64: i64   = 0x0001
+val IMAGE_REL_AMD64_ADDR32: i64   = 0x0002
+val IMAGE_REL_AMD64_ADDR32NB: i64 = 0x0003
+val IMAGE_REL_AMD64_REL32: i64    = 0x0004
+val IMAGE_REL_AMD64_REL32_1: i64  = 0x0005
+val IMAGE_REL_AMD64_REL32_2: i64  = 0x0006
+val IMAGE_REL_AMD64_REL32_3: i64  = 0x0007
+val IMAGE_REL_AMD64_REL32_4: i64  = 0x0008
+val IMAGE_REL_AMD64_REL32_5: i64  = 0x0009
+val IMAGE_REL_AMD64_SECTION: i64  = 0x000a
+val IMAGE_REL_AMD64_SECREL: i64   = 0x000b
+val IMAGE_REL_AMD64_SECREL7: i64  = 0x000c
+val IMAGE_REL_AMD64_TOKEN: i64    = 0x000d
+val IMAGE_REL_AMD64_SREL32: i64   = 0x000e
+val IMAGE_REL_AMD64_PAIR: i64     = 0x000f
+val IMAGE_REL_AMD64_SSPAN32: i64  = 0x0010
+
+val COFF_RELOC_U16_MAX: i64 = 65535
+
+struct CoffRelocValue:
+    """ok = the value may be written; value = what to write; width = how many
+    bytes (0 = write nothing); err = the type name when ok is false."""
+    ok: bool
+    value: i64
+    width: i64
+    err: text
+
+fn coff_reloc_type_name(rtype: i64) -> text:
+    if rtype == IMAGE_REL_AMD64_ABSOLUTE:
+        "IMAGE_REL_AMD64_ABSOLUTE"
+    elif rtype == IMAGE_REL_AMD64_ADDR64:
+        "IMAGE_REL_AMD64_ADDR64"
+    elif rtype == IMAGE_REL_AMD64_ADDR32:
+        "IMAGE_REL_AMD64_ADDR32"
+    elif rtype == IMAGE_REL_AMD64_ADDR32NB:
+        "IMAGE_REL_AMD64_ADDR32NB"
+    elif rtype == IMAGE_REL_AMD64_REL32:
+        "IMAGE_REL_AMD64_REL32"
+    elif rtype == IMAGE_REL_AMD64_REL32_1:
+        "IMAGE_REL_AMD64_REL32_1"
+    elif rtype == IMAGE_REL_AMD64_REL32_2:
+        "IMAGE_REL_AMD64_REL32_2"
+    elif rtype == IMAGE_REL_AMD64_REL32_3:
+        "IMAGE_REL_AMD64_REL32_3"
+    elif rtype == IMAGE_REL_AMD64_REL32_4:
+        "IMAGE_REL_AMD64_REL32_4"
+    elif rtype == IMAGE_REL_AMD64_REL32_5:
+        "IMAGE_REL_AMD64_REL32_5"
+    elif rtype == IMAGE_REL_AMD64_SECTION:
+        "IMAGE_REL_AMD64_SECTION"
+    elif rtype == IMAGE_REL_AMD64_SECREL:
+        "IMAGE_REL_AMD64_SECREL"
+    elif rtype == IMAGE_REL_AMD64_SECREL7:
+        "IMAGE_REL_AMD64_SECREL7"
+    elif rtype == IMAGE_REL_AMD64_TOKEN:
+        "IMAGE_REL_AMD64_TOKEN"
+    elif rtype == IMAGE_REL_AMD64_SREL32:
+        "IMAGE_REL_AMD64_SREL32"
+    elif rtype == IMAGE_REL_AMD64_PAIR:
+        "IMAGE_REL_AMD64_PAIR"
+    elif rtype == IMAGE_REL_AMD64_SSPAN32:
+        "IMAGE_REL_AMD64_SSPAN32"
+    else:
+        "IMAGE_REL_AMD64_UNKNOWN_{rtype}"
+
+fn coff_reloc_reject(rtype: i64) -> CoffRelocValue:
+    CoffRelocValue(ok: false, value: 0, width: 0, err: coff_reloc_type_name(rtype))
+
+fn coff_reloc_rel32(rtype: i64, s: i64, a: i64, p: i64, bias: i64) -> CoffRelocValue:
+    """S + A - P - bias, checked against a signed 32-bit field."""
+    val r = smf_reloc_checked_i32(s + a - p - bias)
+    if r.ok:
+        CoffRelocValue(ok: true, value: r.value, width: 4, err: "")
+    else:
+        CoffRelocValue(ok: false, value: 0, width: 4, err: coff_reloc_type_name(rtype))
+
+fn coff_reloc_compute(rtype: i64, s: i64, a: i64, p: i64, image_base: i64, sec_va: i64, sec_index: i64) -> CoffRelocValue:
+    """Compute one IMAGE_REL_AMD64_* relocation value.
+
+    s = resolved symbol virtual address, a = the value already in the field
+    (COFF carries no explicit addend), p = virtual address of the field,
+    image_base = the output image base, sec_va = virtual address of the
+    output section the TARGET symbol lands in, sec_index = that section's
+    1-based index in the output section table. Out-of-width or unmodelled
+    results reject with ok: false and a named err — never truncated, never
+    silently defaulted to another formula."""
+    if rtype == IMAGE_REL_AMD64_ABSOLUTE:
+        return CoffRelocValue(ok: true, value: 0, width: 0, err: "")
+    if rtype == IMAGE_REL_AMD64_ADDR64:
+        return CoffRelocValue(ok: true, value: s + a, width: 8, err: "")
+    if rtype == IMAGE_REL_AMD64_ADDR32NB:
+        val nb = smf_reloc_checked_u32(s + a - image_base)
+        if nb.ok:
+            return CoffRelocValue(ok: true, value: nb.value, width: 4, err: "")
+        return CoffRelocValue(ok: false, value: 0, width: 4, err: coff_reloc_type_name(rtype))
+    if rtype == IMAGE_REL_AMD64_REL32:
+        return coff_reloc_rel32(rtype, s, a, p, 4)
+    if rtype == IMAGE_REL_AMD64_REL32_1:
+        return coff_reloc_rel32(rtype, s, a, p, 5)
+    if rtype == IMAGE_REL_AMD64_REL32_2:
+        return coff_reloc_rel32(rtype, s, a, p, 6)
+    if rtype == IMAGE_REL_AMD64_REL32_3:
+        return coff_reloc_rel32(rtype, s, a, p, 7)
+    if rtype == IMAGE_REL_AMD64_REL32_4:
+        return coff_reloc_rel32(rtype, s, a, p, 8)
+    if rtype == IMAGE_REL_AMD64_REL32_5:
+        return coff_reloc_rel32(rtype, s, a, p, 9)
+    if rtype == IMAGE_REL_AMD64_SECREL:
+        val sr = smf_reloc_checked_u32(s + a - sec_va)
+        if sr.ok:
+            return CoffRelocValue(ok: true, value: sr.value, width: 4, err: "")
+        return CoffRelocValue(ok: false, value: 0, width: 4, err: coff_reloc_type_name(rtype))
+    if rtype == IMAGE_REL_AMD64_SECTION:
+        if sec_index >= 1 and sec_index <= COFF_RELOC_U16_MAX:
+            return CoffRelocValue(ok: true, value: sec_index, width: 2, err: "")
+        return CoffRelocValue(ok: false, value: 0, width: 2, err: coff_reloc_type_name(rtype))
+    coff_reloc_reject(rtype)
+
+fn coff_reloc_needs_base_reloc(rtype: i64) -> bool:
+    """True when the patched field holds an absolute VA and therefore needs a
+    .reloc entry so the loader can rebase it. Only ADDR64 qualifies in the
+    modelled set: ADDR32NB and SECREL are image-relative, the REL32 family is
+    PC-relative, and SECTION is an index."""
+    rtype == IMAGE_REL_AMD64_ADDR64
