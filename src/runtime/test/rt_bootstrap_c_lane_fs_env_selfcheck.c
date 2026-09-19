@@ -45,6 +45,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+/* UCRT has no POSIX setenv(); _putenv_s(name, value) is the direct equivalent
+ * (overwrite is implicit, matching the always-overwrite call sites below).
+ * Without this the TU does not even parse on Windows, which left the
+ * push-blocking C-runtime gate RED on every Windows host. */
+#define setenv(name, value, overwrite) _putenv_s(name, value)
+#endif
+
 /* SplArray is opaque outside runtime_native.c; test code, like any other
  * translation unit, only ever sees it as a pointer handed back through
  * rt_array_* accessors. */
