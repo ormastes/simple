@@ -162,3 +162,30 @@ single largest remaining cause. Filed as
 and `lint_other_whole_file_aborts_2026-09-19.md`; the same files are analysed
 fine by `simple fix`, which is recorded as its own contract question in
 `lint_and_fix_disagree_on_analysable_files_2026-09-19.md`.
+
+### Final numbers, after also walking method bodies
+
+| | sites diagnosed (of 68) | of the 54 genuinely-quadratic |
+|---|---|---|
+| before any widening | 18 | 18 |
+| + structural guarded value, negated filter | 37 | 37 |
+| + method bodies walked | **40** | **40** |
+
+Within the 47 in-loop sites in files `bin/simple lint` can actually process:
+**40 of 47, 85%.**
+
+Denominator, stated once more because it is the easy thing to get wrong: the
+68 came from a textual grep for the dedup idiom, and **14 of them are not
+inside a loop at all** (recursive accumulators, one-shot adds). Those are not
+quadratic and are correctly silent. Of the remaining 54, **7 are unreachable
+because `bin/simple lint` aborts on the whole file** — a front-end defect,
+filed separately — and **7 are the multi-statement guard-body limit**, where
+the guard body pushes something else alongside the dedup push
+(`typedefs.push(cb)`). That last group is the only remaining detector gap and
+it is a deliberate one: widening it means proving the extra statements are
+not part of the idiom.
+
+**Fix coverage is unchanged at 10 of 68 throughout**, by design. The Certain
+envelope was not widened with the detector: `coll020_proof` refuses any
+guarded value that is not a plain identifier, so every newly-seen site warns
+with no fix.

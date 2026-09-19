@@ -1,6 +1,6 @@
 # COLL rules walk top-level functions only, never methods
 
-**Status:** OPEN 2026-09-19
+**Status:** RESOLVED 2026-09-19 — methods are walked via `coll_all_decls`
 **Area:** `src/compiler/35.semantics/lint/collection_patterns.spl`
   (the `module_get_decls()` / `DECL_FN` walk)
 
@@ -55,3 +55,17 @@ fix side needs no change: `collection_fix_proofs` reasons per function body
 and would receive method bodies on the same footing. Worth re-running the
 coverage measurement afterwards, since this is a pure gain — it can only add
 diagnostics, never suppress one.
+
+## RESOLVED 2026-09-19
+
+`coll_all_decls` flattens nested declarations through `flat_decl_child_decls`
+and all 12 rule loops iterate it. The reproduction above now reports both
+sites (`method.spl:7:13` for the method, `:14:9` for the free function).
+Diagnostic coverage over the 52-file sample moved 37 -> 40 of 68. As predicted
+in this record it was worth more than the 2 sites it first showed up as,
+though the sample is still mostly free functions, so the gain on
+method-heavy code will be larger than 3.
+
+Pinned by `collection_frame_rules_spec`, including an example asserting a
+method and a free function with the same idiom report exactly twice — a
+declaration reachable by two paths must not double-count.
