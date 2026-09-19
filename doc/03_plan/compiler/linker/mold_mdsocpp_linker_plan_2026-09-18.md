@@ -377,3 +377,7 @@ file), not in `native_linking.spl`, and both measured against ld.lld:
    a per-library flag on `ElfLinkRequest.shared` so DT_NEEDED is written only
    when the resolver actually took a symbol from that library. The error now
    names this instead of misreporting the script as malformed.
+
+All 27 linker specs re-run individually at `f38a070708b` (the round-2 fix):
+27/27 `outcome=OK`, 0 failed — not just the two importers, because the round-2
+change altered shared-input ordering, which any spec that links could see.
