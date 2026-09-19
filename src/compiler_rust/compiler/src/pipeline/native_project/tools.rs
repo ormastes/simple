@@ -465,6 +465,15 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // tolerated-undefined-then-SIGSEGV class as rt_unwrap_or_trap
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         "runtime_terminal.c",
+        // Env-gated SIGPROF PC sampler (diagnostic tooling). Compiles to an
+        // empty TU off Linux x86_64/aarch64. When SIMPLE_PROF_SAMPLE_FILE is
+        // set, a constructor(101) installs a SIGPROF handler + 100 Hz
+        // ITIMER_PROF and appends raw 8-byte PCs to the named file. Zero
+        // symbols are referenced by other members, so the archive link would
+        // drop this TU; prof_sample_force_link is forced as a retention
+        // root by runtime_retention_symbols (native_project/linker.rs).
+        // Self-contained: no runtime.h include, zero symbol overlap.
+        "runtime_prof_sample.c",
         // Group E of stage2_windows_unresolved_inventory_2026-08-31: the only
         // definitions of rt_mkdir / rt_random_i64 / rt_readdir{,_count,_entry,
         // _free} / rt_shell_output live in runtime.c, which is NOT in this list
