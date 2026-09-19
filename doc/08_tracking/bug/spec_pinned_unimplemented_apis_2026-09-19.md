@@ -37,3 +37,9 @@ at the spec level would require inventing behavior.
   seed binary.
 - process_run/process_run_bounded execute the child twice (see
   posix_spawn_and_seed_process_debt_2026-09-19.md).
+
+## Addendum 2026-09-19 (shard3 sweep): dbfs artifact-publication surface
+
+| Spec | Missing API |
+|---|---|
+| test/02_integration/storage/dbfs/dbfs_artifact_publication_spec.spl, dbfs_artifact_bundle_publication_spec.spl | `artifact_publication_begin_v1` and the atomic-publication method family on `DbFsDriver` (exact identity/generation/digest/length/path/target publication, retained-handle old-bytes visibility, digest-mismatch NotPublished privacy). Zero definitions in src/ (verified by grep); specs compile-fail with "semantic: method not found on type DbFsDriver". Same spec-first-without-implementation class as the table above; needs a DbFs feature lane or spec-retirement decision. |
