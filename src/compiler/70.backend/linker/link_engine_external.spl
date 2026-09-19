@@ -4,16 +4,21 @@
 # Lane A3 (mold_mdsocpp_linker_plan_2026-09-18.md row A3). RC1 = zero
 # behaviour change (plan §2): this file only PROJECTS the new KPF-style job
 # records onto the argv builders that already exist in
-# `_LinkerWrapper/native_linking.spl` -- that file is not edited, and is
-# reached only through the `linker_wrapper` facade, exactly like every other
-# external caller of `link_to_native`.
+# `_LinkerWrapper/native_linking.spl`, reached only through the
+# `linker_wrapper` facade, exactly like every other external caller of
+# `link_to_native`.
 #
 # `SIMPLE_LINKER=internal` selects the internal ELF engine (`internal:elf`,
-# lane A7 `elf/elf_static_link.elf_link`) in `link_request_to_native`, the
-# only place that holds both the inputs and the config. Supported subset:
-# Linux ELF, target arch == host arch, aarch64 (dynamic PIE / exec against
-# the host glibc found by crt_discovery). Anything else is a receipt with
-# `LinkOutcomeV1.UnsupportedFeature` naming the reason -- never a silent
+# lane A7 `elf/elf_static_link.elf_link`). Lane B3
+# (mold_mdsocpp_linker_plan_2026-09-18.md §1/§11) gave `link_to_native` itself
+# the same routing for callers that never go through a `LinkRequestV1`, and
+# factored the actual CRT-discovery/elf_link/write/chmod sequence out into
+# `native_linking.internal_link_native` -- this file (`link_request_internal`
+# below) now delegates to that one shared implementation through the
+# `linker_wrapper` facade rather than keeping its own copy. Supported subset:
+# Linux ELF, target arch == host arch, x86_64/aarch64 (dynamic PIE / exec
+# against the host glibc found by crt_discovery). Anything else is a receipt
+# with `LinkOutcomeV1.UnsupportedFeature` naming the reason -- never a silent
 # fallback to an external linker. `mold.find_linker_path` still rejects the
 # alias by name (it is not a PATH), and `classify_link_error` turns that
 # rejection into `UnsupportedFeature` for callers that bypass this adapter.
@@ -28,10 +33,11 @@ use std.common.linker.link_receipt_v1.{LinkAccountingClassV1, LinkOutcomeV1, Lin
 use std.nogc_sync_mut.io_runtime.{host_os, host_arch}
 use std.log.{debug}
 
-# `link_to_native`/`NativeLinkConfig` come through the facade per the plan
-# row ("calls link_to_native through the linker_wrapper facade --
-# native_linking.spl is not edited").
-use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, native_linker_abi_for_target}
+# `link_to_native`/`NativeLinkConfig`/`internal_link_native` all come through
+# the facade (`link_to_native` per the original A3 plan row; `internal_link_native`
+# is lane B3's shared SIMPLE_LINKER=internal implementation, reused here
+# instead of duplicated).
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, native_linker_abi_for_target, internal_link_native}
 
 # `find_linker_path`/`linker_type_for_path`/`LinkerType` are read directly
 # from `mold.spl` (not re-imported through the facade) purely to report
@@ -40,12 +46,10 @@ use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, na
 # another lane.
 use compiler.backend.linker.mold.{find_linker_path, linker_type_for_path, LinkerType, requested_linker_override}
 
-# Internal engine (lane A7): ELF link driver + host CRT/libc discovery.
-use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
-use compiler.backend.linker.reloc_engine.{RelocArch}
-use compiler.backend.linker.crt_discovery.{find_crt_files, path_dirname}
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_write_bytes}
-use std.nogc_sync_mut.io.process_ops.{process_run}
+# Internal engine (lane A7/B3): `internal_link_native` (defined in
+# `_LinkerWrapper/native_linking.spl`, lane B3) owns the actual
+# CRT-discovery/elf_link/write/chmod sequence -- imported above via the
+# `linker_wrapper` facade alongside `link_to_native`, not reimplemented here.
 
 # ============================================================================
 # A3-local target vocabulary
@@ -293,98 +297,55 @@ fn resolve_engine_id_for_success() -> text:
 
 val INTERNAL_ELF_ENGINE_ID: text = "internal:elf"
 
-fn internal_unsupported_reason(target: LinkTargetV1) -> text:
-    """Empty when the internal ELF engine supports `target` on this host, else why not."""
-    if target.object_format != LINK_OBJECT_FORMAT_ELF:
-        return "internal:elf links ELF only (object_format {target.object_format})"
-    if target.os != LINK_OS_LINUX:
-        return "internal:elf links Linux targets only (os {target.os})"
-    var arch = ""
-    if target.arch == LINK_ARCH_X86_64:
-        arch = "x86_64"
-    elif target.arch == LINK_ARCH_AARCH64:
-        arch = "aarch64"
-    if arch == "":
-        return "internal:elf supports x86_64 and aarch64 only (arch {target.arch})"
-    if arch != host_arch():
-        return "internal:elf links against the host glibc; target {arch} != host {host_arch()}"
+fn link_os_text(os_code: u32) -> text:
+    """Map a LinkTargetV1 os code to the os string `internal_link_native` expects."""
+    if os_code == LINK_OS_LINUX: return "linux"
+    if os_code == LINK_OS_MACOS: return "macos"
+    if os_code == LINK_OS_FREEBSD: return "freebsd"
+    if os_code == LINK_OS_WINDOWS: return "windows"
     ""
 
-fn internal_read_i64(path: text) -> [i64]:
-    val raw = file_read_bytes(path)
-    var out: [i64] = []
-    var i: i64 = 0
-    while i < raw.len():
-        out = out.push(raw[i] as i64)
-        i = i + 1
-    out
+fn link_arch_text(arch_code: u32) -> text:
+    """Map a LinkTargetV1 arch code to the arch string `internal_link_native` expects."""
+    if arch_code == LINK_ARCH_X86_64: return "x86_64"
+    if arch_code == LINK_ARCH_AARCH64: return "aarch64"
+    ""
 
 fn classify_internal_error(message: text) -> LinkOutcomeV1:
-    """Map an `elf_link` Err payload to a LinkOutcomeV1."""
+    """Map an `internal_link_native`/`elf_link` Err payload to a LinkOutcomeV1."""
     if message.contains("UnsupportedFeature") or message.contains("unsupported") or message.contains("slice 1"):
         return LinkOutcomeV1.UnsupportedFeature
     if message.contains("undefined symbol") or message.contains("duplicate symbol") or message.contains("entry symbol") or message.contains("not a relocatable") or message.contains("e_machine") or message.contains("cannot be read"):
         return LinkOutcomeV1.InputError
     LinkOutcomeV1.ResourceFailure
 
-fn internal_link_bytes(target: LinkTargetV1, pie: bool, object_files: [text]) -> Result<[i64], text>:
-    """Host-glibc dynamic link of object_files with the internal ELF engine."""
-    for path in object_files:
-        if not file_exists(path):
-            return Err("input {path} cannot be read")
-    val crt = find_crt_files(pie, false)
-    if crt.crt1 == "" or crt.crti == "" or crt.crtn == "":
-        return Err("UnsupportedFeature: internal:elf found no host crt1/crti/crtn objects")
-    if crt.dynamic_linker == "":
-        return Err("UnsupportedFeature: internal:elf found no host dynamic linker")
-    val libdir = path_dirname(crt.crt1)
-    val libc = "{libdir}/libc.so.6"
-    if not file_exists(libc):
-        return Err("UnsupportedFeature: internal:elf found no {libc}")
-    var objects: [[i64]] = [internal_read_i64(crt.crt1), internal_read_i64(crt.crti)]
-    for path in object_files:
-        objects = objects.push(internal_read_i64(path))
-    objects = objects.push(internal_read_i64(crt.crtn))
-    var archives: [[i64]] = []
-    val nonshared = "{libdir}/libc_nonshared.a"
-    if file_exists(nonshared):
-        archives = archives.push(internal_read_i64(nonshared))
-    var arch = RelocArch.X86_64
-    if target.arch == LINK_ARCH_AARCH64:
-        arch = RelocArch.AArch64
-    var mode = ELF_LINK_DYNAMIC_EXEC
-    if pie:
-        mode = ELF_LINK_DYNAMIC_PIE
-    elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [file_read_bytes(libc)],
-        entry: "_start", target: arch, mode: mode, interp: crt.dynamic_linker))
-
 fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
         object_files: [text], output: text) -> LinkReceiptV1:
     """SIMPLE_LINKER=internal: link with internal:elf or return a named
-    UnsupportedFeature receipt. Never falls back to an external linker."""
-    val reason = internal_unsupported_reason(req.target)
-    if reason != "":
+    UnsupportedFeature receipt. Never falls back to an external linker.
+
+    Delegates the actual CRT-discovery/elf_link/write/chmod sequence to
+    `native_linking.internal_link_native` (lane B3), reached through the
+    `linker_wrapper` facade -- the single internal-ELF-link implementation,
+    shared with `link_to_native`'s own SIMPLE_LINKER=internal routing, so
+    there is exactly one place that does this rather than two that could
+    drift. Only the `object_format` check stays local: `internal_link_native`
+    takes a plain (os, arch) pair with no `object_format` concept, and
+    `LinkTargetV1` is the only caller shape whose `object_format` can vary
+    independently of os/arch (e.g. a Mach-O target that otherwise looks like
+    a Linux/aarch64 pair)."""
+    if req.target.object_format != LINK_OBJECT_FORMAT_ELF:
+        val reason = "internal:elf links ELF only (object_format {req.target.object_format})"
         debug("link-engine-external", "UnsupportedFeature: {reason}")
         return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
     val config = link_request_to_native_config(req, policy)
-    val linked = internal_link_bytes(req.target, config.pie, object_files)
+    val linked = internal_link_native(
+        link_os_text(req.target.os), link_arch_text(req.target.arch), config.pie, object_files, output)
     if linked.is_err():
         val message = linked.unwrap_err()
         val outcome = classify_internal_error(message)
         debug("link-engine-external", "internal:elf failed ({outcome.name()}): {message}")
         return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, outcome, LinkAccountingClassV1.NotCertified)
-    var bytes: [u8] = []
-    for b in linked.unwrap():
-        bytes = bytes.push(b as u8)
-    if not file_write_bytes(output, bytes):
-        debug("link-engine-external", "internal:elf could not write {output}")
-        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.ResourceFailure, LinkAccountingClassV1.NotCertified)
-    # argv array, no shell: a quote in the output path cannot break the command.
-    # (nogc_sync_mut file_set_mode is a stub that never chmods — see bug record.)
-    val (_co, _ce, chmod_code) = process_run("chmod", ["755", output])
-    if chmod_code != 0:
-        debug("link-engine-external", "internal:elf could not mark {output} executable")
-        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.ResourceFailure, LinkAccountingClassV1.NotCertified)
     base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
 
 # ============================================================================
