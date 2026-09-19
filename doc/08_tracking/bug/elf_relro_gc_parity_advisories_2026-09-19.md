@@ -51,3 +51,18 @@ and any tooling that keys on "has RELRO" sees a difference. Fixing it means
 emitting `.got` unconditionally for the modes where ld.lld does, which changes
 segment counts for several existing specs — deliberately not done inside the
 RELRO commit.
+
+## 4. More permissive than ld.lld on a demoted section's own errors
+
+ld.lld runs `shouldMerge` — and therefore its "size is not a multiple of
+sh_entsize" and "writable SHF_MERGE section" errors — BEFORE it decides
+whether to keep a section whole, so it errors even on a section it would then
+demote. `elf_merge_build` checks those two only on the sections it actually
+splits, so a malformed SHF_MERGE section that is also a relocation target is
+demoted and links here while ld.lld refuses it.
+
+Deliberate and recorded rather than changed: the difference only ever accepts
+an input ld.lld rejects (never the reverse), the section is emitted verbatim,
+and the errors that matter for a section we split are unchanged. Closing it is
+a one-line reorder (run `elf_merge_reject` before `elf_merge_demote`) if strict
+ld.lld-compatible diagnostics are ever wanted.

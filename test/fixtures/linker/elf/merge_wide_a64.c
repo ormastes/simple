@@ -1,7 +1,8 @@
-/* Wide-literal fixture (lane C1): L"wide" lands in .rodata.str4.4, a
-   SHF_MERGE|SHF_STRINGS section with sh_entsize 4. ld.lld links it (it just
-   declines to split it), so the internal linker must keep it unmerged
-   instead of failing. Exits 40 + 1 + 1 = 42. */
+/* Wide-literal fixture A (lane C1): L"wide" lands in .rodata.str4.4, a
+   SHF_MERGE|SHF_STRINGS section with sh_entsize 4. It is shared with
+   merge_wideb_a64.c, so a -O1 link must dedupe it across the two objects the
+   way it dedupes byte strings. _start exits 40 + 2 = 42 only when the two
+   copies resolved to ONE address. */
 static long sys3(long n, long a, long b, long c) {
     register long x8 __asm__("x8") = n;
     register long x0 __asm__("x0") = a;
@@ -12,5 +13,12 @@ static long sys3(long n, long a, long b, long c) {
 }
 
 typedef __WCHAR_TYPE__ wchar_t;
-const wchar_t *w(void) { return L"wide"; }
-void _start(void) { const wchar_t *p = w(); sys3(93, 40 + (p[0] == L'w') + (p[3] == L'e'), 0, 0); for(;;){} }
+extern const wchar_t *wide_b(void);
+
+const wchar_t *wide_a(void) { return L"wide"; }
+
+void _start(void) {
+    long same = (wide_a() == wide_b()) ? 2 : 0;
+    sys3(93, 40 + same, 0, 0);
+    for (;;) {}
+}

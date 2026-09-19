@@ -12,13 +12,20 @@
 #
 # Kept whole (unmerged) rather than split, which is always safe and is what
 # ld.lld does for anything it declines to merge: sh_size 0 and sh_entsize 0
-# (InputFiles.cpp `shouldMerge`), SHF_STRINGS with sh_entsize != 1 (wide
-# literals), and any section a relocation points INTO (elf_merge_demote).
+# (InputFiles.cpp `shouldMerge`), and any section a relocation points INTO
+# (elf_merge_demote). Wide literals are NOT in that list: SHF_STRINGS with
+# sh_entsize 2 or 4 splits on entsize-sized NUL units and merges like ld.lld.
 #
 # Errors, exactly and only where ld.lld errors too:
 #   - sh_size not a multiple of sh_entsize
 #   - a writable SHF_MERGE section
-#   - a SHF_STRINGS section whose last byte is not NUL (unterminated piece)
+#   - a SHF_STRINGS section whose last entsize bytes are not NUL
+#
+# More permissive than ld.lld in one recorded place: ld.lld runs `shouldMerge`,
+# and therefore those two errors, BEFORE it decides to demote, so it errors even
+# on a section it would then keep whole; we check them only on sections we
+# actually split. See
+# doc/08_tracking/bug/elf_relro_gc_parity_advisories_2026-09-19.md
 #
 # Known divergence from ld.lld, recorded rather than papered over: ld.lld
 # orders the unique pieces by the top bits of an XXH3-64 hash of each piece
@@ -86,20 +93,16 @@ fn elf_merge_reject(obj: ElfObject, si: i64, oi: i64) -> text:
         return "object {oi}: writable SHF_MERGE section {name} is unsupported"
     ""
 
-fn elf_merge_demote(obj: ElfObject, si: i64, reloc_target: bool) -> bool:
+fn elf_merge_demote(reloc_target: bool) -> bool:
     """True when a mergeable section is kept whole (unmerged) rather than split.
 
-    Two cases, both of which ld.lld links without complaint:
-      - SHF_STRINGS with sh_entsize != 1 (wide character literals, e.g.
-        `.rodata.str4.4` from L"..."): splitting needs multi-byte NUL scanning
+    One case, which ld.lld links without complaint (wide literals are NOT one:
+    elf_merge_split scans entsize-sized NUL units, so they merge like ld.lld):
       - a section a relocation points INTO (e.g. `.rodata.cst8` holding
         `.quad target`): ld.lld demotes such a section to a regular input
         section, since a piece's bytes are not relocatable once shared
     Keeping the section whole is always safe: it just forgoes the dedup."""
-    val sec = obj.sections[si]
-    if reloc_target:
-        return true
-    sec.sh_flags & SHF_STRINGS_M != 0 and elf_section_entsize(obj, si) != 1
+    reloc_target
 
 fn elf_merge_bytes(obj: ElfObject, si: i64) -> [i64]:
     """Raw contents of input section si (sh_addr is the file offset here)."""
@@ -111,8 +114,19 @@ fn elf_merge_bytes(obj: ElfObject, si: i64) -> [i64]:
         i = i + 1
     out
 
+fn elf_merge_zero_unit(data: [i64], at: i64, entsize: i64) -> bool:
+    """True when the entsize bytes at `at` are all zero (ld.lld `findNull`)."""
+    var j: i64 = 0
+    while j < entsize:
+        if data[at + j] != 0:
+            return false
+        j = j + 1
+    true
+
 fn elf_merge_split(data: [i64], entsize: i64, strings: bool) -> Result<[i64], text>:
-    """Piece start offsets: NUL-terminated runs for strings, entsize chunks otherwise."""
+    """Piece start offsets: strings end at the first all-zero entsize-sized unit
+    (ld.lld `splitStrings` + `findNull`, so L"..." with sh_entsize 2 or 4 splits
+    exactly like a byte string); otherwise fixed entsize chunks."""
     var starts: [i64] = []
     if not strings:
         var i: i64 = 0
@@ -122,14 +136,23 @@ fn elf_merge_split(data: [i64], entsize: i64, strings: bool) -> Result<[i64], te
         return Ok(starts)
     var begin: i64 = 0
     var i: i64 = 0
-    while i < data.len():
-        if data[i] == 0:
+    while i + entsize <= data.len():
+        if elf_merge_zero_unit(data, i, entsize):
             starts = starts.push(begin)
-            begin = i + 1
-        i = i + 1
+            begin = i + entsize
+        i = i + entsize
     if begin != data.len():
-        return Err("SHF_STRINGS section does not end with a NUL byte")
+        return Err("SHF_STRINGS section does not end with a NUL unit")
     Ok(starts)
+
+fn elf_merge_piece_end(data: [i64], start: i64, entsize: i64, strings: bool) -> i64:
+    """End offset (exclusive, terminator included) of the piece starting at start."""
+    if not strings:
+        return start + entsize
+    var e = start
+    while not elf_merge_zero_unit(data, e, entsize):
+        e = e + entsize
+    e + entsize
 
 fn elf_merge_key(data: [i64], start: i64, end: i64) -> text:
     """Content key for a piece (hex, so any byte value is representable)."""
@@ -186,7 +209,7 @@ fn elf_merge_build(objects: [ElfObject], live: [[bool]], out_names: [[text]]) ->
         val obj = objects[oi]
         var si: i64 = 0
         while si < obj.sections.len():
-            if live[oi][si] and elf_merge_candidate(obj, si) and not elf_merge_demote(obj, si, targets[oi][si]):
+            if live[oi][si] and elf_merge_candidate(obj, si) and not elf_merge_demote(targets[oi][si]):
                 val reject = elf_merge_reject(obj, si, oi)
                 if reject != "":
                     return Err(reject)
@@ -219,14 +242,7 @@ fn elf_merge_build(objects: [ElfObject], live: [[bool]], out_names: [[text]]) ->
                 var seen = keys[g]
                 var p: i64 = 0
                 while p < starts.len():
-                    var end = data.len()
-                    if strings:
-                        end = starts[p]
-                        while data[end] != 0:
-                            end = end + 1
-                        end = end + 1
-                    else:
-                        end = starts[p] + entsize
+                    val end = elf_merge_piece_end(data, starts[p], entsize, strings)
                     val key = elf_merge_key(data, starts[p], end)
                     if seen.has(key):
                         outs = outs.push(seen[key])
@@ -256,12 +272,16 @@ fn elf_merge_build(objects: [ElfObject], live: [[bool]], out_names: [[text]]) ->
 
 fn elf_merge_piece_off(set: ElfMergeSet, oi: i64, si: i64, off: i64) -> Result<i64, text>:
     """Offset inside the merged blob for input-section offset off (ld.lld
-    `getOffset`: the piece containing off, plus the distance into it)."""
+    `getOffset`: the piece containing off, plus the distance into it).
+
+    The bound is `off > size`, like ld.lld (Symbols.cpp getSymVA): a symbol
+    defined at the very END of a merged section (offset == size) is legal and
+    resolves one past the last piece."""
     val row = set.sec_row[oi][si]
     if row < 0:
         return Err("internal: section {si} of object {oi} was not merged")
     val starts = set.starts[row]
-    if starts.len() == 0 or off < 0 or off >= set.row_size[row]:
+    if starts.len() == 0 or off < 0 or off > set.row_size[row]:
         return Err("object {oi}: offset {off} is outside merged section {si} (size {set.row_size[row]})")
     var i = starts.len() - 1
     while i > 0 and starts[i] > off:

@@ -160,19 +160,26 @@ ld.lld-23 -static -e _start -O1 merge_a_a64.o merge_b_a64.o -o mrg1   # .rodata 
 ld.lld-23 -static -e _start -O0 merge_a_a64.o merge_b_a64.o -o mrg0   # .rodata 0x22, exit 40
 ```
 
-### Unmergeable-input fallback fixtures (lane C1 review)
+### Wide-literal, end-of-section and demotion fixtures (lane C1 review)
 
-Two inputs `ld.lld-23 -O1` links and runs but declines to merge, so the
-internal linker must demote them to ordinary sections instead of erroring:
-`merge_wide_a64.o` (`L"wide"` -> `.rodata.str4.4`, `SHF_STRINGS` with
-`sh_entsize 4`) and `merge_relin_a64.o` (`.rodata.cst8` holding
-`.quad target`, i.e. a relocation INTO a merge section). Both exit 42.
+`merge_wide_a64.o` + `merge_wideb_a64.o` share one `L"wide"` literal in
+`.rodata.str4.4` (`SHF_MERGE|SHF_STRINGS`, `sh_entsize 4`); ld.lld MERGES
+multi-byte strings (`splitStrings` -> `findNull` scans entsize-sized NUL
+units), so `-O1` gives one copy and exit 42, `-O0` two copies and exit 40.
+`merge_strend_a64.o` defines a global at the very END of a merged section
+(`st_value == sh_size`), which ld.lld accepts (its bound is `offset > size`).
+`merge_relin_a64.o` has `.rodata.cst8` holding `.quad target`, i.e. a
+relocation INTO a merge section, which ld.lld demotes to a regular input
+section. All three exit 42.
 
 ```
 CF="-c -O2 -ffreestanding -fno-pic -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
-clang --target=aarch64-linux-gnu $CF merge_wide_a64.c  -o merge_wide_a64.o
-clang --target=aarch64-linux-gnu $CF merge_relin_a64.c -o merge_relin_a64.o
-ld.lld-23 -static -e _start -O1 merge_wide_a64.o                   # .rodata 0x14 AMS es 4
-ld.lld-23 -static -e _start -O1 merge_relin_a64.o                  # .rodata 0x08 AM  es 8
-ld.lld-23 -static -e _start -O1 merge_wide_a64.o merge_b_a64.o     # .rodata 0x25 AMS es 0
+for f in merge_wide_a64 merge_wideb_a64 merge_strend_a64 merge_relin_a64; do
+  clang --target=aarch64-linux-gnu $CF $f.c -o $f.o
+done
+ld.lld-23 -static -e _start -O1 merge_wide_a64.o merge_wideb_a64.o   # .rodata 0x14 es 4, exit 42
+ld.lld-23 -static -e _start -O0 merge_wide_a64.o merge_wideb_a64.o   # .rodata 0x28 es 4, exit 40
+ld.lld-23 -static -e _start -O1 merge_strend_a64.o                   # links, exit 42
+ld.lld-23 -static -e _start -O1 merge_relin_a64.o                    # .rodata 0x08 AM es 8
+ld.lld-23 -static -e _start -O1 merge_relin_a64.o merge_b_a64.o      # .rodata 0x19 es 0
 ```
