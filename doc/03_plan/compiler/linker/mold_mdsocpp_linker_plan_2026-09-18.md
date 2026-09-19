@@ -156,6 +156,35 @@ Next: RELRO, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real 
 
 **Which linker links the `simple` binary today.** The question had two
 candidate routes and the answer is the Simple one, which is the opposite of
+**CORRECTED 2026-09-19 (round 2, Fable block).** The first version of this
+section said both stage binaries link through the Simple-side wrapper. That is
+wrong for stage 2, and the two stages do not even share a chain.
+
+* **Stage 2 links through the RUST path.**
+  `scripts/bootstrap/bootstrap-from-scratch.sh:2945` sets
+  `SIMPLE_NATIVE_BUILD_RUST=1` (and `:2958` `SIMPLE_BINARY=<seed>`) for the
+  `:2959` `native-build`, which `driver/src/main.rs:168-178` routes to the Rust
+  handler -> `native_build.rs:662` -> `native_project/mod.rs:1216 link_objects`
+  -> `linker.rs:1165` -> `:54`, where `linker_alias` answers
+  `Unsupported SIMPLE_LINKER value: internal`. So the Rust linker links the
+  stage-2 OBJECTS, not merely the cargo artifacts, and **a real
+  `SIMPLE_LINKER=internal` bootstrap dies at stage 2 before stage 3 is ever
+  reached.** Closing this needs either the Rust path taught to delegate to the
+  internal engine, or the bootstrap taught to use the Simple path for stage 2.
+* **Stage 3 is Simple-side**, and `:3036` does NOT set
+  `SIMPLE_NATIVE_BUILD_RUST`. It is driven by the stage-2 binary, i.e. the
+  bootstrap CLI: `src/app/cli/bootstrap_main.spl:385` ->
+  `run_exact_stage3_focused_capsule` / `bootstrap_focused_native_build` ->
+  `compiler.driver.bootstrap_api_fixed.aot_native_project_with_backend_fixed`
+  -> `driver_aot_native_output` -> `llvm_native_link_orchestrator.spl:648`
+  `link_to_native(all_objects, output, link_config)`. **Not**
+  `native_build_main.spl` / `native_build_worker.spl`, which is what the first
+  version of this section claimed. Even here the internal route is refused, by
+  `retained_symbols` in the config built at `orchestrator:633-640`.
+* The Rust seed's `linker.rs` is therefore the route for the cargo artifacts
+  **and for stage 2**. Its reject is correct — there is no internal engine on
+  the Rust side — but it is a hard stop for this lane's goal, not a detail.
+
 what the seed's presence suggests:
 
 * The sanctioned bootstrap links stage2 and stage3 `simple` with
@@ -252,11 +281,19 @@ through `link_to_native`) against `ld.lld 23` with the equivalent argv.
 | segments | `PHDR INTERP NOTE LOAD×3 DYNAMIC GNU_STACK` | same plus `GNU_RELRO`, `LOAD×4` |
 | sections only in ld.lld's output | — | `.gnu.version`, `.gnu.version_r`, `.relro_padding`, `.comment` |
 
-The deltas are exactly the already-named gaps: no RELRO (hence 3 `PT_LOAD`
-instead of 4 and no `.relro_padding`) and no symbol versions. Nothing here is
-a silent difference — `.gnu.hash`, `.symtab`/`.strtab`, `.rela.dyn`,
-`.rela.plt`, `.plt`, `.got`/`.got.plt` are all present and the DT_NEEDED set
-matches byte for byte.
+**CORRECTED (round 2).** The row above compared the DT_NEEDED SET and the
+sentence that stood here -- "the DT_NEEDED set matches byte for byte ... nothing
+here is a silent difference" -- was false, because it never compared ORDER.
+Order is load-bearing: the loader resolves a symbol from the FIRST DT_NEEDED
+entry that defines it. This engine seeded its shared-input list with libc
+FIRST, where ld.lld emits the `-l` libraries first and libc last, so on this
+very fixture ours read `libc libm libmvec` against lld's `libm libmvec libc`.
+Measured consequence, not a theoretical one: an object calling `atoi` linked
+with a library whose `atoi` returns 42 exits **1** under the old order (libc
+wins) and **42** under ld.lld. Fixed, and pinned by a spec that asserts the
+ORDER and the exit status. The remaining structural deltas are the
+already-named gaps: no RELRO (hence 3 `PT_LOAD` instead of 4 and no
+`.relro_padding`) and no symbol versions.
 
 ### What was NOT done, stated plainly
 
@@ -313,3 +350,30 @@ never been exercised end to end through `native-build` on this host; every
 internal-engine result in this lane comes from `link_to_native` driven
 directly by a spec.** Filing the SCV cursor defect belongs to whoever owns
 `src/app/compiler_entrypoint/inventory_events.spl`.
+
+### Round 2 (Fable block): what was fixed, what is still a gap
+
+Fixed, each with a red→green spec in `native_linking_internal_spec` (20
+examples, both trees byte-identical):
+
+| | before | after |
+|---|---|---|
+| DT_NEEDED order | libc first; a shadowing `-l` library lost, exit **1** | `-l` libraries first, libc last, exit **42** — same order as ld.lld. Dedup keeps the FIRST occurrence, as ld does by SONAME, so an explicit `-lc` keeps its own position |
+| `-l:<file>` literal form | searched for `lib:libfoo.a.so`, unresolvable | resolves that exact file name; the error names the literal form |
+| relative ld-script members | `libgcc_s.so` = `GROUP ( libgcc_s.so.1 -lgcc )` reported "neither ELF nor a GNU ld script" | relative members resolve against the script's own directory then the search path; `-lNAME` members re-enter the search (depth-bounded, cycles named) |
+| `OUTPUT_FORMAT` argument | would have been collected as a member once non-absolute tokens were accepted | members are collected only inside `GROUP()`/`INPUT()` |
+| all-AS_NEEDED script | "neither ELF nor a GNU ld script" — the wrong cause | names AS_NEEDED, lists the members, and says it is a capability gap |
+
+Still gaps, both located in `elf_static_link.spl` / `ElfLinkRequest` (lane A7's
+file), not in `native_linking.spl`, and both measured against ld.lld:
+
+1. **`.so` with no DT_SONAME.** ld.lld records the file name; this engine
+   answers `internal engine: shared object 0: shared object has no DT_SONAME
+   (needed for DT_NEEDED)`. `ElfLinkRequest.shared` carries bytes only — no
+   file name — so the fallback cannot be supplied from the wrapper.
+2. **AS_NEEDED member whose symbol IS used.** ld.lld keeps the library
+   (measured: `DT_NEEDED libneeded_f1.so`); this engine cannot, because it
+   emits one DT_NEEDED per shared input unconditionally. Real as-needed needs
+   a per-library flag on `ElfLinkRequest.shared` so DT_NEEDED is written only
+   when the resolver actually took a symbol from that library. The error now
+   names this instead of misreporting the script as malformed.

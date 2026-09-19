@@ -547,9 +547,29 @@ fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
     ""
 
 fn internal_ld_script_members(script: text) -> [text]:
-    """Absolute member paths of a GNU ld script's top-level GROUP()/INPUT(), in
-    order. glibc ships `libm.so`/`libc.so` as such scripts rather than as ELF
-    files, so `-lm` cannot be resolved without following them.
+    """GROUP()/INPUT() members OUTSIDE any AS_NEEDED() -- the ones this engine
+    can honour. See internal_ld_script_members_mode."""
+    internal_ld_script_members_mode(script, false)
+
+fn internal_ld_script_as_needed_members(script: text) -> [text]:
+    """GROUP()/INPUT() members INSIDE an AS_NEEDED(), which this engine skips.
+    Used only to name the real cause when skipping them leaves nothing: a
+    script whose every member is AS_NEEDED otherwise reported "neither ELF nor
+    a GNU ld script", which is the wrong cause and the same misleading-error
+    class that hid gcc's libgcc_s.so."""
+    internal_ld_script_members_mode(script, true)
+
+fn internal_ld_script_members_mode(script: text, want_as_needed: bool) -> [text]:
+    """Member tokens of a GNU ld script's GROUP()/INPUT(), in order, exactly as
+    written: absolute paths, RELATIVE names and `-lNAME` forms all come back
+    and the caller resolves them (internal_resolve_script_file). glibc ships
+    `libm.so`/`libc.so` as such scripts rather than as ELF files, so `-lm`
+    cannot be resolved without following them, and gcc's `libgcc_s.so` is
+    `GROUP ( libgcc_s.so.1 -lgcc )` -- neither member is an absolute path.
+
+    Tokens are collected only INSIDE a GROUP()/INPUT() region. That is not a
+    detail: `OUTPUT_FORMAT(elf64-littleaarch64)` sits at the same paren depth,
+    so a depth-only rule would return `elf64-littleaarch64` as a member.
 
     AS_NEEDED(...) members are deliberately NOT returned. This engine emits one
     DT_NEEDED per shared input unconditionally (elf_static_link
@@ -562,6 +582,7 @@ fn internal_ld_script_members(script: text) -> [text]:
     var i: i64 = 0
     val n = script.len()
     var depth_skip: i64 = -1   # paren depth at which an AS_NEEDED body started
+    var depth_group: i64 = -1  # paren depth at which a GROUP/INPUT body started
     var depth: i64 = 0
     var word_start: i64 = -1
     # The keyword and its `(` are separated by whitespace in glibc's own
@@ -585,7 +606,10 @@ fn internal_ld_script_members(script: text) -> [text]:
         if word_start >= 0:
             word = script[word_start:i]
             word_start = -1
-        if word != "" and depth_skip < 0 and depth > 0 and word[0:1] == "/":
+        var inside = depth_skip < 0
+        if want_as_needed:
+            inside = depth_skip >= 0
+        if word != "" and inside and depth_group >= 0 and word != "AS_NEEDED":
             out = out.push(word)
         if word != "":
             last_word = word
@@ -593,10 +617,14 @@ fn internal_ld_script_members(script: text) -> [text]:
             depth = depth + 1
             if last_word == "AS_NEEDED" and depth_skip < 0:
                 depth_skip = depth
+            elif (last_word == "GROUP" or last_word == "INPUT") and depth_group < 0:
+                depth_group = depth
             last_word = ""
         elif ch == ")":
             if depth_skip == depth:
                 depth_skip = -1
+            if depth_group == depth:
+                depth_group = -1
             depth = depth - 1
         i = i + 1
     out
@@ -620,24 +648,92 @@ fn internal_is_elf_file(path: text) -> bool:
     val raw = file_read_bytes(path)
     raw.len() >= 4 and raw[0] == 0x7f and raw[1] == 0x45 and raw[2] == 0x4c and raw[3] == 0x46
 
+fn internal_is_archive_file(path: text) -> bool:
+    """True when `path` starts with the ar magic `!<ar`."""
+    val raw = file_read_bytes(path)
+    raw.len() >= 8 and raw[0] == 0x21 and raw[1] == 0x3c and raw[2] == 0x61 and raw[3] == 0x72
+
+fn internal_resolve_script_file(script_path: text, name: text, dirs: [text], depth: i64) -> Result:
+    """Concrete input files for a GNU ld script's GROUP()/INPUT() members.
+
+    Members come in three shapes and all three occur in the real host
+    libraries this engine has to link against:
+      * absolute path   -- glibc's `libc.so` / `libm.so`;
+      * RELATIVE name   -- gcc's `libgcc_s.so` is `GROUP ( libgcc_s.so.1 -lgcc )`,
+        resolved against the SCRIPT's own directory first (that is where ld
+        looks), then the ordinary search path;
+      * `-lNAME`        -- same `libgcc_s.so`, resolved by re-entering the
+        normal search.
+    Before this, only absolute members were recognised, so `libgcc_s.so` --
+    one of the three DT_NEEDED entries of the shipped `simple` binary --
+    reported "neither ELF nor a GNU ld script", which named the wrong cause."""
+    val script = file_read_nullable(script_path) ?? ""
+    val members = internal_ld_script_members(script)
+    if members.len() == 0:
+        val as_needed = internal_ld_script_as_needed_members(script)
+        if as_needed.len() > 0:
+            return Err("internal engine: library '{name}' at {script_path}: every GROUP()/INPUT() member ({as_needed.join(\", \")}) is inside AS_NEEDED(), which this engine does not implement -- it emits one DT_NEEDED per shared input unconditionally, so it cannot record a library only when a symbol is used. ld keeps such a member when its symbols ARE used; this is a capability gap, not a malformed script")
+        return Err("internal engine: library '{name}' at {script_path} is neither ELF nor a GNU ld script with GROUP()/INPUT() members")
+    val script_dir = path_dirname(script_path)
+    var out: [text] = []
+    for m in members:
+        if m.starts_with("-l"):
+            val nested = internal_resolve_library_depth(m.substring(2), dirs, depth + 1)
+            if nested.is_err():
+                return Err("internal engine: library '{name}': ld-script member {m} (from {script_path}) is unresolvable -- {nested.unwrap_err()}")
+            for p in nested.unwrap():
+                out = out.push(p)
+        elif m.starts_with("/"):
+            if not file_exists(m):
+                return Err("internal engine: library '{name}': ld-script member {m} (from {script_path}) does not exist")
+            out = out.push(m)
+        else:
+            var found = ""
+            if file_exists("{script_dir}/{m}"):
+                found = "{script_dir}/{m}"
+            else:
+                for d in dirs:
+                    if found == "" and file_exists("{d}/{m}"):
+                        found = "{d}/{m}"
+            if found == "":
+                return Err("internal engine: library '{name}': ld-script member {m} (from {script_path}) not found in {script_dir} or the library search path")
+            out = out.push(found)
+    Ok(out)
+
 fn internal_resolve_library(name: text, dirs: [text]) -> Result:
+    internal_resolve_library_depth(name, dirs, 0)
+
+fn internal_resolve_library_depth(name: text, dirs: [text], depth: i64) -> Result:
     """Resolve one library SEARCH name to concrete input files, ld's order:
     each directory in turn, `lib<name>.so` before `lib<name>.a`. A `.so` that
-    is a GNU ld script is followed to its GROUP() members (see
-    internal_ld_script_members). Returns Ok([paths]) or a named Err."""
+    is a GNU ld script is followed to its members (internal_resolve_script_file).
+
+    `name` beginning with `:` is ld's literal form -- `-l:libfoo.a` asks for a
+    file named exactly `libfoo.a`, with no `lib`/`.so`/`.a` decoration and no
+    `.so`-before-`.a` preference. It is how a caller pins a static archive
+    when a shared library of the same name is also installed, so treating it
+    as an ordinary name (searching for `lib:libfoo.a.so`) silently linked the
+    wrong thing or failed for the wrong reason.
+
+    `depth` bounds ld-script member recursion; scripts naming each other in a
+    cycle are a named error, not a hang."""
+    if depth > 4:
+        return Err("internal engine: library '{name}': ld-script member recursion exceeded 4 levels (cycle?)")
+    if name.starts_with(":"):
+        val literal = name.substring(1)
+        for dir in dirs:
+            val exact = "{dir}/{literal}"
+            if file_exists(exact):
+                if internal_is_elf_file(exact) or internal_is_archive_file(exact):
+                    return Ok([exact])
+                return internal_resolve_script_file(exact, name, dirs, depth)
+        return Err("internal engine: unresolved library '{name}' (literal form -l:{literal}; searched {dirs.join(\", \")})")
     for dir in dirs:
         val so = "{dir}/lib{name}.so"
         if file_exists(so):
             if internal_is_elf_file(so):
                 return Ok([so])
-            val script = file_read_nullable(so) ?? ""
-            val members = internal_ld_script_members(script)
-            if members.len() == 0:
-                return Err("internal engine: library '{name}' at {so} is neither ELF nor a GNU ld script with GROUP()/INPUT() members")
-            for m in members:
-                if not file_exists(m):
-                    return Err("internal engine: library '{name}': ld-script member {m} (from {so}) does not exist")
-            return Ok(members)
+            return internal_resolve_script_file(so, name, dirs, depth)
         val a = "{dir}/lib{name}.a"
         if file_exists(a):
             return Ok([a])
@@ -714,7 +810,7 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     # engine writes one per shared input) where ld.lld, which keys on SONAME,
     # emits one. Measured on this host before the fix.
     var extra_shared: [[u8]] = []
-    var shared_digests: [text] = [file_hash_sha256(libc)]
+    var shared_digests: [text] = []
     for libname in libraries:
         val resolved = internal_resolve_library(libname,
             internal_library_search_dirs(library_paths, libdir))
@@ -737,9 +833,24 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     var mode = ELF_LINK_DYNAMIC_EXEC
     if pie:
         mode = ELF_LINK_DYNAMIC_PIE
-    var shared_inputs: [[u8]] = [file_read_bytes(libc)]
+    # ld's order: the `-l` libraries FIRST, the implicit libc LAST. DT_NEEDED
+    # order is load-bearing, not cosmetic -- the dynamic loader resolves a
+    # symbol from the first DT_NEEDED entry that defines it -- so seeding this
+    # list with libc silently beat any `-l` library that shadows a libc
+    # symbol. Measured before the fix: a library whose atoi() returns 42 lost
+    # to libc's and the program exited 1, where ld.lld with the equivalent
+    # argv exits 42. The old parity claim compared the DT_NEEDED SET, which is
+    # identical in both orders, and therefore could not see this.
+    #
+    # De-duplication keeps the FIRST occurrence, as ld does by SONAME: an
+    # explicit `-lc` keeps its own position in the caller's order and it is
+    # the implicit copy that is dropped, so `libraries=["c","m"]` yields
+    # libc,libm exactly as ld.lld does rather than libm,libc.
+    var shared_inputs: [[u8]] = []
     for so in extra_shared:
         shared_inputs = shared_inputs.push(so)
+    if not shared_digests.contains(file_hash_sha256(libc)):
+        shared_inputs = shared_inputs.push(file_read_bytes(libc))
     val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_inputs,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
     if linked.is_err():

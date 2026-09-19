@@ -97,3 +97,21 @@ linker resolves a library SEARCH name: `NativeLinkConfig.libraries = ["m"]` plus
 (`GROUP ( /lib/<triple>/libm.so.6 AS_NEEDED ( ... ) )`), not an ELF file, so
 resolving it exercises the internal engine's ld-script member handling. It prints
 `sqrt=42` and exits 42. Linked by `native_linking_internal_spec`.
+
+`main_int_a64.o` + `libshadowatoi_a64.so` (lane F1, round 2) prove DT_NEEDED
+ORDER rather than the set. The library defines `atoi()` returning 42; libc's
+returns 1; `main_int.c` calls it through a global with `-fno-builtin` so the
+call cannot be constant-folded. The DT_NEEDED *set* is identical whichever
+order the linker emits, so only the exit status distinguishes them: 42 when the
+`-l` library precedes libc (ld.lld's order), 1 when libc precedes it.
+
+```
+clang --target=aarch64-linux-gnu -shared -fPIC -Wl,-soname,libshadowatoi_a64.so shadow_atoi.c -o libshadowatoi_a64.so
+clang --target=aarch64-linux-gnu -c -O1 -fno-builtin -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables main_int.c -o main_int_a64.o
+```
+
+`libshadowatoi_a64.so` must keep a bare `.so` name — `-l<name>` searches for
+exactly `lib<name>.so`, which is the point of the fixture — so unlike the
+sibling `.so.1` fixtures it is matched by `.gitignore:23 *.so` and was added
+with `git add -f`. If it is ever regenerated, re-add it the same way or the
+DT_NEEDED-order spec loses its library.

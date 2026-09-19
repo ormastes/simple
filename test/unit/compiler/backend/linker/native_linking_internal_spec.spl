@@ -35,6 +35,7 @@ fn with_env(key: text, value: text, block: fn()):
 
 val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
 val LIBM_A64_OBJ: text = "test/fixtures/linker/elf/hello_libm_a64.o"
+val INT_A64_OBJ: text = "test/fixtures/linker/elf/main_int_a64.o"
 
 describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
     # Host requirement: aarch64 Linux with glibc (crt_discovery finds
@@ -265,4 +266,122 @@ describe "native_linking - internal engine DT_NEEDED parity with ld.lld on an ld
             expect(needed.stdout.trim()).to_equal("1")
             val run = shell("'{out}'")
             expect(run.exit_code).to_equal(42)
+        )
+
+describe "native_linking - internal engine DT_NEEDED ORDER (not just the set)":
+    # Lane F1, round 2 (coordinator/Fable block). The earlier parity claim in
+    # plan §13 compared DT_NEEDED as a SET and called it "byte for byte" --
+    # it was not comparing ORDER, and order is load-bearing: the dynamic
+    # loader resolves a symbol from the FIRST DT_NEEDED entry that defines it.
+    # ld.lld emits the `-l` libraries first and libc last; this engine seeded
+    # its shared-input list with libc FIRST, so any `-l` library that shadows
+    # a libc symbol silently lost. Exactly the silent-difference class the
+    # reject-never-mask rule exists to prevent.
+    #
+    # libshadowatoi_a64.so defines atoi() returning 42; libc's returns 1.
+    # main_int_a64.o calls atoi through a global (no builtin folding), so the
+    # exit status names which library the loader searched first -- and the
+    # DT_NEEDED set is identical in both link orders.
+    it "emits -l libraries before libc, so a shadowing library wins as it does under ld.lld":
+        # @req REQ-LINKER-F1-INTERNAL-NEEDED-ORDER
+        step("libraries=[shadowatoi_a64] -> DT_NEEDED order libshadowatoi_a64.so then libc.so.6, and the program exits 42 (libc-first would exit 1)")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_needed_order"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["shadowatoi_a64"]
+            cfg.library_paths = ["test/fixtures/linker/elf"]
+            expect(link_to_native([INT_A64_OBJ], out, cfg).is_ok()).to_equal(true)
+            val order = shell("readelf -dW '{out}' | grep NEEDED | sed -n 's/.*\\[\\(.*\\)\\]/\\1/p' | tr '\\n' ' '")
+            expect(order.stdout.trim()).to_equal("libshadowatoi_a64.so libc.so.6")
+            val run = shell("LD_LIBRARY_PATH=test/fixtures/linker/elf '{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+describe "native_linking - internal engine ld-script member forms and the literal -l: form":
+    # Lane F1, round 2. Three member shapes occur in the host libraries this
+    # engine must link, and only the first was recognised:
+    #   absolute        glibc libc.so / libm.so
+    #   RELATIVE name   gcc libgcc_s.so -> GROUP ( libgcc_s.so.1 -lgcc )
+    #   -lNAME          the same libgcc_s.so
+    # libgcc_s is one of the three DT_NEEDED entries of the shipped `simple`
+    # binary, so this was directly on the target path -- and it failed with
+    # "neither ELF nor a GNU ld script", which named the wrong cause.
+    it "follows a script whose members are a relative name and a -lNAME (gcc libgcc_s.so)":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[gcc_s] resolves GROUP ( libgcc_s.so.1 -lgcc ): the relative member from the search path, the -lgcc member by re-entering the search")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val gccdir = shell("dirname \"$(ls -d /usr/lib/gcc/*/*/libgcc_s.so | head -1)\"").stdout.trim()
+            expect(gccdir).to_contain("/usr/lib/gcc/")
+            val out = "/tmp/native_linking_internal_spec_libgcc_s"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["gcc_s"]
+            cfg.library_paths = [gccdir]
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val needed = shell("readelf -dW '{out}' | grep NEEDED")
+            expect(needed.stdout).to_contain("libgcc_s.so.1")
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+    it "resolves the literal -l:<file> form to that exact file name":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[:libchain_a64.a] selects the file named exactly libchain_a64.a, with no lib/.so/.a decoration and no .so-before-.a preference")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_literal_l"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = [":libchain_a64.a"]
+            cfg.library_paths = ["test/fixtures/linker/elf"]
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            expect(shell("'{out}'").exit_code).to_equal(42)
+        )
+
+    it "names the literal form in its unresolved error instead of reporting a decorated name":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("libraries=[:libnope_f1.a] -> error naming the literal form, not a search for lib:libnope_f1.a.so")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = [":libnope_f1.a"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "/tmp/native_linking_internal_spec_literal_missing", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("literal form -l:libnope_f1.a")
+        )
+
+    it "does not mistake OUTPUT_FORMAT's argument for a GROUP member":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("glibc's libc.so has OUTPUT_FORMAT(elf64-littleaarch64) at the same paren depth as GROUP's members; only GROUP/INPUT contents are members")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_output_format"
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["c"]
+            # If OUTPUT_FORMAT's argument were collected as a member, the
+            # resolver would fail with "member elf64-littleaarch64 ... not
+            # found in ... or the library search path". A clean link IS the
+            # assertion; the error text is checked so a future regression
+            # names itself rather than hiding behind a generic failure.
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            if result.is_err():
+                expect(result.unwrap_err()).to_not_contain("elf64")
+            expect(result.is_ok()).to_equal(true)
+            expect(shell("'{out}'").exit_code).to_equal(42)
+        )
+
+    it "names AS_NEEDED as the cause when skipping it leaves a script with no usable member":
+        # @req REQ-LINKER-F1-INTERNAL-LIBRARY-SEARCH
+        step("A script whose every member is inside AS_NEEDED() reports AS_NEEDED and the capability gap, not the wrong cause 'neither ELF nor a GNU ld script'")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val dir = "/tmp/f1_asn_spec"
+            expect(shell("mkdir -p '{dir}' && cp test/fixtures/linker/elf/hello_libc_a64.o '{dir}/'").exit_code).to_equal(0)
+            expect(shell("printf '/* GNU ld script */\\nGROUP ( AS_NEEDED ( /usr/lib/aarch64-linux-gnu/libm.so.6 ) )\\n' > '{dir}/libasnonly_f1.so'").exit_code).to_equal(0)
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["asnonly_f1"]
+            cfg.library_paths = [dir]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "/tmp/native_linking_internal_spec_asn_only", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("inside AS_NEEDED()")
+            expect(result.unwrap_err()).to_contain("capability gap")
+            expect(result.unwrap_err().contains("neither ELF")).to_equal(false)
         )
