@@ -483,3 +483,37 @@ describe "handing the array to a second binding is an escape":
         it applies to declarations only."""
         val iterate = "fn f(xs: [i64]) -> i64:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    var n = 0\n    for v in seen:\n        n = n + v\n    n\n"
         assert_true(is_some(fix020(iterate)))
+
+# ---------------------------------------------------------------------------
+# Methods, and an honest correction.
+#
+# Round 4's commit message claimed the method walk was "warning-only; the
+# Certain fix envelope is untouched". That was WRONG, and an adversarial
+# review caught it: a method-local `var seen` that no rule could previously
+# see now gets a COLL020 fix, because the proofs run over whatever function
+# bodies the walk hands them. The rewrites are output-identical, so the
+# widening is sound — but it happened incidentally, and something the fix
+# envelope covers must be pinned deliberately.
+# ---------------------------------------------------------------------------
+
+describe "method bodies are inside the fix envelope, deliberately":
+    it "m1: a method-local dedup is proven and fixed":
+        step("m1: a method-local dedup is proven and fixed")
+        val method_local = "class Box:\n    var items: [text]\n\n    fn uniq(self) -> [text]:\n        var seen: [text] = []\n        for it in self.items:\n            if not seen.contains(it):\n                seen.push(it)\n        seen\n"
+        assert_true(is_some(fix020(method_local)))
+
+    it "m2: and the same proofs still refuse inside a method":
+        step("m2: and the same proofs still refuse inside a method")
+        """The envelope must not be weaker in a method than at top level: the
+        proofs are whole-FUNCTION, and a method body is a function body. A
+        mutation elsewhere in the method refuses exactly as it would in a
+        free function."""
+        val method_mutated = "class Box:\n    var items: [text]\n\n    fn uniq(self) -> [text]:\n        var seen: [text] = []\n        for it in self.items:\n            if not seen.contains(it):\n                seen.push(it)\n            if it == \"x\":\n                val d = seen.pop()\n        seen\n"
+        assert_false(is_some(fix020(method_mutated)))
+
+    it "m3: a method receiver field is not a local, so it is not fixed":
+        step("m3: a method receiver field is not a local, so it is not fixed")
+        """`self.items` is not a local declaration the proof can find, and
+        the dominance proof requires one."""
+        val field_recv = "class Box:\n    var items: [text]\n\n    fn add(self, xs: [text]):\n        for x in xs:\n            if not self.items.contains(x):\n                self.items.push(x)\n"
+        assert_false(is_some(fix020(field_recv)))

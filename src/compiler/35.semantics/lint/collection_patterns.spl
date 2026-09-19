@@ -42,6 +42,7 @@ use compiler.core.ast_expr.{
     EXPR_INTERPOLATED_STRING, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_DICT_LIT,
     EXPR_UNARY, EXPR_LAMBDA, EXPR_CALL,
     expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts,
+    expr_get_float, expr_get_arg_names,
     expr_get_span, expr_child_exprs, expr_child_stmts, expr_child_arms,
     EXPR_FLOAT_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_RANGE, EXPR_TUPLE,
     EXPR_STRUCT_LIT, EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST,
@@ -328,6 +329,22 @@ fn check_expr_for_loops(e: i64, fn_name: text, text_vars: [text]) -> [Collection
 # Loop Body Pattern Checks
 # ============================================================================
 
+# True when a `.contains(` receiver is a name known to hold TEXT. On text
+# `.contains` is a SUBSTRING search, not an O(n) element scan, so COLL002 does
+# not apply and a rewrite to a membership Dict would change behaviour.
+# Measured in the real tree: `val alphabet = "0123456789abcdef"` at
+# `src/compiler/80.driver/driver_build/incremental.spl:308` was reported. The
+# positive form had this defect already; the negated-filter widening added a
+# second way in. `check_loop_body` was already being handed `text_vars` for
+# COLL001's sake and simply was not consulting it here.
+fn contains_receiver_is_text(call: i64, text_vars: [text]) -> bool:
+    if call < 0:
+        return false
+    val recv = expr_get_left(call)
+    if recv < 0 or expr_get_tag(recv) != EXPR_IDENT:
+        return false
+    name_in_list(text_vars, expr_get_str(recv))
+
 fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
 
@@ -388,7 +405,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
                         fn_name, expr_anchor_span(e)))
 
                 # COLL002: .contains() on array in loop
-                if is_contains_call(e):
+                if is_contains_call(e) and not contains_receiver_is_text(e, text_vars):
                     warnings.push(coll002_warning(fn_name, expr_anchor_span(e)))
 
                 # COLL003: .remove(0) queue drain
@@ -412,7 +429,8 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
             val cond = stmt_get_expr(s)
             if cond >= 0:
                 if is_contains_call(cond):
-                    warnings.push(coll002_warning(fn_name, expr_anchor_span(cond)))
+                    if not contains_receiver_is_text(cond, text_vars):
+                        warnings.push(coll002_warning(fn_name, expr_anchor_span(cond)))
                 else:
                     # The NEGATED filter, `if not allowed.contains(x):`. It was
                     # silent because the condition node is a unary `not`, not
@@ -426,7 +444,8 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
                     # are therefore left to it.
                     val negated = is_not_contains_call(cond)
                     if negated >= 0 and not is_manual_distinct_guard(s):
-                        warnings.push(coll002_warning(fn_name, expr_anchor_span(negated)))
+                        if not contains_receiver_is_text(negated, text_vars):
+                            warnings.push(coll002_warning(fn_name, expr_anchor_span(negated)))
 
         # COLL001 via val/var decl with concat
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
@@ -445,6 +464,23 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
                                     "array concat in loop (O(n^2))",
                                     "use .push() instead of arr = arr + [x]",
                                     fn_name, expr_anchor_span(init)))
+
+        # Still inside the same loop: an `if`, a `match` arm or a block does
+        # not end the iteration, so a quadratic operation nested under one is
+        # just as quadratic. This walk only ever looked at the loop body's TOP
+        # level, and `check_fn_body` descends into those blocks hunting for
+        # LOOPS, not for in-loop patterns — so a guard under `if x > 0:` was
+        # checked by neither. Measured: all 14 remaining silent dedup sites in
+        # the tree were nested this way, which made it the real coverage gap
+        # rather than the multi-statement guard body it was attributed to.
+        #
+        # Loops are skipped deliberately: a nested loop is reached by
+        # `check_fn_body`, which calls `check_loop_body` on it in its own
+        # right, and descending here as well would report its body twice.
+        if not coll_stmt_is_loop(tag):
+            for nested_block in coll_stmt_child_stmts(s):
+                for w in check_loop_body([nested_block], fn_name, iter_var, text_vars):
+                    warnings.push(w)
 
     warnings
 
@@ -1132,6 +1168,26 @@ fn expr_structurally_equal(a: i64, b: i64) -> bool:
         return false
     if expr_get_int(a) != expr_get_int(b):
         return false
+    # A float literal's value lives in `expr_get_float`, not `expr_get_str` or
+    # `expr_get_int`, and a call's named-argument LABELS live in
+    # `expr_get_arg_names` rather than in the child expression list. Comparing
+    # neither meant `seen.contains(1.5)` / `seen.push(2.5)` and
+    # `f(a: x)` / `f(b: x)` compared EQUAL and reported as dedup. The fix
+    # refused both anyway (the value is not a plain identifier), so it was
+    # warning noise rather than a wrong rewrite — but it falsified the
+    # "conservative by construction" claim this comment makes, so it is
+    # closed rather than documented.
+    if expr_get_float(a) != expr_get_float(b):
+        return false
+    val na = expr_get_arg_names(a)
+    val nb = expr_get_arg_names(b)
+    if na.len() != nb.len():
+        return false
+    var k = 0
+    while k < na.len():
+        if na[k] != nb[k]:
+            return false
+        k = k + 1
     if expr_child_stmts(a).len() != 0 or expr_child_stmts(b).len() != 0:
         return false
     if expr_child_arms(a).len() != 0 or expr_child_arms(b).len() != 0:

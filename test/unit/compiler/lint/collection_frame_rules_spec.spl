@@ -308,3 +308,73 @@ describe "the rules walk method bodies too":
         step("COLL002 sees a plain contains-in-loop inside a method")
         val filt = "class Box:\n    var allowed: [text]\n\n    fn hits(self, xs: [text]) -> i64:\n        var n = 0\n        for x in xs:\n            if self.allowed.contains(x):\n                n = n + 1\n        n\n"
         assert_true(has(results_for("/tmp/coll_m2.spl", filt), "COLL002"))
+
+# ---------------------------------------------------------------------------
+# Round 5, from an adversarial review of the widened matcher.
+# ---------------------------------------------------------------------------
+
+describe "a text receiver is a substring search, not an element scan":
+    it "COLL002 does not fire on `.contains` over a text value":
+        step("COLL002 does not fire on `.contains` over a text value")
+        """Real false positive, found in the tree at
+        src/compiler/80.driver/driver_build/incremental.spl:308 —
+        `val alphabet = "0123456789abcdef"`. On text `.contains` is a
+        substring search, so the rule does not apply and a Dict rewrite would
+        change behaviour. `check_loop_body` was already being handed
+        `text_vars` for COLL001 and simply was not consulting it here."""
+        val txt = "fn f(xs: [i64]) -> i64:\n    val alphabet = \"0123456789abcdef\"\n    var n = 0\n    for x in xs:\n        if alphabet.contains(\"a\"):\n            n = n + 1\n    n\n"
+        assert_false(has(results_for("/tmp/coll_text_pos.spl", txt), "COLL002"))
+
+    it "nor in the negated form":
+        step("nor in the negated form")
+        """The positive form had this defect already; the negated-filter
+        widening added a second way in. Both are gated."""
+        val txt = "fn f(xs: [i64]) -> i64:\n    val alphabet = \"0123456789abcdef\"\n    var n = 0\n    for x in xs:\n        if not alphabet.contains(\"a\"):\n            n = n + 1\n    n\n"
+        assert_false(has(results_for("/tmp/coll_text_neg.spl", txt), "COLL002"))
+
+    it "but an ARRAY receiver still fires (non-vacuity)":
+        step("but an ARRAY receiver still fires (non-vacuity)")
+        val arr = "fn f(xs: [text]) -> i64:\n    val allowed: [text] = [\"a\", \"b\"]\n    var n = 0\n    for x in xs:\n        if allowed.contains(x):\n            n = n + 1\n    n\n"
+        assert_true(has(results_for("/tmp/coll_arr.spl", arr), "COLL002"))
+
+describe "a block inside the loop does not end the iteration":
+    it "COLL020 sees a dedup guard nested under an `if`":
+        step("COLL020 sees a dedup guard nested under an `if`")
+        """`check_loop_body` only ever looked at the loop body's TOP level,
+        and `check_fn_body` descends into blocks hunting for LOOPS, not for
+        in-loop patterns — so a guard under `if x > 0:` was checked by
+        neither. All 14 remaining silent dedup sites in the tree were nested
+        this way, which made it the real coverage gap rather than the
+        multi-statement guard body it had been attributed to."""
+        val nested = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if x > 0:\n            if not seen.contains(x):\n                seen.push(x)\n    seen\n"
+        assert_true(has(results_for("/tmp/coll_nest.spl", nested), "COLL020"))
+
+    it "and reports it ONCE, not once per enclosing block":
+        step("and reports it ONCE, not once per enclosing block")
+        val nested = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if x > 0:\n            if not seen.contains(x):\n                seen.push(x)\n    seen\n"
+        assert_equal(1, count_of("/tmp/coll_nest1.spl", nested, "COLL020"))
+        assert_equal(0, count_of("/tmp/coll_nest1.spl", nested, "COLL002"))
+
+    it "a nested LOOP body is not checked twice":
+        step("a nested LOOP body is not checked twice")
+        """Loops are skipped by the new descent deliberately: a nested loop is
+        reached by `check_fn_body`, which runs `check_loop_body` on it in its
+        own right."""
+        val two = "fn f(gs: [[i64]]) -> [i64]:\n    var seen: [i64] = []\n    for g in gs:\n        for x in g:\n            if not seen.contains(x):\n                seen.push(x)\n    seen\n"
+        assert_equal(1, count_of("/tmp/coll_two.spl", two, "COLL020"))
+
+describe "structural equality compares the whole value":
+    it "float literals that differ are not the same value":
+        step("float literals that differ are not the same value")
+        """A float's value lives in `expr_get_float`, not `expr_get_str` or
+        `expr_get_int`, so `seen.contains(1.5)` / `seen.push(2.5)` compared
+        EQUAL and reported as dedup. The fix refused it anyway, so this was
+        warning noise, not a wrong rewrite — but it falsified the
+        "conservative by construction" claim, so it is closed."""
+        val floats = "fn f(xs: [f64]) -> [f64]:\n    var seen: [f64] = []\n    for x in xs:\n        if not seen.contains(1.5):\n            seen.push(2.5)\n    seen\n"
+        assert_false(has(results_for("/tmp/coll_f.spl", floats), "COLL020"))
+
+    it "float literals that match still are":
+        step("float literals that match still are")
+        val floats = "fn f(xs: [f64]) -> [f64]:\n    var seen: [f64] = []\n    for x in xs:\n        if not seen.contains(1.5):\n            seen.push(1.5)\n    seen\n"
+        assert_true(has(results_for("/tmp/coll_f2.spl", floats), "COLL020"))

@@ -1,0 +1,58 @@
+#!/bin/sh
+# Enumerate the array-dedup sites this repo contains, so the COLL coverage
+# figures quoted in doc/08_tracking/bug/coll020_* are auditable rather than
+# taken on trust. The site list was previously held only in a scratch
+# directory, which made every number in those records unreproducible.
+#
+#   sh scripts/check/scan-dedup-sites.shs [ROOT]
+#
+# Prints one line per site:  <path>:<line>:<receiver>
+# then a summary to stderr. ROOT defaults to the repo root.
+#
+# A "site" is the guard `if [not] R.contains(E):` with a matching `R.push(E)`
+# within the next 3 lines. This is a TEXTUAL scan, deliberately: it is the
+# independent yardstick the AST rules are measured against, so it must not
+# share their blind spots. It therefore over-reports — it cannot tell whether
+# a site is inside a loop, and a guard outside one is not quadratic and is
+# correctly not reported by the rules. `--in-loop-only` applies an
+# indentation heuristic for that, and the difference between the two counts
+# is itself the number worth quoting.
+root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
+inloop=0
+case "$1" in --in-loop-only) inloop=1; root="${2:-$(cd "$(dirname "$0")/../.." && pwd)}";; esac
+case "$2" in --in-loop-only) inloop=1;; esac
+
+total=0
+find "$root" -name '*.spl' -not -path '*/vendor/*' -not -path '*/build/*' \
+     -not -path '*/.git/*' -not -path '*/bootstrap/*' | sort | while read -r f; do
+  awk -v F="$f" -v ROOT="$root" -v INLOOP="$inloop" '
+    { line[NR] = $0 }
+    END {
+      for (n = 1; n <= NR; n++) {
+        s = line[n]
+        if (match(s, /if +(not +)?[A-Za-z_][A-Za-z0-9_]*\.contains\(/) == 0) continue
+        recv = s
+        sub(/^.*if +(not +)?/, "", recv)
+        sub(/\.contains\(.*$/, "", recv)
+        if (recv !~ /^[A-Za-z_][A-Za-z0-9_]*$/) continue
+        found = 0
+        for (k = n + 1; k <= n + 3 && k <= NR; k++)
+          if (index(line[k], recv ".push(") > 0) found = 1
+        if (!found) continue
+        if (INLOOP == 1) {
+          match(s, /^ */); ind = RLENGTH; hit = 0
+          for (k = n - 1; k >= 1; k--) {
+            match(line[k], /^ */); i = RLENGTH
+            if (line[k] ~ /^[^ ]/ && line[k] !~ /^(for |while )/) break
+            if (i < ind && line[k] ~ /^ *(for |while )/) { hit = 1; break }
+          }
+          if (!hit) continue
+        }
+        p = F; sub(ROOT "/", "", p)
+        print p ":" n ":" recv
+      }
+    }' "$f"
+done | tee /tmp/.dedup_sites.$$ 
+c=$(wc -l < /tmp/.dedup_sites.$$)
+rm -f /tmp/.dedup_sites.$$
+echo "scan-dedup-sites: $c site(s)" >&2
