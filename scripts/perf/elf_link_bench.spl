@@ -1,0 +1,76 @@
+# Internal ELF linker benchmark driver (lane C4).
+#
+# Driven by scripts/perf/bench-elf-link.shs. Links one input set with the
+# internal engine (`elf_link`) and writes the image to ELF_BENCH_OUT, so the
+# caller can time the whole process and hash the output.
+#
+#   ELF_BENCH_MODE   static | pie | dynamic
+#   ELF_BENCH_OBJS   space-separated ET_REL paths, command-line order
+#   ELF_BENCH_SHARED space-separated ET_DYN paths (dynamic only)
+#   ELF_BENCH_INTERP PT_INTERP path (dynamic only)
+#   ELF_BENCH_OUT    output path
+#   ELF_LINK_PROFILE=1 makes the engine print per-phase timings on stdout.
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_write_bytes}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_micros() -> i64
+
+fn env(key: text) -> text:
+    val v = rt_env_get(key)
+    if v == nil:
+        return ""
+    v
+
+fn words(s: text) -> [text]:
+    var out: [text] = []
+    for w in s.split(" "):
+        if w != "":
+            out = out.push(w)
+    out
+
+fn main() -> i64:
+    val t0 = rt_time_now_micros()
+    val mode_name = env("ELF_BENCH_MODE")
+    var mode = ELF_LINK_STATIC_EXEC
+    if mode_name == "pie":
+        mode = ELF_LINK_STATIC_PIE
+    else if mode_name == "dynamic":
+        mode = ELF_LINK_DYNAMIC_EXEC
+    else if mode_name != "static":
+        print "elf_link_bench: unknown ELF_BENCH_MODE '{mode_name}'"
+        return 2
+    var objs: [[i64]] = []
+    for p in words(env("ELF_BENCH_OBJS")):
+        val raw = file_read_bytes(p)
+        if raw.len() == 0:
+            print "elf_link_bench: cannot read {p}"
+            return 2
+        var b: [i64] = []
+        for x in raw:
+            b = b.push(x as i64)
+        objs = objs.push(b)
+    var shared: [[u8]] = []
+    for p in words(env("ELF_BENCH_SHARED")):
+        shared = shared.push(file_read_bytes(p))
+    val t1 = rt_time_now_micros()
+    val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: shared, entry: "_start",
+        target: RelocArch.AArch64, mode: mode, interp: env("ELF_BENCH_INTERP")))
+    val t2 = rt_time_now_micros()
+    if r.is_err():
+        print "elf_link_bench: link failed: {r.unwrap_err()}"
+        return 1
+    val img = r.unwrap()
+    var bytes: [u8] = []
+    for x in img:
+        bytes = bytes.push(x as u8)
+    if not file_write_bytes(env("ELF_BENCH_OUT"), bytes):
+        print "elf_link_bench: cannot write output"
+        return 2
+    val t3 = rt_time_now_micros()
+    print "bench-phase load_inputs_us={t1 - t0} elf_link_us={t2 - t1} write_us={t3 - t2} out_bytes={img.len()}"
+    0

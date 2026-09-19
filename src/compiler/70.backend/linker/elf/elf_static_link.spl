@@ -33,7 +33,7 @@ use compiler.backend.linker.elf_parser.{
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
-use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width, reloc_patch_word}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
 use compiler.backend.linker.elf.reloc_scan.{
@@ -983,36 +983,53 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     val gotplt_v = elf_plan_addr(plan, ".got.plt")
 
     # --- relocate input sections ---
-    var j: i64 = 0
-    while j < refs.len():
-        val r = refs[j]
-        if r.rclass == RC_NONE:
+    # Section-outer, relocation-inner: each output section's buffer is taken
+    # out of `contents` once and written in place. The old shape handed the
+    # whole buffer to a patch helper and stored its return value per
+    # relocation, which copies the section every time under the interpreter and
+    # made the engine quadratic in (section bytes x relocations). The relocated
+    # value and the instruction-field merge still come from the reloc_engine
+    # oracle (reloc_apply / reloc_patch_word), never from a local formula.
+    var ck: i64 = 0
+    while ck < contents.len():
+        var buf = contents[ck]
+        var j: i64 = 0
+        while j < refs.len():
+            val r = refs[j]
+            if r.rclass == RC_NONE or r.out_sec != ck:
+                j = j + 1
+                continue
+            val p = plan.vaddrs[in_to_plan[ck]] + r.out_off
+            var rtype = r.rtype
+            var s = elf_ref_addr(ctx, lay, r)?
+            var a = r.addend
+            if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
+                s = got_v + sc.got_idx[r.key] * 8
+                if a64:
+                    a = 0
+            else if r.relax:
+                buf[r.out_off - 2] = 0x8d
+                rtype = 2  # R_X86_64_PC32: lea foo(%rip)
+            else if r.rclass == RC_BRANCH and r.kind == SYMREF_IMPORT:
+                s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
+            else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
+                # ld.lld: a branch to an undefined weak symbol targets the next instruction
+                s = p + 4 - a
+            val applied = reloc_apply(target, buf, r.out_off, rtype, s, a, p)
+            if not applied.success:
+                return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
+            val width = reloc_patch_width(target, rtype)
+            if r.out_off >= 0 and r.out_off + width <= buf.len():
+                var word = applied.value
+                if width == 4:
+                    word = reloc_patch_word(target, rtype, elf_rd_le(buf, r.out_off, 4), applied.value)
+                var wi: i64 = 0
+                while wi < width:
+                    buf[r.out_off + wi] = (word >> (wi * 8)) & 0xff
+                    wi = wi + 1
             j = j + 1
-            continue
-        val k = r.out_sec
-        val p = plan.vaddrs[in_to_plan[k]] + r.out_off
-        var rtype = r.rtype
-        var s = elf_ref_addr(ctx, lay, r)?
-        var a = r.addend
-        if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
-            s = got_v + sc.got_idx[r.key] * 8
-            if a64:
-                a = 0
-        else if r.relax:
-            var buf = contents[k]
-            buf[r.out_off - 2] = 0x8d
-            contents[k] = buf
-            rtype = 2  # R_X86_64_PC32: lea foo(%rip)
-        else if r.rclass == RC_BRANCH and r.kind == SYMREF_IMPORT:
-            s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
-        else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
-            # ld.lld: a branch to an undefined weak symbol targets the next instruction
-            s = p + 4 - a
-        val applied = reloc_apply(target, contents[k], r.out_off, rtype, s, a, p)
-        if not applied.success:
-            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
-        contents[k] = reloc_patch_bytes(target, contents[k], r.out_off, rtype, s, a, p)
-        j = j + 1
+        contents[ck] = buf
+        ck = ck + 1
 
     # --- synthetic contents ---
     var got: [i64] = []
