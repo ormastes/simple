@@ -365,3 +365,50 @@ diagnostics are correct and positioned, and the Certain door refuses rather
 than rewriting wrongly. 15% does not clear the bar for turning the fix on by
 default, and the honest next step is the detector record above, not further
 loosening of the proofs.
+
+### Round-4 CLI re-sweep of the fixture corpus, and one more escape it found
+
+Every fixture re-run with `bin/simple fix --dry-run` **from inside the lane
+worktree** (`/home/yoon/dev/simple-coll-gaps`) after the per-site and
+destructuring changes — the out-of-worktree run that reports "No fixes
+available" for everything was avoided deliberately, and the controls fixing in
+both sweeps is the proof the runs were real:
+
+| set | fixtures | COLL fix | no fix |
+|---|---|---|---|
+| round 1 + round 2 (`d2/fx`, `d2/r2`) | 62 | 12 | 50 |
+| round 3 + round 4 named breaks (`r3/new*`, `r4/attack*`) | 58 | 12 | 46 |
+
+Every one of Fable's named breaks refuses: round 3's `b1_else_mut`,
+`b1b_elif_mut`, `b1c_else_coll002`, `b11_destructure_rebind`,
+`b17_unlisted_method`, `b3_index_stmt_assign`; round 4's `y1_interp`,
+`y1b_interp_val`, `y2_unsafe`, `y6_match_expr`, `x24_coll002_interp`. Every
+fixture that DOES fix was A/B'd by running the program before and after, and
+all 13 are byte-identical in output (`a9_f64` 2/2, `a9b_arr` 2/2,
+`a10b_set2_only` [1,2], `a13_nested_if` [1,2], `a1_while_paren` [1,2,3,4],
+`nested` [1,2,3,4], `b18_dom_break_block` [1,2,1,2], `b13_toplevel_fn_clash`
+[1,2], `x23_string_elem` [a,b,c], `x28_early_return` [1,2,3], plus the
+controls).
+
+**The sweep found one more escape the proof was not making.** Four alias
+fixtures were being fixed: `var alias = seen` (`y10_var_alias`) and
+`d["k"] = seen` (`b7_dict_value_alias`, `b7b`, `b7c`). A/B says all four are
+harmless — Simple copies an array on assignment, so `alias.pop()` leaves
+`seen` at `[1,2,3]`, measured. But the proof was not establishing that; it was
+**inheriting** it, and an unstated language assumption is precisely the shape
+that produced the earlier wrong rewrites. If array assignment ever gains
+reference semantics, every one of those four becomes a silent miscompile with
+no spec to catch it.
+
+So it now fails closed, like any other escape:
+
+- `expr_has_unsafe_use` treats the array on the RIGHT of an assignment as an
+  escape (the old rule checked only the assignment TARGET, which is why
+  `d["k"] = seen` was invisible);
+- `stmts_have_unsafe_use` treats a binding whose initializer escapes the name
+  as a use, which covers `var alias = seen`.
+
+All four now refuse; the controls still fix. Covered by
+`collection_certain_fix_safety_spec` e1, e2 and e3 (`val n = seen.len()` binds
+a FRESH value and stays fixable, so the rule is about the array itself and not
+about every binding).

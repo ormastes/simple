@@ -438,3 +438,38 @@ describe "per-site rendering inserts one Dict per declaration":
         val out = applied_all(two_arrays)
         assert_equal(1, out.split("var alpha_set").len() - 1)
         assert_equal(1, out.split("var beta_set").len() - 1)
+
+# ---------------------------------------------------------------------------
+# Aliasing the array into a second binding.
+#
+# Found by re-running the fixture corpus through the real CLI after the
+# per-site and destructuring changes: `var alias = seen` and `d["k"] = seen`
+# were NOT treated as escapes, and a fix was offered. A/B by execution says
+# every one of them is harmless — Simple copies an array on assignment, so
+# `alias.pop()` leaves `seen` at [1,2,3]. That is a language fact this proof
+# would be INHERITING rather than establishing, and an unstated language
+# assumption is the exact shape that produced the earlier wrong rewrites. So
+# it fails closed like any other escape: a bare mention of the array on the
+# right of an assignment, or as a binding's initializer, is a use.
+# ---------------------------------------------------------------------------
+
+describe "handing the array to a second binding is an escape":
+    it "e1: `var alias = seen` refuses, even though it copies today":
+        step("e1: `var alias = seen` refuses, even though it copies today")
+        val var_alias = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        if x == 2:\n            var alias = seen\n            alias.pop()\n    seen\n"
+        assert_false(is_some(fix020(var_alias)))
+
+    it "e2: `d[\"k\"] = seen` refuses too":
+        step("e2: `d[\"k\"] = seen` refuses too")
+        """The array on the RIGHT of an assignment, where the target is an
+        index into something else. The old rule checked only the assignment
+        TARGET, so this was invisible."""
+        val dict_alias = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var d: Dict<text, [i64]> = " + "{" + "}" + "\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        d[\"k\"] = seen\n        d[\"k\"].push(x + 10)\n    seen\n"
+        assert_false(is_some(fix020(dict_alias)))
+
+    it "e3: a reader result may still be bound (non-vacuity)":
+        step("e3: a reader result may still be bound (non-vacuity)")
+        """`val n = seen.len()` binds a FRESH value, not a handle to the
+        array, so it stays fixable — the rule is about the array itself."""
+        val reader_bound = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        val n = seen.len()\n    seen\n"
+        assert_true(is_some(fix020(reader_bound)))

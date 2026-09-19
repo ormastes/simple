@@ -1974,6 +1974,16 @@ fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
                 val base = expr_get_left(target)
                 if base >= 0 and expr_get_tag(base) == EXPR_IDENT and expr_get_str(base) == name:
                     return true
+        # The array on the RIGHT of an assignment — `alias = seen`,
+        # `d["k"] = seen` — hands a second handle to it to something this
+        # proof does not follow. It happens to be harmless in Simple today,
+        # because assignment copies an array: `var alias = seen;
+        # alias.pop()` leaves `seen` untouched, measured. But the proof does
+        # not VERIFY that, it would only be inheriting it, and an unstated
+        # language assumption is exactly the shape that produced the earlier
+        # wrong rewrites. So it fails closed, like any other escape.
+        if expr_escapes_ident(expr_get_right(e), name):
+            return true
         if expr_has_unsafe_use(expr_get_left(e), name, allowed_mutation):
             return true
         return expr_has_unsafe_use(expr_get_right(e), name, allowed_mutation)
@@ -1996,6 +2006,13 @@ fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
 
 fn stmts_have_unsafe_use(stmts: [i64], name: text, allowed_mutation: i64) -> bool:
     for s in real_stmts(stmts):
+        # `var alias = seen` binds a second handle to the array. As with the
+        # right-hand side of an assignment, it is harmless in Simple today
+        # only because assignment copies (measured: `alias.pop()` leaves
+        # `seen` at [1,2,3]) — a language fact this proof inherits rather
+        # than establishes, so it fails closed instead.
+        if coll_stmt_binds(stmt_get_tag(s)) and expr_escapes_ident(stmt_get_expr(s), name):
+            return true
         for e in coll_stmt_child_exprs(s):
             if expr_has_unsafe_use(e, name, allowed_mutation):
                 return true
