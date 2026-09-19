@@ -239,11 +239,22 @@ pub fn collect_fixes_from_source(file_path: String, source: String) -> [EasyFix]
 
     # COLL002/COLL020 Certain fixes: go through the detector-gated entry point
     # so this tool and `simple lint` cannot disagree about whether a shape is
-    # a COLL finding at all. It carries the same `.contains(` perf gate this
-    # call site used to (measured 2.70s -> 3.60s on a COLL-free 251-line file
-    # before that gate existed) and parses only on the files that pass it.
-    for f in collection_certain_fixes(file_path, source):
-        fixes.push(f)
+    # a COLL finding at all (see `collection_certain_fixes`' header).
+    #
+    # The `.contains(` gate stays HERE, at the call site, and not only inside
+    # that function. `collection_certain_fixes` is a `lazy` import: calling it
+    # at all forces the lint/parser frontend to load, so with the gate only
+    # inside, every COLL-free file paid that load (measured on a two-line
+    # COLL-free file: 4.03s / 4.48s, against a 2.68s best for the same file
+    # before this lane). With the gate back at the call site, interleaved
+    # 5-run A/B on this host — noisy, so read the minima — is
+    # COLL-free 2.68s -> 1.77s (no cost, as intended) and COLL-hit
+    # 3.23s -> 3.44s, i.e. ~0.2s for the one extra parse the detector gate
+    # needs. Neither rule's precondition can be met without a `.contains(`
+    # call, so this gate cannot hide a finding.
+    if source.contains(".contains("):
+        for f in collection_certain_fixes(file_path, source):
+            fixes.push(f)
 
     val primitive_api_fixes = check_primitive_api(source, file_path)
     for f in primitive_api_fixes:
