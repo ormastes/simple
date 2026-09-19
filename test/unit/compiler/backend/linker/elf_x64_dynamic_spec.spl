@@ -4,11 +4,10 @@
 # *GOTPLT+16(%rip); nopl`, PLTn `jmpq *slot(%rip); pushq $n; jmp PLT0`),
 # .got.plt ([0] = _DYNAMIC, slots start at PLTn+6), R_X86_64_JUMP_SLOT per
 # PLT entry, R_X86_64_GLOB_DAT for GOT-referenced imports and PT_INTERP
-# /lib64/ld-linux-x86-64.so.2. The build host has no x86_64 glibc/ld.so, so
-# these outputs are validated STRUCTURALLY only (readelf -l -S -d -r and PLT
-# disassembly vs ld.lld on the same inputs, evidence in the lane report).
-# Until an execution proof exists the default elf_link keeps x86_64 dynamic
-# behind a named UnsupportedFeature; elf_link_structural opts in.
+# /lib64/ld-linux-x86-64.so.2, checked structurally against ld.lld on the same
+# inputs. The execution proof (glibc hello, ET_EXEC + PIE, exit 42 under
+# qemu-x86_64) is elf_x64_dynamic_exec_spec (lane C2); that is what lifted the
+# former UnsupportedFeature gate, so the default elf_link produces these.
 #
 # Inputs: test/fixtures/linker/elf/pic_start_x64.o (REX_GOTPCRELX msg at
 # _start+4, PLT32 add_val at _start+0x1f) against libadd_x64.so.1 (ld.lld
@@ -19,7 +18,7 @@
 # @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
 
 use compiler.backend.linker.elf.elf_static_link.{
-    elf_link, elf_link_structural, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+    elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_read_bytes}
@@ -102,23 +101,21 @@ fn request(mode: i64) -> ElfLinkRequest:
         shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
         target: RelocArch.X86_64, mode: mode, interp: INTERP)
 
-fn structural(mode: i64) -> [i64]:
-    val r = elf_link_structural(request(mode))
+fn linked(mode: i64) -> [i64]:
+    val r = elf_link(request(mode))
     if r.is_err():
         print "link error: {r.unwrap_err()}"
         return []
     r.unwrap()
 
-describe "elf_link - x86_64 dynamic gate":
-    it "is a named UnsupportedFeature by default (no execution proof on this host)":
-        val r = elf_link(request(ELF_LINK_DYNAMIC_EXEC))
-        expect(r.is_err()).to_equal(true)
-        expect(r.unwrap_err().contains("UnsupportedFeature")).to_equal(true)
-        expect(r.unwrap_err().contains("x86_64")).to_equal(true)
+describe "elf_link - x86_64 dynamic gate lifted (lane C2)":
+    it "links x86_64 dynamic ET_EXEC and PIE by default":
+        expect(elf_link(request(ELF_LINK_DYNAMIC_EXEC)).is_ok()).to_equal(true)
+        expect(elf_link(request(ELF_LINK_DYNAMIC_PIE)).is_ok()).to_equal(true)
 
-describe "elf_link_structural - x86_64 dynamic ET_EXEC":
+describe "elf_link - x86_64 dynamic ET_EXEC":
     it "has PT_INTERP naming ld-linux-x86-64 and DT_NEEDED libadd_x64.so":
-        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val b = linked(ELF_LINK_DYNAMIC_EXEC)
         expect(b.len() > 64).to_equal(true)
         expect(rd16(b, 16)).to_equal(2)
         expect(rd16(b, 18)).to_equal(62)
@@ -132,7 +129,7 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
         expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, 1))).to_equal("libadd_x64.so")
 
     it "writes ld.lld's lazy PLT0 and PLT1 encodings":
-        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val b = linked(ELF_LINK_DYNAMIC_EXEC)
         val plt = sec_addr(b, ".plt")
         val po = sec_off(b, ".plt")
         val gp = sec_addr(b, ".got.plt")
@@ -153,7 +150,7 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
         expect(plt + 32 + s32(rd32(b, po + 28))).to_equal(plt)
 
     it "seeds .got.plt with _DYNAMIC and the PLT1 push, bound by one JUMP_SLOT":
-        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val b = linked(ELF_LINK_DYNAMIC_EXEC)
         val gpo = sec_off(b, ".got.plt")
         val gp = sec_addr(b, ".got.plt")
         expect(sec_size(b, ".got.plt")).to_equal(32)
@@ -167,7 +164,7 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
         expect(dynsym_name(b, rd32(b, ro + 12))).to_equal("add_val")
 
     it "binds the imported msg through a GLOB_DAT GOT slot (mov kept, not relaxed)":
-        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val b = linked(ELF_LINK_DYNAMIC_EXEC)
         val rd = sec_off(b, ".rela.dyn")
         expect(sec_size(b, ".rela.dyn")).to_equal(24)
         expect(rd64(b, rd)).to_equal(sec_addr(b, ".got"))
@@ -178,14 +175,14 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
         expect(e + 8 + s32(rd32(b, at(b, ".text", e + 4)))).to_equal(sec_addr(b, ".got"))
 
     it "routes the add_val call to PLT1":
-        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val b = linked(ELF_LINK_DYNAMIC_EXEC)
         val e = rd64(b, 24)
         expect(b[at(b, ".text", e + 0x1e)]).to_equal(0xe8)
         expect(e + 0x23 + s32(rd32(b, at(b, ".text", e + 0x1f)))).to_equal(sec_addr(b, ".plt") + 16)
 
-describe "elf_link_structural - x86_64 dynamic PIE":
+describe "elf_link - x86_64 dynamic PIE":
     it "is ET_DYN with DT_FLAGS_1 PIE and the same PLT/GOT shape":
-        val b = structural(ELF_LINK_DYNAMIC_PIE)
+        val b = linked(ELF_LINK_DYNAMIC_PIE)
         expect(rd16(b, 16)).to_equal(3)
         expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
         expect(sec_size(b, ".plt")).to_equal(32)

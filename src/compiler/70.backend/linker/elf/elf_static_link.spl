@@ -20,11 +20,17 @@
 # -> build synthetic contents -> write.
 #
 # Limits (reported as errors, never silently degraded):
-#   - targets: x86_64 and aarch64; x86_64 dynamic outputs only via
-#     elf_link_structural (structural parity with ld.lld, never executed here)
+#   - targets: x86_64 and aarch64 (dynamic glibc exec + PIE run on both:
+#     aarch64 natively, x86_64 under qemu-x86_64 -L <glibc sysroot>)
 #   - no TLS, no COMMON, no copy relocations / canonical PLTs, no text relocs,
-#     no COMDAT dedup, no symbol versioning
-#     (unversioned references bind to the library's default version)
+#     no COMDAT dedup, no locally defined IFUNC (no IRELATIVE),
+#     no property-note merge (they are dropped when the FEATURE_1_AND is 0,
+#     which is ld.lld's own result, and rejected otherwise)
+#   - SHF_MERGE string merging IS supported and on by default (ld.lld -O1;
+#     ElfLinkRequest.string_merge = false is -O0), and section GC IS supported
+#     opt-in through ElfLinkRequest.gc_sections (ld.lld --gc-sections)
+#   - symbol versioning is emitted for what imports NEED (.gnu.version +
+#     .gnu.version_r); this linker defines no versions of its own
 #   - single-threaded; no StageReceipts yet
 
 use compiler.backend.linker.elf_parser.{
@@ -50,6 +56,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64,
     elf_rela_entry, elf_sym_entry, elf_build_dynstr, elf_build_dynsym, elf_hash_size, elf_build_hash,
     elf_gnu_hash_size, elf_build_gnu_hash,
+    elf_versym_size, elf_build_versym, elf_verneed_size, elf_build_verneed,
     elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
     elf_build_plt_x64, elf_build_gotplt_x64,
     elf_build_dynamic, elf_build_interp,
@@ -57,7 +64,9 @@ use compiler.backend.linker.elf.synthetic_sections.{
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
     DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE,
+    DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM,
     SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
+    SHT_GNU_VERSYM_S, SHT_GNU_VERNEED_S,
     GOTPLT_RESERVED
 }
 use compiler.backend.linker.elf.elf_exec_writer.{
@@ -81,6 +90,11 @@ val ET_DYN_T: i64 = 3
 val SHT_SYMTAB_L: i64 = 2
 val SHF_MERGE_L: i64 = 0x10
 val SHF_STRINGS_L: i64 = 0x20
+val VER_NDX_GLOBAL: i64 = 1      # gABI: an import with no version of its own
+val VER_FLG_WEAK: i64 = 2        # vna_flags: the DSO defined this version weak
+val PROPERTY_NOTE: text = ".note.gnu.property"
+val GNU_PROPERTY_AARCH64_FEATURE_1_AND: i64 = 0xc0000000
+val GNU_PROPERTY_X86_FEATURE_1_AND: i64 = 0xc0000002
 
 # ============================================================================
 # Types
@@ -204,6 +218,63 @@ fn elf_out_names(objects: [ElfObject]) -> Result<[[text]], text>:
         oi = oi + 1
     Ok(out)
 
+fn elf_rd_u32(raw: [u8], o: i64) -> i64:
+    (raw[o] as i64) | ((raw[o + 1] as i64) << 8) | ((raw[o + 2] as i64) << 16) | ((raw[o + 3] as i64) << 24)
+
+fn elf_object_property_and(obj: ElfObject) -> i64:
+    """`GNU_PROPERTY_*_FEATURE_1_AND` of this object's `.note.gnu.property`, or 0.
+
+    0 is also the honest answer for an object that has no such note, which is
+    exactly what makes the AND below collapse."""
+    var si: i64 = 0
+    while si < obj.sections.len():
+        if elf_section_name(obj, si) == PROPERTY_NOTE and obj.sections[si].sh_type == SHT_NOTE:
+            val sec = obj.sections[si]
+            var o = sec.sh_addr
+            val end = sec.sh_addr + sec.sh_size
+            var acc: i64 = 0
+            while o + 12 <= end:
+                val namesz = elf_rd_u32(obj.raw, o)
+                val descsz = elf_rd_u32(obj.raw, o + 4)
+                var d = o + 12 + align_up(namesz, 4)
+                val dend = d + descsz
+                while d + 8 <= dend and d + 8 <= end:
+                    val pr_type = elf_rd_u32(obj.raw, d)
+                    val pr_size = elf_rd_u32(obj.raw, d + 4)
+                    if (pr_type == GNU_PROPERTY_AARCH64_FEATURE_1_AND or pr_type == GNU_PROPERTY_X86_FEATURE_1_AND) and pr_size >= 4:
+                        acc = acc | elf_rd_u32(obj.raw, d + 8)
+                    d = d + 8 + align_up(pr_size, 8)
+                o = dend
+            return acc
+        si = si + 1
+    0
+
+fn elf_property_policy(objects: [ElfObject]) -> Result<(), text>:
+    """Ok when the `.note.gnu.property` inputs may be dropped, Err naming why not.
+
+
+    ld.lld ANDs `FEATURE_1_AND` across all inputs, so one object without the
+    note clears the feature bits and the section disappears. This linker does
+    not merge notes or emit `PT_GNU_PROPERTY`, so concatenating the inputs
+    would claim IBT/SHSTK for code never built for it. Drop when the AND is 0
+    (the ld.lld-identical result); reject by name when it is not, rather than
+    emit a note that says something untrue."""
+    var acc: i64 = -1
+    var any: bool = false
+    for obj in objects:
+        val v = elf_object_property_and(obj)
+        if v != 0:
+            any = true
+        if acc < 0:
+            acc = v
+        else:
+            acc = acc & v
+    if not any:
+        return Ok(())
+    if acc != 0:
+        return Err("UnsupportedFeature: .note.gnu.property FEATURE_1_AND is {acc} across all inputs; this linker neither merges property notes nor emits PT_GNU_PROPERTY")
+    Ok(())
+
 # reason: positional placement inputs (objects, liveness, merged-section set)
 fn elf_static_place(objects: [ElfObject], live: [[bool]], merged: ElfMergeSet) -> Result<ElfStaticInputs, text>:
     """Assign every live allocatable input section to a named output section + offset.
@@ -213,7 +284,11 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]], merged: ElfMergeSet) -
     A merged section reserves space only for the first input of its group
     (ld.lld's MergeSyntheticSection, placed where that input would have gone);
     the others record the same offset and contribute no bytes, so an offset
-    inside them is resolved through elf_merge_piece_off."""
+    inside them is resolved through elf_merge_piece_off.
+
+    `.note.gnu.property` inputs are never placed: the only link that reaches
+    here is one elf_property_policy admitted, and it admits exactly the links
+    whose notes must be dropped."""
     var outs: [ElfOutSec] = []
     var sec_out: [[i64]] = []
     var sec_off: [[i64]] = []
@@ -233,7 +308,7 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]], merged: ElfMergeSet) -
         var si: i64 = 0
         while si < obj.sections.len():
             val sec = obj.sections[si]
-            if sec.sh_flags & SHF_ALLOC == 0 or not live[oi][si]:
+            if sec.sh_flags & SHF_ALLOC == 0 or not live[oi][si] or (sec.sh_type == SHT_NOTE and elf_section_name(obj, si) == PROPERTY_NOTE):
                 idxs = idxs.push(-1)
                 offs = offs.push(0)
             else if merged.sec_grp[oi][si] >= 0 and grp_at[merged.sec_grp[oi][si]] >= 0:
@@ -350,21 +425,25 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
             return 1
         if n == ".dynsym":
             return 2
-        if n == ".gnu.hash":
+        if n == ".gnu.version":
             return 3
-        if n == ".hash":
-            return 3
-        if n == ".dynstr":
+        if n == ".gnu.version_r":
             return 4
-        if n == ".rela.dyn":
+        if n == ".gnu.hash":
             return 5
-        if n == ".rela.plt":
+        if n == ".hash":
+            return 5
+        if n == ".dynstr":
             return 6
-        if n == ".rodata":
+        if n == ".rela.dyn":
             return 7
-        if n == ".eh_frame":
+        if n == ".rela.plt":
             return 8
-        return 9
+        if n == ".rodata":
+            return 9
+        if n == ".eh_frame":
+            return 10
+        return 11
     if s.seg == ELF_SEG_RX:
         if n == ".text":
             return 20
@@ -442,12 +521,25 @@ fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:
 # ============================================================================
 
 fn elf_is_synth(name: text) -> bool:
-    name == "_DYNAMIC" or name == "__ehdr_start" or name == "__executable_start" or
+    name == "_DYNAMIC" or name == "_GLOBAL_OFFSET_TABLE_" or name == "__ehdr_start" or name == "__executable_start" or
         name == "__init_array_start" or name == "__init_array_end" or
         name == "__fini_array_start" or name == "__fini_array_end" or
         name == "__preinit_array_start" or name == "__preinit_array_end"
 
-fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>:
+fn elf_got_base(plan: ElfExecPlan, target: RelocArch) -> i64:
+    """Plan index of the section _GLOBAL_OFFSET_TABLE_ points at, or -1.
+    ld.lld: .got.plt on x86_64 (gotBaseSymInGotPlt), .got on aarch64."""
+    if elf_target_is_a64(target):
+        val g = elf_exec_find(plan, ".got")
+        if g >= 0:
+            return g
+        return elf_exec_find(plan, ".got.plt")
+    val gp = elf_exec_find(plan, ".got.plt")
+    if gp >= 0:
+        return gp
+    elf_exec_find(plan, ".got")
+
+fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text, target: RelocArch) -> Result<i64, text>:
     if name == "__ehdr_start" or name == "__executable_start":
         return Ok(base)
     if name == "_DYNAMIC":
@@ -455,6 +547,12 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>
         if d < 0:
             return Err("undefined symbol: _DYNAMIC (output has no .dynamic)")
         return Ok(plan.vaddrs[d])
+    if name == "_GLOBAL_OFFSET_TABLE_":
+        # ld.lld (x86_64 and aarch64): the start of .got.plt, else .got
+        val g = elf_got_base(plan, target)
+        if g < 0:
+            return Err("undefined symbol: _GLOBAL_OFFSET_TABLE_ (output has no .got.plt or .got)")
+        return Ok(plan.vaddrs[g])
     var sec = ".init_array"
     if name.starts_with("__fini_array"):
         sec = ".fini_array"
@@ -473,6 +571,73 @@ fn elf_lib_export(libs: [ElfSharedLib], name: text) -> i64:
         if l.exports.has(name):
             return l.exports[name]
     -1
+
+struct ElfVerPlan:
+    """`.gnu.version` / `.gnu.version_r` contents, by import index."""
+    versym: [i64]        # per import: version index (0 = unversioned)
+    files: [text]        # needed files that supply at least one version
+    names: [[text]]      # per file: version names, in index order
+    idxs: [[i64]]        # per file: the index assigned to each of those names
+    flags: [[i64]]       # per file: vna_flags (VER_FLG_WEAK when the DSO marked it weak)
+    n_aux: i64           # total vernaux entries
+
+fn elf_ver_plan(libs: [ElfSharedLib], imports: [text]) -> ElfVerPlan:
+    """Assign a version index (>=2) to every (file, version) an import needs.
+
+    An import from a library with no versions gets VER_NDX_GLOBAL (1), which
+    is the gABI value and what ld.lld writes (measured: `add_val` from an
+    unversioned DSO is `1 (*global*)` in an output that also needs versioned
+    glibc symbols). Index 0 is VER_NDX_LOCAL and belongs to symbols that are
+    not imports at all.
+
+    Indices are assigned in first-use order and are self-consistent, not a
+    copy of ld.lld's: on aarch64 ours are 2=GLIBC_2.34, 3=GLIBC_2.17 where
+    ld.lld's are reversed. Nothing reads them but this file and ld.so, which
+    follows DT_VERSYM into DT_VERNEED.
+
+    Leaving the section out entirely is what is fatal: ld.so then resolves a
+    versionless reference to the library's version index 2, which on
+    glibc/x86_64 is the GLIBC_2.2.5 compat set, silently binding `realpath`,
+    `memcpy`, `pthread_cond_*` and the rest to their OLD implementations."""
+    var versym: [i64] = []
+    var files: [text] = []
+    var names: [[text]] = []
+    var idxs: [[i64]] = []
+    var flags: [[i64]] = []
+    var key_idx: {text: i64} = {}
+    var file_pos: {text: i64} = {}
+    var next_idx: i64 = 2
+    var n_aux: i64 = 0
+    for n in imports:
+        var file = ""
+        var ver = ""
+        var weak: i64 = 0
+        for l in libs:
+            if file == "" and l.exports.has(n):
+                file = l.soname
+                ver = l.versions[n]
+                if ver != "" and l.version_weak.has(ver) and l.version_weak[ver]:
+                    weak = VER_FLG_WEAK
+        if ver == "":
+            versym = versym.push(VER_NDX_GLOBAL)
+        else:
+            val key = "{file}\n{ver}"
+            if not key_idx.has(key):
+                key_idx[key] = next_idx
+                next_idx = next_idx + 1
+                n_aux = n_aux + 1
+                if not file_pos.has(file):
+                    file_pos[file] = files.len()
+                    files = files.push(file)
+                    names = names.push([])
+                    idxs = idxs.push([])
+                    flags = flags.push([])
+                val fi = file_pos[file]
+                names[fi] = names[fi].push(ver)
+                idxs[fi] = idxs[fi].push(key_idx[key])
+                flags[fi] = flags[fi].push(weak)
+            versym = versym.push(key_idx[key])
+    ElfVerPlan(versym: versym, files: files, names: names, idxs: idxs, flags: flags, n_aux: n_aux)
 
 fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text>:
     """Resolve relocation symbol (oi, sym_idx) to its SYMREF_* kind (placement fields zero)."""
@@ -497,6 +662,19 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text
         if t >= 0:
             return Ok(elf_ref(oi, sym_idx, SYMREF_IMPORT, sym.name, sym.name, t, weak))
         if weak:
+            # POLICY — an undefined weak symbol is NEVER made dynamic here.
+            # It is resolved statically to 0: a GOT slot holds a constant 0
+            # with no dynamic relocation, and an aarch64 branch to it targets
+            # the next instruction. ld.lld instead puts it in .dynsym with an
+            # R_*_GLOB_DAT, so a library loaded later can still supply it.
+            # The difference is observable: `__gmon_start__` (crti.o) is in
+            # ld.lld's .dynsym and absent from ours. It is SAFE for the glibc
+            # startup only because crt1/crti guard the call on the slot being
+            # non-zero, which a constant 0 satisfies. It is NOT safe in
+            # general — any weak symbol a later-loaded object is expected to
+            # define will silently stay 0. Making it dynamic needs the import
+            # to be emitted without a definition and with no version, which
+            # the versioning plan above already supports (versym 0).
             return Ok(elf_ref(oi, sym_idx, SYMREF_WEAK_ZERO, sym.name, sym.name, 0, weak))
         return Err("undefined symbol: {sym.name}")
     if sym.st_shndx == SHN_ABS or sym.st_shndx == SHN_UNDEF:
@@ -560,8 +738,18 @@ fn elf_ref_def(ctx: ElfLinkCtx, r: ElfScanRef) -> ElfRefDef:
     ElfRefDef(obj: r.oi, sec: sym.st_shndx, off: sym.st_value)
 
 fn elf_ref_merged(ctx: ElfLinkCtx, r: ElfScanRef) -> bool:
-    """True when r's symbol lands in a merged section, so elf_ref_addr already
-    folded the addend in (the caller must not add it a second time)."""
+    """True when r's symbol is a SECTION symbol landing in a merged section, so
+    elf_ref_addr already folded the addend in (the caller must not add it twice).
+
+    ld.lld Symbols.cpp getSymVA folds the addend into the piece lookup
+    (`offset += addend` ... `va -= addend`) only under `d.isSection()`. A NAMED
+    symbol is anchored at its own st_value and the addend is applied after the
+    lookup — x86_64 `R_X86_64_PC32 .L.str - 4` against a 13-byte merged string
+    is exactly that case, and folding -4 in would leave the section."""
+    if r.sym_idx == 0 or r.oi < 0:
+        return false
+    if elf_symbol_type(ctx.inputs.objects[r.oi].symbols[r.sym_idx]) != STT_SECTION:
+        return false
     val d = elf_ref_def(ctx, r)
     if d.obj < 0 or d.sec < 0 or d.sec >= ctx.merged.sec_grp[d.obj].len():
         return false
@@ -578,9 +766,10 @@ fn elf_entry_addr(ctx: ElfLinkCtx, lay: ElfLayout, e: SymEntry) -> Result<i64, t
 fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, text>:
     """Link-time value S of a DEFINED / ABS / WEAK_ZERO reference (imports: 0).
 
-    For a symbol in a merged section the addend is part of the piece lookup
-    (ld.lld's `MergeInputSection::getOffset`), so S already covers S + A and
-    elf_ref_merged tells the caller to drop A."""
+    For a SECTION symbol in a merged section the addend is part of the piece
+    lookup (ld.lld's `MergeInputSection::getOffset`), so S already covers S + A
+    and elf_ref_merged tells the caller to drop A. A named symbol in a merged
+    section is anchored on its own piece and keeps its addend."""
     if r.kind == SYMREF_IMPORT or r.kind == SYMREF_WEAK_ZERO or r.sym_idx == 0:
         return Ok(0)
     if elf_ref_merged(ctx, r):
@@ -590,7 +779,7 @@ fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, t
     if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
         if ctx.res.defined.has(sym.name):
             return elf_entry_addr(ctx, lay, ctx.res.defined[sym.name])
-        return elf_synth_addr(lay.plan, lay.base, sym.name)
+        return elf_synth_addr(lay.plan, lay.base, sym.name, ctx.target)
     if sym.st_shndx == SHN_ABS:
         return Ok(sym.st_value)
     if sym.st_shndx == SHN_UNDEF:
@@ -598,7 +787,9 @@ fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, t
     val base = elf_in_vaddr(ctx, lay, r.oi, sym.st_shndx)
     if base < 0:
         return Err("local symbol '{sym.name}' refers to a non-allocatable section {sym.st_shndx}")
-    Ok(base + sym.st_value)
+    # a LOCAL named symbol can still sit in a merged section (clang's .L.str):
+    # anchor it on its own piece, the caller adds the addend (see elf_ref_merged)
+    elf_sec_addr(ctx, lay, r.oi, sym.st_shndx, sym.st_value)
 
 # ============================================================================
 # Checks
@@ -614,6 +805,25 @@ fn elf_static_undefined(objects: [ElfObject], res: SymResolution, libs: [ElfShar
                 if not res.defined.has(sym.name) and not elf_is_synth(sym.name) and elf_lib_export(libs, sym.name) < 0 and not seen.has(sym.name):
                     seen[sym.name] = true
                     out = out.push(sym.name)
+    out
+
+fn elf_local_ifunc(objects: [ElfObject]) -> [text]:
+    """Names of STT_GNU_IFUNC symbols DEFINED in this link.
+
+    A defined IFUNC is not a function address: ld.lld gives it a PLT entry
+    whose .got.plt slot carries R_*_IRELATIVE, so ld.so calls the resolver at
+    startup and stores what it returns. This linker emits no IRELATIVE, so
+    taking the symbol's address would yield the resolver instead — the call
+    would return the resolver's own value (measured rc=192, not 42). An
+    IMPORTED IFUNC is fine: it is a plain JUMP_SLOT, and the library's own
+    ld.so resolves it."""
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    for obj in objects:
+        for sym in obj.symbols:
+            if sym.name != "" and sym.st_shndx != SHN_UNDEF and elf_symbol_type(sym) == 10 and not seen.has(sym.name):
+                seen[sym.name] = true
+                out = out.push(sym.name)
     out
 
 fn elf_static_join(items: [text]) -> text:
@@ -682,6 +892,9 @@ struct ElfDynAddrs:
     rela_dyn: i64
     rela_plt: i64
     gotplt: i64
+    versym: i64
+    verneed: i64
+    verneednum: i64
     init: i64
     fini: i64
     init_array: i64
@@ -719,6 +932,10 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
         t = t.push([DT_SYMTAB, a.dynsym])
         t = t.push([DT_STRSZ, dynstr.data.len()])
         t = t.push([DT_SYMENT, 24])
+        if a.verneednum > 0:
+            t = t.push([DT_VERSYM, a.versym])
+            t = t.push([DT_VERNEED, a.verneed])
+            t = t.push([DT_VERNEEDNUM, a.verneednum])
     if n_rela_dyn > 0:
         t = t.push([DT_RELA, a.rela_dyn])
         t = t.push([DT_RELASZ, n_rela_dyn * 24])
@@ -789,11 +1006,16 @@ fn elf_sym_hidden(sym: ElfSymbol) -> bool:
 fn elf_is_definer(ctx: ElfLinkCtx, oi: i64, sym: ElfSymbol) -> bool:
     sym.st_shndx != SHN_UNDEF and ctx.res.defined.has(sym.name) and ctx.res.defined[sym.name].obj_idx == oi
 
-fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
+fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
     """Header index of the section a linker-defined symbol points into, or -1."""
     if name == "__ehdr_start" or name == "__executable_start":
         return 1
     var sec = ".init_array"
+    if name == "_GLOBAL_OFFSET_TABLE_":
+        val g = elf_got_base(plan, target)
+        if g < 0:
+            return -1
+        return g + 1
     if name == "_DYNAMIC":
         sec = ".dynamic"
     else if name.starts_with("__fini_array"):
@@ -856,9 +1078,9 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         oi = oi + 1
     for n in order:
         if elf_is_synth(n) and not ctx.res.defined.has(n):
-            val sh = elf_synth_shndx(lay.plan, n)
+            val sh = elf_synth_shndx(lay.plan, n, ctx.target)
             if sh > 0:
-                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n)?, 0)
+                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
                 demoted[n] = true
     # ld.lld defines _DYNAMIC (hidden) whenever there is a .dynamic, referenced or not
     val dyn = elf_exec_find(lay.plan, ".dynamic")
@@ -1005,23 +1227,11 @@ fn elf_static_link(objects: [[i64]], archives: [[i64]], entry: text, target: Rel
 
 fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     """Link per req.mode; Err on any link error (never a partial image)."""
-    elf_link_mode(req, false)
-
-fn elf_link_structural(req: ElfLinkRequest) -> Result<[i64], text>:
-    """elf_link that also admits x86_64 dynamic outputs. Those are validated only
-    structurally against ld.lld (readelf -l -S -d -r, PLT disassembly): the build
-    host has no x86_64 ld.so to execute them, so elf_link keeps them behind a
-    named UnsupportedFeature. For specs and parity tooling, not production links."""
-    elf_link_mode(req, true)
-
-fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
     val dynamic = elf_mode_dynamic(mode)
     val pie = elf_mode_pie(mode)
-    if dynamic and not elf_target_is_a64(target) and not structural:
-        return Err("UnsupportedFeature: x86_64 dynamic linking has no execution proof on this build host (no x86_64 glibc / ld-linux-x86-64.so.2); it is validated structurally against ld.lld only (elf_link_structural)")
     if not dynamic and req.shared.len() > 0:
         return Err("shared objects given to a static link")
     if dynamic and req.interp == "":
@@ -1065,10 +1275,25 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
         return Err(elf_static_join(res.errors))
     val undef = elf_static_undefined(all, res, libs)
     if undef.len() > 0:
+        # A `name@VERSION` reference comes from `.symver name, name@VERSION`.
+        # The symbol DOES exist under that version, so "undefined symbol" is a
+        # true refusal with a false reason: what is missing is the explicit
+        # symver form, not the symbol. This linker binds every reference to its
+        # library's DEFAULT version (see elf_ver_plan).
+        var symver: [text] = []
+        for n in undef:
+            if n.contains("@"):
+                symver = symver.push(n)
+        if symver.len() > 0:
+            return Err("UnsupportedFeature: explicit symbol versions (.symver name, name@VERSION) are unsupported; this linker binds references to each library's default version: " + elf_static_join(symver))
         return Err("undefined symbol: " + elf_static_join(undef))
     if not res.defined.has(req.entry):
         return Err("entry symbol not defined: {req.entry}")
+    val ifuncs = elf_local_ifunc(all)
+    if ifuncs.len() > 0:
+        return Err("UnsupportedFeature: locally defined STT_GNU_IFUNC needs an R_*_IRELATIVE relocation, which this linker does not emit: " + elf_static_join(ifuncs))
 
+    elf_property_policy(all)?
     var live = elf_gc_all_live(all)
     if req.gc_sections:
         live = elf_gc_live(all, res, req.entry)?
@@ -1093,16 +1318,21 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
             n_got_rel = n_got_rel + 1
     val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + sc.sym_abs.len()
     val n_rela = [n_rela_dyn, sc.relative.len() + n_got_rel]
+    val ver = elf_ver_plan(libs, sc.imports)
     var strnames: [text] = []
     for l in libs:
         strnames = strnames.push(l.soname)
     for n in sc.imports:
         strnames = strnames.push(n)
+    for vn in ver.names:
+        for v in vn:
+            strnames = strnames.push(v)
     val dynstr0 = elf_build_dynstr(strnames)
     val arrays = [elf_array_size(inputs.outs, ".init_array"), elf_array_size(inputs.outs, ".fini_array"),
         elf_array_size(inputs.outs, ".preinit_array")]
     val zero = ElfDynAddrs(dynsym: 0, dynstr: 0, hash: 0, gnu_hash: 0, rela_dyn: 0, rela_plt: 0, gotplt: 0,
-        init: 0, fini: 0, init_array: 0, fini_array: 0, preinit_array: 0)
+        versym: 0, verneed: 0, verneednum: ver.files.len(), init: 0, fini: 0, init_array: 0, fini_array: 0,
+        preinit_array: 0)
     val ntags = elf_dynamic_tags(ctx, sc, dynstr0, n_rela, zero, arrays).len() + 1
 
     var secs: [ElfOutSec] = []
@@ -1111,6 +1341,9 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     if dynamic:
         secs = secs.push(elf_out_sec(".interp", SHT_PROGBITS_E, SHF_ALLOC, 1, req.interp.len() + 1, ELF_SEG_R))
         secs = secs.push(elf_sec_with(elf_out_sec(".dynsym", SHT_DYNSYM_S, SHF_ALLOC, 8, (sc.imports.len() + 1) * 24, ELF_SEG_R), 24, ".dynstr", 1))
+        if ver.files.len() > 0:
+            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version", SHT_GNU_VERSYM_S, SHF_ALLOC, 2, elf_versym_size(sc.imports.len()), ELF_SEG_R), 2, ".dynsym", 0))
+            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version_r", SHT_GNU_VERNEED_S, SHF_ALLOC, 4, elf_verneed_size(ver.files.len(), ver.n_aux), ELF_SEG_R), 0, ".dynstr", ver.files.len()))
         secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8, elf_gnu_hash_size(0), ELF_SEG_R), 0, ".dynsym", 0))
         secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".dynstr", SHT_STRTAB_E, SHF_ALLOC, 1, dynstr0.data.len(), ELF_SEG_R))
@@ -1232,6 +1465,8 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
         fini_v = elf_entry_addr(ctx, lay, res.defined["_fini"])?
     val addrs = ElfDynAddrs(dynsym: elf_plan_addr(plan, ".dynsym"), dynstr: elf_plan_addr(plan, ".dynstr"), hash: elf_plan_addr(plan, ".hash"), gnu_hash: elf_plan_addr(plan, ".gnu.hash"),
         rela_dyn: elf_plan_addr(plan, ".rela.dyn"), rela_plt: elf_plan_addr(plan, ".rela.plt"), gotplt: gotplt_v,
+        versym: elf_plan_addr(plan, ".gnu.version"), verneed: elf_plan_addr(plan, ".gnu.version_r"),
+        verneednum: ver.files.len(),
         init: init_v, fini: fini_v, init_array: elf_plan_addr(plan, ".init_array"), fini_array: elf_plan_addr(plan, ".fini_array"),
         preinit_array: elf_plan_addr(plan, ".preinit_array"))
 
@@ -1251,6 +1486,10 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
             out = out.push(elf_build_gnu_hash([], sc.imports.len() + 1))
         else if n == ".hash":
             out = out.push(elf_build_hash(sc.imports))
+        else if n == ".gnu.version":
+            out = out.push(elf_build_versym(ver.versym))
+        else if n == ".gnu.version_r":
+            out = out.push(elf_build_verneed(ver.files, ver.names, ver.idxs, ver.flags, dynstr0))
         else if n == ".dynstr":
             out = out.push(dynstr0.data)
         else if n == ".rela.dyn":
@@ -1286,6 +1525,7 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
 # ============================================================================
 
 export ElfStaticInputs, ElfLinkRequest
-export elf_static_link, elf_link, elf_link_structural
+export elf_static_link, elf_link
+export ElfVerPlan, elf_ver_plan, elf_local_ifunc, elf_property_policy, elf_object_property_and
 export ELF_STATIC_BASE
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE

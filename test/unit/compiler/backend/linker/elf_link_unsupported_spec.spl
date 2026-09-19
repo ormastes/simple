@@ -1,0 +1,231 @@
+# Internal ELF linker: the gaps that must be REJECTED BY NAME — lane C2
+#
+# Lifting the x86_64 dynamic gate makes three pre-existing holes reachable, and
+# each one produced a silently wrong binary rather than an error:
+#
+#   1. A locally defined STT_GNU_IFUNC needs an R_*_IRELATIVE relocation so
+#      ld.so calls the resolver. Without one the symbol's address is the
+#      resolver itself: `ifunc.c` returned 192, where ld.lld gives 42.
+#   2. An x86_64 GOTTPOFF (type 22) fell through to the shared-library `else`
+#      branch and was reported as needing "a copy relocation or canonical PLT;
+#      recompile with -fPIC" — a diagnosis unrelated to the real gap (TLS).
+#   3. `.note.gnu.property` inputs were concatenated, so an output claimed
+#      IBT/SHSTK for code never built for it. ld.lld ANDs FEATURE_1_AND across
+#      all inputs, which is 0 as soon as one object has no note, and drops the
+#      section. This linker does the same, and rejects a non-zero AND because
+#      it emits no PT_GNU_PROPERTY.
+#
+# Host requirement: none for the reject paths (they run before any execution).
+# The IFUNC and property fixtures need the x86_64 sysroot's crt objects, so
+# those scenarios skip by name without it.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC,
+    elf_local_ifunc, elf_property_policy, elf_object_property_and, elf_ver_plan
+}
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
+use compiler.backend.linker.elf.reloc_scan.{
+    ElfScanRef, elf_reloc_scan, elf_reloc_class, elf_reloc_is_tls,
+    ELF_LINK_DYNAMIC_EXEC as SCAN_DYNAMIC_EXEC,
+    SYMREF_IMPORT, RC_TLS, RC_GOT, RC_NONE
+}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.spec.decorators.{skip_if}
+use std.io_runtime.{file_read_bytes, file_exists, env_get}
+
+val FIX: text = "test/fixtures/linker/elf"
+val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn sysroot() -> text:
+    val env = env_get("SIMPLE_X64_SYSROOT") ?? ""
+    if env != "":
+        return env
+    "{env_get(\"HOME\") ?? \"\"}/.cache/x64-sysroot/root"
+
+fn libdir() -> text:
+    "{sysroot()}/usr/lib/x86_64-linux-gnu"
+
+fn sysroot_missing() -> bool:
+    not file_exists("{libdir()}/crt1.o") or not file_exists("{libdir()}/crti.o") or
+        not file_exists("{libdir()}/libc.so.6")
+
+val needs_sysroot = skip_if(fn(): sysroot_missing(), "x64-sysroot-missing: no x86_64 glibc crt objects under SIMPLE_X64_SYSROOT (see elf_x64_dynamic_exec_spec header)")
+
+fn link_x64(obj: text) -> Result<[i64], text>:
+    val objs = [load_path("{libdir()}/crt1.o"), load_path("{libdir()}/crti.o"),
+        load_path("{FIX}/{obj}"), load_path("{libdir()}/crtn.o")]
+    elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [file_read_bytes("{libdir()}/libc.so.6")],
+        entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+
+# One relocation of type rtype against an imported symbol, as the driver builds it.
+fn import_ref(rtype: i64, target: RelocArch) -> ElfScanRef:
+    ElfScanRef(oi: 0, sym_idx: 1, out_sec: 0, out_off: 4, writable: false, rtype: rtype,
+        rclass: elf_reloc_class(target, rtype), kind: SYMREF_IMPORT, key: "tls_counter",
+        name: "tls_counter", stype: 6, weak: false, addend: -4, relax: false)
+
+describe "elf_link - locally defined IFUNC":
+    needs_sysroot("rejects it by name instead of using the resolver's address", fn():
+        print "scenario: rejects it by name instead of using the resolver's address"
+        val r = link_x64("ifunc_x64.o")
+        expect(r.is_err()).to_equal(true)
+        val e = r.unwrap_err()
+        expect(e.contains("UnsupportedFeature")).to_equal(true)
+        expect(e.contains("IFUNC")).to_equal(true)
+        expect(e.contains("IRELATIVE")).to_equal(true)
+        expect(e.contains("f")).to_equal(true)
+    )
+
+    it "names every defined IFUNC symbol in the inputs":
+        val obj = elf_parse_object(load_path("{FIX}/ifunc_x64.o"))
+        expect(obj.is_ok()).to_equal(true)
+        val names = elf_local_ifunc([obj.unwrap()])
+        expect(names).to_equal(["f"])
+
+    it "leaves an object with no IFUNC alone":
+        val obj = elf_parse_object(load_path("{FIX}/hello_libc_x64.o"))
+        expect(elf_local_ifunc([obj.unwrap()]).len()).to_equal(0)
+
+describe "reloc_scan - TLS relocations are reported as TLS":
+    it "classifies x86_64 GOTTPOFF/TLSGD/TLSDESC and aarch64 TLS types as RC_TLS":
+        expect(elf_reloc_class(RelocArch.X86_64, 22)).to_equal(RC_TLS)   # GOTTPOFF
+        expect(elf_reloc_class(RelocArch.X86_64, 19)).to_equal(RC_TLS)   # TLSGD
+        expect(elf_reloc_class(RelocArch.X86_64, 36)).to_equal(RC_TLS)   # TLSDESC
+        expect(elf_reloc_is_tls(RelocArch.AArch64, 541)).to_equal(true)  # TLSIE_*
+        expect(elf_reloc_is_tls(RelocArch.AArch64, 1030)).to_equal(true) # TLS_TPREL
+        # neighbours that are NOT TLS keep their class
+        expect(elf_reloc_is_tls(RelocArch.X86_64, 9)).to_equal(false)    # GOTPCREL
+        expect(elf_reloc_class(RelocArch.X86_64, 9)).to_equal(RC_GOT)
+        expect(elf_reloc_is_tls(RelocArch.AArch64, 311)).to_equal(false) # ADR_GOT_PAGE
+        expect(elf_reloc_class(RelocArch.AArch64, 0)).to_equal(RC_NONE)
+
+    it "rejects a GOTTPOFF naming TLS, never a copy relocation or -fPIC":
+        val r = elf_reloc_scan([import_ref(22, RelocArch.X86_64)], RelocArch.X86_64, SCAN_DYNAMIC_EXEC)
+        expect(r.is_err()).to_equal(true)
+        val e = r.unwrap_err()
+        expect(e.contains("UnsupportedFeature")).to_equal(true)
+        expect(e.contains("TLS")).to_equal(true)
+        expect(e.contains("tls_counter")).to_equal(true)
+        expect(e.contains("copy relocation")).to_equal(false)
+        expect(e.contains("-fPIC")).to_equal(false)
+
+    it "rejects an aarch64 TLS relocation the same way":
+        val r = elf_reloc_scan([import_ref(541, RelocArch.AArch64)], RelocArch.AArch64, SCAN_DYNAMIC_EXEC)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("TLS")).to_equal(true)
+
+describe "elf_link - .note.gnu.property":
+    needs_sysroot("reads FEATURE_1_AND out of a crt object's property note", fn():
+        print "scenario: reads FEATURE_1_AND out of a crt object's property note"
+        val crt1 = elf_parse_object(load_path("{libdir()}/crt1.o"))
+        expect(crt1.is_ok()).to_equal(true)
+        expect(elf_object_property_and(crt1.unwrap()) != 0).to_equal(true)
+        # a clang object built without -fcf-protection carries no such note
+        val hello = elf_parse_object(load_path("{FIX}/hello_libc_x64.o"))
+        expect(elf_object_property_and(hello.unwrap())).to_equal(0)
+    )
+
+    needs_sysroot("drops the notes when the AND across all inputs is 0, as ld.lld does", fn():
+        print "scenario: drops the notes when the AND across all inputs is 0, as ld.lld does"
+        val objs = [elf_parse_object(load_path("{libdir()}/crt1.o")).unwrap(),
+            elf_parse_object(load_path("{FIX}/hello_libc_x64.o")).unwrap()]
+        val p = elf_property_policy(objs)
+        expect(p.is_ok()).to_equal(true)
+    )
+
+    needs_sysroot("rejects by name when the AND is non-zero (no PT_GNU_PROPERTY here)", fn():
+        print "scenario: rejects by name when the AND is non-zero (no PT_GNU_PROPERTY here)"
+        val objs = [elf_parse_object(load_path("{libdir()}/crt1.o")).unwrap(),
+            elf_parse_object(load_path("{libdir()}/crti.o")).unwrap()]
+        val p = elf_property_policy(objs)
+        expect(p.is_err()).to_equal(true)
+        val e = p.unwrap_err()
+        expect(e.contains("UnsupportedFeature")).to_equal(true)
+        expect(e.contains(".note.gnu.property")).to_equal(true)
+        expect(e.contains("PT_GNU_PROPERTY")).to_equal(true)
+    )
+
+    needs_sysroot("emits no .note.gnu.property in the linked glibc hello", fn():
+        print "scenario: emits no .note.gnu.property in the linked glibc hello"
+        val r = link_x64("hello_libc_x64.o")
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        # walk the section header names: the property note must be absent
+        val shoff = (b[0x28] & 0xff) | ((b[0x29] & 0xff) << 8) | ((b[0x2a] & 0xff) << 16)
+        val shnum = (b[0x3c] & 0xff) | ((b[0x3d] & 0xff) << 8)
+        val shstr = shoff + (((b[0x3e] & 0xff) | ((b[0x3f] & 0xff) << 8)) * 64)
+        val stroff = (b[shstr + 24] & 0xff) | ((b[shstr + 25] & 0xff) << 8) | ((b[shstr + 26] & 0xff) << 16)
+        var found: i64 = 0
+        var i: i64 = 0
+        while i < shnum:
+            val h = shoff + i * 64
+            val no = stroff + ((b[h] & 0xff) | ((b[h + 1] & 0xff) << 8) | ((b[h + 2] & 0xff) << 16))
+            var name = ""
+            var k = no
+            while b[k] != 0:
+                name = name + "{b[k]}."
+                k = k + 1
+            # ".note.gnu.property" as the same dotted byte sequence
+            var want = ""
+            for ch in ".note.gnu.property".bytes():
+                want = want + "{ch as i64}."
+            if name == want:
+                found = found + 1
+            i = i + 1
+        expect(found).to_equal(0)
+    )
+
+describe "elf_ver_plan - version index assignment":
+    needs_sysroot("gives an import from an unversioned library VER_NDX_GLOBAL (1)", fn():
+        print "scenario: gives an import from an unversioned library VER_NDX_GLOBAL (1)"
+        # libadd_x64.so.1 has no .gnu.version_d, so its exports carry no version.
+        # ld.lld writes 1 (*global*) for such an import, measured on a link that
+        # also needs versioned glibc symbols; 0 is VER_NDX_LOCAL and is for
+        # symbols that are not imports at all.
+        val libadd = elf_parse_shared(file_read_bytes("{FIX}/libadd_x64.so.1"))
+        expect(libadd.is_ok()).to_equal(true)
+        val libc = elf_parse_shared(file_read_bytes("{libdir()}/libc.so.6"))
+        val plan = elf_ver_plan([libadd.unwrap(), libc.unwrap()], ["add_val", "puts"])
+        expect(plan.versym[0]).to_equal(1)          # unversioned -> VER_NDX_GLOBAL
+        expect(plan.versym[1]).to_equal(2)          # first version needed
+        expect(plan.files).to_equal(["libc.so.6"])  # no verneed for the unversioned DSO
+        expect(plan.n_aux).to_equal(1)
+        expect(plan.flags[0]).to_equal([0])         # GLIBC_2.2.5 is not VER_FLG_WEAK
+    )
+
+    needs_sysroot("assigns one index per (file, version) in first-use order", fn():
+        print "scenario: assigns one index per (file, version) in first-use order"
+        val libc = elf_parse_shared(file_read_bytes("{libdir()}/libc.so.6")).unwrap()
+        # realpath -> GLIBC_2.3, puts -> GLIBC_2.2.5, exit -> GLIBC_2.2.5 (shared index)
+        val plan = elf_ver_plan([libc], ["realpath", "puts", "exit"])
+        expect(plan.versym).to_equal([2, 3, 3])
+        expect(plan.n_aux).to_equal(2)
+        expect(plan.names[0]).to_equal(["GLIBC_2.3", "GLIBC_2.2.5"])
+        expect(plan.idxs[0]).to_equal([2, 3])
+    )
+
+describe "elf_link - explicit symbol versions":
+    needs_sysroot("refuses .symver name@VERSION by name, not as an undefined symbol", fn():
+        print "scenario: refuses .symver name@VERSION by name, not as an undefined symbol"
+        val r = link_x64("symver_x64.o")
+        expect(r.is_err()).to_equal(true)
+        val e = r.unwrap_err()
+        expect(e.contains("UnsupportedFeature")).to_equal(true)
+        expect(e.contains(".symver")).to_equal(true)
+        expect(e.contains("default version")).to_equal(true)
+        expect(e.contains("realpath@GLIBC_2.2.5")).to_equal(true)
+        # the old message claimed the symbol did not exist, which is false
+        expect(e.starts_with("undefined symbol")).to_equal(false)
+    )

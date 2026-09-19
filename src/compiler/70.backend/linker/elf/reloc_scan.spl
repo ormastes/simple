@@ -51,8 +51,28 @@ val RC_PCREL: i64 = 3        # PC-/page-relative (incl. the :lo12: half of ADRP 
 val RC_BRANCH: i64 = 4       # call/jump that may go through a PLT
 val RC_GOT: i64 = 5          # GOT-indirect, not relaxable
 val RC_GOT_RELAX: i64 = 6    # x86_64 GOTPCRELX / REX_GOTPCRELX
+val RC_TLS: i64 = 7          # thread-local storage (TLSGD/TLSLD/IE/LE/TLSDESC)
+
+fn elf_reloc_is_tls(target: RelocArch, rtype: i64) -> bool:
+    """A thread-local-storage relocation, on either target.
+
+    Classified separately so it is REPORTED as TLS. Before this, x86_64
+    GOTTPOFF (22) fell through to RC_PCREL and then to the shared-library
+    branch's else, which told the user to "recompile with -fPIC" for a copy
+    relocation — a diagnosis with nothing to do with the real gap."""
+    match target:
+        case X86_64:
+            # DTPMOD64/DTPOFF64/TPOFF64, TLSGD/TLSLD/DTPOFF32/GOTTPOFF/TPOFF32,
+            # GOTPC32_TLSDESC/TLSDESC_CALL/TLSDESC
+            (rtype >= 16 and rtype <= 23) or (rtype >= 34 and rtype <= 36)
+        case _:
+            # aarch64 TLS descriptor/GD/IE/LE statics and the TLS dynamic types
+            (rtype >= 512 and rtype <= 573) or (rtype >= 580 and rtype <= 582) or
+                (rtype >= 1028 and rtype <= 1031)
 
 fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
+    if elf_reloc_is_tls(target, rtype):
+        return RC_TLS
     match target:
         case X86_64:
             if rtype == 0:
@@ -156,6 +176,8 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
         if c == RC_NONE:
             j = j + 1
             continue
+        if c == RC_TLS:
+            return Err("UnsupportedFeature: TLS relocation: {elf_reloc_what(r)} (no TLS support: no .tdata/.tbss, no PT_TLS, no TLSDESC/TPREL)")
         if r.kind == SYMREF_IMPORT:
             if not import_idx.has(r.name):
                 imports = imports.push(r.name)
@@ -207,7 +229,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
 # ============================================================================
 
 export ElfScanRef, ElfScan
-export elf_reloc_scan, elf_reloc_class, elf_target_is_a64, elf_x86_can_relax, elf_mode_pie, elf_mode_dynamic
+export elf_reloc_scan, elf_reloc_class, elf_reloc_is_tls, elf_target_is_a64, elf_x86_can_relax, elf_mode_pie, elf_mode_dynamic
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
-export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX
+export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS

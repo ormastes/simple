@@ -15,12 +15,15 @@
 # restored (`git checkout --`) after every mutation, whether the spec caught
 # it or not.
 #
-# Mutation table (7 rows; see MUTATIONS below): archive-closure fixpoint
+# Mutation table (11 rows; see MUTATIONS below): archive-closure fixpoint
 # iteration, AArch64 CALL26 branch-range reject, ELF strong-duplicate-symbol
 # reject, the shared SMF relocation oracle's i32-range reject, the runtime
 # loader's use of that oracle (reject vs. silent truncation), the
 # `SIMPLE_LINKER=internal` -> `UnsupportedFeature` rejection, and the
-# `Bounded` link-policy `job_memory_limit_bytes > 0` requirement.
+# `Bounded` link-policy `job_memory_limit_bytes > 0` requirement, and four
+# lane-C2 rows: the .gnu.version index an import needs, the locally defined
+# IFUNC reject, the .note.gnu.property non-zero-AND reject, and the TLS
+# relocation classification.
 #
 # Deliberately EXCLUDED (not a vacuous gate — a documented absence): "drop
 # KEEP/GC-root handling" from the research list has no target in this tree.
@@ -86,6 +89,10 @@ smf_reloc_oracle_out_of_range_ok|src/compiler/70.backend/linker/gpu_smf/smf_relo
 loader_reloc_value_bypass_reject|src/compiler/99.loader/module_loader_compat.spl|if computed.ok:|if true:|test/01_unit/compiler/loader/loader_reloc_oracle_spec.spl|do_real_spec_run
 simple_linker_internal_no_longer_errors|src/compiler/70.backend/linker/mold.spl|return Err("internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf")|return Ok("internal")|test/01_unit/compiler/backend/linker/link_engine_external_spec.spl|do_real_spec_run
 link_policy_bounded_limit_zero_accepted|src/lib/common/linker/link_policy_v1.spl|if is_bounded and policy.job_memory_limit_bytes == 0:|if false:|test/01_unit/lib/common/linker/link_policy_v1_spec.spl|do_real_spec_run
+versym_index_always_zero|src/compiler/70.backend/linker/elf/elf_static_link.spl|versym = versym.push(key_idx\[key\])|versym = versym.push(0)|test/01_unit/compiler/backend/linker/elf_x64_dynamic_exec_spec.spl|do_real_spec_run
+local_ifunc_no_longer_rejected|src/compiler/70.backend/linker/elf/elf_static_link.spl|if ifuncs.len() > 0:|if false:|test/01_unit/compiler/backend/linker/elf_link_unsupported_spec.spl|do_real_spec_run
+property_note_nonzero_and_accepted|src/compiler/70.backend/linker/elf/elf_static_link.spl|if acc != 0:|if false:|test/01_unit/compiler/backend/linker/elf_link_unsupported_spec.spl|do_real_spec_run
+tls_reloc_not_classified|src/compiler/70.backend/linker/elf/reloc_scan.spl|if elf_reloc_is_tls(target, rtype):|if false:|test/01_unit/compiler/backend/linker/elf_link_unsupported_spec.spl|do_real_spec_run
 '
 
 do_real_spec_run() {
@@ -205,9 +212,25 @@ run_all_mutations() {
     return 0
 }
 
+# --- host preconditions -------------------------------------------------------
+# Four rows (the lane-C2 ones) drive specs whose scenarios skip themselves
+# without an x86_64 glibc sysroot. A skipped scenario cannot fail, so on such a
+# host the mutation would look VACUOUS — indistinguishable from a gate that has
+# genuinely stopped protecting. That is exactly the silent stop this check
+# exists to prevent, so the absence of the sysroot is an ERROR ("nothing was
+# checked" for those rows), never a pass and never a vacuity claim.
+X64_SYSROOT="${SIMPLE_X64_SYSROOT:-$HOME/.cache/x64-sysroot/root}"
+require_x64_sysroot() {
+    for f in crt1.o crti.o crtn.o libc.so.6; do
+        [ -f "$X64_SYSROOT/usr/lib/x86_64-linux-gnu/$f" ] || die_error \
+            "rows versym_index_always_zero, local_ifunc_no_longer_rejected, property_note_nonzero_and_accepted and tls_reloc_not_classified drive specs that SKIP without an x86_64 glibc sysroot, so their mutations could not be distinguished from vacuous gates: $X64_SYSROOT/usr/lib/x86_64-linux-gnu/$f is missing (build it per test/fixtures/linker/elf/RECIPE.md, or point SIMPLE_X64_SYSROOT at one)"
+    done
+}
+
 # --- real dispatch ------------------------------------------------------------
 run_real_check() {
     command -v git >/dev/null 2>&1 || die_error "git is not on PATH"
+    require_x64_sysroot
     [ -x "$SIMPLE_BIN" ] || [ -f "$SIMPLE_BIN" ] \
         || die_error "SIMPLE_BIN '$SIMPLE_BIN' does not exist (override with MUTATION_GATE_SIMPLE_BIN)"
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
