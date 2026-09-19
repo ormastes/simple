@@ -428,3 +428,8 @@ name) still needs a field on that struct, which is lane A7's file. Keying the
 All 27 linker specs re-run individually at `cc758db2ea5` (the round-3 SONAME
 dedup): 27/27 `outcome=OK`, 0 failed. The only later commit, `d2a5ba6fc98`, is
 comment-only.
+
+Verified under real concurrency rather than by inspection: both trees' copies
+of `native_linking_internal_spec` run at the same time now give
+`outcome=OK ... passed=21 failed=0` and rc 0, where the fixed `/tmp` names had
+each run linking over the other's binary mid-assertion.
