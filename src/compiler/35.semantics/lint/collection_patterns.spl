@@ -41,14 +41,33 @@ use compiler.core.ast_expr.{
     EXPR_COMPOUND_ASSIGN, EXPR_SLICE, EXPR_STRING_LIT,
     EXPR_INTERPOLATED_STRING, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_DICT_LIT,
     EXPR_UNARY, EXPR_LAMBDA, EXPR_CALL,
-    expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts
+    expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts,
+    expr_get_float, expr_get_arg_names,
+    expr_get_span, expr_child_exprs, expr_child_stmts, expr_child_arms,
+    EXPR_FLOAT_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_RANGE, EXPR_TUPLE,
+    EXPR_STRUCT_LIT, EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST,
+    EXPR_UNIT, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
+    EXPR_SUFFIXED_LIT, EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_DO_BLOCK,
+    EXPR_ATOM, EXPR_SPREAD, EXPR_EXISTS_CHECK, EXPR_FORCE_UNWRAP, EXPR_TRY,
+    EXPR_NEW, EXPR_LIST_COMP, EXPR_DICT_COMP, EXPR_ARRAY_REPEAT,
+    EXPR_UNSAFE_BLOCK, EXPR_BLOCK, EXPR_MATCH, EXPR_IF, EXPR_RETURN,
+    EXPR_BREAK, EXPR_CONTINUE
 }
-use compiler.core.types.{TYPE_TEXT, TYPE_DICT, TYPE_DICT_BASE, TYPE_TUPLE_BASE}
+use compiler.core.types.{
+    TYPE_TEXT, TYPE_DICT, TYPE_DICT_BASE, TYPE_TUPLE_BASE,
+    span_line, span_col, span_is_valid
+}
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_RETURN,
-    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body, stmt_get_type
+    STMT_BREAK, STMT_CONTINUE, STMT_MATCH, STMT_DEFER, STMT_ERRDEFER,
+    STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIND,
+    STMT_LAZY_VAL_DECL, STMT_GPU_LAUNCH,
+    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body, stmt_get_type,
+    stmt_get_span, stmt_get_if_single_else,
+    arm_get_pattern, arm_get_guard, arm_get_body, elif_get_else
 }
+use compiler.core.ast_traversal.{flat_stmt_child_exprs, flat_decl_child_decls}
 use compiler.core.ast.{
     DECL_FN, DECL_VAR, decl_get_tag, decl_get_name, decl_get_body,
     decl_get_param_names, decl_get_param_types
@@ -65,18 +84,117 @@ struct CollectionLintWarning:
     message: text
     hint: text
     item_name: text
+    # 1-based source position of the offending AST node, or 0 when this rule
+    # has no node carrying a real span (see `coll_span_line` below). A caller
+    # must treat 0 as "unknown" and fall back to its own location recovery,
+    # never print it as line 0.
+    line: i64
+    column: i64
 
     fn fmt() -> text:
         "[{self.code}] {self.severity}: {self.message} in '{self.item_name}' — {self.hint}"
+
+# ----------------------------------------------------------------------------
+# Source positions for COLL diagnostics
+#
+# Until 2026-09-19 every COLL finding was reported at `<file>:1:0` — not a
+# hardcoded constant, but the enclosing function's declaration line recovered
+# by text scan in entry_and_fixes.spl, which for a one-function fixture IS
+# line 1, with the column always literally 0. An LLM (the audience this rule
+# family was built for) cannot act on that.
+#
+# The AST does carry real positions, but only on SOME nodes, and the obvious
+# guard for "is this a real span" is wrong:
+#   * `span_is_valid(0)` returns TRUE (types.spl: `span_id >= 0 and span_id <
+#     pool.len()`), because span id 0 is a genuine pool slot holding whatever
+#     the first allocation of the run recorded. The parser also passes 0 as
+#     its "no span" default, so id 0 is ambiguous and reading it yields a
+#     position from an unrelated part of the file (measured: every unspanned
+#     node reported line 2, col 23 for a fixture whose first span happened to
+#     be there).
+#   * Measured on the arena AST: EXPR_METHOD_CALL, EXPR_SLICE and STMT_IF
+#     carry real spans; EXPR_IDENT and most other statement tags carry 0.
+# So: positive span ids only, and anchor each rule on a node that has one
+# (the offending call, or the guard `if`), falling back to 0 = unknown.
+fn coll_span_line(span_id: i64) -> i64:
+    if span_id > 0 and span_is_valid(span_id):
+        return span_line(span_id)
+    0
+
+fn coll_span_col(span_id: i64) -> i64:
+    if span_id > 0 and span_is_valid(span_id):
+        return span_col(span_id)
+    0
+
+# Best positive span reachable from `e` without leaving the offending
+# expression: the node's own span, else its receiver/left operand's.
+fn expr_anchor_span(e: i64) -> i64:
+    if e < 0:
+        return 0
+    val own = expr_get_span(e)
+    if own > 0:
+        return own
+    val left = expr_get_left(e)
+    if left >= 0:
+        val left_span = expr_get_span(left)
+        if left_span > 0:
+            return left_span
+    0
+
+fn stmt_anchor_span(s: i64) -> i64:
+    if s < 0:
+        return 0
+    val own = stmt_get_span(s)
+    if own > 0:
+        return own
+    expr_anchor_span(stmt_get_expr(s))
+
+fn coll_warning(
+    code: text, severity: text, message: text, hint: text, item_name: text, span_id: i64
+) -> CollectionLintWarning:
+    CollectionLintWarning(
+        code: code,
+        severity: severity,
+        message: message,
+        hint: hint,
+        item_name: item_name,
+        line: coll_span_line(span_id),
+        column: coll_span_col(span_id)
+    )
 
 # ============================================================================
 # Main Entry Point
 # ============================================================================
 
+# Every declaration these rules should inspect, with nested ones flattened in.
+#
+# Each rule below walks the module's declarations and acts on `DECL_FN`. A
+# `fn` inside a `class` or `impl` is NOT one of those — it is a child of the
+# enclosing declaration — so until now every COLL rule was silent on method
+# bodies. In this codebase most real logic lives in methods, so that was not a
+# corner: it made the whole family blind to the majority of the code it exists
+# to check. Measured on a 52-file sample it accounted for 2 missed dedup
+# sites, but the sample is mostly free functions and under-represents it.
+#
+# `flat_decl_child_decls` is the arena's own nested-declaration contract
+# (`DECL_IMPL` / `DECL_CLI` bodies, and a trait `DECL_STRUCT` body), so this
+# neither invents a traversal nor has to enumerate container kinds itself: a
+# container added later is picked up by fixing that one function. The walk is
+# depth-bounded by the tree and every declaration is yielded exactly once, so
+# a rule that filters for `DECL_FN` sees each function body once whatever its
+# nesting.
+fn coll_all_decls(decl_indices: [i64]) -> [i64]:
+    var out: [i64] = []
+    for idx in decl_indices:
+        out.push(idx)
+        for nested in coll_all_decls(flat_decl_child_decls(idx)):
+            out.push(nested)
+    out
+
 fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
 
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -211,6 +329,22 @@ fn check_expr_for_loops(e: i64, fn_name: text, text_vars: [text]) -> [Collection
 # Loop Body Pattern Checks
 # ============================================================================
 
+# True when a `.contains(` receiver is a name known to hold TEXT. On text
+# `.contains` is a SUBSTRING search, not an O(n) element scan, so COLL002 does
+# not apply and a rewrite to a membership Dict would change behaviour.
+# Measured in the real tree: `val alphabet = "0123456789abcdef"` at
+# `src/compiler/80.driver/driver_build/incremental.spl:308` was reported. The
+# positive form had this defect already; the negated-filter widening added a
+# second way in. `check_loop_body` was already being handed `text_vars` for
+# COLL001's sake and simply was not consulting it here.
+fn contains_receiver_is_text(call: i64, text_vars: [text]) -> bool:
+    if call < 0:
+        return false
+    val recv = expr_get_left(call)
+    if recv < 0 or expr_get_tag(recv) != EXPR_IDENT:
+        return false
+    name_in_list(text_vars, expr_get_str(recv))
+
 fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
 
@@ -224,31 +358,25 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
             val e = stmt_get_expr(s)
             if e >= 0:
                 if is_concat_assign_expr(e):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL001",
-                        severity: "CRITICAL",
-                        message: "array concat in loop (O(n^2))",
-                        hint: "use .push() instead of arr = arr + [x]",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL001", "CRITICAL",
+                        "array concat in loop (O(n^2))",
+                        "use .push() instead of arr = arr + [x]",
+                        fn_name, stmt_anchor_span(s)))
                 # COLL006: str = str + x in loop (non-array RHS)
                 if is_string_concat_assign_expr(e, text_vars):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL006",
-                        severity: "CRITICAL",
-                        message: "string concat in loop (O(n^2))",
-                        hint: "use StringBuilder instead of str = str + x",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL006", "CRITICAL",
+                        "string concat in loop (O(n^2))",
+                        "use StringBuilder instead of str = str + x",
+                        fn_name, stmt_anchor_span(s)))
                 # COLL007: arr = arr[0..arr.len()-1] (array rebuild to pop)
                 if is_array_rebuild_pop(e):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL007",
-                        severity: "HIGH",
-                        message: "array rebuild to remove last element (O(n))",
-                        hint: "use .pop() instead of rebuilding array",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL007", "HIGH",
+                        "array rebuild to remove last element (O(n))",
+                        "use .pop() instead of rebuilding array",
+                        fn_name, stmt_anchor_span(s)))
 
         # Check expression statements
         if tag == STMT_EXPR:
@@ -256,62 +384,68 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
             if e >= 0:
                 # COLL001 via expression-level assign
                 if is_concat_assign_expr(e):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL001",
-                        severity: "CRITICAL",
-                        message: "array concat in loop (O(n^2))",
-                        hint: "use .push() instead of arr = arr + [x]",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL001", "CRITICAL",
+                        "array concat in loop (O(n^2))",
+                        "use .push() instead of arr = arr + [x]",
+                        fn_name, expr_anchor_span(e)))
                 # COLL006 via expression-level assign
                 if is_string_concat_assign_expr(e, text_vars):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL006",
-                        severity: "CRITICAL",
-                        message: "string concat in loop (O(n^2))",
-                        hint: "use StringBuilder instead of str = str + x",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL006", "CRITICAL",
+                        "string concat in loop (O(n^2))",
+                        "use StringBuilder instead of str = str + x",
+                        fn_name, expr_anchor_span(e)))
                 # COLL007 via expression-level assign
                 if is_array_rebuild_pop(e):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL007",
-                        severity: "HIGH",
-                        message: "array rebuild to remove last element (O(n))",
-                        hint: "use .pop() instead of rebuilding array",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL007", "HIGH",
+                        "array rebuild to remove last element (O(n))",
+                        "use .pop() instead of rebuilding array",
+                        fn_name, expr_anchor_span(e)))
 
                 # COLL002: .contains() on array in loop
-                if is_contains_call(e):
-                    warnings.push(coll002_warning(fn_name))
+                if is_contains_call(e) and not contains_receiver_is_text(e, text_vars):
+                    warnings.push(coll002_warning(fn_name, expr_anchor_span(e)))
 
                 # COLL003: .remove(0) queue drain
                 if is_remove_zero_call(e):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL003",
-                        severity: "HIGH",
-                        message: ".remove(0) in loop (O(n) shift per iteration)",
-                        hint: "use a deque or reverse + .pop()",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL003", "HIGH",
+                        ".remove(0) in loop (O(n) shift per iteration)",
+                        "use a deque or reverse + .pop()",
+                        fn_name, expr_anchor_span(e)))
 
                 # COLL004: loop-invariant method call
                 if is_loop_invariant_call(e, iter_var):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL004",
-                        severity: "MEDIUM",
-                        message: "loop-invariant method call",
-                        hint: "hoist call result to variable before loop",
-                        item_name: fn_name
-                    ))
+                    warnings.push(coll_warning(
+                        "COLL004", "MEDIUM",
+                        "loop-invariant method call",
+                        "hoist call result to variable before loop",
+                        fn_name, expr_anchor_span(e)))
 
         # COLL002/COLL003 in if-condition context
         if tag == STMT_IF:
             val cond = stmt_get_expr(s)
             if cond >= 0:
                 if is_contains_call(cond):
-                    warnings.push(coll002_warning(fn_name))
+                    if not contains_receiver_is_text(cond, text_vars):
+                        warnings.push(coll002_warning(fn_name, expr_anchor_span(cond)))
+                else:
+                    # The NEGATED filter, `if not allowed.contains(x):`. It was
+                    # silent because the condition node is a unary `not`, not
+                    # the method call, so `is_contains_call` never matched —
+                    # yet it is the same O(n) scan per iteration.
+                    #
+                    # Every COLL020 site is also a negated contains guard
+                    # (`if not seen.contains(v): seen.push(v)` IS the dedup
+                    # idiom), so reporting this one unconditionally would make
+                    # every dedup site warn twice. The guards COLL020 claims
+                    # are therefore left to it.
+                    val negated = is_not_contains_call(cond)
+                    if negated >= 0 and not is_manual_distinct_guard(s):
+                        if not contains_receiver_is_text(negated, text_vars):
+                            warnings.push(coll002_warning(fn_name, expr_anchor_span(negated)))
 
         # COLL001 via val/var decl with concat
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
@@ -325,13 +459,28 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
                             val assign_name = stmt_get_name(s)
                             val left = expr_get_left(init)
                             if left >= 0 and expr_get_tag(left) == EXPR_IDENT and expr_get_str(left) == assign_name:
-                                warnings.push(CollectionLintWarning(
-                                    code: "COLL001",
-                                    severity: "CRITICAL",
-                                    message: "array concat in loop (O(n^2))",
-                                    hint: "use .push() instead of arr = arr + [x]",
-                                    item_name: fn_name
-                                ))
+                                warnings.push(coll_warning(
+                                    "COLL001", "CRITICAL",
+                                    "array concat in loop (O(n^2))",
+                                    "use .push() instead of arr = arr + [x]",
+                                    fn_name, expr_anchor_span(init)))
+
+        # Still inside the same loop: an `if`, a `match` arm or a block does
+        # not end the iteration, so a quadratic operation nested under one is
+        # just as quadratic. This walk only ever looked at the loop body's TOP
+        # level, and `check_fn_body` descends into those blocks hunting for
+        # LOOPS, not for in-loop patterns — so a guard under `if x > 0:` was
+        # checked by neither. Measured: all 14 remaining silent dedup sites in
+        # the tree were nested this way, which made it the real coverage gap
+        # rather than the multi-statement guard body it was attributed to.
+        #
+        # Loops are skipped deliberately: a nested loop is reached by
+        # `check_fn_body`, which calls `check_loop_body` on it in its own
+        # right, and descending here as well would report its body twice.
+        if not coll_stmt_is_loop(tag):
+            for nested_block in coll_stmt_child_stmts(s):
+                for w in check_loop_body([nested_block], fn_name, iter_var, text_vars):
+                    warnings.push(w)
 
     warnings
 
@@ -370,14 +519,12 @@ fn is_concat_assign_expr(e: i64) -> bool:
 
 # COLL002 message (design doc section 10.3's message-form contract: name the
 # std.common.frame call, the inline Dict form, and say "dataframe-able").
-fn coll002_warning(fn_name: text) -> CollectionLintWarning:
-    CollectionLintWarning(
-        code: "COLL002",
-        severity: "HIGH",
-        message: ".contains() on array inside loop is O(n) per iteration; switch to key_set(xs, key) (std.common.frame) — dataframe-able. Inline form: build a Dict<T, bool> membership set before the loop and check it instead of scanning",
-        hint: "use key_set or an inline Dict<T,bool> membership set",
-        item_name: fn_name
-    )
+fn coll002_warning(fn_name: text, span_id: i64) -> CollectionLintWarning:
+    coll_warning(
+        "COLL002", "HIGH",
+        ".contains() on array inside loop is O(n) per iteration; switch to key_set(xs, key) (std.common.frame) — dataframe-able. Inline form: build a Dict<T, bool> membership set before the loop and check it instead of scanning",
+        "use key_set or an inline Dict<T,bool> membership set",
+        fn_name, span_id)
 
 # COLL002: Detect .contains() call
 fn is_contains_call(e: i64) -> bool:
@@ -526,9 +673,29 @@ fn collect_text_var_names(stmts: [i64], seed: [text]) -> [text]:
                 if is_text_valued_expr(assigned_value):
                     names.push(assigned)
 
-        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
-            val nested = collect_text_var_names(stmt_get_body(s), names)
-            for n in nested:
+        # The SAME traversal every other walker uses. This enumerated four
+        # statement kinds and took only `stmt_get_body` — the THEN-branch of
+        # an `if` — so a text binding in an `elif`, `else` or `case` body was
+        # never collected. That was harmless while the rule walkers were
+        # equally shallow; once `check_loop_body` began descending into every
+        # branch, the two walkers disagreed about the same tree and a guard in
+        # an else-branch was reported while the binding that would have
+        # excluded it was invisible. Two real false positives followed, both
+        # introduced by this lane:
+        #
+        #   src/compiler/80.driver/parser_llvm_objdump_codec_v1.spl:125
+        #     `if assembly.contains("<unknown>")`, where
+        #     `val assembly = fields[1].trim()` is bound in an `elif` body
+        #   src/app/cli/query_ast_query.spl:123
+        #     `if value.contains("*")`, where
+        #     `val value = rest.substring(...)` is bound in an `elif` body
+        #
+        # Fixed by sharing the traversal rather than by adding `elif` to the
+        # list: a walker that enumerates its own container kinds will drift
+        # from the others again the next time one of them is widened, which is
+        # exactly what happened here.
+        for nested_block in coll_stmt_child_stmts(s):
+            for n in collect_text_var_names([nested_block], names):
                 if not name_in_list(names, n):
                     names.push(n)
     names
@@ -620,7 +787,7 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
 
     # Collect module-level var names that are arrays (initialized with [])
     var global_arrays: [text] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_VAR:
             val init = decl_get_body(idx)
             # A module-level var with array init will have stmts list
@@ -632,7 +799,7 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
 
     # For each function, check if it pushes to a global array
     # without a reset/clear/trim or a dominating len >= capacity return guard
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -643,13 +810,14 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
                 reset_vars_set[rv] = true
             for pv in pushed_vars:
                 if not reset_vars_set.has(pv) and not has_bounded_push(body, pv):
-                    warnings.push(CollectionLintWarning(
-                        code: "COLL008",
-                        severity: "MEDIUM",
-                        message: "unbounded global array '{pv}' grows via .push() without reset",
-                        hint: "add capacity check, ring buffer, or periodic reset/clear",
-                        item_name: fn_name
-                    ))
+                    # No single offending node: this rule is a whole-function
+                    # property (pushes without a reset), so it keeps the
+                    # caller's function-line fallback (span 0 = unknown).
+                    warnings.push(coll_warning(
+                        "COLL008", "MEDIUM",
+                        "unbounded global array '{pv}' grows via .push() without reset",
+                        "add capacity check, ring buffer, or periodic reset/clear",
+                        fn_name, 0))
     warnings
 
 fn is_len_call_for(e: i64, global_name: text) -> bool:
@@ -777,7 +945,7 @@ fn is_chained_filter(e: i64) -> bool:
 
 fn check_chained_filter_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -796,24 +964,20 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
         if tag == STMT_EXPR:
             val e = stmt_get_expr(s)
             if e >= 0 and is_chained_filter(e):
-                warnings.push(CollectionLintWarning(
-                    code: "COLL005",
-                    severity: "MEDIUM",
-                    message: "chained .filter().filter() (two passes over data)",
-                    hint: "combine predicates into single .filter()",
-                    item_name: fn_name
-                ))
+                warnings.push(coll_warning(
+                    "COLL005", "MEDIUM",
+                    "chained .filter().filter() (two passes over data)",
+                    "combine predicates into single .filter()",
+                    fn_name, expr_anchor_span(e)))
 
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
             val e = stmt_get_expr(s)
             if e >= 0 and is_chained_filter(e):
-                warnings.push(CollectionLintWarning(
-                    code: "COLL005",
-                    severity: "MEDIUM",
-                    message: "chained .filter().filter() (two passes over data)",
-                    hint: "combine predicates into single .filter()",
-                    item_name: fn_name
-                ))
+                warnings.push(coll_warning(
+                    "COLL005", "MEDIUM",
+                    "chained .filter().filter() (two passes over data)",
+                    "combine predicates into single .filter()",
+                    fn_name, expr_anchor_span(e)))
 
         # Recurse into blocks, loops, ifs
         if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
@@ -843,8 +1007,30 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
 # Plain array-of-arrays (`b[i].push(x)` on [[T]]) mutates in place and must
 # never fire; it only can via kind 1, which requires dict evidence.
 
-# Mutating methods whose effect is lost on a value copy. Read-only methods
-# (len, contains, ...) are fine on a copy and must not fire.
+# Methods PROVEN not to change the receiver. This is an allow-list and the
+# default is UNSAFE, which is the opposite of the mutating-name whitelist it
+# replaced: that list omitted `fill`, a real runtime mutator, so
+# `seen.fill(99)` read as a harmless call and the rewrite turned
+# [1,2,1,2] into [1,2]. Omitting a reader here costs a suggestion; omitting a
+# mutator there cost correctness. `sort`/`reverse` are deliberately absent —
+# whether they mutate in place is not something this rule should be guessing.
+fn is_readonly_collection_method(name: text) -> bool:
+    if name == "contains" or name == "contains_key" or name == "has":
+        return true
+    if name == "len" or name == "length" or name == "size" or name == "count":
+        return true
+    if name == "is_empty" or name == "index_of" or name == "find_index":
+        return true
+    if name == "get" or name == "first" or name == "last" or name == "at":
+        return true
+    if name == "keys" or name == "values":
+        return true
+    if name == "to_text" or name == "to_string" or name == "join":
+        return true
+    false
+
+# Mutating methods whose effect is lost on a value copy (COLL019 only; the
+# Certain-fix proofs use the allow-list above, not this one).
 fn is_mutating_collection_method(name: text) -> bool:
     if name == "push" or name == "pop" or name == "insert" or name == "remove":
         return true
@@ -921,19 +1107,17 @@ fn index_mutation_kind(e: i64, dict_vars: [text]) -> i64:
             return 2
     0
 
-fn coll019_warning(kind: i64, fn_name: text) -> CollectionLintWarning:
+fn coll019_warning(kind: i64, fn_name: text, span_id: i64) -> CollectionLintWarning:
     val what = if kind == 1: "a dict index" else: "an indexed tuple/struct field"
-    CollectionLintWarning(
-        code: "COLL019",
-        severity: "HIGH",
-        message: "mutation through {what} is silently lost (value semantics)",
-        hint: "write back: var b = c[k]; b.push(x); c[k] = b — see ADR-004",
-        item_name: fn_name
-    )
+    coll_warning(
+        "COLL019", "HIGH",
+        "mutation through {what} is silently lost (value semantics)",
+        "write back: var b = c[k]; b.push(x); c[k] = b — see ADR-004",
+        fn_name, span_id)
 
 fn check_index_mutation_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val body = decl_get_body(idx)
@@ -954,7 +1138,7 @@ fn check_stmts_for_index_mutation(stmts: [i64], fn_name: text, dict_vars: [text]
             val e = stmt_get_expr(s)
             val kind = index_mutation_kind(e, dict_vars)
             if kind > 0:
-                warnings.push(coll019_warning(kind, fn_name))
+                warnings.push(coll019_warning(kind, fn_name, expr_anchor_span(e)))
             # Loops can appear as expression statements; walk their bodies.
             if e >= 0:
                 val etag = expr_get_tag(e)
@@ -980,6 +1164,65 @@ fn real_stmts(stmts: [i64]) -> [i64]:
             out.push(s)
     out
 
+# "Is this the SAME value expression", structurally. The dedup idiom tests a
+# value and then pushes it, and comparing those two by identifier NAME meant
+# the rule only ever recognised `seen.contains(x)` / `seen.push(x)` — while
+# `seen.contains(dep.path)` / `seen.push(dep.path)`, the most common real
+# shape, went unreported. Measured: 26 of 68 real dedup sites in the tree got
+# no diagnostic at all for this reason. A warning that is never emitted is the
+# expensive kind of miss; a fix that declines to apply is not.
+#
+# Conservative by construction: both sides must be of a kind this enumerates
+# and must carry no child statements or match arms, so a shape it cannot
+# compare answers "not equal" and the rule stays silent rather than firing on
+# something that is not dedup.
+fn expr_structurally_equal(a: i64, b: i64) -> bool:
+    if a < 0 or b < 0:
+        return false
+    val ta = expr_get_tag(a)
+    if ta != expr_get_tag(b):
+        return false
+    if not coll_expr_kind_known(ta):
+        return false
+    if expr_get_str(a) != expr_get_str(b):
+        return false
+    if expr_get_int(a) != expr_get_int(b):
+        return false
+    # A float literal's value lives in `expr_get_float`, not `expr_get_str` or
+    # `expr_get_int`, and a call's named-argument LABELS live in
+    # `expr_get_arg_names` rather than in the child expression list. Comparing
+    # neither meant `seen.contains(1.5)` / `seen.push(2.5)` and
+    # `f(a: x)` / `f(b: x)` compared EQUAL and reported as dedup. The fix
+    # refused both anyway (the value is not a plain identifier), so it was
+    # warning noise rather than a wrong rewrite — but it falsified the
+    # "conservative by construction" claim this comment makes, so it is
+    # closed rather than documented.
+    if expr_get_float(a) != expr_get_float(b):
+        return false
+    val na = expr_get_arg_names(a)
+    val nb = expr_get_arg_names(b)
+    if na.len() != nb.len():
+        return false
+    var k = 0
+    while k < na.len():
+        if na[k] != nb[k]:
+            return false
+        k = k + 1
+    if expr_child_stmts(a).len() != 0 or expr_child_stmts(b).len() != 0:
+        return false
+    if expr_child_arms(a).len() != 0 or expr_child_arms(b).len() != 0:
+        return false
+    val ca = expr_child_exprs(a)
+    val cb = expr_child_exprs(b)
+    if ca.len() != cb.len():
+        return false
+    var i = 0
+    while i < ca.len():
+        if not expr_structurally_equal(ca[i], cb[i]):
+            return false
+        i = i + 1
+    true
+
 fn expr_equal_idents(a: i64, b: i64) -> bool:
     if a < 0 or b < 0:
         return false
@@ -987,39 +1230,133 @@ fn expr_equal_idents(a: i64, b: i64) -> bool:
         return false
     expr_get_str(a) == expr_get_str(b)
 
-# Conservative recursive "does this expression mention identifier `name`"
-# walker over the arena-AST shapes this file already handles. Missing a
-# reference (false negative) only means a rule stays silent; it never
-# fabricates a match.
+# "Does this expression mention identifier `name`", recursing over the
+# canonical child list.
+#
+# This used to be a hand-written tag switch covering eight shapes, with the
+# note that a missed reference "only means a rule stays silent; it never
+# fabricates a match". That was true while every caller (COLL015/016/021)
+# asked "IS this name mentioned" — but COLL022's bound-value form asks the
+# opposite question, "is it mentioned anywhere ELSE", and there a missed
+# mention reads as "used nowhere else" and fires wrongly. The switch was
+# missing EXPR_SLICE, EXPR_INTERPOLATED_STRING (so `print("{sorted.len()}")`
+# was invisible — measured, it produced exactly that false positive), array/
+# tuple/dict literals, EXPR_CALL receivers and more.
+#
+# `expr_child_exprs` is the arena's own tag-dispatched ownership contract: it
+# deliberately excludes slots holding match-arm ids or field-name metadata
+# rather than expression ids, so recursing through it can neither miss a
+# child nor read a non-expression slot as one.
 fn expr_mentions_ident(e: i64, name: text) -> bool:
     if e < 0:
         return false
     val tag = expr_get_tag(e)
     if tag == EXPR_IDENT:
         return expr_get_str(e) == name
-    if tag == EXPR_BINARY or tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN or tag == EXPR_INDEX:
-        if expr_mentions_ident(expr_get_left(e), name):
+    if tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING:
+        return literal_hole_mentions(e, name)
+    for child in expr_child_exprs(e):
+        if expr_mentions_ident(child, name):
             return true
-        return expr_mentions_ident(expr_get_right(e), name)
-    if tag == EXPR_UNARY or tag == EXPR_FIELD_ACCESS:
-        return expr_mentions_ident(expr_get_left(e), name)
-    if tag == EXPR_METHOD_CALL:
-        if expr_mentions_ident(expr_get_left(e), name):
+    # Expression-level BLOCKS carry STATEMENTS, and match/receive expressions
+    # carry ARMS. `expr_child_exprs` yields neither, so a `do:`/`unsafe:`
+    # block body or a `match` arm was invisible to every walker in this file
+    # — `val r = match x: case 2: seen.pop()` turned [1,3] into [3].
+    for s in expr_child_stmts(e):
+        if stmts_mention_ident([s], name):
             return true
-        for a in expr_get_args(e):
-            if expr_mentions_ident(a, name):
-                return true
+    for arm in expr_child_arms(e):
+        if arm_mentions_ident(arm, name):
+            return true
+    false
+
+fn arm_mentions_ident(arm: i64, name: text) -> bool:
+    if arm < 0:
         return false
-    if tag == EXPR_CALL:
-        for a in expr_get_args(e):
-            if expr_mentions_ident(a, name):
+    if expr_mentions_ident(arm_get_pattern(arm), name):
+        return true
+    if expr_mentions_ident(arm_get_guard(arm), name):
+        return true
+    stmts_mention_ident(arm_get_body(arm), name)
+
+fn stmts_mention_ident(stmts: [i64], name: text) -> bool:
+    for s in real_stmts(stmts):
+        if coll_stmt_binds(stmt_get_tag(s)) and coll_binding_binds(stmt_get_name(s), name):
+            return true
+        for e in coll_stmt_child_exprs(s):
+            if expr_mentions_ident(e, name):
                 return true
+        if stmts_mention_ident(coll_stmt_child_stmts(s), name):
+            return true
+    false
+
+# String interpolation is OPAQUE: `"{seen.pop()}"` parses as a plain
+# EXPR_STRING_LIT whose text is the literal `{seen.pop()}`, with zero child
+# expressions (measured; see the note above `expr_contains_interpolation`).
+# So a hole naming the tracked array is invisible to any AST walk, and
+# `print "{seen.pop()}"` silently mutated it — [1,3] became [3].
+#
+# Interim rule, fail-closed: a literal that has an interpolation hole AND
+# mentions the name as a bare token counts as a use. The real fix is for the
+# parser to expose holes as child expressions, which would serve every
+# analysis rather than this one — filed as
+# doc/02_requirements/feature/parser_interpolation_holes_as_child_expressions.md.
+fn literal_hole_mentions(e: i64, name: text) -> bool:
+    val body = expr_get_str(e)
+    if not body.contains("{"):
         return false
-    if tag == EXPR_LAMBDA:
-        for a in expr_get_stmts(e):
-            if expr_mentions_ident(a, name):
-                return true
+    var pos = 0
+    while pos < body.len():
+        val idx = coll_text_index_from(body, name, pos)
+        if idx < 0:
+            return false
+        val after = idx + name.len()
+        val prev = if idx > 0: body.slice(idx - 1, idx) else: ""
+        val before_ok = prev == "" or not coll_is_ident_char(prev)
+        val after_ok = after >= body.len() or not coll_is_ident_char(body.slice(after, after + 1))
+        if before_ok and after_ok:
+            return true
+        pos = idx + 1
+    false
+
+fn coll_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn coll_text_index_from(s: text, needle: text, from: i64) -> i64:
+    if from >= s.len():
+        return -1
+    val rel = s.substring(from, s.len()).index_of(needle)
+    if rel < 0:
+        return -1
+    from + rel
+
+# String interpolation is OPAQUE on this path, and NOT as
+# EXPR_INTERPOLATED_STRING. Measured 2026-09-19 by dumping the arena for
+# `val t = "{sorted.len()}"`: the initializer is a plain **EXPR_STRING_LIT**
+# whose text is the literal `{sorted.len()}`, with ZERO child expressions —
+# the hole is still raw text and is lowered later. (`print(sorted.len())`, by
+# contrast, is a normal call and walks fine; the earlier suspicion that
+# `print` was the opaque part was wrong.) So every identifier used only
+# inside `"{...}"` is invisible to `expr_mentions_ident`, and no walker over
+# this AST can recover it — checking for tag EXPR_INTERPOLATED_STRING finds
+# nothing, which is why this predicate reads the literal's text instead.
+#
+# For the "is it mentioned anywhere ELSE" question that must be answered
+# NEGATIVELY before COLL022 fires on a bound sort, invisible is not the same
+# as absent. This predicate lets that caller treat "an interpolation hole is
+# in scope here" as an unknown use and stay silent — a miss, which is the
+# cheap direction, rather than advice that is wrong.
+fn expr_contains_interpolation(e: i64) -> bool:
+    if e < 0:
         return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_INTERPOLATED_STRING:
+        return true
+    if tag == EXPR_STRING_LIT and expr_get_str(e).contains("{"):
+        return true
+    for child in expr_child_exprs(e):
+        if expr_contains_interpolation(child):
+            return true
     false
 
 # ============================================================================
@@ -1033,7 +1370,10 @@ fn expr_mentions_ident(e: i64, name: text) -> bool:
 # check, so it does not know whether the comparison is actually the join key
 # — a false positive here just produces an extra hint, never a fix.
 
-fn has_cross_equality(stmts: [i64], var_a: text, var_b: text) -> bool:
+# Index of the `if <a-expr> == <b-expr>` statement, or -1. Returning the
+# statement (rather than a bool) is what gives COLL015 a real source position:
+# STMT_IF is one of the few statement tags the parser records a span for.
+fn cross_equality_stmt(stmts: [i64], var_a: text, var_b: text) -> i64:
     for s in stmts:
         if s < 0:
             continue
@@ -1046,20 +1386,19 @@ fn has_cross_equality(stmts: [i64], var_a: text, var_b: text) -> bool:
             val right = expr_get_right(cond)
             if (expr_mentions_ident(left, var_a) and expr_mentions_ident(right, var_b)) or
                (expr_mentions_ident(left, var_b) and expr_mentions_ident(right, var_a)):
-                return true
+                return s
         if tag == STMT_IF or tag == STMT_BLOCK:
-            if has_cross_equality(stmt_get_body(s), var_a, var_b):
-                return true
-    false
+            val nested = cross_equality_stmt(stmt_get_body(s), var_a, var_b)
+            if nested >= 0:
+                return nested
+    -1
 
-fn cartesian_warning(fn_name: text) -> CollectionLintWarning:
-    CollectionLintWarning(
-        code: "COLL015",
-        severity: "HIGH",
-        message: "nested loops compared by == look like an accidental cartesian product, O(n*m); switch to semi_join(l, r, lk, rk) or index_by(r, rk) (std.common.frame) — dataframe-able. Inline form: build a Dict<K, i64> from the inner collection keyed by the join field, then look up by key instead of scanning",
-        hint: "use semi_join/index_by or an inline Dict<K,i64> keyed by the join field",
-        item_name: fn_name
-    )
+fn cartesian_warning(fn_name: text, span_id: i64) -> CollectionLintWarning:
+    coll_warning(
+        "COLL015", "HIGH",
+        "nested loops compared by == look like an accidental cartesian product, O(n*m); switch to semi_join(l, r, lk, rk) or index_by(r, rk) (std.common.frame) — dataframe-able. Inline form: build a Dict<K, i64> from the inner collection keyed by the join field, then look up by key instead of scanning",
+        "use semi_join/index_by or an inline Dict<K,i64> keyed by the join field",
+        fn_name, span_id)
 
 fn check_cartesian_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
@@ -1075,8 +1414,9 @@ fn check_cartesian_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]
                     if stmt_get_tag(inner_s) == STMT_FOR:
                         val inner_var = stmt_get_name(inner_s)
                         if inner_var != "" and inner_var != outer_var:
-                            if has_cross_equality(stmt_get_body(inner_s), outer_var, inner_var):
-                                warnings.push(cartesian_warning(fn_name))
+                            val eq_stmt = cross_equality_stmt(stmt_get_body(inner_s), outer_var, inner_var)
+                            if eq_stmt >= 0:
+                                warnings.push(cartesian_warning(fn_name, stmt_anchor_span(eq_stmt)))
             val nested = check_cartesian_stmts(outer_body, fn_name)
             for w in nested:
                 warnings.push(w)
@@ -1088,7 +1428,7 @@ fn check_cartesian_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]
 
 fn check_cartesian_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_cartesian_stmts(decl_get_body(idx), fn_name)
@@ -1117,14 +1457,12 @@ fn is_missing_index_call(e: i64, iter_var: text) -> bool:
         return false
     expr_mentions_ident(args[0], iter_var)
 
-fn missing_index_warning(fn_name: text) -> CollectionLintWarning:
-    CollectionLintWarning(
-        code: "COLL016",
-        severity: "MEDIUM",
-        message: ".find()/.filter() inside a loop is re-scanned once per outer iteration, O(n*m); switch to index_by(xs, key) or group_by_key(xs, key) (std.common.frame) — dataframe-able. Inline form: build a Dict<K, i64> (or Dict<K, [T]>) before the loop and look up by key instead of scanning",
-        hint: "use index_by/group_by_key or an inline Dict keyed by the lookup field",
-        item_name: fn_name
-    )
+fn missing_index_warning(fn_name: text, span_id: i64) -> CollectionLintWarning:
+    coll_warning(
+        "COLL016", "MEDIUM",
+        ".find()/.filter() inside a loop is re-scanned once per outer iteration, O(n*m); switch to index_by(xs, key) or group_by_key(xs, key) (std.common.frame) — dataframe-able. Inline form: build a Dict<K, i64> (or Dict<K, [T]>) before the loop and look up by key instead of scanning",
+        "use index_by/group_by_key or an inline Dict keyed by the lookup field",
+        fn_name, span_id)
 
 fn check_missing_index_stmts(stmts: [i64], iter_var: text, fn_name: text) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
@@ -1136,7 +1474,7 @@ fn check_missing_index_stmts(stmts: [i64], iter_var: text, fn_name: text) -> [Co
         if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_IF:
             candidate = stmt_get_expr(s)
         if is_missing_index_call(candidate, iter_var):
-            warnings.push(missing_index_warning(fn_name))
+            warnings.push(missing_index_warning(fn_name, expr_anchor_span(candidate)))
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
             val nested = check_missing_index_stmts(stmt_get_body(s), iter_var, fn_name)
             for w in nested:
@@ -1167,7 +1505,7 @@ fn check_missing_index_outer(stmts: [i64], fn_name: text) -> [CollectionLintWarn
 
 fn check_missing_index_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_missing_index_outer(decl_get_body(idx), fn_name)
@@ -1180,13 +1518,37 @@ fn check_missing_index_all(decl_indices: [i64]) -> [CollectionLintWarning]:
 # entry_and_fixes.spl, which has the source text this AST pass does not)
 # ============================================================================
 #
-# Loop body is EXACTLY one statement: `if not <arr>.contains(<x>):
-# <arr>.push(<x>)`, guard and push on the SAME array and the SAME identifier.
-# This is the narrow single-array form of the pattern (the array is both its
-# own seen-set and the result); a `seen` array distinct from `result` is a
-# different (two-array) shape this detector deliberately does not claim,
-# since matching it reliably needs alias analysis this AST walker lacks. A
-# trailing `else` branch on the guard, if present, is not inspected by this
+# Guard shape: `if not <seen>.contains(<x>):` somewhere inside a loop body,
+# whose then-branch consists ONLY of `<array>.push(<x>)` statements — every
+# one pushing the SAME identifier the guard tested — and at least one of them
+# pushing onto the guard's own receiver.
+#
+# Until 2026-09-19 this detector required the loop body to be EXACTLY one
+# statement AND the guard's receiver to be the only array pushed to, i.e. only
+# the single-array form (`out` is its own seen-set). The two-array form —
+# `seen` guards, `out` collects — is the single most common shape an LLM
+# writes, and it was explicitly disclaimed here as needing "alias analysis
+# this AST walker lacks". That disclaimer did not survive contact with the
+# fix path: `collection_020_fix` (entry_and_fixes.spl), which is TEXTUAL and
+# never consulted this detector, happily reported the two-array shape as a
+# `Certain` fix. So `simple lint` said "all files clean" on the same file
+# `simple fix --dry-run` rewrote. See
+# doc/08_tracking/bug/coll020_lint_fix_disagree_two_array_dedup_2026-09-19.md.
+#
+# The resolution is ONE truth in the detector's favour: the shape below is
+# recognised (so lint reports it), and the Certain fix is now reachable ONLY
+# through this detector — `collection_certain_fixes` in entry_and_fixes.spl
+# is the single door both `simple lint --fix` and `simple fix` go through.
+# No alias analysis was needed, because nothing here claims the two arrays
+# are unrelated: the push set is required to be pushes of the SAME value the
+# guard tested, which is the whole semantic content of "dedup". Whether the
+# rewrite is SAFE remains a separate, stricter question answered textually by
+# `collection_020_fix` (fresh `= []` declaration, no other mutation of the
+# array in the loop, no aliasing through a call argument, unique lines).
+# Lint firing without a fix is normal and expected; a fix without lint is the
+# bug this closes.
+#
+# A trailing `else` branch on the guard, if present, is not inspected by this
 # accessor and is not excluded — documented limitation, not a silent gap.
 
 fn is_not_contains_call(e: i64) -> i64:
@@ -1199,14 +1561,34 @@ fn is_not_contains_call(e: i64) -> i64:
         return -1
     inner
 
-fn is_manual_distinct_loop(loop_body: [i64]) -> bool:
-    val real = real_stmts(loop_body)
-    if real.len() != 1:
+# `<array>.push(<value>)` as a whole statement, with `<array>` a bare
+# identifier: returns the array name, or "" for anything else.
+fn push_stmt_array_name(s: i64, guarded_val: i64) -> text:
+    if stmt_get_tag(s) != STMT_EXPR:
+        return ""
+    val push_expr = stmt_get_expr(s)
+    if push_expr < 0 or expr_get_tag(push_expr) != EXPR_METHOD_CALL or expr_get_str(push_expr) != "push":
+        return ""
+    val push_recv = expr_get_left(push_expr)
+    if push_recv < 0 or expr_get_tag(push_recv) != EXPR_IDENT:
+        return ""
+    val push_args = expr_get_args(push_expr)
+    if push_args.len() != 1:
+        return ""
+    if not expr_structurally_equal(guarded_val, push_args[0]):
+        return ""
+    expr_get_str(push_recv)
+
+# True when `s` is a dedup guard: `if not <seen>.contains(<x>):` whose body is
+# a non-empty run of `<array>.push(<x>)` statements, at least one of them onto
+# `<seen>` itself. Any other statement in the then-branch (an assignment, an
+# early `break`/`continue`, a push of a DIFFERENT value than the one tested)
+# disqualifies it — those are not dedup, and a rewrite that assumed they were
+# would be wrong.
+fn is_manual_distinct_guard(s: i64) -> bool:
+    if stmt_get_tag(s) != STMT_IF:
         return false
-    val only = real[0]
-    if stmt_get_tag(only) != STMT_IF:
-        return false
-    val contains_call = is_not_contains_call(stmt_get_expr(only))
+    val contains_call = is_not_contains_call(stmt_get_expr(s))
     if contains_call < 0:
         return false
     val recv = expr_get_left(contains_call)
@@ -1217,60 +1599,794 @@ fn is_manual_distinct_loop(loop_body: [i64]) -> bool:
     if call_args.len() != 1:
         return false
     val guarded_val = call_args[0]
-    val if_body = real_stmts(stmt_get_body(only))
-    if if_body.len() != 1:
+    # The guarded value may be ANY expression the structural comparison below
+    # can read — `dep.path`, `xs[i]`, `key(x)` — not only a bare identifier.
+    # That is what the rule SEES; what it may REWRITE is unchanged, and
+    # `coll020_proof` still refuses anything but a plain identifier.
+    if guarded_val < 0:
         return false
-    val push_stmt = if_body[0]
-    if stmt_get_tag(push_stmt) != STMT_EXPR:
+    val if_body = real_stmts(stmt_get_body(s))
+    if if_body.len() == 0:
         return false
-    val push_expr = stmt_get_expr(push_stmt)
-    if push_expr < 0 or expr_get_tag(push_expr) != EXPR_METHOD_CALL or expr_get_str(push_expr) != "push":
-        return false
-    val push_recv = expr_get_left(push_expr)
-    if push_recv < 0 or expr_get_tag(push_recv) != EXPR_IDENT or expr_get_str(push_recv) != recv_name:
-        return false
-    val push_args = expr_get_args(push_expr)
-    if push_args.len() != 1:
-        return false
-    expr_equal_idents(guarded_val, push_args[0])
+    var pushes_seen = false
+    for body_stmt in if_body:
+        val pushed_into = push_stmt_array_name(body_stmt, guarded_val)
+        if pushed_into == "":
+            return false
+        if pushed_into == recv_name:
+            pushes_seen = true
+    pushes_seen
 
-fn manual_distinct_warning(fn_name: text) -> CollectionLintWarning:
-    CollectionLintWarning(
-        code: "COLL020",
-        severity: "MEDIUM",
-        message: "manual dedup loop (.contains guard + .push on the same array) is O(n^2); switch to distinct_by(xs, key) or unique() (std.common.frame) — dataframe-able. Inline form: build a Dict<T, bool> membership set before the loop and check/insert into it instead of the array",
-        hint: "use distinct_by/unique or an inline Dict<T,bool> membership set",
-        item_name: fn_name
-    )
+fn manual_distinct_warning(fn_name: text, span_id: i64) -> CollectionLintWarning:
+    coll_warning(
+        "COLL020", "MEDIUM",
+        "manual dedup loop (.contains guard + .push of the guarded value) is O(n^2); switch to distinct_by(xs, key) or unique() (std.common.frame) — dataframe-able. Inline form: build a Dict<T, bool> membership set before the loop and check/insert into it instead of the array",
+        "use distinct_by/unique or an inline Dict<T,bool> membership set",
+        fn_name, span_id)
+
+# Collect dedup guards inside ONE loop body, descending through `if`/block
+# wrappers but NOT into a nested loop (that loop is visited in its own right
+# by `check_manual_distinct_stmts`, so descending here would double-report).
+fn manual_distinct_guards_in_loop(stmts: [i64]) -> [i64]:
+    var found: [i64] = []
+    for s in real_stmts(stmts):
+        if is_manual_distinct_guard(s):
+            found.push(s)
+        elif not coll_stmt_is_loop(stmt_get_tag(s)):
+            # Generic descent through every child list this kind owns, so an
+            # `else`/`elif` body or a match arm is reached by construction.
+            for nested in manual_distinct_guards_in_loop(coll_stmt_child_stmts(s)):
+                found.push(nested)
+    found
 
 fn check_manual_distinct_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for s in stmts:
-        if s < 0:
-            continue
-        val tag = stmt_get_tag(s)
-        if tag == STMT_FOR:
+    for s in real_stmts(stmts):
+        if coll_stmt_is_loop(stmt_get_tag(s)):
             val loop_body = stmt_get_body(s)
-            if is_manual_distinct_loop(loop_body):
-                warnings.push(manual_distinct_warning(fn_name))
-            val nested = check_manual_distinct_stmts(loop_body, fn_name)
-            for w in nested:
+            for guard in manual_distinct_guards_in_loop(loop_body):
+                warnings.push(manual_distinct_warning(fn_name, stmt_anchor_span(guard)))
+            for w in check_manual_distinct_stmts(loop_body, fn_name):
                 warnings.push(w)
-        elif tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_WHILE:
-            val nested = check_manual_distinct_stmts(stmt_get_body(s), fn_name)
-            for w in nested:
+        else:
+            for w in check_manual_distinct_stmts(coll_stmt_child_stmts(s), fn_name):
                 warnings.push(w)
     warnings
 
 fn check_manual_distinct_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_manual_distinct_stmts(decl_get_body(idx), fn_name)
             for w in ws:
                 warnings.push(w)
     warnings
+
+# ============================================================================
+# Safety PROOFS for the COLL002/COLL020 Certain fixes — on the AST
+# ============================================================================
+#
+# Two review rounds produced twelve wrong rewrites, and every single one was
+# the same defect wearing a different hat: a safety decision made by reading
+# SOURCE TEXT disagreeing with the parser about where a statement or a block
+# begins and ends. `while(gi < n):` was not a loop because the scan wanted
+# `"while "`. A column-0 comment ended a block. A tab counted as zero indent.
+# `val d = (seen\n.pop())` was two lines, so neither was a `.pop()`. A named
+# argument `grow(k=x, a=seen)` was not "flanked by ( or ,". A `for allowed in
+# groups` binding was not a `val|var`, so a shadowed name resolved to the
+# wrong array.
+#
+# None of those is a missing case. Text is simply not where statement extent
+# lives, so the proofs live here instead, on the same nodes the detector
+# already walks. Nothing below reads a line, trims a string, or counts an
+# indent. `entry_and_fixes.spl` keeps only the RENDERING of the edit (byte
+# offsets, the annotation text to copy into `Dict<T, bool>`), and is handed
+# the proven sites rather than hunting for them.
+#
+# Record: doc/08_tracking/bug/
+# coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md
+
+struct CollectionFixProof:
+    code: text
+    receiver: text          # the tracking array
+    value: text             # COLL020: the guarded identifier; COLL002: the arg text is not needed
+    guard_line: i64         # 1-based line of the `if not R.contains(v):` / `R.contains(v)` site
+    push_line: i64          # COLL020: 1-based line of the kept `R.push(v)`; else 0
+    decl_line: i64          # 1-based line of R's declaration
+    loop_line: i64          # 1-based line of the innermost enclosing loop header
+    safe: bool
+    reason: text            # why not, when `safe` is false
+
+fn coll_proof_unsafe(code: text, receiver: text, reason: text) -> CollectionFixProof:
+    CollectionFixProof(
+        code: code, receiver: receiver, value: "", guard_line: 0, push_line: 0,
+        decl_line: 0, loop_line: 0, safe: false, reason: reason)
+
+# --- generic traversal, fail-closed -----------------------------------------
+#
+# Round 3 broke the proofs four more ways, all one defect: they were written
+# as ALLOW-lists over enumerated cases, so anything not enumerated defaulted
+# to "safe". `stmts_have_unsafe_use` walked only `stmt_get_body(if)`, so a
+# `seen.pop()` in an `else` (or `elif`) was invisible. The mutating-method
+# list was a whitelist, so the real runtime method `fill` read as a mutation-
+# free call. `var (seen, k) = ([], 0)` has an empty `stmt_get_name`, so
+# destructuring did not count as a binding. A receiver that was not a bare
+# identifier (`seen[0].push(7)`) read as no receiver at all.
+#
+# Every default below is inverted: children are enumerated for the statement
+# kinds this analysis KNOWS, and an unknown kind makes the whole function
+# uninspectable rather than empty. Callers must refuse on uninspectable.
+
+# All child statements of `s`, across every list the kind owns. `else`/`elif`
+# bodies, match/receive arm bodies and a single-statement `else` are children
+# here; they were not before.
+fn coll_stmt_child_stmts(s: i64) -> [i64]:
+    val tag = stmt_get_tag(s)
+    var children: [i64] = []
+    if tag == STMT_IF:
+        # Measured layout (probe, 2026-09-19): `stmt_get_type` is the elif
+        # record index and is ALWAYS >= 0 — 0 for a plain `if` — so it is not
+        # a "has else" signal. `elif_get_body` MIRRORS the then-branch, so
+        # adding it would visit every then-statement twice and double-count
+        # bindings. `elif_get_else` is the else body and is empty when there
+        # is none; `stmt_get_if_single_else` points at that same statement,
+        # so it is not added again. An `elif` chain appears as a nested
+        # STMT_IF inside the else body and is reached by recursion.
+        for c in stmt_get_body(s):
+            children.push(c)
+        val elif_idx = stmt_get_type(s)
+        if elif_idx >= 0:
+            for c in elif_get_else(elif_idx):
+                children.push(c)
+        return children
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        for arm in stmt_get_body(s):
+            if arm >= 0:
+                for c in arm_get_body(arm):
+                    children.push(c)
+        if tag == STMT_RECEIVE:
+            val timeout_body = stmt_get_type(s)
+            if timeout_body >= 0:
+                children.push(timeout_body)
+        return children
+    if (tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_WHILE
+        or tag == STMT_BLOCK or tag == STMT_COMPTIME or tag == STMT_DEFER
+        or tag == STMT_ERRDEFER or tag == STMT_LABELED_LOOP or tag == STMT_GPU_LAUNCH):
+        return stmt_get_body(s)
+    children
+
+# All child expressions of `s`, including the ones `stmt_get_expr` alone
+# misses (an assignment's value lives in the body slot) and match/receive arm
+# patterns and guards.
+fn coll_stmt_child_exprs(s: i64) -> [i64]:
+    var children: [i64] = []
+    for e in flat_stmt_child_exprs(s):
+        children.push(e)
+    val tag = stmt_get_tag(s)
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        for arm in stmt_get_body(s):
+            if arm >= 0:
+                val pattern = arm_get_pattern(arm)
+                if pattern >= 0:
+                    children.push(pattern)
+                val guard = arm_get_guard(arm)
+                if guard >= 0:
+                    children.push(guard)
+    # No elif-record condition here: it MIRRORS the statement's own condition
+    # (ast_traversal.spl says to take only ELSE from the record), and counting
+    # it twice made one `known.contains(x)` look like two COLL002 candidates,
+    # which `collection_single_safe_proof` then refused as ambiguous. A real
+    # `elif` condition belongs to the nested STMT_IF in the else body.
+    children
+
+# Statement kinds whose children (above) are fully enumerated, and whose
+# binding form (below) can be read. Anything else makes the function
+# uninspectable — the caller refuses rather than walking a subset.
+fn coll_stmt_kind_known(tag: i64) -> bool:
+    if tag == STMT_EXPR or tag == STMT_RETURN or tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        return true
+    if tag == STMT_BREAK or tag == STMT_CONTINUE:
+        return true
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL or tag == STMT_BIND:
+        return true
+    if tag == STMT_IF or tag == STMT_MATCH or tag == STMT_RECEIVE:
+        return true
+    if (tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_WHILE
+        or tag == STMT_BLOCK or tag == STMT_COMPTIME or tag == STMT_DEFER
+        or tag == STMT_ERRDEFER or tag == STMT_LABELED_LOOP or tag == STMT_GPU_LAUNCH):
+        return true
+    false
+
+# A destructuring form does NOT produce an empty name, as first assumed —
+# `var (seen, k) = ([], 0)` yields the literal `"(seen,k)"`, a pattern
+# rendered as text — so an emptiness test missed it and the rewrite built a
+# Dict from a rebound `seen` ([1,1,2] -> [1,2]).
+#
+# Round 3 asked for destructuring to COUNT AS A BINDING. What landed was
+# stricter than that: any non-plain binding made the whole function
+# uninspectable, so `val (source_content, source_count) = f()` refused a fix
+# for `dependency_ids`, a name the pattern does not bind at all. That is
+# over-refusal against the round-3 requirement, not safety, and it was the
+# single largest remaining cause of refusals in the tree.
+#
+# The names a binding pattern binds, or `nil` when the pattern is one this
+# does not model. The input is the PARSER's rendering of the pattern
+# (`stmt_get_name`), not a line of source: `var (seen, k) = ([], 0)` yields
+# the literal `"(seen,k)"`. Only identifiers, `(`, `)`, `,` and spaces are
+# accepted; anything else (`[`, `.`, `*`, `..`) is a form this does not model
+# and refuses the function, exactly as before.
+#
+# The direction is fail-closed by construction. Over-counting bindings can
+# only ADD refusals — a name that is bound is a name that may be a different
+# array — so `Some(seen)` yielding both `Some` and `seen` is safe, and
+# `(a, b)` yielding neither the receiver is the case being unlocked. Only the
+# inspectability gate is relaxed, and only for patterns whose every bound name
+# is readable.
+fn coll_binding_names_of(name: text) -> [text]?:
+    if name == "":
+        return nil
+    var names: [text] = []
+    var current = ""
+    var i = 0
+    while i < name.len():
+        val c = name.slice(i, i + 1)
+        val is_ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+            c == "_" or (c >= "0" and c <= "9")
+        if is_ident:
+            current = current + c
+        elif c == "(" or c == ")" or c == "," or c == " ":
+            if current != "":
+                names.push(current)
+                current = ""
+        else:
+            return nil
+        i = i + 1
+    if current != "":
+        names.push(current)
+    if names.len() == 0:
+        return nil
+    names
+
+fn coll_binding_readable(name: text) -> bool:
+    match coll_binding_names_of(name):
+        case Some(_): true
+        case nil: false
+
+fn coll_binding_binds(name: text, target: text) -> bool:
+    match coll_binding_names_of(name):
+        case Some(names): names.contains(target)
+        case nil: true
+
+# Expression kinds whose children are fully yielded by the arena's own
+# `expr_child_exprs` / `expr_child_stmts` / `expr_child_arms`. Mirrors
+# `coll_stmt_kind_known` one level down: an expression kind absent here makes
+# the whole function uninspectable, so a kind added later cannot default to
+# "safe". EXPR_ASM / EXPR_ASM_MATCH / EXPR_CUSTOM_BLOCK are deliberately
+# absent — no accessor yields their children, so nothing can vouch for them.
+fn coll_expr_kind_known(tag: i64) -> bool:
+    if tag == EXPR_INT_LIT or tag == EXPR_FLOAT_LIT or tag == EXPR_STRING_LIT:
+        return true
+    if tag == EXPR_BOOL_LIT or tag == EXPR_NIL_LIT or tag == EXPR_IDENT:
+        return true
+    if tag == EXPR_UNIT or tag == EXPR_ATOM or tag == EXPR_SUFFIXED_LIT:
+        return true
+    if tag == EXPR_PASS or tag == EXPR_PASS_TODO or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN:
+        return true
+    if tag == EXPR_BREAK or tag == EXPR_CONTINUE:
+        return true
+    if tag == EXPR_BINARY or tag == EXPR_UNARY or tag == EXPR_INDEX or tag == EXPR_RANGE:
+        return true
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN or tag == EXPR_NULL_COALESCE:
+        return true
+    if tag == EXPR_ARRAY_REPEAT or tag == EXPR_FIELD_ACCESS or tag == EXPR_RETURN:
+        return true
+    if tag == EXPR_AWAIT or tag == EXPR_YIELD or tag == EXPR_SPAWN or tag == EXPR_SPREAD:
+        return true
+    if tag == EXPR_EXISTS_CHECK or tag == EXPR_FORCE_UNWRAP or tag == EXPR_TRY:
+        return true
+    if tag == EXPR_CAST or tag == EXPR_OPTIONAL_CHAIN or tag == EXPR_NEW:
+        return true
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL or tag == EXPR_LAMBDA:
+        return true
+    if tag == EXPR_ARRAY_LIT or tag == EXPR_TUPLE or tag == EXPR_DICT_LIT or tag == EXPR_STRUCT_LIT:
+        return true
+    if tag == EXPR_INTERPOLATED_STRING or tag == EXPR_SLICE:
+        return true
+    if tag == EXPR_IF or tag == EXPR_MATCH or tag == EXPR_BLOCK:
+        return true
+    if tag == EXPR_FOR or tag == EXPR_WHILE or tag == EXPR_DO_BLOCK or tag == EXPR_UNSAFE_BLOCK:
+        return true
+    if tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP:
+        return true
+    false
+
+fn coll_expr_inspectable(e: i64) -> bool:
+    if e < 0:
+        return true
+    if not coll_expr_kind_known(expr_get_tag(e)):
+        return false
+    for child in expr_child_exprs(e):
+        if not coll_expr_inspectable(child):
+            return false
+    for s in expr_child_stmts(e):
+        if not coll_stmts_inspectable([s]):
+            return false
+    for arm in expr_child_arms(e):
+        if arm >= 0:
+            if not coll_expr_inspectable(arm_get_pattern(arm)):
+                return false
+            if not coll_expr_inspectable(arm_get_guard(arm)):
+                return false
+            if not coll_stmts_inspectable(arm_get_body(arm)):
+                return false
+    true
+
+fn coll_stmt_binds(tag: i64) -> bool:
+    (tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL
+     or tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_BIND)
+
+# False when any statement in the tree has a kind this analysis does not
+# enumerate, or a binding form it cannot read (`var (seen, k) = ([], 0)` has
+# an empty name — a destructuring pattern, which may well bind the tracked
+# array). A function that is not fully inspectable gets no Certain fix.
+fn coll_stmts_inspectable(stmts: [i64]) -> bool:
+    for s in real_stmts(stmts):
+        val tag = stmt_get_tag(s)
+        if not coll_stmt_kind_known(tag):
+            return false
+        if coll_stmt_binds(tag) and not coll_binding_readable(stmt_get_name(s)):
+            return false
+        for e in coll_stmt_child_exprs(s):
+            if not coll_expr_inspectable(e):
+                return false
+        if not coll_stmts_inspectable(coll_stmt_child_stmts(s)):
+            return false
+    true
+
+# --- bindings ---------------------------------------------------------------
+#
+# Every name BOUND anywhere in a statement tree. A `for allowed in groups`
+# binding counts even though it is not a `val|var` line — fixture a8 built the
+# Dict from an outer array shadowed by a loop variable, turning 1 into 0 — and
+# so do `bind`, `lazy val` and `static for`. A binding whose name cannot be
+# read is not silently skipped; `coll_stmts_inspectable` has already refused
+# the function by the time this runs.
+fn collect_binding_names(stmts: [i64], acc: [text]) -> [text]:
+    var names = acc
+    for s in real_stmts(stmts):
+        if coll_stmt_binds(stmt_get_tag(s)):
+            match coll_binding_names_of(stmt_get_name(s)):
+                case Some(bound):
+                    for n in bound:
+                        names.push(n)
+                case nil: val _ = 0
+        # Expression-level blocks (`do:`, `unsafe:`, a block-bodied lambda)
+        # and match arms hold statements too, and a binding there shadows
+        # just as well as one in a statement block.
+        for e in coll_stmt_child_exprs(s):
+            names = collect_expr_binding_names(e, names)
+        names = collect_binding_names(coll_stmt_child_stmts(s), names)
+    names
+
+fn collect_expr_binding_names(e: i64, acc: [text]) -> [text]:
+    var names = acc
+    if e < 0:
+        return names
+    for child in expr_child_exprs(e):
+        names = collect_expr_binding_names(child, names)
+    for s in expr_child_stmts(e):
+        names = collect_binding_names([s], names)
+    for arm in expr_child_arms(e):
+        if arm >= 0:
+            names = collect_binding_names(arm_get_body(arm), names)
+    names
+
+fn count_bindings_of(stmts: [i64], name: text) -> i64:
+    var total = 0
+    for n in collect_binding_names(stmts, []):
+        if n == name:
+            total = total + 1
+    total
+
+# Every identifier bound OR referenced anywhere in the module. Used for
+# generated-name freshness: strictly larger than "in scope", which is the safe
+# direction, and it needs no scope model the AST does not have.
+fn collect_expr_idents(e: i64, acc: [text]) -> [text]:
+    var names = acc
+    if e < 0:
+        return names
+    if expr_get_tag(e) == EXPR_IDENT:
+        names.push(expr_get_str(e))
+        return names
+    for child in expr_child_exprs(e):
+        names = collect_expr_idents(child, names)
+    for s in expr_child_stmts(e):
+        names = collect_stmt_idents([s], names)
+    for arm in expr_child_arms(e):
+        if arm >= 0:
+            names = collect_expr_idents(arm_get_pattern(arm), names)
+            names = collect_expr_idents(arm_get_guard(arm), names)
+            names = collect_stmt_idents(arm_get_body(arm), names)
+    names
+
+fn collect_stmt_idents(stmts: [i64], acc: [text]) -> [text]:
+    var names = acc
+    for s in real_stmts(stmts):
+        if coll_stmt_binds(stmt_get_tag(s)):
+            match coll_binding_names_of(stmt_get_name(s)):
+                case Some(bound):
+                    for n in bound:
+                        names.push(n)
+                case nil: val _ = 0
+        for e in coll_stmt_child_exprs(s):
+            names = collect_expr_idents(e, names)
+        names = collect_stmt_idents(coll_stmt_child_stmts(s), names)
+    names
+
+fn collection_module_names(decl_indices: [i64]) -> [text]:
+    """Every identifier the module binds or mentions, for name-freshness proofs."""
+    var names: [text] = []
+    for idx in coll_all_decls(decl_indices):
+        val n = decl_get_name(idx)
+        if n != "":
+            names.push(n)
+        for p in decl_get_param_names(idx):
+            names.push(p)
+        names = collect_stmt_idents(decl_get_body(idx), names)
+    names
+
+# --- use analysis -----------------------------------------------------------
+#
+# True when the tree contains any use of `name` that is not a plain read:
+# a mutating method call on it, an assignment to it or through its index, its
+# appearance anywhere inside a call's ARGUMENTS (the callee can alias it — and
+# an argument is an argument whatever its surface syntax, so named and
+# line-split arguments are the same node here), or its capture by a lambda.
+# `allowed_mutation` is the one method-call node the rewrite keeps in step
+# with the Dict (-1 when there is none).
+# True when `name` reaches a place this analysis can no longer follow: a bare
+# mention, an element or field of it, an interpolation hole. The one thing
+# that does NOT escape is the RESULT of a proven read-only method: `R.len()`
+# is a fresh value, so passing it to a call tells the callee nothing about R
+# and cannot mutate it.
+#
+# That distinction is the difference between a fix that fires and one that
+# does not. Measured over the tree: of 68 real dedup sites, ~24 were refused
+# solely because a reader result was passed somewhere (`print(seen.len())`).
+fn expr_escapes_ident(e: i64, name: text) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_IDENT:
+        return expr_get_str(e) == name
+    if tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING:
+        return literal_hole_mentions(e, name)
+    if tag == EXPR_METHOD_CALL:
+        val recv = expr_get_left(e)
+        val on_name = recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == name
+        if on_name and is_readonly_collection_method(expr_get_str(e)):
+            for a in expr_get_args(e):
+                if expr_escapes_ident(a, name):
+                    return true
+            return false
+    for child in expr_child_exprs(e):
+        if expr_escapes_ident(child, name):
+            return true
+    for s in expr_child_stmts(e):
+        if stmts_mention_ident([s], name):
+            return true
+    for arm in expr_child_arms(e):
+        if arm_mentions_ident(arm, name):
+            return true
+    false
+
+fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING:
+        # An interpolation hole can call anything on the name, including a
+        # mutator, and the AST shows nothing inside it.
+        return literal_hole_mentions(e, name)
+    if tag == EXPR_METHOD_CALL:
+        val recv = expr_get_left(e)
+        val on_name = recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == name
+        # A receiver that reaches the array without BEING it — `seen[0]`,
+        # `seen.field`, `f(seen)` — touches the same storage through a shape
+        # this analysis does not model. A reader CHAIN (`seen.len().to_text()`)
+        # does not: its receiver is already a fresh value.
+        if not on_name and expr_escapes_ident(recv, name):
+            return true
+        if on_name and e != allowed_mutation and not is_readonly_collection_method(expr_get_str(e)):
+            return true
+        for a in expr_get_args(e):
+            if expr_escapes_ident(a, name):
+                return true
+            if expr_has_unsafe_use(a, name, allowed_mutation):
+                return true
+        if not on_name:
+            return expr_has_unsafe_use(recv, name, allowed_mutation)
+        return false
+    if tag == EXPR_CALL:
+        if expr_escapes_ident(expr_get_left(e), name):
+            return true
+        for a in expr_get_args(e):
+            if expr_escapes_ident(a, name):
+                return true
+            if expr_has_unsafe_use(a, name, allowed_mutation):
+                return true
+        return false
+    # The array escaping into an aggregate leaves this analysis' sight.
+    if tag == EXPR_ARRAY_LIT or tag == EXPR_DICT_LIT or tag == EXPR_TUPLE or tag == EXPR_STRUCT_LIT:
+        return expr_escapes_ident(e, name)
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        val target = expr_get_left(e)
+        if target >= 0:
+            if expr_get_tag(target) == EXPR_IDENT and expr_get_str(target) == name:
+                return true
+            if expr_get_tag(target) == EXPR_INDEX:
+                val base = expr_get_left(target)
+                if base >= 0 and expr_get_tag(base) == EXPR_IDENT and expr_get_str(base) == name:
+                    return true
+        # The array on the RIGHT of an assignment — `alias = seen`,
+        # `d["k"] = seen` — hands a second handle to it to something this
+        # proof does not follow. It happens to be harmless in Simple today,
+        # because assignment copies an array: `var alias = seen;
+        # alias.pop()` leaves `seen` untouched, measured. But the proof does
+        # not VERIFY that, it would only be inheriting it, and an unstated
+        # language assumption is exactly the shape that produced the earlier
+        # wrong rewrites. So it fails closed, like any other escape.
+        if expr_escapes_ident(expr_get_right(e), name):
+            return true
+        if expr_has_unsafe_use(expr_get_left(e), name, allowed_mutation):
+            return true
+        return expr_has_unsafe_use(expr_get_right(e), name, allowed_mutation)
+    if tag == EXPR_LAMBDA:
+        # Closures capture by reference, so a mention inside one is enough.
+        return expr_mentions_ident(e, name)
+    for child in expr_child_exprs(e):
+        if expr_has_unsafe_use(child, name, allowed_mutation):
+            return true
+    # Statements and arms hanging off an EXPRESSION — a `do:`/`unsafe:` block
+    # body, a `match` arm. Any mention there is unsafe: this walker has no
+    # `allowed_mutation` context to grant inside them.
+    for s in expr_child_stmts(e):
+        if stmts_mention_ident([s], name):
+            return true
+    for arm in expr_child_arms(e):
+        if arm_mentions_ident(arm, name):
+            return true
+    false
+
+fn stmts_have_unsafe_use(stmts: [i64], name: text, allowed_mutation: i64) -> bool:
+    for s in real_stmts(stmts):
+        # `var alias = seen` binds a second handle to the array. As with the
+        # right-hand side of an assignment, it is harmless in Simple today
+        # only because assignment copies (measured: `alias.pop()` leaves
+        # `seen` at [1,2,3]) — a language fact this proof inherits rather
+        # than establishes, so it fails closed instead.
+        #
+        # DECLARATIONS only, never `for`. A `for` statement's expression is
+        # the ITERABLE, and its binding is the element, not the collection:
+        # `for imp in crate_imports:` reads the array and hands nothing to
+        # anyone. Treating it as an escape refused two real sites in the tree
+        # (`rust_codegen.spl`, `source_facts.spl`) for a hazard that is not
+        # there.
+        val btag = stmt_get_tag(s)
+        if btag == STMT_VAL_DECL or btag == STMT_VAR_DECL or btag == STMT_LAZY_VAL_DECL or btag == STMT_BIND:
+            if expr_escapes_ident(stmt_get_expr(s), name):
+                return true
+        for e in coll_stmt_child_exprs(s):
+            if expr_has_unsafe_use(e, name, allowed_mutation):
+                return true
+        if stmts_have_unsafe_use(coll_stmt_child_stmts(s), name, allowed_mutation):
+            return true
+    false
+
+# --- site location ----------------------------------------------------------
+
+fn coll_stmt_line(s: i64) -> i64:
+    coll_span_line(stmt_anchor_span(s))
+
+fn coll_expr_line(e: i64) -> i64:
+    coll_span_line(expr_anchor_span(e))
+
+# The declaration of `name` among the declarations in scope at the candidate
+# site, or -1. `visible_decls` is accumulated while descending: the `val`/
+# `var` statements that precede, on the path from the function body to this
+# loop, in each enclosing block. Sibling position and block membership are the
+# parser's answer, so nothing is counted or guessed.
+#
+# This is the dominance proof, and it no longer requires the declaration to be
+# a sibling of the loop itself. It does not need to, because the Dict is now
+# emitted immediately AFTER the declaration rather than before the loop: the
+# two then have exactly the same lifetime, whatever loops sit between them.
+# The old placement is what made a nested loop unsafe (the Dict was recreated
+# per outer iteration while the array was not, so membership reset); emitting
+# it beside the declaration removes the hazard instead of detecting it.
+# Measured: ~16 of 68 real dedup sites were refused for nesting alone.
+fn decl_visible_for(visible_decls: [i64], name: text) -> i64:
+    var found = -1
+    for s in visible_decls:
+        if s >= 0 and stmt_get_name(s) == name:
+            found = s
+    found
+
+# The `<ident>.contains(<x>)` call inside `e` that is NOT the inner of a
+# `not`, or -1. (A negated one is COLL020's guard, a different rule.)
+fn find_plain_contains_call(e: i64) -> i64:
+    if e < 0:
+        return -1
+    val tag = expr_get_tag(e)
+    if tag == EXPR_UNARY and expr_get_int(e) == TOK_NOT:
+        val inner = expr_get_left(e)
+        if inner >= 0 and expr_get_tag(inner) == EXPR_METHOD_CALL and expr_get_str(inner) == "contains":
+            return -1
+    if tag == EXPR_METHOD_CALL and expr_get_str(e) == "contains":
+        val recv = expr_get_left(e)
+        if recv >= 0 and expr_get_tag(recv) == EXPR_IDENT:
+            if expr_get_args(e).len() == 1:
+                return e
+    for child in expr_child_exprs(e):
+        val hit = find_plain_contains_call(child)
+        if hit >= 0:
+            return hit
+    -1
+
+# Plain-contains sites directly inside one loop body, descending through
+# `if`/block wrappers but not into a nested loop (that loop is the innermost
+# one for its own sites).
+fn guard_has_else(s: i64) -> bool:
+    if stmt_get_if_single_else(s) >= 0:
+        return true
+    val elif_idx = stmt_get_type(s)
+    elif_idx >= 0 and elif_get_else(elif_idx).len() > 0
+
+fn coll_stmt_is_loop(tag: i64) -> bool:
+    (tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_STATIC_FOR
+     or tag == STMT_LABELED_LOOP)
+
+fn plain_contains_sites_in_loop(stmts: [i64]) -> [i64]:
+    var found: [i64] = []
+    for s in real_stmts(stmts):
+        for e in coll_stmt_child_exprs(s):
+            val hit = find_plain_contains_call(e)
+            if hit >= 0:
+                found.push(hit)
+        if not coll_stmt_is_loop(stmt_get_tag(s)):
+            for nested in plain_contains_sites_in_loop(coll_stmt_child_stmts(s)):
+                found.push(nested)
+    found
+
+# The kept `R.push(v)` method-call node inside a proven dedup guard.
+fn guard_kept_push(guard: i64, receiver: text) -> i64:
+    for body_stmt in real_stmts(stmt_get_body(guard)):
+        val e = stmt_get_expr(body_stmt)
+        if e >= 0 and expr_get_tag(e) == EXPR_METHOD_CALL and expr_get_str(e) == "push":
+            val recv = expr_get_left(e)
+            if recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == receiver:
+                return e
+    -1
+
+# --- proof construction -----------------------------------------------------
+
+fn coll020_proof(
+    guard: i64, loop_stmt: i64, visible_decls: [i64], fn_body: [i64], param_names: [text]
+) -> CollectionFixProof:
+    val contains_call = is_not_contains_call(stmt_get_expr(guard))
+    val receiver = expr_get_str(expr_get_left(contains_call))
+    val guarded_val = expr_get_args(contains_call)[0]
+    # The DETECTOR now reports a guard on any value expression. The FIX
+    # envelope is deliberately not widened with it: the rewrite names the
+    # value in a generated `seen_set[<v>] = true`, and for anything but a
+    # plain identifier that would have to prove the expression is pure and
+    # evaluating it twice is free. Those sites warn with no fix.
+    if guarded_val < 0 or expr_get_tag(guarded_val) != EXPR_IDENT:
+        return coll_proof_unsafe(
+            "COLL020", receiver, "guarded value is not a plain identifier")
+    val value = expr_get_str(guarded_val)
+    val kept_push = guard_kept_push(guard, receiver)
+    if kept_push < 0:
+        return coll_proof_unsafe("COLL020", receiver, "no push onto the guarded array")
+    # An `elif`/`else` on the guard runs when the value WAS present. The
+    # rewrite says nothing about that branch, so it is not a shape this
+    # proves; lint still warns. Tested on the else BODY, not on the elif
+    # record index, which every `if` has (see `coll_stmt_child_stmts`).
+    if guard_has_else(guard):
+        return coll_proof_unsafe("COLL020", receiver, "guard has an elif/else branch")
+    # Name freshness aside, four proofs, in the order they are cheapest.
+    if name_in_list(param_names, receiver):
+        return coll_proof_unsafe("COLL020", receiver, "tracking array is a parameter, not a local")
+    if count_bindings_of(fn_body, receiver) != 1:
+        return coll_proof_unsafe("COLL020", receiver, "name is bound more than once (shadowed)")
+    val decl = decl_visible_for(visible_decls, receiver)
+    if decl < 0:
+        return coll_proof_unsafe(
+            "COLL020", receiver, "no local declaration of the array is in scope at this site")
+    if stmts_have_unsafe_use(fn_body, receiver, kept_push):
+        return coll_proof_unsafe("COLL020", receiver, "array is mutated or aliased elsewhere")
+    CollectionFixProof(
+        code: "COLL020", receiver: receiver, value: value,
+        guard_line: coll_stmt_line(guard), push_line: coll_expr_line(kept_push),
+        decl_line: coll_stmt_line(decl), loop_line: coll_stmt_line(loop_stmt),
+        safe: true, reason: "")
+
+fn coll002_proof(
+    site: i64, loop_stmt: i64, visible_decls: [i64], fn_body: [i64], param_names: [text]
+) -> CollectionFixProof:
+    val receiver = expr_get_str(expr_get_left(site))
+    if name_in_list(param_names, receiver):
+        return coll_proof_unsafe("COLL002", receiver, "array is a parameter, not a local")
+    if count_bindings_of(fn_body, receiver) != 1:
+        return coll_proof_unsafe("COLL002", receiver, "name is bound more than once (shadowed)")
+    val decl = decl_visible_for(visible_decls, receiver)
+    if decl < 0:
+        return coll_proof_unsafe(
+            "COLL002", receiver, "no local declaration of the array is in scope at this site")
+    # COLL002 builds the Dict ONCE from the array, so there is no kept-in-step
+    # statement: any mutation at all disqualifies.
+    if stmts_have_unsafe_use(fn_body, receiver, -1):
+        return coll_proof_unsafe("COLL002", receiver, "array is mutated or aliased elsewhere")
+    CollectionFixProof(
+        code: "COLL002", receiver: receiver, value: "",
+        guard_line: coll_expr_line(site), push_line: 0,
+        decl_line: coll_stmt_line(decl), loop_line: coll_stmt_line(loop_stmt),
+        safe: true, reason: "")
+
+fn collect_proofs_in_block(
+    block: [i64], fn_body: [i64], param_names: [text], visible_decls: [i64],
+    acc: [CollectionFixProof]
+) -> [CollectionFixProof]:
+    var proofs = acc
+    # Declarations accumulate as the walk descends, so a candidate sees every
+    # `val`/`var` that precedes it on its own path — including ones in blocks
+    # further out. Appended AFTER the statement is processed, so a declaration
+    # never sees itself.
+    var in_scope = visible_decls
+    for s in real_stmts(block):
+        val tag = stmt_get_tag(s)
+        if tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_STATIC_FOR or tag == STMT_LABELED_LOOP:
+            val loop_body = stmt_get_body(s)
+            for guard in manual_distinct_guards_in_loop(loop_body):
+                proofs.push(coll020_proof(guard, s, in_scope, fn_body, param_names))
+            for site in plain_contains_sites_in_loop(loop_body):
+                proofs.push(coll002_proof(site, s, in_scope, fn_body, param_names))
+            proofs = collect_proofs_in_block(loop_body, fn_body, param_names, in_scope, proofs)
+        else:
+            # Generic descent: every child statement list of every kind, so an
+            # `else`/`elif` body or a match arm containing a loop is reached
+            # by construction rather than by being listed here.
+            proofs = collect_proofs_in_block(
+                coll_stmt_child_stmts(s), fn_body, param_names, in_scope, proofs)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            in_scope.push(s)
+    proofs
+
+fn collection_fix_proofs(decl_indices: [i64]) -> [CollectionFixProof]:
+    """Every COLL002/COLL020 fix candidate in the module, each marked safe or not.
+
+    A caller may render a fix ONLY for a `safe` proof, and only at the lines
+    the proof names. Every judgement here is made on parser output, and every
+    default is fail-closed: a function this analysis cannot fully inspect
+    yields an UNSAFE proof for each of its candidates rather than none.
+    """
+    var proofs: [CollectionFixProof] = []
+    for idx in coll_all_decls(decl_indices):
+        if decl_get_tag(idx) == DECL_FN:
+            val body = decl_get_body(idx)
+            val inspectable = coll_stmts_inspectable(body)
+            for proof in collect_proofs_in_block(body, body, decl_get_param_names(idx), [], []):
+                if inspectable:
+                    proofs.push(proof)
+                else:
+                    # Downgraded, not dropped: a silently skipped function
+                    # would leave its candidate invisible, and a sibling's
+                    # safe proof would look like the file's only one.
+                    proofs.push(coll_proof_unsafe(
+                        proof.code, proof.receiver,
+                        "function contains a statement kind or binding form this analysis cannot inspect"))
+    proofs
 
 # ============================================================================
 # COLL021: manual_group (advisory, no fix — narrow shape, see note)
@@ -1368,13 +2484,11 @@ fn check_manual_group_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarni
                         if idx_name != "":
                             if has_index_scan_assign(stmt_get_body(inner), idx_name, scan_var):
                                 if has_negative_guard_on(_slice_from(loop_body, i + 1), idx_name):
-                                    warnings.push(CollectionLintWarning(
-                                        code: "COLL021",
-                                        severity: "MEDIUM",
-                                        message: "manual group-by (scan a keys array for a slot index, then push into a parallel bucket) is O(n*m); switch to group_by_key(xs, key) (std.common.frame) — dataframe-able. Inline form: a Dict<K, i64> key->slot plus parallel keys/members arrays, zipped at the end",
-                                        hint: "use group_by_key or the Dict-index + parallel-array idiom",
-                                        item_name: fn_name
-                                    ))
+                                    warnings.push(coll_warning(
+                                        "COLL021", "MEDIUM",
+                                        "manual group-by (scan a keys array for a slot index, then push into a parallel bucket) is O(n*m); switch to group_by_key(xs, key) (std.common.frame) — dataframe-able. Inline form: a Dict<K, i64> key->slot plus parallel keys/members arrays, zipped at the end",
+                                        "use group_by_key or the Dict-index + parallel-array idiom",
+                                        fn_name, stmt_anchor_span(inner)))
                         j = j + 1
                 i = i + 1
             val nested = check_manual_group_stmts(stmt_get_body(s), fn_name)
@@ -1396,7 +2510,7 @@ fn _slice_from(items: [i64], start: i64) -> [i64]:
 
 fn check_manual_group_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_manual_group_stmts(decl_get_body(idx), fn_name)
@@ -1427,34 +2541,101 @@ fn is_sort_then_take(e: i64) -> bool:
             return true
     false
 
-fn sort_then_take_warning(fn_name: text) -> CollectionLintWarning:
-    CollectionLintWarning(
-        code: "COLL022",
-        severity: "MEDIUM",
-        message: "full sort followed by take/slice is O(n log n) when only the top k are kept; switch to top_k_by(xs, k, score) (std.common.frame) — dataframe-able. Inline form: keep a small sorted k-buffer instead of sorting the whole collection",
-        hint: "use top_k_by or a bounded k-buffer instead of a full sort",
-        item_name: fn_name
-    )
+fn sort_then_take_warning(fn_name: text, span_id: i64) -> CollectionLintWarning:
+    coll_warning(
+        "COLL022", "MEDIUM",
+        "full sort followed by take/slice is O(n log n) when only the top k are kept; switch to top_k_by(xs, k, score) (std.common.frame) — dataframe-able. Inline form: keep a small sorted k-buffer instead of sorting the whole collection",
+        "use top_k_by or a bounded k-buffer instead of a full sort",
+        fn_name, span_id)
+
+# ---------------------------------------------------------------------------
+# Bound-value form (added 2026-09-19)
+#
+# `xs.sort_by(..).take(3)` fired; `val sorted = xs.sort_by(..)` followed by
+# `sorted.take(3)` did NOT — the same computation, one `val` apart, and the
+# bound form is the one people actually write when the comparator is long.
+#
+# Firing on it needs an extra proof the chained form gets for free: the sorted
+# array must not be USED for anything but the take/slice. If it is (`print
+# (sorted.len())`, a second slice, a return of the whole thing), the full sort
+# is load-bearing and `top_k_by` is not an equivalent rewrite — so that is a
+# false positive, not a hint. The check below is statement-granular: among the
+# statements that follow the binding in its own block, exactly the take/slice
+# statements may mention the name, and there must be at least one.
+# ---------------------------------------------------------------------------
+
+# The `val|var NAME = <recv>.sort...(...)` name, or "" when `s` is not one.
+fn sort_bound_name(s: i64) -> text:
+    val tag = stmt_get_tag(s)
+    if tag != STMT_VAL_DECL and tag != STMT_VAR_DECL:
+        return ""
+    val name = stmt_get_name(s)
+    if name == "":
+        return ""
+    val init = stmt_get_expr(s)
+    if init < 0 or expr_get_tag(init) != EXPR_METHOD_CALL:
+        return ""
+    if not is_sort_method_name(expr_get_str(init)):
+        return ""
+    name
+
+# `NAME.take(k)` / `NAME[a:b]` on a bare identifier receiver.
+fn is_take_or_slice_of(e: i64, name: text) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    var receiver = -1
+    if tag == EXPR_METHOD_CALL and expr_get_str(e) == "take":
+        receiver = expr_get_left(e)
+    elif tag == EXPR_SLICE:
+        receiver = expr_get_left(e)
+    else:
+        return false
+    receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT and expr_get_str(receiver) == name
+
+# (take_or_slice_statements, other_statements_mentioning_name) over `stmts`
+# and every nested body inside them.
+fn sort_bound_use_counts(stmts: [i64], name: text) -> (i64, i64):
+    var takes = 0
+    var others = 0
+    for s in real_stmts(stmts):
+        val e = stmt_get_expr(s)
+        if is_take_or_slice_of(e, name):
+            takes = takes + 1
+        elif e >= 0 and (expr_mentions_ident(e, name) or expr_contains_interpolation(e)):
+            others = others + 1
+        val nested = sort_bound_use_counts(stmt_get_body(s), name)
+        takes = takes + nested.0
+        others = others + nested.1
+    (takes, others)
 
 fn check_sort_then_take_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for s in stmts:
-        if s < 0:
-            continue
+    val real = real_stmts(stmts)
+    var i = 0
+    while i < real.len():
+        val s = real[i]
         val tag = stmt_get_tag(s)
-        if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+        if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_RETURN:
             val e = stmt_get_expr(s)
             if e >= 0 and is_sort_then_take(e):
-                warnings.push(sort_then_take_warning(fn_name))
+                warnings.push(sort_then_take_warning(fn_name, expr_anchor_span(e)))
+            else:
+                val bound = sort_bound_name(s)
+                if bound != "":
+                    val uses = sort_bound_use_counts(_slice_from(real, i + 1), bound)
+                    if uses.0 > 0 and uses.1 == 0:
+                        warnings.push(sort_then_take_warning(fn_name, expr_anchor_span(e)))
         if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
             val nested = check_sort_then_take_stmts(stmt_get_body(s), fn_name)
             for w in nested:
                 warnings.push(w)
+        i = i + 1
     warnings
 
 fn check_sort_then_take_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for idx in decl_indices:
+    for idx in coll_all_decls(decl_indices):
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
             val ws = check_sort_then_take_stmts(decl_get_body(idx), fn_name)

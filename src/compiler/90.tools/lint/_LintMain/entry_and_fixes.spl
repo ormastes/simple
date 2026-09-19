@@ -27,7 +27,9 @@ use compiler.core.ast_expr.{ast_generation}
 use compiler.core.parser.{parser_first_error_get}
 use compiler.tools.lint.lint_parse_memo.{lint_parse_module_memo}
 use compiler.semantics.lint.argument_count.{check_argument_count}
-use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use compiler.semantics.lint.collection_patterns.{
+    check_collection_patterns, CollectionFixProof, collection_fix_proofs,
+    collection_module_names}
 use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
@@ -195,13 +197,17 @@ fn lint_cli_append_parsed_results(
         val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
             .with_fix(warning.hint)
         results.push(LintRunResult.new(path, warning.line, 0, lint))
-    # Certain fixes are attached at most once per file per code — a second
-    # attach would duplicate the same Replacement spans and corrupt the
-    # applied output. Precondition 3 (file-unique `.contains(`/push line)
-    # already makes a second eligible warning impossible in practice; these
-    # flags are the explicit belt-and-suspenders guarantee.
-    var coll002_fix_attached = false
-    var coll020_fix_attached = false
+    # A Certain fix is attached to the warning whose own site it rewrites, and
+    # to no other: proofs carry the exact line of the guard they proved, so the
+    # fix for site B can no longer land on the diagnostic for site A. The old
+    # once-per-file flags did exactly that when a file had two safe sites, and
+    # made `simple lint --fix` disagree with `simple fix` about which line the
+    # edit belongs to.
+    # Proofs for the SAME parse, computed once before the loop. The fix
+    # generators must never re-parse here: `decls` is live for the whole loop
+    # and a re-parse resets the arena underneath it.
+    val coll_proofs = collection_fix_proofs(decls)
+    val coll_module_names = collection_module_names(decls)
     for warning in check_collection_patterns(decls):
         # This is the AST compatibility fallback.  Robust/critical deny policy
         # is reserved for typed, high-confidence evidence; unresolved receiver,
@@ -216,29 +222,34 @@ fn lint_cli_append_parsed_results(
             .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
             .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
             .with_evidence_tier(LintEvidenceTier.SourcePattern)
-        if warning.code == "COLL002" and not coll002_fix_attached:
-            match collection_002_fix(path, lines):
-                case Some(fix):
-                    lint = lint.with_easy_fix(fix)
-                    coll002_fix_attached = true
-                case nil:
-                    val _ = 0
-        elif warning.code == "COLL020" and not coll020_fix_attached:
-            match collection_020_fix(path, lines):
-                case Some(fix):
-                    lint = lint.with_easy_fix(fix)
-                    coll020_fix_attached = true
-                case nil:
-                    val _ = 0
-        # Locate the offending line textually; the AST span pool is empty on
-        # this path (verified: expr/stmt spans all read 0 and span_is_valid is
-        # false), so line recovery here works the same way lint_cli_find_fn_line
-        # already does.
-        val hit = lint_source_collection_fix_line(source_locations, warning.code)
-        var coll_line = lint_source_function_line(source_locations, warning.item_name)
-        if hit >= 0:
-            coll_line = hit + 1
-        results.push(LintRunResult.new(path, coll_line, 0, lint))
+        if warning.code == "COLL002":
+            for fix in collection_render_proven_fixes(
+                    path, lines, coll_proofs, coll_module_names, true, false, warning.line):
+                lint = lint.with_easy_fix(fix)
+        elif warning.code == "COLL020":
+            for fix in collection_render_proven_fixes(
+                    path, lines, coll_proofs, coll_module_names, false, true, warning.line):
+                lint = lint.with_easy_fix(fix)
+        # Position. The AST DOES carry real spans on the nodes these rules
+        # anchor on (method calls, slices, `if` statements) — the earlier note
+        # here ("expr/stmt spans all read 0 and span_is_valid is false") was
+        # wrong on both halves: span id 0 is a real pool slot, `span_is_valid`
+        # answers TRUE for it, and reading it yields a position belonging to
+        # an unrelated node. `check_collection_patterns` now resolves that
+        # itself (positive span ids only) and reports 0 for "unknown", which
+        # is the only case that still needs the textual fallbacks below.
+        # Before this change EVERY COLL finding landed on the function's
+        # declaration line at column 0 — `<file>:1:0` for the single-function
+        # files an LLM produces.
+        var coll_line = warning.line
+        var coll_col = warning.column
+        if coll_line <= 0:
+            val hit = lint_source_collection_fix_line(source_locations, warning.code)
+            coll_line = lint_source_function_line(source_locations, warning.item_name)
+            coll_col = 0
+            if hit >= 0:
+                coll_line = hit + 1
+        results.push(LintRunResult.new(path, coll_line, coll_col, lint))
     for warning in check_stub_impl(decls, stub_profile_name):
         # The line-scan text reimplementation in lint_checks.spl (`pass_todo`
         # substring scan) remains the ONE live STUB003 source for this CLI
@@ -518,146 +529,8 @@ fn collection_line_start_offset(lines: [text], line_idx: i64) -> i64:
         i = i + 1
     start
 
-# Index of the sole line containing `needle`, or -1 when there are zero or
-# more than one match — an ambiguous location has no safe fix (mirrors
-# `collection_fix_line`'s file-unique requirement).
-fn collection_unique_line_containing(lines: [text], needle: text) -> i64:
-    var found = -1
-    var i = 0
-    while i < lines.len():
-        if lines[i].contains(needle):
-            if found >= 0:
-                return -1
-            found = i
-        i = i + 1
-    found
-
-# Nearest enclosing `for `/`while ` header above `line_idx`, found by an
-# upward text scan that follows decreasing indentation through any
-# intervening `if`/`elif`/`else`/`match` wrapper rather than stopping at the
-# first shallower line. -1 when no such header is found before the file start.
-fn collection_enclosing_loop_line(lines: [text], line_idx: i64) -> i64:
-    var threshold = collection_line_indent(lines[line_idx])
-    var i = line_idx - 1
-    while i >= 0:
-        val trimmed = lines[i].trim()
-        if trimmed != "":
-            val indent = collection_line_indent(lines[i])
-            if indent < threshold:
-                if trimmed.starts_with("for ") or trimmed.starts_with("while "):
-                    return i
-                threshold = indent
-        i = i - 1
-    -1
-
-# Last line index still inside the block headed at `header_idx` (its own
-# indentation level or deeper), same shape as the unused-var function-end scan
-# in query_lint.spl but block-generic.
-fn collection_block_end(lines: [text], header_idx: i64) -> i64:
-    val header_indent = collection_line_indent(lines[header_idx])
-    var end = header_idx
-    var i = header_idx + 1
-    while i < lines.len():
-        val trimmed = lines[i].trim()
-        if trimmed != "":
-            if collection_line_indent(lines[i]) <= header_indent:
-                return end
-            end = i
-        i = i + 1
-    end
-
-fn collection_is_mutation_of(trimmed: text, name: text) -> bool:
-    if (trimmed.starts_with("{name} = ") or trimmed.starts_with("{name} += ") or
-        trimmed.starts_with("{name}.push(") or trimmed.starts_with("{name}.pop(") or
-        trimmed.starts_with("{name}.remove(") or trimmed.starts_with("{name}.insert(") or
-        trimmed.starts_with("{name}.clear(") or trimmed.starts_with("{name}.append(") or
-        trimmed.starts_with("{name}.sort(") or trimmed.starts_with("{name}.extend(")):
-        return true
-    # Index assignment (`arr[0] = 99`) mutates the array in place without
-    # matching any `.method(` prefix above. Find the matching `]` and check
-    # the text right after it is `=` and not `==` (a comparison, not a
-    # mutation).
-    if trimmed.starts_with("{name}["):
-        val close = trimmed.index_of("]")
-        if close >= 0:
-            val rest = trimmed.slice(close + 1).trim()
-            if rest.starts_with("=") and not rest.starts_with("=="):
-                return true
-    false
-
-fn collection_range_mutates(lines: [text], start_idx: i64, end_idx: i64, name: text) -> bool:
-    var i = start_idx
-    while i <= end_idx:
-        if collection_is_mutation_of(lines[i].trim(), name):
-            return true
-        i = i + 1
-    false
-
 fn collection_is_ident_char(c: text) -> bool:
     (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
-
-# Nearest enclosing top-level `fn ` header above `line_idx` (indentation 0),
-# found by an upward scan — same shape as `collection_enclosing_loop_line`.
-# -1 when no such header is found before the file start (should not happen
-# for any well-formed source, but callers must treat it as "no scope, no
-# fix" rather than falling back to the whole file).
-fn collection_enclosing_fn_start(lines: [text], line_idx: i64) -> i64:
-    var i = line_idx
-    while i >= 0:
-        val trimmed = lines[i].trim()
-        if trimmed.starts_with("fn ") and collection_line_indent(lines[i]) == 0:
-            return i
-        i = i - 1
-    -1
-
-# True when `name` appears, between lines `start_idx..end_idx` inclusive, as
-# a bare token immediately flanked (ignoring spaces) by `(` or `,` on one
-# side and `,` or `)` on the other — i.e. passed as an argument to some call.
-# A callee can alias the array through the parameter and mutate/replace it in
-# ways no textual scan can see, so this is conservative: any match blocks the
-# fix (hint-only) rather than trying to prove the callee is safe.
-fn collection_name_passed_as_call_arg(lines: [text], start_idx: i64, end_idx: i64, name: text) -> bool:
-    var i = start_idx
-    while i <= end_idx:
-        val line = lines[i]
-        var pos = 0
-        while pos < line.len():
-            val idx = text_index_of_from(line, name, pos)
-            if idx < 0:
-                break
-            val after = idx + name.len()
-            val before_ok = idx == 0 or not collection_is_ident_char(line.slice(idx - 1, idx))
-            val after_ok = after >= line.len() or not collection_is_ident_char(line.slice(after, after + 1))
-            if before_ok and after_ok:
-                var b = idx - 1
-                while b >= 0 and line.slice(b, b + 1) == " ":
-                    b = b - 1
-                var a = after
-                while a < line.len() and line.slice(a, a + 1) == " ":
-                    a = a + 1
-                val prev_c = if b >= 0: line.slice(b, b + 1) else: ""
-                val next_c = if a < line.len(): line.slice(a, a + 1) else: ""
-                if (prev_c == "(" or prev_c == ",") and (next_c == "," or next_c == ")"):
-                    return true
-            pos = idx + 1
-        i = i + 1
-    false
-
-# True when any of `name.` / `name[` / `name =` / `(name` / `, name` appears
-# between lines `start_idx..end_idx` inclusive — a broader "was this name
-# referenced at all" scan than `collection_is_mutation_of`, used to enforce
-# that a COLL020 candidate array is untouched between its `= []` declaration
-# and the loop that seeds it (no pre-seeding, no aliasing, nothing).
-fn collection_referenced_between(lines: [text], start_idx: i64, end_idx: i64, name: text) -> bool:
-    var i = start_idx
-    while i <= end_idx:
-        val trimmed = lines[i].trim()
-        if (trimmed.contains("{name}.") or trimmed.contains("{name}[") or
-            trimmed.contains("{name} =") or trimmed.contains("({name}") or
-            trimmed.contains(", {name}")):
-            return true
-        i = i + 1
-    false
 
 # ("", "") when `trimmed` is not a `val|var NAME[: TYPE] = INIT` declaration
 # of exactly `name`. Otherwise (annotation-or-"", init-text).
@@ -719,40 +592,6 @@ fn collection_infer_elem_type_from_literal(cursor: text) -> text:
         return "i64"
     ""
 
-# Element type for a `val|var NAME` declaration unique within
-# `scope_start..scope_end` (inclusive), or "" when the declaration is
-# missing, ambiguous, `text`-typed (precondition-1 rejection — the receiver
-# isn't actually an array), or its type can't be read. The `.1` is the
-# declaration's absolute line index (only meaningful when `.0 != ""`).
-#
-# The scope is always the enclosing function, never the whole file: a
-# same-named `val|var` in a sibling function (or a same-named parameter of
-# the fix's own function, which never matches here since parameters aren't
-# `val|var` lines) must never be mistaken for the receiver's declaration —
-# see `collection_enclosing_fn_start`.
-fn collection_decl_element_type(lines: [text], name: text, scope_start: i64, scope_end: i64) -> (text, i64):
-    var found_line = -1
-    var ambiguous = false
-    var elem_type = ""
-    var i = scope_start
-    while i <= scope_end:
-        val parts = collection_decl_parts(lines[i].trim(), name)
-        if parts.0 != "" or parts.1 != "":
-            if found_line >= 0:
-                ambiguous = true
-            found_line = i
-            if parts.0 != "":
-                if parts.0.starts_with("[") and parts.0.ends_with("]"):
-                    elem_type = parts.0.slice(1, parts.0.len() - 1).trim()
-                else:
-                    elem_type = ""
-            else:
-                elem_type = collection_infer_elem_type_from_literal(parts.1)
-        i = i + 1
-    if ambiguous or found_line < 0 or elem_type == "":
-        return ("", -1)
-    (elem_type, found_line)
-
 # Receiver/argument of the sole `.contains(` call on `trimmed`, or ("","")
 # when the shape doesn't match (no call, empty/multi-arg call, or the
 # receiver is guarded by `not` — that is COLL020's shape, not COLL002's).
@@ -794,191 +633,355 @@ fn collection_parse_contains_call(trimmed: text) -> (text, text):
         return ("", "")
     (receiver, arg)
 
-# COLL002 fix: hoist a loop-invariant `arr` into a membership Dict before the
-# loop and rewrite the `.contains(` call to `.contains_key(`. Every
-# precondition in the design doc section 10.3 is re-checked here from source
-# text; any failure returns nil (hint-only), never a partial/guessed fix.
-fn collection_002_fix(file_path: text, lines: [text]) -> EasyFix?:
-    val contains_idx = collection_unique_line_containing(lines, ".contains(")
-    if contains_idx < 0:
-        return nil
-    val trimmed = lines[contains_idx].trim()
-    val parsed = collection_parse_contains_call(trimmed)
-    val receiver = parsed.0
-    val arg = parsed.1
-    if receiver == "":
-        return nil
-    # Scope the declaration search to the enclosing function only — a
-    # same-named `val|var` in a sibling function must never be mistaken for
-    # this receiver's declaration.
-    val fn_start = collection_enclosing_fn_start(lines, contains_idx)
-    if fn_start < 0:
-        return nil
-    val fn_end = collection_block_end(lines, fn_start)
-    val decl = collection_decl_element_type(lines, receiver, fn_start, fn_end)
-    val elem_type = decl.0
-    if elem_type == "":
-        return nil
-    val loop_line = collection_enclosing_loop_line(lines, contains_idx)
-    if loop_line < 0:
-        return nil
-    # The declaration must precede the loop being hoisted out of. A decl
-    # found INSIDE the loop body (its line index falls after the loop header)
-    # is a fresh per-iteration local, not a loop-invariant array.
-    if decl.1 >= loop_line:
-        return nil
-    if collection_range_mutates(lines, loop_line + 1, collection_block_end(lines, loop_line), receiver):
-        return nil
-    # The array can be aliased through any call in the enclosing function
-    # that takes it as a bare argument (`grow(arr, x)`) — the callee could
-    # mutate or replace it in ways no textual scan can prove safe, so that
-    # stays hint-only rather than a machine-applied fix.
-    if collection_name_passed_as_call_arg(lines, fn_start, fn_end, receiver):
-        return nil
+# ===========================================================================
+# COLL002 / COLL020 Certain fixes — RENDERING ONLY
+#
+# Everything below builds an edit. Nothing below decides whether an edit is
+# SAFE: that is `collection_fix_proofs` in
+# `compiler.semantics.lint.collection_patterns`, which answers on parser
+# output. Two review rounds produced twelve wrong rewrites and every one was
+# a textual proof disagreeing with the parser about statement or block
+# extent — `while(gi < n):` not matching `"while "`, a column-0 comment
+# ending a block, a tab counting as indent 0, a statement split over two
+# lines, a named call argument not "flanked by ( or ,", a `for` binding not
+# being a `val|var`. See doc/08_tracking/bug/
+# coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md.
+#
+# The text work that remains is genuinely rendering: byte offsets, the
+# element-type annotation to copy into `Dict<T, bool>`, and the exact
+# substring being replaced. Every one of those can only REFUSE (return nil)
+# when the line does not look as expected; none of them can admit a site the
+# AST rejected, because the site set comes from the proofs.
+# ===========================================================================
 
-    val marker = ".contains("
-    val at_in_trimmed = trimmed.index_of(marker)
-    val recv_start_in_trimmed = at_in_trimmed - receiver.len()
-    val close_in_trimmed = text_index_of_from(trimmed, ")", at_in_trimmed + marker.len())
-    val line_indent = collection_line_indent(lines[contains_idx])
-
-    val set_name = "{receiver}_set"
-    val loop_indent = lines[loop_line].slice(0, collection_line_indent(lines[loop_line]))
-    val empty_dict = "{" + "}"
-    val insert_text = (
-        "{loop_indent}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n" +
-        "{loop_indent}for _v in {receiver}: {set_name}[_v] = true\n")
-    val insert_at = collection_line_start_offset(lines, loop_line)
-
-    val call_line_start = collection_line_start_offset(lines, contains_idx)
-    val call_start = call_line_start + line_indent + recv_start_in_trimmed
-    val call_end = call_line_start + line_indent + close_in_trimmed + 1
-    val new_call = "{set_name}.contains_key({arg})"
-
-    var fix = EasyFix.create(
-        "COLL002", "hoist `{receiver}` into a membership Dict before the loop",
-        FixConfidence.Certain)
-    fix.add_replacement(Replacement.create(
-        file_path, insert_at, insert_at, loop_line + 1, collection_line_indent(lines[loop_line]),
-        insert_text))
-    fix.add_replacement(Replacement.create(
-        file_path, call_start, call_end, contains_idx + 1, line_indent + recv_start_in_trimmed,
-        new_call))
-    Some(fix)
-
-# COLL020 fix: same membership-Dict idea, but the array is its own seen-set —
-# no pre-loop population pass, just an empty Dict kept in step with the array.
-fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
-    var found_guard = -1
-    var receiver = ""
-    var arg = ""
+# Leading whitespace of a line, spaces AND tabs. `collection_line_indent`
+# counts spaces only, which silently mis-measures a tab-indented file; used
+# for offsets it would corrupt the edit rather than refuse it.
+fn collection_ws_prefix(line: text) -> text:
     var i = 0
-    while i < lines.len():
-        val trimmed = lines[i].trim()
-        if trimmed.starts_with("if not ") and trimmed.contains(".contains(") and trimmed.ends_with(":"):
-            val marker = ".contains("
-            val at = trimmed.index_of(marker)
-            if at > 0:
-                var start = at
-                while start > 0:
-                    val c = trimmed.slice(start - 1, start)
-                    val is_ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
-                    if not is_ident:
-                        break
-                    start = start - 1
-                val recv = trimmed.slice(start, at)
-                val close = text_index_of_from(trimmed, ")", at + marker.len())
-                # Bare-identifier check, same as COLL002's
-                # `collection_parse_contains_call`: a dotted/qualified
-                # receiver must not be resolved to an unrelated same-named
-                # local elsewhere in the file.
-                val dotted = start > 0 and (trimmed.slice(start - 1, start) == "." or collection_is_ident_char(trimmed.slice(start - 1, start)))
-                if recv != "" and close >= 0 and not dotted:
-                    val a = trimmed.slice(at + marker.len(), close).trim()
-                    if a != "" and not a.contains(","):
-                        if found_guard >= 0:
-                            return nil  # ambiguous: more than one candidate guard line
-                        found_guard = i
-                        receiver = recv
-                        arg = a
+    while i < line.len():
+        val c = line.slice(i, i + 1)
+        if c != " " and c != "\t":
+            return line.slice(0, i)
         i = i + 1
-    if found_guard < 0:
+    line
+
+# The safe proofs for `code`, each renderable on its own.
+#
+# This used to demand EXACTLY ONE candidate of the code in the whole file and
+# no unsafe ones, because the renderer hunted for its site by scanning text
+# and could not be told which of several it was at. It no longer hunts: every
+# proof names its own guard, push and declaration lines. Measured, that
+# obsolete rule — not the analysis — was what capped coverage: of 68 real
+# dedup sites in the tree, most live in files that hold more than one
+# `.contains(` candidate, so the file was refused wholesale.
+#
+# Dropping it is sound because each proof is established over the WHOLE
+# function for ONE receiver: an unsafe candidate on a different array says
+# nothing about this one, and two safe candidates on the SAME array cannot
+# coexist — the second one's push is a mutation the first does not permit, so
+# neither would be safe. Distinct receivers also give distinct generated
+# names and disjoint edits.
+# One caveat, and it is not symmetric between the two codes. For COLL020 two
+# safe candidates on the SAME array genuinely cannot coexist. For COLL002 they
+# can: `contains` is a READER, so a lookup table that is never mutated yields
+# a safe proof at every loop that reads it — and rendering each would insert
+# `var known_set: Dict<...>` after the same declaration twice, a duplicate
+# binding. So proofs are deduped by (receiver, declaration): the first site
+# renders, the others keep their warning and get no fix.
+fn collection_safe_proofs(proofs: [CollectionFixProof], code: text) -> [CollectionFixProof]:
+    var found: [CollectionFixProof] = []
+    for proof in proofs:
+        if proof.code != code or not proof.safe:
+            continue
+        var already = false
+        for kept in found:
+            if kept.receiver == proof.receiver and kept.decl_line == proof.decl_line:
+                already = true
+        if not already:
+            found.push(proof)
+    found
+
+# A generated name not bound or mentioned anywhere in the module, per the
+# AST's own identifier set. `""` when `base`..`base10` are all taken.
+fn collection_fresh_name(module_names: [text], base: text) -> text:
+    var attempt = 0
+    while attempt < 10:
+        val candidate = if attempt == 0: base else: base + (attempt + 1).to_text()
+        var taken = false
+        for n in module_names:
+            if n == candidate:
+                taken = true
+        if not taken:
+            return candidate
+        attempt = attempt + 1
+    ""
+
+# Element type text for a `val|var NAME: [T] = INIT` line, plus the init text.
+# ("", "") when the line is not that shape — a rendering refusal: without the
+# annotation there is no `T` to write into `Dict<T, bool>`.
+fn collection_decl_render_parts(line: text, name: text) -> (text, text):
+    val parts = collection_decl_parts(line.trim(), name)
+    val annotation = parts.0
+    if annotation == "" or not annotation.starts_with("[") or not annotation.ends_with("]"):
+        return ("", "")
+    (annotation.slice(1, annotation.len() - 1).trim(), parts.1)
+
+fn collection_020_fix_proven(
+    file_path: text, lines: [text], proof: CollectionFixProof, module_names: [text]
+) -> EasyFix?:
+    val guard_idx = proof.guard_line - 1
+    val push_idx = proof.push_line - 1
+    val decl_idx = proof.decl_line - 1
+    val loop_idx = proof.loop_line - 1
+    if guard_idx < 0 or push_idx < 0 or decl_idx < 0 or loop_idx < 0:
+        return nil
+    if (guard_idx >= lines.len() or push_idx >= lines.len()
+        or decl_idx >= lines.len() or loop_idx >= lines.len()):
         return nil
 
-    val push_needle = "{receiver}.push({arg})"
-    val push_idx = collection_unique_line_containing(lines, push_needle)
-    if push_idx < 0:
-        return nil
+    val receiver = proof.receiver
+    val arg = proof.value
+    # The rewrite keeps the array's own push and adds a Dict write beside it,
+    # so the push must be the whole statement on its line — otherwise there is
+    # no place to put the second statement without re-indenting a block.
     val push_trimmed = lines[push_idx].trim()
-    if push_trimmed != push_needle:
-        return nil  # the push must be the whole statement, not part of a larger one
+    if push_trimmed != "{receiver}.push({arg})":
+        return nil
+    # The guard is replaced whole; it must be the single-line `if not ...:`
+    # form for that to be a faithful replacement.
+    val guard_trimmed = lines[guard_idx].trim()
+    if not guard_trimmed.starts_with("if not ") or not guard_trimmed.ends_with(":"):
+        return nil
+    if guard_trimmed != "if not {receiver}.contains({arg}):":
+        return nil
 
-    val loop_line = collection_enclosing_loop_line(lines, found_guard)
-    if loop_line < 0:
-        return nil
-    val block_end = collection_block_end(lines, loop_line)
-    # No mutation of the array anywhere in the loop body other than the
-    # guarded push itself — checked as two ranges split around the push line
-    # (reusing `collection_range_mutates` rather than a bespoke scan; an
-    # empty sub-range, e.g. when the push is the very next line, is a no-op
-    # since `start_idx > end_idx` short-circuits the scan).
-    if collection_range_mutates(lines, loop_line + 1, push_idx - 1, receiver):
-        return nil
-    if collection_range_mutates(lines, push_idx + 1, block_end, receiver):
-        return nil
-    # Scope the declaration search to the enclosing function only, same
-    # rationale as COLL002.
-    val fn_start = collection_enclosing_fn_start(lines, found_guard)
-    if fn_start < 0:
-        return nil
-    val fn_end = collection_block_end(lines, fn_start)
-    # The array itself must be the fresh local this rule requires: a
-    # `val|var NAME: [T] = []` declaration (annotation-only — an un-annotated
-    # `[]` carries no element type to infer from).
-    val decl = collection_decl_element_type(lines, receiver, fn_start, fn_end)
-    val elem_type = decl.0
+    val decl_parts = collection_decl_render_parts(lines[decl_idx], receiver)
+    val elem_type = decl_parts.0
     if elem_type == "":
         return nil
-    # The declaration must precede the loop it seeds — a decl found INSIDE
-    # the loop body is a fresh per-iteration local.
-    if decl.1 >= loop_line:
-        return nil
-    val decl_init = collection_decl_parts(lines[decl.1].trim(), receiver).1
-    if decl_init != "[]":
-        return nil
-    # Nothing may reference the array between its declaration and the loop
-    # that seeds it — a pre-seeded array (`seen.push(0)` right after the
-    # decl) is not the empty-set state the hoisted Dict would start from.
-    if collection_referenced_between(lines, decl.1 + 1, loop_line - 1, receiver):
+    # The Dict starts empty, so the array must too.
+    if decl_parts.1 != "[]":
         return nil
 
-    val guard_line_indent = collection_line_indent(lines[found_guard])
-    val guard_trimmed = lines[found_guard].trim()
-    val set_name = "{receiver}_set"
-    val new_guard = "if not {set_name}.contains_key({arg}):"
-    val guard_start = collection_line_start_offset(lines, found_guard) + guard_line_indent
+    val set_name = collection_fresh_name(module_names, "{receiver}_set")
+    if set_name == "":
+        return nil
+
+    val guard_ws = collection_ws_prefix(lines[guard_idx])
+    val guard_start = collection_line_start_offset(lines, guard_idx) + guard_ws.len()
     val guard_end = guard_start + guard_trimmed.len()
+    val new_guard = "if not {set_name}.contains_key({arg}):"
 
-    val push_indent = lines[push_idx].slice(0, collection_line_indent(lines[push_idx]))
-    val push_start = collection_line_start_offset(lines, push_idx) + collection_line_indent(lines[push_idx])
+    val push_ws = collection_ws_prefix(lines[push_idx])
+    val push_start = collection_line_start_offset(lines, push_idx) + push_ws.len()
     val push_end = push_start + push_trimmed.len()
-    val new_push = "{push_trimmed}\n{push_indent}{set_name}[{arg}] = true"
+    val new_push = "{push_trimmed}\n{push_ws}{set_name}[{arg}] = true"
 
-    val loop_indent = lines[loop_line].slice(0, collection_line_indent(lines[loop_line]))
+    # Emit the Dict immediately AFTER the array's declaration, not before the
+    # loop. The two then share a lifetime exactly, so a loop nested inside
+    # another cannot reset one without resetting the other — the hazard that
+    # made nested shapes unsafe, and that refused ~16 of 68 real dedup sites
+    # in this tree. Removing the hazard beats detecting it.
+    val decl_ws = collection_ws_prefix(lines[decl_idx])
     val empty_dict = "{" + "}"
-    val decl_text = "{loop_indent}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n"
-    val decl_at = collection_line_start_offset(lines, loop_line)
+    val decl_text = "{decl_ws}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n"
+    val decl_at = collection_line_start_offset(lines, decl_idx + 1)
 
     var fix = EasyFix.create(
         "COLL020", "track membership in `{set_name}` Dict instead of `.contains` on `{receiver}`",
         FixConfidence.Certain)
     fix.add_replacement(Replacement.create(
-        file_path, decl_at, decl_at, loop_line + 1, collection_line_indent(lines[loop_line]), decl_text))
+        file_path, decl_at, decl_at, proof.decl_line + 1, decl_ws.len(), decl_text))
     fix.add_replacement(Replacement.create(
-        file_path, guard_start, guard_end, found_guard + 1, guard_line_indent, new_guard))
+        file_path, guard_start, guard_end, proof.guard_line, guard_ws.len(), new_guard))
     fix.add_replacement(Replacement.create(
-        file_path, push_start, push_end, push_idx + 1, collection_line_indent(lines[push_idx]), new_push))
+        file_path, push_start, push_end, proof.push_line, push_ws.len(), new_push))
     Some(fix)
+
+fn collection_002_fix_proven(
+    file_path: text, lines: [text], proof: CollectionFixProof, module_names: [text]
+) -> EasyFix?:
+    val site_idx = proof.guard_line - 1
+    val decl_idx = proof.decl_line - 1
+    val loop_idx = proof.loop_line - 1
+    if site_idx < 0 or decl_idx < 0 or loop_idx < 0:
+        return nil
+    if site_idx >= lines.len() or decl_idx >= lines.len() or loop_idx >= lines.len():
+        return nil
+
+    val trimmed = lines[site_idx].trim()
+    val parsed = collection_parse_contains_call(trimmed)
+    # The argument's source text is not recoverable from the AST, so it is
+    # read back off the proven line. Cross-check the receiver: if the line does
+    # not read as the call the proof is about, refuse rather than guess.
+    if parsed.0 != proof.receiver:
+        return nil
+    val arg = parsed.1
+    if arg == "":
+        return nil
+
+    val decl_parts = collection_decl_render_parts(lines[decl_idx], proof.receiver)
+    var elem_type = decl_parts.0
+    if elem_type == "":
+        # Un-annotated `val xs = [1, 2]` still renders, from the literal.
+        elem_type = collection_infer_elem_type_from_literal(decl_parts.1)
+        if elem_type == "":
+            val fallback = collection_decl_parts(lines[decl_idx].trim(), proof.receiver)
+            elem_type = collection_infer_elem_type_from_literal(fallback.1)
+        if elem_type == "":
+            return nil
+
+    val set_name = collection_fresh_name(module_names, "{proof.receiver}_set")
+    if set_name == "":
+        return nil
+    val elem_var = collection_fresh_name(module_names, "_v")
+    if elem_var == "":
+        return nil
+
+    val marker = ".contains("
+    val at_in_trimmed = trimmed.index_of(marker)
+    val recv_start_in_trimmed = at_in_trimmed - proof.receiver.len()
+    val close_in_trimmed = text_index_of_from(trimmed, ")", at_in_trimmed + marker.len())
+    if recv_start_in_trimmed < 0 or close_in_trimmed < 0:
+        return nil
+    val site_ws = collection_ws_prefix(lines[site_idx])
+
+    # Same placement rule as COLL020: beside the declaration, not before the
+    # loop. The array is proven un-mutated for this rule, so building the Dict
+    # at the declaration reads exactly the same elements the loop would have.
+    val decl_ws = collection_ws_prefix(lines[decl_idx])
+    val empty_dict = "{" + "}"
+    val insert_text = (
+        "{decl_ws}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n" +
+        "{decl_ws}for {elem_var} in {proof.receiver}: {set_name}[{elem_var}] = true\n")
+    val insert_at = collection_line_start_offset(lines, decl_idx + 1)
+
+    val call_line_start = collection_line_start_offset(lines, site_idx)
+    val call_start = call_line_start + site_ws.len() + recv_start_in_trimmed
+    val call_end = call_line_start + site_ws.len() + close_in_trimmed + 1
+    val new_call = "{set_name}.contains_key({arg})"
+
+    var fix = EasyFix.create(
+        "COLL002", "hoist `{proof.receiver}` into a membership Dict before the loop",
+        FixConfidence.Certain)
+    fix.add_replacement(Replacement.create(
+        file_path, insert_at, insert_at, proof.decl_line + 1, decl_ws.len(), insert_text))
+    fix.add_replacement(Replacement.create(
+        file_path, call_start, call_end, proof.guard_line,
+        site_ws.len() + recv_start_in_trimmed, new_call))
+    Some(fix)
+
+# Standalone entry points: parse the source themselves, then render only what
+# the AST proved. Callers that already hold a parsed module use the `_proven`
+# forms with `collection_fix_proofs` / `collection_module_names` instead, so
+# that no caller can reach a renderer without a proof.
+fn collection_fix_from_lines(file_path: text, lines: [text], code: text) -> EasyFix?:
+    val content = lines.join("\n")
+    if not content.contains(".contains("):
+        return nil
+    val previous_parse_error = parser_has_errors()
+    val parse_failed = parse_module_silent_checked(content, file_path)
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        return nil
+    val decls = module_get_decls()
+    val proofs = collection_fix_proofs(decls)
+    val module_names = collection_module_names(decls)
+    # Single-fix entry point: the FIRST safe proof, for callers that want one
+    # `EasyFix?`. `collection_render_proven_fixes` renders every safe site.
+    for proof in collection_safe_proofs(proofs, code):
+        if code == "COLL020":
+            return collection_020_fix_proven(file_path, lines, proof, module_names)
+        return collection_002_fix_proven(file_path, lines, proof, module_names)
+    nil
+
+fn collection_002_fix(file_path: text, lines: [text]) -> EasyFix?:
+    collection_fix_from_lines(file_path, lines, "COLL002")
+
+fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
+    collection_fix_from_lines(file_path, lines, "COLL020")
+
+# ---------------------------------------------------------------------------
+# The single door to the COLL002/COLL020 Certain fixes (2026-09-19).
+#
+# `simple lint` gates these generators on the AST detector
+# (`check_collection_patterns`, above). `simple fix` called them directly, on
+# raw source text, with NO detector gate at all — so the two tools disagreed
+# on the most common LLM dedup shape: lint printed "all files clean" while
+# `simple fix --dry-run` reported `[COLL020] ... (certain)` and rewrote the
+# file. Two callers of the same generator with different admission rules is
+# not a tunable; it is two tools.
+#
+# This function is the one admission rule. Both paths now answer the same two
+# questions in the same order:
+#   1. does the AST detector report this code for this source?  (lint's rule)
+#   2. do the generator's textual preconditions hold?            (fix's rule)
+# A fix exists only when both say yes. Lint may still WARN without offering a
+# fix — that is the hint-only case and is expected — but a Certain fix can no
+# longer appear for a shape lint is silent about.
+#
+# Deliberately narrower than `lint_cli_source`: no config resolution, no
+# other rule families, no diagnostics. `simple fix` should not pay for the
+# whole linter to learn whether one loop is a dedup loop.
+pub fn collection_certain_fixes(file_path: text, content: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    # Both generators hunt for a `.contains(` call; a file with none can never
+    # satisfy either precondition, so skip the parse entirely (the same perf
+    # gate `collect_fixes_from_source` used to carry).
+    if not content.contains(".contains("):
+        return fixes
+    val previous_parse_error = parser_has_errors()
+    val parse_failed = parse_module_silent_checked(content, file_path)
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        # Source that does not parse was never analysed, so nothing here is
+        # proven — fail closed to no fix rather than falling back to the raw
+        # textual scan this function exists to gate.
+        return fixes
+    val decls = module_get_decls()
+    var saw_coll002 = false
+    var saw_coll020 = false
+    for warning in check_collection_patterns(decls):
+        if warning.code == "COLL002":
+            saw_coll002 = true
+        elif warning.code == "COLL020":
+            saw_coll020 = true
+    if not saw_coll002 and not saw_coll020:
+        return fixes
+    # Proofs and the identifier set come from THIS parse, so nothing re-parses
+    # and invalidates the arena while a caller still holds `decls`.
+    val proofs = collection_fix_proofs(decls)
+    val module_names = collection_module_names(decls)
+    val lines = content.split("\n")
+    for fix in collection_render_proven_fixes(file_path, lines, proofs, module_names, saw_coll002, saw_coll020, 0):
+        fixes.push(fix)
+    fixes
+
+# Render the fixes the proofs admit, for a caller that already parsed.
+# `for_line` is 0 for "every safe site" (the `simple fix` whole-file path) or
+# a 1-based line for "only the site anchored on this line". The lint path uses
+# the latter, because a diagnostic must carry the fix for ITS OWN site: the
+# warning's span and the proof's `guard_line` are the same node resolved the
+# same way, so the match is exact rather than positional.
+fn collection_render_proven_fixes(
+    file_path: text, lines: [text], proofs: [CollectionFixProof], module_names: [text],
+    want_coll002: bool, want_coll020: bool, for_line: i64
+) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    if want_coll002:
+        for proof in collection_safe_proofs(proofs, "COLL002"):
+            if for_line > 0 and proof.guard_line != for_line: continue
+            match collection_002_fix_proven(file_path, lines, proof, module_names):
+                case Some(fix): fixes.push(fix)
+                case nil: val _ = 0
+    if want_coll020:
+        for proof in collection_safe_proofs(proofs, "COLL020"):
+            if for_line > 0 and proof.guard_line != for_line: continue
+            match collection_020_fix_proven(file_path, lines, proof, module_names):
+                case Some(fix): fixes.push(fix)
+                case nil: val _ = 0
+    fixes
 
 fn lint_evidence_json(evidence: [text]) -> text:
     var items: [text] = []

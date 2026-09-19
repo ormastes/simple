@@ -142,12 +142,19 @@ describe "COLL002 upgrade — Certain fix under §10.3 preconditions":
             case nil:
                 assert_true(false)
 
-    it "stays hint-only when the receiver is declared as text, not an array":
-        step("stays hint-only when the receiver is declared as text, not an array")
-        """is_contains_call has no receiver type; a text receiver means
-        `.contains` is a substring search, and rewriting it to a Dict lookup
-        would change behavior — so this must warn without a fix."""
-        assert_true(coll002_warned("/tmp/coll002_text.spl", COLL002_TEXT_RECEIVER_SRC))
+    it "does not warn at all when the receiver is text, not an array":
+        step("does not warn at all when the receiver is text, not an array")
+        """FLIPPED round 5. This used to assert the rule WARNS here and
+        merely withholds the fix. That was wrong, and it was a real false
+        positive in the tree: on text `.contains` is a SUBSTRING search, not
+        an O(n) element scan, so COLL002 simply does not apply and there is
+        nothing for the user to act on. Measured at
+        src/compiler/80.driver/driver_build/incremental.spl:308 —
+        `val alphabet = "0123456789abcdef"`. `check_loop_body` was already
+        being handed `text_vars` for COLL001's sake and was not consulting
+        them here. Both the positive and the negated form are now gated; the
+        array case still warns, pinned in collection_frame_rules_spec."""
+        assert_false(coll002_warned("/tmp/coll002_text.spl", COLL002_TEXT_RECEIVER_SRC))
         match coll002_fix_of("/tmp/coll002_text.spl", COLL002_TEXT_RECEIVER_SRC):
             case Some(_): assert_true(false)
             case nil: val _ = 0
@@ -162,15 +169,23 @@ describe "COLL002 upgrade — Certain fix under §10.3 preconditions":
             case Some(_): assert_true(false)
             case nil: val _ = 0
 
-    it "stays hint-only when more than one .contains( line exists in the file":
-        step("stays hint-only when more than one .contains( line exists in the file")
-        """Two candidate call sites make the textual location recovery
-        ambiguous — the same file-uniqueness rule COLL001/COLL007 already
-        rely on."""
+    it "fixes BOTH sites when two different arrays are searched in one loop":
+        step("fixes BOTH sites when two different arrays are searched in one loop")
+        """FLIPPED round 4. This used to refuse, on a file-uniqueness rule
+        inherited from COLL001/COLL007: two `.contains(` sites made the
+        TEXTUAL location recovery ambiguous. Location is no longer recovered
+        from text — each proof carries the parser's own line for its guard,
+        its push and its declaration — so the ambiguity it was guarding
+        against no longer exists, and refusing here cost real coverage.
+        `arr` and `other` are distinct receivers with distinct declarations,
+        distinct generated names and disjoint edits. A/B'd by execution:
+        `search_twice([1, 4, 7, 2, 5])` is `[1, 4, 2, 5]` before and after.
+        (Two safe proofs on the SAME receiver are still collapsed to one
+        rendered fix — see collection_certain_fix_safety_spec.)"""
         assert_true(coll002_warned("/tmp/coll002_ambiguous.spl", COLL002_AMBIGUOUS_SRC))
         match coll002_fix_of("/tmp/coll002_ambiguous.spl", COLL002_AMBIGUOUS_SRC):
-            case Some(_): assert_true(false)
-            case nil: val _ = 0
+            case Some(_): val _ = 0
+            case nil: assert_true(false)
 
 # ---------------------------------------------------------------------------
 # COLL020 manual_distinct: a Certain fix, but only for the fresh-local,

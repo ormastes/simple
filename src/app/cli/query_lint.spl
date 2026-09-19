@@ -727,7 +727,17 @@ fn _run_ast_lint_passes(
     for w in coll_warnings:
         if _lint_code_suppressed(w.code):
             continue
-        val line_num = _query_callable_line(locations, w.item_name)
+        # Position: prefer the offending AST node's own span, which
+        # `check_collection_patterns` now resolves (positive span ids only —
+        # span id 0 is a real pool slot for which `span_is_valid` answers
+        # TRUE, so it is not evidence). Falling back to the enclosing
+        # callable's line, which used to be the ONLY answer here, with the
+        # column hardcoded to 1 — every COLL diagnostic on this LSP/MCP
+        # surface pointed at the function header. See doc/08_tracking/bug/
+        # coll020_lint_fix_disagree_two_array_dedup_2026-09-19.md.
+        val span_line = w.line
+        val line_num = if span_line > 0: span_line else: _query_callable_line(locations, w.item_name)
+        val col_num = if span_line > 0 and w.column > 0: w.column else: 1
         # These legacy checks run before type/effect completion. Keep them at
         # warning severity and disclose the missing proof rather than allowing
         # a textual HIGH label to look like a proven error.
@@ -737,9 +747,9 @@ fn _run_ast_lint_passes(
             val item_evidence = _escape_json("item=" + w.item_name)
             val severity_evidence = _escape_json("source_severity=" + w.severity)
             val uncertainty_json = _escape_json(uncertainty)
-            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"confidence\":\"source-pattern\",\"evidence\":[\"{item_evidence}\",\"{severity_evidence}\"],\"uncertainty\":\"{uncertainty_json}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"confidence\":\"source-pattern\",\"evidence\":[\"{item_evidence}\",\"{severity_evidence}\"],\"uncertainty\":\"{uncertainty_json}\",\"line\":{line_num},\"col\":{col_num},\"end_line\":{line_num},\"end_col\":{col_num},\"tags\":[],\"source\":\"simple-lint\"}")
         else:
-            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
+            print "{file}:{line_num}:{col_num}: warning[{w.code}]: {w.message}"
             print "  confidence: source-pattern"
             print "  evidence: item={w.item_name}"
             print "  evidence: source_severity={w.severity}"

@@ -69,3 +69,39 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   than the two above because comparing the DT_NEEDED *set* cannot see it:
   DT_NEEDED **order** decides which library wins, ld.lld emits `-l` libraries
   before libc, and a libc-first list silently loses every shadowing symbol.
+## Traps (arena AST / lint rules) — measured 2026-09-19
+
+Found while fixing the COLL0xx rule family
+(`doc/08_tracking/bug/coll020_lint_fix_disagree_two_array_dedup_2026-09-19.md`).
+All three cost real time and none is guessable from the source.
+
+- **`span_is_valid(0)` is TRUE, and span id 0 is a lie.** `span_is_valid`
+  (`10.frontend/core/types.spl`) is just `id >= 0 and id < pool.len()`, and id
+  0 is a genuine pool slot holding whatever the first allocation of the run
+  recorded. The parser also passes 0 as its "no span" default, so reading a
+  0 span hands you a position from an unrelated part of the file (measured:
+  every unspanned node reported line 2, col 23 for one fixture). **Gate on
+  `span_id > 0`, not on `span_is_valid`.** Relatedly, only SOME node kinds
+  carry spans at all: EXPR_METHOD_CALL, EXPR_SLICE and STMT_IF do;
+  EXPR_IDENT and most statement tags do not. Anchor a diagnostic on a node
+  that does.
+- **String interpolation is opaque, and NOT as `EXPR_INTERPOLATED_STRING`.**
+  `val t = "{x.len()}"` parses to a plain **`EXPR_STRING_LIT`** whose text is
+  the literal `{x.len()}`, with ZERO child expressions — the hole is raw text
+  and is lowered later. Checking for tag `EXPR_INTERPOLATED_STRING` finds
+  nothing. Any "is this identifier used anywhere?" analysis is blind to uses
+  inside `"{...}"`, which is safe for a rule that must find a use and UNSAFE
+  for a rule that must prove there is none. Also: a spec fixture containing a
+  literal `{` is interpolated in the SPEC's own scope before the linter ever
+  sees it — build such fixtures by concatenation (`"{" + "x" + "}"`).
+- **Walk `expr_child_exprs`, never a hand-rolled tag switch.**
+  `10.frontend/core/_AstExpr/accessors.spl` has the arena's canonical,
+  tag-dispatched ownership contract; it deliberately excludes slots that hold
+  match-arm ids or field-name metadata rather than expression ids, so it can
+  neither miss a child nor misread a non-expression slot. The hand-written
+  switch it replaced in `collection_patterns.spl` silently missed
+  EXPR_SLICE, literals, and call receivers.
+- **A `lazy` import loads on CALL, so a perf gate must sit at the call site.**
+  Moving a `source.contains(".contains(")` gate from the caller into the lazy
+  callee made every COLL-free file pay the lint/parser frontend load: 2.68s ->
+  4.03s on a two-line file. The gate belongs outside the lazy call.

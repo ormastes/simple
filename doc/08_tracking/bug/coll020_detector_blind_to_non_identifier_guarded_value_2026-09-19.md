@@ -1,0 +1,259 @@
+# COLL002/COLL020 are blind to a dedup guard whose value is not a bare identifier
+
+**Status:** OPEN 2026-09-19
+**Area:** `src/compiler/35.semantics/lint/collection_patterns.spl`
+  (`is_manual_distinct_guard`, `push_stmt_array_name`, `is_contains_call`)
+**Found by:** measuring Certain-fix coverage over the tree's real dedup sites
+  for `doc/08_tracking/bug/coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md`
+
+## What happens
+
+Neither rule fires when the guarded value is anything other than a bare
+identifier. Measured with the real CLI, one file, two functions:
+
+```
+fn get_unique_externals(deps: [Dep]) -> [text]:
+    val seen: [text] = []
+    for dep in deps:
+        if not seen.contains(dep.path):      # <- field access
+            seen.push(dep.path)
+    return seen
+
+fn plain(deps: [text]) -> [text]:
+    val seen: [text] = []
+    for d in deps:
+        if not seen.contains(d):             # <- bare identifier
+            seen.push(d)
+    return seen
+```
+
+```
+$ bin/simple lint probe/p1.spl
+p1.spl:14:9: warning[COLL020]: manual dedup loop ... is O(n^2) ...
+  fix: available [COLL020] (certain)
+Found 0 error(s), 1 warning(s), 1 auto-fix(es) available
+```
+
+Line 14 is `plain`. `get_unique_externals` gets **no diagnostic at all** — not
+COLL020, and not even COLL002, although `.contains()` on an array inside a
+loop is exactly what COLL002 is for. The first function is the real one, from
+`src/compiler/90.tools/depgraph/analyzer.spl:218`; the second is a reduction
+of it. They are the same O(n^2) idiom with the same fix.
+
+## Why it matters
+
+This is the dominant ceiling on the feature, and it is a DETECTION gap, not a
+safety refusal. Over the 68 real dedup sites in 52 files:
+
+- **26 of 68 (38%)** guard on something that is not a bare identifier —
+  `dep.path`, `f(x)`, `xs[i]`, a concatenation. Every one is silently
+  un-warned, so the Certain door never gets a chance to prove anything.
+- 10 of 68 have a guard body with more than one statement, which
+  `manual_distinct_guard_body_pushes` also rejects (it requires every
+  statement in the body to be a push of the guarded value).
+
+Those two account for most of the gap between 68 sites and the 8 that get a
+Certain fix. The remaining refusals are the Certain door doing its job:
+parameters, reassignment of the array, `.sort()` on it, and same-receiver
+multi-site loops.
+
+## What the fix would need
+
+`is_manual_distinct_guard` compares the guarded value and the pushed value by
+NAME. It should compare them structurally — the same expression subtree in the
+`contains` argument and in the `push` argument — which the arena can answer
+without any new accessor. The generated Dict key is then that expression,
+emitted once into a local:
+
+```
+var seen_set: Dict<text, bool> = {}
+...
+    val _k = dep.path
+    if not seen_set.contains_key(_k):
+        seen_set[_k] = true
+        seen.push(_k)
+```
+
+That is a bigger rewrite than the current one (it introduces a binding, so it
+needs the same name-freshness proof the Dict name already gets), and the
+expression must be proven side-effect-free before it can be evaluated once
+instead of twice — `f(x)` is not. Both are checks the Certain door already
+knows how to express; neither is in place.
+
+## Deliberate scope note
+
+Not attempted in the round that found it. The Certain door had just closed 21
+measured wrong rewrites across four rounds, and widening WHAT IT SEES is a
+separate change class from proving what it may rewrite. A correct warning with
+no fix is a fine outcome; a wrong rewrite is not.
+
+## A second, related blindness in the same family
+
+`if not allowed.contains(x):` — the plain FILTER form, with no push onto
+`allowed` — also produces no COLL002. Verified with the real CLI on a
+two-array fixture: `Lint passed: all files clean`. The cause is visible in the
+source: the if-condition path tests `is_contains_call(cond)`, and under `not`
+the condition node is a unary expression, not the method call. The positive
+form `if arr.contains(t):` is detected (two sites, `amb.spl:6:12` and `8:12`,
+each carrying its own Certain fix), so this is specifically the negated one.
+
+Both blindnesses live in the same place — the rule asks whether ONE node has
+the shape it expects, instead of looking for the `contains` call anywhere in
+the condition — and a fix for one should cover the other.
+
+## Two precision notes on the measurement above
+
+- The "26 of 68" figure is a **classification by argument text** over the site
+  list, not 26 separate CLI runs. Two were confirmed against the real CLI: the
+  original `src/compiler/90.tools/depgraph/analyzer.spl` (6 warnings, none
+  COLL) and its two-function reduction.
+- **Why COLL002 is also silent on the field-access form is not established
+  here.** COLL002 has its own `.contains()`-in-loop path that does not depend
+  on the push, so a handoff or suppression between the two rules is the
+  likely cause, but it was not traced. Whoever fixes COLL020's matcher must
+  re-check that interaction rather than assume one change covers both.
+
+## The trap a fixer will hit first
+
+Do not fix the negated-filter blindness by simply looking for a `contains`
+call anywhere in the condition. **Every COLL020 site is a negated filter** —
+`if not X.contains(v): X.push(v)` is the dedup idiom itself — so a naive
+widening makes COLL002 fire on all of them and every dedup site reports
+twice, once as O(n^2)-per-iteration and once as a manual dedup loop. A fix
+must exclude the guards COLL020 already claims.
+
+## RESOLVED 2026-09-19 — measured before/after
+
+Both matchers widened, warning-only. Diagnostic coverage measured by running
+`bin/simple lint` over the same 52 files at the commit before and after, and
+matching reported lines against the 68 known sites:
+
+| | sites diagnosed | raw COLL rows |
+|---|---|---|
+| before | 18 of 68 | 31 |
+| after | **37 of 68** | 60 |
+
+Fix coverage is **unchanged at 10 of 68**, verified site by site — the fix
+envelope was deliberately not widened with the detector.
+
+**CORRECTION to a first reading of these numbers.** The first cut of this
+section said "only 33 of 52 files reach the COLL rules" and quoted 37 of 41
+(90%). That was wrong: it treated "produced no COLL row" as "never reached the
+rules", which conflated three different things. Re-measured properly:
+
+- **14 of the 68 sites are not inside a loop at all.** The site list came from
+  a textual grep for the dedup idiom and caught recursive accumulators and
+  one-shot adds (`src/compiler/80.driver/incremental.spl:69`,
+  `src/compiler/10.frontend/aspect_registry.spl:151`). Those are not
+  quadratic and are CORRECTLY silent. The honest denominator is **54**.
+- Of those 54: **37 diagnosed, 7 blocked by a whole-file lint abort, 10
+  silent.**
+- So within files lint can actually process, it is **37 of 47 (79%)**.
+
+The 10 remaining silences are two known causes: eight are the multi-statement
+guard-body limit recorded above (the body pushes something else alongside the
+dedup push, e.g. `typedefs.push(cb)`), and two are methods rather than
+top-level functions — filed as
+`coll_rules_do_not_walk_methods_2026-09-19.md`.
+
+The 7 aborts are a front-end defect, not detector blindness, and are the
+single largest remaining cause. Filed as
+`lint_semantic_string_index_out_of_bounds_aborts_whole_file_2026-09-19.md`
+and `lint_other_whole_file_aborts_2026-09-19.md`; the same files are analysed
+fine by `simple fix`, which is recorded as its own contract question in
+`lint_and_fix_disagree_on_analysable_files_2026-09-19.md`.
+
+### Final numbers, after also walking method bodies
+
+| | sites diagnosed (of 68) | of the 54 genuinely-quadratic |
+|---|---|---|
+| before any widening | 18 | 18 |
+| + structural guarded value, negated filter | 37 | 37 |
+| + method bodies walked | **40** | **40** |
+
+Within the 47 in-loop sites in files `bin/simple lint` can actually process:
+**40 of 47, 85%.**
+
+Denominator, stated once more because it is the easy thing to get wrong: the
+68 came from a textual grep for the dedup idiom, and **14 of them are not
+inside a loop at all** (recursive accumulators, one-shot adds). Those are not
+quadratic and are correctly silent. Of the remaining 54, **7 are unreachable
+because `bin/simple lint` aborts on the whole file** — a front-end defect,
+filed separately — and **7 are the multi-statement guard-body limit**, where
+the guard body pushes something else alongside the dedup push
+(`typedefs.push(cb)`). That last group is the only remaining detector gap and
+it is a deliberate one: widening it means proving the extra statements are
+not part of the idiom.
+
+**Fix coverage is unchanged at 10 of 68 throughout**, by design. The Certain
+envelope was not widened with the detector: `coll020_proof` refuses any
+guarded value that is not a plain identifier, so every newly-seen site warns
+with no fix.
+
+### Round 5 — nested blocks, and the number is now auditable
+
+The attribution above ("the multi-statement guard-body limit is the only
+remaining detector gap") was **wrong**. An adversarial review found every
+remaining silent site was nested under an `if` or `case` INSIDE the loop, and
+that a top-level multi-statement body reports fine. `check_loop_body` only
+examined the loop body's top level, and `check_fn_body` descends into blocks
+hunting for LOOPS, not for in-loop patterns — so such a guard was checked by
+neither. It now descends generically, skipping loops (reached in their own
+right, so descending would double-report).
+
+| | of the 54 in-loop sites |
+|---|---|
+| before any widening | 18 |
+| + structural value, negated filter | 37 |
+| + method bodies | 40 |
+| + nested blocks | **47** |
+
+**47 of 47 — every in-loop site `bin/simple lint` can reach is diagnosed.**
+The remaining 7 are in files the linter aborts on before any rule runs, which
+is the front-end defect filed separately, not a rule gap.
+
+**The numbers are now reproducible.** `scripts/check/scan-dedup-sites.shs`
+generates the site list, and the 52-file sample used above is committed as
+`coll_dedup_sites_52file_sample_2026-09-19.txt`. Over the whole tree the
+script finds **213 sites, 157 of them in a loop**; the 68/54 quoted above and
+a reviewer's independent 105/78 were both subsets differing by scan scope.
+Coverage has NOT been re-measured at tree scale — linting every file holding
+one of the 157 takes hours on this host — so the 47/47 figure is the 52-file
+sample, and a tree-wide re-measure is named here as remaining work rather
+than extrapolated.
+
+Fix coverage is **10 of 68 on that sample and unchanged by all four
+widenings**, except as corrected below: the method walk DID widen the
+envelope (a method-local `var seen` is now fixed), which round 4 wrongly
+claimed it had not. Those rewrites are output-identical, and the case is now
+pinned deliberately by `collection_certain_fix_safety_spec` m1/m2/m3.
+
+### Correction: "text receivers no longer warn" is too strong
+
+The gate added in round 5 covers the case it was built for — a receiver that
+is a local NAME the walker has seen bound to text. It does not make COLL002
+silent on every text receiver, and saying so was an overstatement. Measured
+after the fix, **25 sites in 6 files still warn** on receivers that are
+text, through a pre-existing class the gate cannot reach: there is no
+syntactic text evidence for the receiver at all. Examples are
+`normalize_lint_line(...)` and `strip_ansi(...)` — a CALL RESULT, which is
+not a name to look up — and a loop variable, whose element type the walker
+does not infer.
+
+That class predates this lane and is not made worse by it. Closing it needs
+receiver TYPES, which this rule deliberately does not have (it is the
+"source-pattern fallback" tier and says so in its own uncertainty field), so
+it is recorded here rather than papered over with more syntactic guessing.
+
+What IS true after round 5: a text receiver bound to a local `val`/`var`,
+in any branch of any nested block, no longer warns in either the positive or
+the negated form.
+
+### Re-sweep after the shared-traversal fix
+
+Removing the two false positives cost no true positives: the 52-file sample
+re-measures at **47 of 47 reachable in-loop sites diagnosed, 0 silent, 7
+blocked by a whole-file lint abort** — identical to the figure before the
+fix, with 73 raw COLL rows either way. That is the expected result, since the
+fix only ADDS text bindings to the exclusion set and the excluded sites were
+not dedup sites.
