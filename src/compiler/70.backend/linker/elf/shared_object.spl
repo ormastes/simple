@@ -25,12 +25,15 @@ val SHT_GNU_VERSYM: i64 = 0x6fffffff
 val SHT_GNU_VERDEF: i64 = 0x6ffffffd
 val DT_SONAME_SO: i64 = 14
 val VERSYM_HIDDEN: i64 = 0x8000
+val VER_FLG_BASE: i64 = 1
+val VER_FLG_WEAK: i64 = 2
 
 struct ElfSharedLib:
     soname: text
     machine: i64
     exports: {text: i64}   # defined default-version symbol -> STT_* type
-    versions: {text: text} # export -> its default version name ("" = unversioned)
+    versions: {text: text}      # export -> its default version name ("" = unversioned)
+    version_weak: {text: bool}  # version name -> VER_FLG_WEAK was set on its verdef
 
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
@@ -42,24 +45,33 @@ fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
 fn elf_so_link(bytes: [u8], shoff: i64, i: i64) -> i64:
     elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 40)
 
-fn elf_verdef_names(bytes: [u8], sec: ElfSectionHeader, strtab: ElfStringTable, count: i64) -> {i64: text}:
-    """`.gnu.version_d` version index -> version name (Elf64_Verdef chain)."""
+struct ElfVerdefs:
+    """What a DSO's `.gnu.version_d` says about each version index."""
+    names: {i64: text}
+    weak: {text: bool}      # by version NAME, which is what a verneed aux carries
+
+fn elf_verdef_names(bytes: [u8], sec: ElfSectionHeader, strtab: ElfStringTable, count: i64) -> ElfVerdefs:
+    """`.gnu.version_d` version index -> version name + VER_FLG_WEAK (Elf64_Verdef chain)."""
     var out: {i64: text} = {}
+    var weak: {text: bool} = {}
     var off = sec.sh_addr
     var seen: i64 = 0
     while seen < count and off + 20 <= bytes.len():
-        val base = elf_read_u16_le(bytes, off + 2) & 1   # VER_FLG_BASE: the file's own name, not a version
+        val flags = elf_read_u16_le(bytes, off + 2)
+        val base = flags & VER_FLG_BASE   # the file's own name, not a version
         val ndx = elf_read_u16_le(bytes, off + 4) & 0x7fff
         val aux = elf_read_u32_le(bytes, off + 12)
         if base == 0 and off + aux + 4 <= bytes.len():
-            out[ndx] = elf_strtab_get(strtab, elf_read_u32_le(bytes, off + aux))
+            val vname = elf_strtab_get(strtab, elf_read_u32_le(bytes, off + aux))
+            out[ndx] = vname
+            weak[vname] = flags & VER_FLG_WEAK != 0
         val next = elf_read_u32_le(bytes, off + 16)
         if next == 0:
             seen = count
         else:
             off = off + next
             seen = seen + 1
-    out
+    ElfVerdefs(names: out, weak: weak)
 
 fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
@@ -96,7 +108,7 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     if versym_i >= 0:
         versym_off = elf_so_shdr(bytes, shoff, versym_i).sh_addr
 
-    var verdef: {i64: text} = {}
+    var verdef = ElfVerdefs(names: {}, weak: {})
     if verdef_i >= 0:
         val vsec = elf_so_shdr(bytes, shoff, verdef_i)
         verdef = elf_verdef_names(bytes, vsec,
@@ -118,8 +130,8 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
             val vs = elf_read_u16_le(bytes, versym_off + k * 2)
             if vs & VERSYM_HIDDEN != 0:
                 linkable = false
-            else if verdef.has(vs & 0x7fff):
-                ver = verdef[vs & 0x7fff]
+            else if verdef.names.has(vs & 0x7fff):
+                ver = verdef.names[vs & 0x7fff]
         if linkable:
             val name = elf_strtab_get(strtab, elf_read_u32_le(bytes, e))
             exports[name] = info & 0xf
@@ -141,6 +153,7 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
                 d = d + 16
     if soname == "":
         return Err("shared object has no DT_SONAME (needed for DT_NEEDED)")
-    Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports, versions: versions))
+    Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports, versions: versions,
+        version_weak: verdef.weak))
 
-export ElfSharedLib, elf_parse_shared
+export ElfSharedLib, ElfVerdefs, elf_parse_shared

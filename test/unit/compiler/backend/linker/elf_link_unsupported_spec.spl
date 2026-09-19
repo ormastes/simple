@@ -24,8 +24,9 @@
 
 use compiler.backend.linker.elf.elf_static_link.{
     elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC,
-    elf_local_ifunc, elf_property_policy, elf_object_property_and
+    elf_local_ifunc, elf_property_policy, elf_object_property_and, elf_ver_plan
 }
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, elf_reloc_scan, elf_reloc_class, elf_reloc_is_tls,
     ELF_LINK_DYNAMIC_EXEC as SCAN_DYNAMIC_EXEC,
@@ -142,7 +143,6 @@ describe "elf_link - .note.gnu.property":
             elf_parse_object(load_path("{FIX}/hello_libc_x64.o")).unwrap()]
         val p = elf_property_policy(objs)
         expect(p.is_ok()).to_equal(true)
-        expect(p.unwrap()).to_equal(true)
     )
 
     needs_sysroot("rejects by name when the AND is non-zero (no PT_GNU_PROPERTY here)", fn():
@@ -185,4 +185,47 @@ describe "elf_link - .note.gnu.property":
                 found = found + 1
             i = i + 1
         expect(found).to_equal(0)
+    )
+
+describe "elf_ver_plan - version index assignment":
+    needs_sysroot("gives an import from an unversioned library VER_NDX_GLOBAL (1)", fn():
+        print "scenario: gives an import from an unversioned library VER_NDX_GLOBAL (1)"
+        # libadd_x64.so.1 has no .gnu.version_d, so its exports carry no version.
+        # ld.lld writes 1 (*global*) for such an import, measured on a link that
+        # also needs versioned glibc symbols; 0 is VER_NDX_LOCAL and is for
+        # symbols that are not imports at all.
+        val libadd = elf_parse_shared(file_read_bytes("{FIX}/libadd_x64.so.1"))
+        expect(libadd.is_ok()).to_equal(true)
+        val libc = elf_parse_shared(file_read_bytes("{libdir()}/libc.so.6"))
+        val plan = elf_ver_plan([libadd.unwrap(), libc.unwrap()], ["add_val", "puts"])
+        expect(plan.versym[0]).to_equal(1)          # unversioned -> VER_NDX_GLOBAL
+        expect(plan.versym[1]).to_equal(2)          # first version needed
+        expect(plan.files).to_equal(["libc.so.6"])  # no verneed for the unversioned DSO
+        expect(plan.n_aux).to_equal(1)
+        expect(plan.flags[0]).to_equal([0])         # GLIBC_2.2.5 is not VER_FLG_WEAK
+    )
+
+    needs_sysroot("assigns one index per (file, version) in first-use order", fn():
+        print "scenario: assigns one index per (file, version) in first-use order"
+        val libc = elf_parse_shared(file_read_bytes("{libdir()}/libc.so.6")).unwrap()
+        # realpath -> GLIBC_2.3, puts -> GLIBC_2.2.5, exit -> GLIBC_2.2.5 (shared index)
+        val plan = elf_ver_plan([libc], ["realpath", "puts", "exit"])
+        expect(plan.versym).to_equal([2, 3, 3])
+        expect(plan.n_aux).to_equal(2)
+        expect(plan.names[0]).to_equal(["GLIBC_2.3", "GLIBC_2.2.5"])
+        expect(plan.idxs[0]).to_equal([2, 3])
+    )
+
+describe "elf_link - explicit symbol versions":
+    needs_sysroot("refuses .symver name@VERSION by name, not as an undefined symbol", fn():
+        print "scenario: refuses .symver name@VERSION by name, not as an undefined symbol"
+        val r = link_x64("symver_x64.o")
+        expect(r.is_err()).to_equal(true)
+        val e = r.unwrap_err()
+        expect(e.contains("UnsupportedFeature")).to_equal(true)
+        expect(e.contains(".symver")).to_equal(true)
+        expect(e.contains("default version")).to_equal(true)
+        expect(e.contains("realpath@GLIBC_2.2.5")).to_equal(true)
+        # the old message claimed the symbol did not exist, which is false
+        expect(e.starts_with("undefined symbol")).to_equal(false)
     )

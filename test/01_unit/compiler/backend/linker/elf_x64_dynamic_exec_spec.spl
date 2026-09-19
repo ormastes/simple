@@ -228,7 +228,8 @@ describe "elf_link - x86_64 symbol versioning (compat-set trap)":
         val r = link_obj("crt1.o", "realpath_ver_x64.o", ELF_LINK_DYNAMIC_EXEC)
         expect(r.is_ok()).to_equal(true)
         val b = r.unwrap()
-        # one u16 per .dynsym entry, and no import left at index 0 or 1
+        # one u16 per .dynsym entry; here every import is versioned, so none
+        # is left at VER_NDX_LOCAL (0) or VER_NDX_GLOBAL (1)
         val n_dynsym = sec_size(b, ".dynsym") / 24
         expect(sec_size(b, ".gnu.version")).to_equal(n_dynsym * 2)
         var i: i64 = 1
@@ -249,11 +250,20 @@ describe "elf_link - x86_64 symbol versioning (compat-set trap)":
         while a < cnt:
             val aux = vn + 16 + a * 16
             names = names.push(dynstr(b, rd32(b, aux + 8)))
-            expect(rd16(b, aux + 6)).to_equal(a + 2)        # vna_other: index 2, 3, 4
+            expect(rd16(b, aux + 6)).to_equal(a + 2)        # vna_other: OUR first-use numbering
+            expect(rd16(b, aux + 4)).to_equal(0)            # vna_flags: no glibc version is VER_FLG_WEAK
             a = a + 1
         expect(names.contains("GLIBC_2.3")).to_equal(true)
         expect(names.contains("GLIBC_2.34")).to_equal(true)
         expect(names.contains("GLIBC_2.2.5")).to_equal(true)
+        # the property is self-consistency, NOT ld.lld's exact numbering: its
+        # indices for the same inputs differ on aarch64. Every versym must name
+        # an index this verneed actually defines.
+        var k: i64 = 1
+        while k < n_dynsym:
+            val vs = rd16(b, sec_off(b, ".gnu.version") + k * 2)
+            expect(vs >= 2 and vs < 2 + cnt).to_equal(true)
+            k = k + 1
         # DT_VERSYM / DT_VERNEED / DT_VERNEEDNUM point at them
         expect(dyn_tag(b, 0x6ffffff0)).to_equal(sec_addr(b, ".gnu.version"))
         expect(dyn_tag(b, 0x6ffffffe)).to_equal(sec_addr(b, ".gnu.version_r"))

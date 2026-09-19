@@ -193,3 +193,38 @@ Also in this round:
   x86_64, `.got` on aarch64).
 
 All 26 `test/01_unit/.../linker` specs green.
+
+#### C2 round 3 — Fable PASS with five accuracy items (2026-09-19)
+
+Fable verified versioning end to end against ld.lld-23 (two verneed chains in
+both link orders, a symbol with different default versions in two libraries,
+`@@` plus `@`, weak-undef, `.gnu.version` count == dynsym count on 15 binaries,
+aarch64 exec + PIE still at 42). Fixed here:
+
+1. **An unversioned import is now `VER_NDX_GLOBAL` (1)**, not 0. Measured
+   ld.lld on a mixed link (`add_val` from an unversioned DSO plus versioned
+   glibc): it writes `1 (*global*)`. 0 is `VER_NDX_LOCAL` and is for symbols
+   that are not imports. glibc treats them alike; the gABI does not, so we
+   match ld.lld.
+2. **The index-numbering claim is corrected to "self-consistent", not
+   "matches ld.lld"** — on aarch64 ours are 2=GLIBC_2.34, 3=GLIBC_2.17 where
+   ld.lld's are reversed. The spec pins OUR first-use numbering and adds the
+   real property: every `.gnu.version` entry names an index the verneed
+   defines.
+3. **`vna_flags` carries `VER_FLG_WEAK`**: `shared_object` now reads each
+   verdef's flags and `elf_ver_plan` propagates them. No glibc version is weak,
+   so nothing changes for the corpus — it is asserted as 0 rather than assumed.
+4. **The vestigial `drop_property` parameter is gone.** `elf_property_policy`
+   returns `Result<(), text>` (admit or refuse by name) and `elf_static_place`
+   never places a property note, since the only links that reach it are the
+   ones whose notes must be dropped.
+5. **The sysroot-dependent mutation rows fail closed.** Without an x86_64
+   sysroot their specs skip, so the mutation would read VACUOUS —
+   indistinguishable from a gate that has stopped protecting.
+   `check-link-mutation-gates.shs` now ERRORs by name instead.
+
+Also: `.symver name, name@VERSION` used to be refused as `undefined symbol:
+realpath@GLIBC_2.2.5`, which is a true refusal with a false reason — the symbol
+exists under that version. It now names the unsupported explicit-symver form
+and says that references bind to each library's default version. Fixture
+`symver_x64.o`, spec `elf_link - explicit symbol versions`.

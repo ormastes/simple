@@ -82,6 +82,8 @@ val SHT_X86_64_UNWIND: i64 = 0x70000001
 val ET_EXEC_T: i64 = 2
 val ET_DYN_T: i64 = 3
 val SHT_SYMTAB_L: i64 = 2
+val VER_NDX_GLOBAL: i64 = 1      # gABI: an import with no version of its own
+val VER_FLG_WEAK: i64 = 2        # vna_flags: the DSO defined this version weak
 val PROPERTY_NOTE: text = ".note.gnu.property"
 val GNU_PROPERTY_AARCH64_FEATURE_1_AND: i64 = 0xc0000000
 val GNU_PROPERTY_X86_FEATURE_1_AND: i64 = 0xc0000002
@@ -214,8 +216,9 @@ fn elf_object_property_and(obj: ElfObject) -> i64:
         si = si + 1
     0
 
-fn elf_property_policy(objects: [ElfObject]) -> Result<bool, text>:
-    """True when every `.note.gnu.property` input must be DROPPED.
+fn elf_property_policy(objects: [ElfObject]) -> Result<(), text>:
+    """Ok when the `.note.gnu.property` inputs may be dropped, Err naming why not.
+
 
     ld.lld ANDs `FEATURE_1_AND` across all inputs, so one object without the
     note clears the feature bits and the section disappears. This linker does
@@ -234,15 +237,17 @@ fn elf_property_policy(objects: [ElfObject]) -> Result<bool, text>:
         else:
             acc = acc & v
     if not any:
-        return Ok(true)
+        return Ok(())
     if acc != 0:
         return Err("UnsupportedFeature: .note.gnu.property FEATURE_1_AND is {acc} across all inputs; this linker neither merges property notes nor emits PT_GNU_PROPERTY")
-    Ok(true)
+    Ok(())
 
-fn elf_static_place(objects: [ElfObject], drop_property: bool) -> Result<ElfStaticInputs, text>:
+fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
     """Assign every allocatable input section to a named output section + offset.
 
-    drop_property skips `.note.gnu.property` inputs (see elf_property_policy)."""
+    `.note.gnu.property` inputs are never placed: the only link that reaches
+    here is one elf_property_policy admitted, and it admits exactly the links
+    whose notes must be dropped."""
     var outs: [ElfOutSec] = []
     var sec_out: [[i64]] = []
     var sec_off: [[i64]] = []
@@ -254,7 +259,7 @@ fn elf_static_place(objects: [ElfObject], drop_property: bool) -> Result<ElfStat
         var si: i64 = 0
         while si < obj.sections.len():
             val sec = obj.sections[si]
-            if sec.sh_flags & SHF_ALLOC == 0 or (drop_property and sec.sh_type == SHT_NOTE and elf_section_name(obj, si) == PROPERTY_NOTE):
+            if sec.sh_flags & SHF_ALLOC == 0 or (sec.sh_type == SHT_NOTE and elf_section_name(obj, si) == PROPERTY_NOTE):
                 idxs = idxs.push(-1)
                 offs = offs.push(0)
             else:
@@ -458,20 +463,32 @@ struct ElfVerPlan:
     files: [text]        # needed files that supply at least one version
     names: [[text]]      # per file: version names, in index order
     idxs: [[i64]]        # per file: the index assigned to each of those names
+    flags: [[i64]]       # per file: vna_flags (VER_FLG_WEAK when the DSO marked it weak)
     n_aux: i64           # total vernaux entries
 
 fn elf_ver_plan(libs: [ElfSharedLib], imports: [text]) -> ElfVerPlan:
     """Assign a version index (>=2) to every (file, version) an import needs.
 
-    An import that names no version is index 0. ld.so resolves a versionless
-    reference to the library's version index 2, which on glibc/x86_64 is the
-    GLIBC_2.2.5 compat set — so leaving this out silently binds `realpath`,
-    `memcpy`, `pthread_cond_*` and the rest of the compat set to their OLD
-    implementations."""
+    An import from a library with no versions gets VER_NDX_GLOBAL (1), which
+    is the gABI value and what ld.lld writes (measured: `add_val` from an
+    unversioned DSO is `1 (*global*)` in an output that also needs versioned
+    glibc symbols). Index 0 is VER_NDX_LOCAL and belongs to symbols that are
+    not imports at all.
+
+    Indices are assigned in first-use order and are self-consistent, not a
+    copy of ld.lld's: on aarch64 ours are 2=GLIBC_2.34, 3=GLIBC_2.17 where
+    ld.lld's are reversed. Nothing reads them but this file and ld.so, which
+    follows DT_VERSYM into DT_VERNEED.
+
+    Leaving the section out entirely is what is fatal: ld.so then resolves a
+    versionless reference to the library's version index 2, which on
+    glibc/x86_64 is the GLIBC_2.2.5 compat set, silently binding `realpath`,
+    `memcpy`, `pthread_cond_*` and the rest to their OLD implementations."""
     var versym: [i64] = []
     var files: [text] = []
     var names: [[text]] = []
     var idxs: [[i64]] = []
+    var flags: [[i64]] = []
     var key_idx: {text: i64} = {}
     var file_pos: {text: i64} = {}
     var next_idx: i64 = 2
@@ -479,12 +496,15 @@ fn elf_ver_plan(libs: [ElfSharedLib], imports: [text]) -> ElfVerPlan:
     for n in imports:
         var file = ""
         var ver = ""
+        var weak: i64 = 0
         for l in libs:
             if file == "" and l.exports.has(n):
                 file = l.soname
                 ver = l.versions[n]
+                if ver != "" and l.version_weak.has(ver) and l.version_weak[ver]:
+                    weak = VER_FLG_WEAK
         if ver == "":
-            versym = versym.push(0)
+            versym = versym.push(VER_NDX_GLOBAL)
         else:
             val key = "{file}\n{ver}"
             if not key_idx.has(key):
@@ -496,11 +516,13 @@ fn elf_ver_plan(libs: [ElfSharedLib], imports: [text]) -> ElfVerPlan:
                     files = files.push(file)
                     names = names.push([])
                     idxs = idxs.push([])
+                    flags = flags.push([])
                 val fi = file_pos[file]
                 names[fi] = names[fi].push(ver)
                 idxs[fi] = idxs[fi].push(key_idx[key])
+                flags[fi] = flags[fi].push(weak)
             versym = versym.push(key_idx[key])
-    ElfVerPlan(versym: versym, files: files, names: names, idxs: idxs, n_aux: n_aux)
+    ElfVerPlan(versym: versym, files: files, names: names, idxs: idxs, flags: flags, n_aux: n_aux)
 
 fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text>:
     """Resolve relocation symbol (oi, sym_idx) to its SYMREF_* kind (placement fields zero)."""
@@ -1071,6 +1093,17 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         return Err(elf_static_join(res.errors))
     val undef = elf_static_undefined(all, res, libs)
     if undef.len() > 0:
+        # A `name@VERSION` reference comes from `.symver name, name@VERSION`.
+        # The symbol DOES exist under that version, so "undefined symbol" is a
+        # true refusal with a false reason: what is missing is the explicit
+        # symver form, not the symbol. This linker binds every reference to its
+        # library's DEFAULT version (see elf_ver_plan).
+        var symver: [text] = []
+        for n in undef:
+            if n.contains("@"):
+                symver = symver.push(n)
+        if symver.len() > 0:
+            return Err("UnsupportedFeature: explicit symbol versions (.symver name, name@VERSION) are unsupported; this linker binds references to each library's default version: " + elf_static_join(symver))
         return Err("undefined symbol: " + elf_static_join(undef))
     if not res.defined.has(req.entry):
         return Err("entry symbol not defined: {req.entry}")
@@ -1078,7 +1111,8 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     if ifuncs.len() > 0:
         return Err("UnsupportedFeature: locally defined STT_GNU_IFUNC needs an R_*_IRELATIVE relocation, which this linker does not emit: " + elf_static_join(ifuncs))
 
-    val inputs = elf_static_place(all, elf_property_policy(all)?)?
+    elf_property_policy(all)?
+    val inputs = elf_static_place(all)?
     val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode)
     var contents = elf_static_contents(inputs)
     val refs = elf_collect_refs(ctx, contents)?
@@ -1262,7 +1296,7 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         else if n == ".gnu.version":
             out = out.push(elf_build_versym(ver.versym))
         else if n == ".gnu.version_r":
-            out = out.push(elf_build_verneed(ver.files, ver.names, ver.idxs, dynstr0))
+            out = out.push(elf_build_verneed(ver.files, ver.names, ver.idxs, ver.flags, dynstr0))
         else if n == ".dynstr":
             out = out.push(dynstr0.data)
         else if n == ".rela.dyn":
