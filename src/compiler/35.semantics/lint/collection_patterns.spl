@@ -673,9 +673,29 @@ fn collect_text_var_names(stmts: [i64], seed: [text]) -> [text]:
                 if is_text_valued_expr(assigned_value):
                     names.push(assigned)
 
-        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
-            val nested = collect_text_var_names(stmt_get_body(s), names)
-            for n in nested:
+        # The SAME traversal every other walker uses. This enumerated four
+        # statement kinds and took only `stmt_get_body` — the THEN-branch of
+        # an `if` — so a text binding in an `elif`, `else` or `case` body was
+        # never collected. That was harmless while the rule walkers were
+        # equally shallow; once `check_loop_body` began descending into every
+        # branch, the two walkers disagreed about the same tree and a guard in
+        # an else-branch was reported while the binding that would have
+        # excluded it was invisible. Two real false positives followed, both
+        # introduced by this lane:
+        #
+        #   src/compiler/80.driver/parser_llvm_objdump_codec_v1.spl:125
+        #     `if assembly.contains("<unknown>")`, where
+        #     `val assembly = fields[1].trim()` is bound in an `elif` body
+        #   src/app/cli/query_ast_query.spl:123
+        #     `if value.contains("*")`, where
+        #     `val value = rest.substring(...)` is bound in an `elif` body
+        #
+        # Fixed by sharing the traversal rather than by adding `elif` to the
+        # list: a walker that enumerates its own container kinds will drift
+        # from the others again the next time one of them is widened, which is
+        # exactly what happened here.
+        for nested_block in coll_stmt_child_stmts(s):
+            for n in collect_text_var_names([nested_block], names):
                 if not name_in_list(names, n):
                     names.push(n)
     names

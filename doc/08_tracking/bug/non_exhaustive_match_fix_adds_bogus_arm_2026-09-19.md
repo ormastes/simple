@@ -20,6 +20,27 @@ in it is a trap that will never be hit but will read to the next person as
 unfinished work. If the arm is ever reached — because the rule is wrong about
 exhaustiveness in some other direction too — it aborts.
 
+## Worse: the applied result does not parse
+
+The bogus arm is not the whole defect. Running a full `bin/simple fix` on the
+same fixture produces a file the PARSER REJECTS:
+
+```
+error: expected Indent, found Case
+```
+
+So the rule does not merely append an unreachable arm — it emits text that is
+not valid Simple, turning a working file into one that will not compile. That
+is strictly worse than the bogus arm and than any of the 23 COLL cases this
+lane closed: those produced wrong but parseable programs, which at least still
+run. A fix whose output the parser refuses cannot be defended as a
+conservative suggestion under any reading.
+
+It also means the two halves want separate fixes. Suppressing the false
+exhaustiveness verdict removes the occasion for the bad rewrite, but the
+RENDERER is independently broken and would still emit unparseable text
+wherever the rule does fire legitimately.
+
 ## Why it is worth filing here
 
 This lane spent five rounds establishing that a machine-applicable fix must

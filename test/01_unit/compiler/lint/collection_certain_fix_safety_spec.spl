@@ -517,3 +517,31 @@ describe "method bodies are inside the fix envelope, deliberately":
         the dominance proof requires one."""
         val field_recv = "class Box:\n    var items: [text]\n\n    fn add(self, xs: [text]):\n        for x in xs:\n            if not self.items.contains(x):\n                self.items.push(x)\n"
         assert_false(is_some(fix020(field_recv)))
+
+# ---------------------------------------------------------------------------
+# Nested guards, and the second widening I did not claim.
+#
+# Round 5's descent into blocks inside the loop also widened the FIX envelope:
+# a dedup guard under an `if` or a `case` is now proven and rewritten where it
+# previously got nothing, and no spec asserted a fix IS offered on any nested
+# shape — the envelope was pinned only in the refusing direction. Both
+# directions are pinned here.
+# ---------------------------------------------------------------------------
+
+describe "a nested dedup guard is inside the fix envelope, deliberately":
+    it "n1: a guard under an `if` inside the loop is fixed":
+        step("n1: a guard under an `if` inside the loop is fixed")
+        val under_if = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if x > 0:\n            if not seen.contains(x):\n                seen.push(x)\n    seen\n"
+        assert_true(is_some(fix020(under_if)))
+
+    it "n2: a guard under a `case` is fixed":
+        step("n2: a guard under a `case` is fixed")
+        val under_case = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        match x:\n            case 0: val _ = 0\n            case _:\n                if not seen.contains(x):\n                    seen.push(x)\n    seen\n"
+        assert_true(is_some(fix020(under_case)))
+
+    it "n3: but a nested guard obeys the same proofs":
+        step("n3: but a nested guard obeys the same proofs")
+        """Reaching further must not mean proving less: a mutation elsewhere
+        refuses a nested guard exactly as it refuses a top-level one."""
+        val nested_mutated = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if x > 0:\n            if not seen.contains(x):\n                seen.push(x)\n        if x == 2:\n            val d = seen.pop()\n    seen\n"
+        assert_false(is_some(fix020(nested_mutated)))

@@ -227,3 +227,24 @@ widenings**, except as corrected below: the method walk DID widen the
 envelope (a method-local `var seen` is now fixed), which round 4 wrongly
 claimed it had not. Those rewrites are output-identical, and the case is now
 pinned deliberately by `collection_certain_fix_safety_spec` m1/m2/m3.
+
+### Correction: "text receivers no longer warn" is too strong
+
+The gate added in round 5 covers the case it was built for — a receiver that
+is a local NAME the walker has seen bound to text. It does not make COLL002
+silent on every text receiver, and saying so was an overstatement. Measured
+after the fix, **25 sites in 6 files still warn** on receivers that are
+text, through a pre-existing class the gate cannot reach: there is no
+syntactic text evidence for the receiver at all. Examples are
+`normalize_lint_line(...)` and `strip_ansi(...)` — a CALL RESULT, which is
+not a name to look up — and a loop variable, whose element type the walker
+does not infer.
+
+That class predates this lane and is not made worse by it. Closing it needs
+receiver TYPES, which this rule deliberately does not have (it is the
+"source-pattern fallback" tier and says so in its own uncertainty field), so
+it is recorded here rather than papered over with more syntactic guessing.
+
+What IS true after round 5: a text receiver bound to a local `val`/`var`,
+in any branch of any nested block, no longer warns in either the positive or
+the negated form.

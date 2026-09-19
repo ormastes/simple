@@ -378,3 +378,30 @@ describe "structural equality compares the whole value":
         step("float literals that match still are")
         val floats = "fn f(xs: [f64]) -> [f64]:\n    var seen: [f64] = []\n    for x in xs:\n        if not seen.contains(1.5):\n            seen.push(1.5)\n    seen\n"
         assert_true(has(results_for("/tmp/coll_f2.spl", floats), "COLL020"))
+
+describe "every walker sees the same tree":
+    it "a text binding in an `elif` body excludes its guard":
+        step("a text binding in an `elif` body excludes its guard")
+        """`collect_text_var_names` enumerated four statement kinds and took
+        only `stmt_get_body` — an `if`'s THEN-branch — so a text binding in
+        an `elif`/`else`/`case` body was never collected. Harmless while the
+        rule walkers were equally shallow; once `check_loop_body` began
+        descending into every branch the two disagreed about the same tree,
+        and a guard in an else-branch was reported while the binding that
+        would have excluded it was invisible. Two real false positives
+        followed, at parser_llvm_objdump_codec_v1.spl:125 and
+        query_ast_query.spl:123. Fixed by SHARING the traversal, not by
+        adding `elif` to a list — a walker that enumerates its own container
+        kinds drifts from the others the next time one is widened."""
+        val in_elif = "fn f(xs: [text], flag: bool) -> i64:\n    var n = 0\n    for x in xs:\n        if flag:\n            n = n + 1\n        elif true:\n            val assembly = x.trim()\n            if assembly.contains(\"a\"):\n                n = n + 1\n    n\n"
+        assert_false(has(results_for("/tmp/coll_elif_text.spl", in_elif), "COLL002"))
+
+    it "and so does one in an `else` body":
+        step("and so does one in an `else` body")
+        val in_else = "fn f(xs: [text], flag: bool) -> i64:\n    var n = 0\n    for x in xs:\n        if flag:\n            n = n + 1\n        else:\n            val assembly = x.trim()\n            if assembly.contains(\"a\"):\n                n = n + 1\n    n\n"
+        assert_false(has(results_for("/tmp/coll_else_text.spl", in_else), "COLL002"))
+
+    it "an ARRAY bound in an `else` body still warns (non-vacuity)":
+        step("an ARRAY bound in an `else` body still warns (non-vacuity)")
+        val arr_else = "fn f(xs: [text], flag: bool) -> i64:\n    var n = 0\n    for x in xs:\n        if flag:\n            n = n + 1\n        else:\n            val allowed: [text] = [\"a\"]\n            if allowed.contains(x):\n                n = n + 1\n    n\n"
+        assert_true(has(results_for("/tmp/coll_else_arr.spl", arr_else), "COLL002"))
