@@ -1181,9 +1181,73 @@ impl Lowerer {
                 }
             }
 
-            Node::Function(_f) => {
-                // Nested function definitions are ignored in native lowering for now.
-                Ok(vec![])
+            // A `fn` declared inside another function body is lowered as a local
+            // closure binding -- `val <name> = \<params>: <body>` -- and handed
+            // straight back to the `Node::Let` arm above.
+            //
+            // It used to answer `Ok(vec![])`, dropping the definition entirely.
+            // That is not a silent wrong answer, because the call site then
+            // lowers to an unresolved external symbol and the JIT drops the
+            // WHOLE module to the interpreter -- but it costs ~100-1000x on
+            // every module that contains one, and on the native lane (which has
+            // no interpreter to fall back to) it is a link error.
+            //
+            // Measured on the deployed seed before this change: a non-capturing
+            // nested fn, a capturing one, and a recursive one each answered
+            // `unresolved external symbol '<name>'`; the sibling shapes written
+            // as lambdas (`val f = \n: n + k`) compiled and ran, including
+            // capture of an enclosing local, a direct call, and being passed as
+            // a value. So the closure path already carries everything a nested
+            // fn needs -- it was only ever the AST shape that was unhandled.
+            //
+            // The one exception is SELF-RECURSION, and it is a correctness
+            // guard rather than a missing feature: HIR closures have no letrec,
+            // so inside the converted body the fn's own name is unbound. It
+            // would either fail to resolve or -- worse -- silently resolve to a
+            // module-level function of the same name and compile a call to the
+            // WRONG body. A recursive nested fn therefore keeps the old
+            // behaviour and falls back to the interpreter, which handles it
+            // correctly. That gap is the same one that makes a recursive
+            // *lambda* fail outright on both engines; it is tracked separately.
+            //
+            // Mutual recursion needs no guard: lowering `a`'s body hits `b`,
+            // which is unbound, so the module falls back exactly as it does
+            // today and the interpreter runs the original AST.
+            //
+            // Bug: doc/08_tracking/bug/
+            //      nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
+            Node::Function(f) => {
+                let mut bound: Vec<String> = Vec::new();
+                let mut free_reads = std::collections::HashSet::new();
+                super::expr::control::collect_identifiers_function(f, &mut bound, &mut free_reads);
+                if free_reads.contains(&f.name) {
+                    return Ok(vec![]);
+                }
+
+                let lambda = Expr::Lambda {
+                    params: f
+                        .params
+                        .iter()
+                        .map(|p| ast::LambdaParam {
+                            name: p.name.clone(),
+                            ty: p.ty.clone(),
+                        })
+                        .collect(),
+                    body: Box::new(Expr::DoBlock(f.body.statements.clone())),
+                    move_mode: ast::MoveMode::Copy,
+                    capture_all: false,
+                };
+                let binding = ast::LetStmt {
+                    span: f.span,
+                    pattern: Pattern::Identifier(f.name.clone()),
+                    ty: None,
+                    value: Some(lambda),
+                    mutability: Mutability::Immutable,
+                    storage_class: ast::StorageClass::Auto,
+                    is_ghost: false,
+                    is_suspend: false,
+                };
+                self.lower_node(&Node::Let(binding), ctx)
             }
 
             // Module-level imports are resolved in module_pass.rs. Function-scope
