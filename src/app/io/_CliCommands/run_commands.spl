@@ -16,6 +16,7 @@ use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
 use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
 use compiler.core.tokens.{TOK_EOF, TOK_ERROR}
 use app.io.cli_ops.{_CliProcessResult, _cli_shell, _cli_eprint, _cli_print_raw, _cli_process_run, _cli_driver_binary, _cli_run_workspace_root_guard}
+use app.provider_cli.entry.{provider_cli_execute_v1}
 use app.io.cli_fix_options.{fix_option_error}
 use app.io.cli_fmt_options.{fmt_option_error}
 use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
@@ -126,6 +127,12 @@ fn cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
             driver_args.push(arg)
         return process_run_inherit(driver, driver_args)
 
+    # The source-native provider entry is the fail-closed no-bootstrap path.
+    # It receives the same command tail as child-process execution and returns
+    # the provider's real 0/2/3 status instead of collapsing Success(_) to 0.
+    if path == "src/app/provider_cli/main.spl":
+        return cli_run_provider_entry_v1(args)
+
     val result = interpret_file(path)
     match result:
         case CompileResult.Success(_):
@@ -169,6 +176,14 @@ fn cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
         case _:
             _cli_eprint("Internal compiler error while running {path}: unrecognized CompileResult variant. The executable and source tree may be ABI-incompatible; use a source-matched admitted Simple runtime.")
             1
+
+fn cli_run_provider_entry_v1(args: [text]) -> i64:
+    val provider_result = provider_cli_execute_v1(args)
+    if provider_result.output != "":
+        _cli_print_raw(provider_result.output + "\n")
+    if provider_result.diagnostic != "":
+        _cli_print_raw("provider-cli: " + provider_result.diagnostic + "\n")
+    provider_result.exit_code
 
 fn cli_watch_file(path: text) -> i64:
     var config: WatchConfig = watch_config_default()

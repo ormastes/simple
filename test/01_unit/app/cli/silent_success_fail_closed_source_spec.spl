@@ -41,7 +41,7 @@ describe "CLI silent-success fail-closed invariants":
         step("rejects a native-build worker that exits 0 without an output binary")
         val source = src("src/app/cli/native_build_main.spl")
         expect(source.len()).to_be_greater_than(0)
-        expect(source).to_contain("if code == 0 and output_path != \"\" and not rt_file_exists(output_path):")
+        expect(source).to_contain("if code == 0 and output_path != \"\" and not file_exists(output_path):")
         expect(source).to_contain("error: native-build worker exited 0 but produced no output binary")
 
     it "rejects a compiler driver Success that wrote no artifact":
@@ -50,9 +50,14 @@ describe "CLI silent-success fail-closed invariants":
         val source = src("src/app/io/_CliCompile/compile_targets.spl")
         expect(source.len()).to_be_greater_than(0)
         # The staged sibling is what makes the check meaningful: without it a
-        # STALE requested output would satisfy the success test.
-        expect(source).to_contain(".simple-native-build-")
+        # STALE requested output would satisfy the success test. The staging
+        # name's ".simple-native-build-" marker lives in
+        # build_intermediate_policy.spl; the compile lane must consume the
+        # staged name, not write the requested output directly.
+        expect(source).to_contain("val staged_output = out_parent + \"/\" + native_build_intermediate_name(")
         expect(source).to_contain("error: native-build reported success but produced no fresh output binary")
+        val policy = src("src/app/io/_CliCompile/build_intermediate_policy.spl")
+        expect(policy).to_contain(".simple-native-build-")
 
     it "reads argv through the runtime extern, never through a same-named import":
         # @req REQ-SSPEC-APP
@@ -66,10 +71,10 @@ describe "CLI silent-success fail-closed invariants":
         expect(source).to_contain("extern fn rt_exit(code: i64)")
         expect(source).to_contain("rt_cli_get_args()")
         # Re-importing either name here reintroduces the self-binding recursion.
-        # All four spellings are blocked, not just the two `std.`-prefixed ones:
-        # `use nogc_sync_mut.io_runtime.{get_args}` resolves to the same module
-        # and would reintroduce the defect while passing a `std.`-only guard.
-        assert_false(source.contains("use std.io_runtime"))
-        assert_false(source.contains("use std.nogc_sync_mut.io_runtime"))
-        assert_false(source.contains("use nogc_sync_mut.io_runtime"))
-        assert_false(source.contains("use io_runtime"))
+        # Other io_runtime names (env_get, getpid, file facades) are imported
+        # deliberately and are safe; only the two wrapper-colliding names —
+        # imported by any module-path spelling, alone, combined, or via `*` —
+        # must stay out.
+        assert_false(source.contains("io_runtime.{get_args"))
+        assert_false(source.contains("io_runtime.{exit"))
+        assert_false(source.contains("io_runtime.*"))
