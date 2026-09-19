@@ -187,6 +187,27 @@ ld.lld-23 -static -e _start -O1 merge_relin_a64.o                    # .rodata 0
 ld.lld-23 -static -e _start -O1 merge_relin_a64.o merge_b_a64.o      # .rodata 0x19 es 0
 ```
 
+### Named-symbol + non-zero addend fixture (C1+C2 merge)
+
+`merge_naddend_a64.o` pins ld.lld's `getSymVA` rule natively on aarch64: the
+relocation addend is folded INTO the merge piece lookup only for an
+`STT_SECTION` symbol; a NAMED symbol is anchored at `st_value` and the addend
+applied afterwards. `.rodata.str1.1` holds `"dup\0"` twice, so merging puts
+`s1` (st_value 0) and `s2` (st_value 4, `NOTYPE LOCAL`) on one address P, and
+the reference is `s2 - 4` — correct gives `P - 4`, folding gives `P`. `_start`
+exits 42 when `s1 - (s2 - 4)` is 4 and 40 when it is 0. This is the aarch64
+twin of x86_64's `R_X86_64_PC32 .L.str - 4` in `hello_libc_x64.o`, which is
+what first exposed the defect but needs the glibc sysroot and qemu to reach;
+the twin is why mutation row `merge_addend_folded_for_named_symbol` can point
+at a spec that runs on any aarch64 host.
+
+```
+CF="-c -O2 -ffreestanding -fno-pic -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=aarch64-linux-gnu $CF merge_naddend_a64.c -o merge_naddend_a64.o
+ld.lld-23 -static -e _start -O1 merge_naddend_a64.o                  # .rodata 0x4, exit 42
+ld.lld-23 -static -e _start -O0 merge_naddend_a64.o                  # exit 40
+```
+
 ## Lane C2 fixture (x86_64 dynamic glibc execution proof)
 
 `hello_libc_x64.o` is the x86_64 build of `hello_libc.c` (R_X86_64_PC32

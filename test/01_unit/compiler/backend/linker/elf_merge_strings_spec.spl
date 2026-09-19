@@ -215,3 +215,18 @@ describe "elf_link - wide literals and unmergeable inputs":
         val b = link_objs(["merge_relin_a64.o", "merge_b_a64.o"], true)
         expect(sec_entsize(b, ".rodata")).to_equal(0)
         expect(run_image(b, "/tmp/elf_merge_strings_spec_mixed")).to_equal(42)
+
+    it "a NAMED symbol keeps its addend outside the piece lookup (ld.lld getSymVA)":
+        # ld.lld folds the addend INTO the piece lookup only under d.isSection();
+        # a named symbol is anchored at st_value and the addend applied after.
+        # merge_naddend_a64.o references `s2 - 4` (NOTYPE LOCAL, st_value 4) in a
+        # section holding "dup\0" twice, so merging puts s1 and s2 on one address P:
+        #   correct -> P - 4, so s1 - (s2 - 4) == 4  -> exit 42
+        #   folded  -> P,     so the difference is 0 -> exit 40
+        # Verified against ld.lld-23: -O1 exits 42, -O0 exits 40, .rodata 0x4.
+        # This is the aarch64-native twin of x86_64's `R_X86_64_PC32 .L.str - 4`,
+        # which needs a glibc sysroot and qemu to reach.
+        val nb = link_objs(["merge_naddend_a64.o"], true)
+        expect(sec_size(nb, ".rodata")).to_equal(0x4)
+        expect(run_image(nb, "/tmp/elf_merge_strings_spec_naddend_on")).to_equal(42)
+        expect(run_image(link_objs(["merge_naddend_a64.o"], false), "/tmp/elf_merge_strings_spec_naddend_off")).to_equal(40)
