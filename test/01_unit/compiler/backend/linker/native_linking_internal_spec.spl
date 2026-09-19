@@ -1,0 +1,110 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# native_linking — link_to_native's own SIMPLE_LINKER=internal routing (lane
+# B3, doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md
+# §1/§11), plus the pre-existing single-SMF create_temp_dir Result-unwrap bug
+# (doc/08_tracking/bug/native_linking_single_smf_temp_dir_result_not_unwrapped_2026-09-18.md).
+#
+# Before this lane, `link_to_native` under SIMPLE_LINKER=internal stopped
+# with the named error from `find_linker_path` (mold.spl) -- "internal engine
+# is not a linker path" -- because only `link_request_to_native`
+# (link_engine_external.spl, lane A3/A7) knew how to select the internal ELF
+# engine. Lane B3 gives `link_to_native` the same routing, sharing the
+# implementation (`internal_link_native`) with that adapter instead of
+# duplicating it.
+#
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+
+use std.spec.step
+use std.spec.*
+
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+use compiler.backend.linker.smf_writer.{SmfWriter}
+use std.io_runtime.{file_read_bytes, file_write_bytes, shell}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+fn with_env(key: text, value: text, block: fn()):
+    val previous = rt_env_get(key) ?? ""
+    rt_env_set(key, value)
+    block()
+    rt_env_set(key, previous)
+
+val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
+
+describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
+    # Host requirement: aarch64 Linux with glibc (crt_discovery finds
+    # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them) -- same requirement
+    # as link_engine_external_spec.spl's internal-engine specs.
+    it "links a Linux aarch64 ELF object internally and the output runs":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("SIMPLE_LINKER=internal routes link_to_native to the internal ELF engine end to end")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_hello"
+            val cfg = NativeLinkConfig.default()
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("hi from libc\n")
+        )
+
+    it "reports a missing input as a named internal-engine error, never a silent external fallback":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("SIMPLE_LINKER=internal + unreadable object -> 'internal engine: ... cannot be read', not a mold/lld/cc attempt")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val cfg = NativeLinkConfig.default()
+            val result = link_to_native(
+                ["/tmp/native_linking_internal_spec_nonexistent.o"],
+                "/tmp/native_linking_internal_spec_missing_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("internal engine:")
+            expect(result.unwrap_err()).to_contain("cannot be read")
+        )
+
+    it "SIMPLE_LINKER unset still resolves through the external path unchanged":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("Unsetting SIMPLE_LINKER leaves the pre-existing mold/lld/ld resolution untouched (byte-identical argv builders)")
+        with_env("SIMPLE_LINKER", "", fn():
+            val out = "/tmp/native_linking_internal_spec_external_hello"
+            val cfg = NativeLinkConfig.default()
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("hi from libc\n")
+        )
+
+describe "native_linking - single-SMF create_temp_dir Result unwrap (bug fix)":
+    it "links a single SMF wrapping a real ELF object without crashing on the Result comparison":
+        # @req REQ-LINKER-B3-SMF-TEMPDIR-FIX
+        step("A single .smf whose Code section embeds a real ELF object reaches create_temp_dir() and links, not 'method contains not found on type enum'")
+        val obj_bytes = file_read_bytes(HELLO_A64_OBJ)
+        var code: [i64] = []
+        var read_i = 0
+        while read_i < obj_bytes.len():
+            code = code.push(obj_bytes[read_i] as i64)
+            read_i = read_i + 1
+        var writer = SmfWriter.create()
+        writer.add_code_section("code", code)
+        val write_result = writer.write()
+        expect(write_result.is_ok()).to_equal(true)
+        val write_bytes = write_result.unwrap()
+        var smf_bytes: [u8] = []
+        var write_i = 0
+        while write_i < write_bytes.len():
+            smf_bytes = smf_bytes.push(write_bytes[write_i] as u8)
+            write_i = write_i + 1
+        val smf_path = "/tmp/native_linking_internal_spec_object.smf"
+        expect(file_write_bytes(smf_path, smf_bytes)).to_equal(true)
+
+        val out = "/tmp/native_linking_internal_spec_smf_hello"
+        val cfg = NativeLinkConfig.default()
+        val result = link_to_native([smf_path], out, cfg)
+        expect(result.is_ok()).to_equal(true)
+        val run = shell("'{out}'")
+        expect(run.exit_code).to_equal(42)
+        expect(run.stdout).to_equal("hi from libc\n")

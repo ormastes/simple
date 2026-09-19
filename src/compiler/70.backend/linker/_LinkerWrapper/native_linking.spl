@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -52,6 +52,13 @@ use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
 use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan}
+
+# Internal ELF engine (lane A7/B3): SIMPLE_LINKER=internal routes here instead
+# of an external linker. Same imports link_engine_external.spl uses for its
+# own LinkRequestV1-shaped entry point -- internal_link_native() below is the
+# one shared implementation both callers now use.
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.reloc_engine.{RelocArch}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -278,6 +285,24 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         print "[LINKER] link_native_unix: os={os}, arch={arch}"
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+
+    # SIMPLE_LINKER=internal: route to the internal ELF engine (internal:elf)
+    # instead of find_linker_path/cc. Checked before the cross-cc and
+    # SimpleOS-in-process-LLD arms below because neither of those is
+    # something the internal engine can do -- an explicit internal request
+    # against a cross target or a SimpleOS target is a named unsupported
+    # error, never a silent fallback to the external toolchain those arms
+    # would otherwise select.
+    if requested_linker_override().trim().lower() == "internal":
+        if is_simpleos_target():
+            return Err("internal engine: unsupported target 'simpleos' (internal:elf links host Linux targets only)")
+        val cross_plan = hosted_c_compiler_plan(target, os, arch)
+        if cross_plan.requires_cross:
+            return Err("internal engine: unsupported cross target '{target}' (internal:elf links against the host glibc only)")
+        if trace:
+            print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine"
+        return internal_link_native(os, arch, config.pie, object_files, output)
+
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
 
@@ -486,6 +511,79 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 
     Ok(output)
 
+fn internal_link_native_read_i64(path: text) -> [i64]:
+    """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text) -> Result:
+    """Link `object_files` with the internal ELF engine (`internal:elf`, lane
+    A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
+
+    Design (doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md
+    §1/§11): never a silent fallback to an external linker -- anything the
+    engine cannot do returns a named "internal engine: unsupported ..." (or
+    other classified) error instead. This is the single internal-ELF-link
+    implementation, called both from `link_native_unix` above and from
+    `link_engine_external.link_request_internal` (through this facade), so
+    there is exactly one place that owns the CRT-discovery/elf_link/write/
+    chmod sequence."""
+    var norm_arch = arch
+    if arch == "amd64":
+        norm_arch = "x86_64"
+    elif arch == "arm64":
+        norm_arch = "aarch64"
+    if os != "linux":
+        return Err("internal engine: unsupported OS '{os}' (internal:elf links Linux targets only)")
+    if norm_arch != "x86_64" and norm_arch != "aarch64":
+        return Err("internal engine: unsupported architecture '{arch}' (internal:elf supports x86_64 and aarch64 only)")
+    if norm_arch != host_arch():
+        return Err("internal engine: unsupported cross-arch link (target {arch} != host {host_arch()}; internal:elf links against the host glibc only)")
+    for path in object_files:
+        if not file_exists(path):
+            return Err("internal engine: input {path} cannot be read")
+    val crt = find_crt_files(pie, false)
+    if crt.crt1 == "" or crt.crti == "" or crt.crtn == "":
+        return Err("internal engine: unsupported host (no host crt1/crti/crtn objects found)")
+    if crt.dynamic_linker == "":
+        return Err("internal engine: unsupported host (no host dynamic linker found)")
+    val libdir = path_dirname(crt.crt1)
+    val libc = "{libdir}/libc.so.6"
+    if not file_exists(libc):
+        return Err("internal engine: unsupported host (no {libc} found)")
+    var objects: [[i64]] = [internal_link_native_read_i64(crt.crt1), internal_link_native_read_i64(crt.crti)]
+    for path in object_files:
+        objects = objects.push(internal_link_native_read_i64(path))
+    objects = objects.push(internal_link_native_read_i64(crt.crtn))
+    var archives: [[i64]] = []
+    val nonshared = "{libdir}/libc_nonshared.a"
+    if file_exists(nonshared):
+        archives = archives.push(internal_link_native_read_i64(nonshared))
+    var target_arch = RelocArch.X86_64
+    if norm_arch == "aarch64":
+        target_arch = RelocArch.AArch64
+    var mode = ELF_LINK_DYNAMIC_EXEC
+    if pie:
+        mode = ELF_LINK_DYNAMIC_PIE
+    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [file_read_bytes(libc)],
+        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
+    if linked.is_err():
+        return Err("internal engine: {linked.unwrap_err()}")
+    var bytes: [u8] = []
+    for b in linked.unwrap():
+        bytes = bytes.push(b as u8)
+    if not file_write_bytes(output, bytes):
+        return Err("internal engine: could not write {output}")
+    val (_co, _ce, chmod_code) = process_run("chmod", ["755", output])
+    if chmod_code != 0:
+        return Err("internal engine: could not mark {output} executable")
+    Ok(output)
+
 # Build self-contained binary when given SMF inputs
 fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result:
     if smf_inputs.len() == 0:
@@ -502,9 +600,10 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
     # Support multiple SMF inputs
     if smf_inputs.len() > 1 or smf_inputs[0].ends_with(".lsm"):
         # Multi-SMF or .lsm library mode
-        val tmp_dir = create_temp_dir()
-        if tmp_dir == "":
-            return Err("Failed to create temp dir for SMF objects")
+        val tmp_dir_result = create_temp_dir()
+        if tmp_dir_result.is_err():
+            return Err("Failed to create temp dir for SMF objects: {tmp_dir_result.unwrap_err()}")
+        val tmp_dir = tmp_dir_result.unwrap()
 
         var objs: [text] = []
 
@@ -571,9 +670,10 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
     # Try to convert single SMF to object via ObjectProvider
     val obj_result = provider.get_object(path)
     if obj_result.is_ok():
-        val tmp_dir = create_temp_dir()
-        if tmp_dir == "":
-            return Err("Failed to create temp dir for SMF objects")
+        val tmp_dir_result = create_temp_dir()
+        if tmp_dir_result.is_err():
+            return Err("Failed to create temp dir for SMF objects: {tmp_dir_result.unwrap_err()}")
+        val tmp_dir = tmp_dir_result.unwrap()
         val obj_path = "{tmp_dir}/input.o"
         val write_ok = write_bytes_to_file(obj_path, obj_result.unwrap())
         if not write_ok:
@@ -586,9 +686,10 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
     # Fallback: generate objects from exported code
     val code_result = provider.get_exported_code(path)
     if code_result.is_ok():
-        val tmp_dir = create_temp_dir()
-        if tmp_dir == "":
-            return Err("Failed to create temp dir for SMF code")
+        val tmp_dir_result = create_temp_dir()
+        if tmp_dir_result.is_err():
+            return Err("Failed to create temp dir for SMF code: {tmp_dir_result.unwrap_err()}")
+        val tmp_dir = tmp_dir_result.unwrap()
         val obj_paths = materialize_code_units(code_result.unwrap(), tmp_dir, verbose)
         if obj_paths.len() > 0:
             val link_res = link_native_unix(obj_paths, output, config)
