@@ -40,7 +40,11 @@ Kernel objects **can** be produced on this host (aarch64). On 2026-09-19,
 kernel in about 0.2 s with the Rust seed. Two limits apply:
 
 - The native-build link deletes its intermediate objects (`simpleos_native_linkers.spl:67-70`). A rung-3 run needs a keep-objects path, or a relink from those objects.
-- The live arm64 kernels are not linked with `src/os/kernel/arch/arm64/linker.ld`. They use `examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld` (the EFI gate) or `examples/09_embedded/simple_os/arch/arm64/linker.ld` (the `simpleos_native_linkers.spl:75` default). No build consumes the `src/os` arm64 script. Both `examples` scripts parse, and both print token-equivalent through `ld_parse` + `ld_print` (probe run 2026-09-19).
+- Correction (Fable review, 2026-09-19): `src/os/kernel/arch/arm64/linker.ld` **is** consumed. `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl:44,57` declares it as the arm64 platform target's linker script, and the Simple-side build path reads it from there (`src/os/port/simpleos_native_build_config.spl`, `src/os/qemu_runner_part2.spl`, which passes it to the link and checks it for staleness). The *shell* gates use `examples/` scripts instead:
+  - `scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs`, through `scripts/os/build-simpleos-aarch64-*-kernel.shs`, uses `examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld`.
+  - The `simpleos_native_linkers.spl:75` default, used when `SIMPLE_NATIVE_BUILD_LINKER_SCRIPT` is unset, is `examples/09_embedded/simple_os/arch/arm64/linker.ld`.
+
+  So a rung-4 substitution through the EFI gate exercises the `examples` Limine script, not the `src/os` one. Every in-tree `.ld` file (50 of them, from `git ls-files '*.ld'`) parses and prints token-equivalent. `linker_script_spec` checks this.
 
 ## Real-firmware proxy state on this host (baseline, external linker)
 

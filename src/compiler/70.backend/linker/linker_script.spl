@@ -17,6 +17,13 @@
 #       { [KEEP(]*(.pat ...)[)]  sym = expr;  . = ALIGN(n);  . += n; ... }
 #       [> region] [AT> region] [:phdr ...] [= fill]
 #   }
+#   INCLUDE "file"  EXTERN(sym ...)  — at top level or inside SECTIONS
+#   A file of bare output sections (a SECTIONS-tail fragment) parses as `fragment_cmds`.
+#
+# INCLUDE is kept as an unresolved directive node (LdStmtKind.Include). The
+# in-tree scripts name repo-root-relative paths, not script-relative ones, so
+# the parser does not guess a base directory; BootLayoutPlan rejects an
+# unresolved INCLUDE rather than planning a partial script.
 
 # ============================================================================
 # Token Types
@@ -40,6 +47,8 @@ enum LdTokenKind:
     PlusEquals
     Less
     String
+    Op           # compound / bitwise / logical operator: <= >= == != << >> && || & | ! ~ % / ^
+    Unknown      # any other character — kept as a token so the parser rejects it by name
     Eof
 
 # ============================================================================
@@ -136,6 +145,15 @@ fn ld_tokenize(input: text) -> [LdToken]:
             tokens = tokens.push(LdToken(kind: LdTokenKind.Minus, value: "-"))
             i = i + 1
             continue
+        val two = input[i:i + 2]
+        if two == "<=" or two == ">=" or two == "==" or two == "!=" or two == "<<" or two == ">>" or two == "&&" or two == "||":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Op, value: two))
+            i = i + 2
+            continue
+        if ch == "!" or ch == "~" or ch == "&" or ch == "|" or ch == "%" or ch == "/" or ch == "^":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Op, value: ch))
+            i = i + 1
+            continue
         if ch == "<":
             tokens = tokens.push(LdToken(kind: LdTokenKind.Less, value: "<"))
             i = i + 1
@@ -222,7 +240,8 @@ fn ld_tokenize(input: text) -> [LdToken]:
             tokens = tokens.push(LdToken(kind: LdTokenKind.Word, value: word))
             continue
 
-        # Unknown character — skip
+        # Unknown character — never dropped; the parser rejects it by name
+        tokens = tokens.push(LdToken(kind: LdTokenKind.Unknown, value: ch))
         i = i + 1
 
     # Append EOF sentinel
@@ -326,6 +345,8 @@ enum LdStmtKind:
     Provide      # PROVIDE(sym = expr);
     ProvideHidden  # PROVIDE_HIDDEN(sym = expr);
     Assert       # ASSERT(expr, "message")
+    Include      # INCLUDE "file" (kept unresolved; `message` holds the path)
+    Extern       # EXTERN(sym ...) (`patterns` holds the symbols)
 
 struct LdStmt:
     """A statement inside SECTIONS or inside an output section body."""
@@ -377,11 +398,15 @@ struct LdScript:
     sections: [LdOutputSection]
     output_format: text  # first OUTPUT_FORMAT argument or ""
     output_formats: [text]
+    output_format_quoted: bool
     output_arch: text
+    output_arch_quoted: bool
     phdrs: [LdPhdr]
     commands: [LdSectionsCmd]
     top_stmts: [LdStmt]  # assignments / PROVIDE / ASSERT outside SECTIONS
     top_order: [text]    # source order of top-level directives
+    fragment_cmds: [LdSectionsCmd]  # output sections outside SECTIONS (INCLUDEd SECTIONS-tail fragments)
+    sections_blocks: [i64]          # command count of each SECTIONS block, in order
 
 # ============================================================================
 # Parser State
@@ -453,9 +478,9 @@ fn _ld_parse_primary(parser: LdParser) -> (LdParser, text):
     val tok = _ld_peek(p)
     if tok.kind == LdTokenKind.Number:
         return (_ld_advance(p), tok.value)
-    if tok.kind == LdTokenKind.Minus:
+    if tok.kind == LdTokenKind.Minus or (tok.kind == LdTokenKind.Op and (tok.value == "!" or tok.value == "~")):
         val (p2, inner) = _ld_parse_primary(_ld_advance(p))
-        return (p2, "-" + inner)
+        return (p2, tok.value + inner)
     if tok.kind == LdTokenKind.LParen:
         val (p2, inner) = ld_parse_expr(_ld_advance(p))
         val (p3, _rp) = _ld_expect_kind(p2, LdTokenKind.RParen)
@@ -478,7 +503,12 @@ fn _ld_parse_primary(parser: LdParser) -> (LdParser, text):
     (_ld_fail(p, "expected expression"), "")
 
 fn _ld_is_mul_op(tok: LdToken) -> bool:
-    tok.kind == LdTokenKind.Star
+    tok.kind == LdTokenKind.Star or (tok.kind == LdTokenKind.Op and (tok.value == "/" or tok.value == "%"))
+
+fn _ld_is_rel_op(tok: LdToken) -> bool:
+    if tok.kind == LdTokenKind.Less or tok.kind == LdTokenKind.GreaterThan:
+        return true
+    tok.kind == LdTokenKind.Op and tok.value != "!" and tok.value != "~" and tok.value != "/" and tok.value != "%"
 
 fn _ld_is_add_op(tok: LdToken) -> bool:
     tok.kind == LdTokenKind.Plus or tok.kind == LdTokenKind.Minus
@@ -506,11 +536,16 @@ fn _ld_parse_sum(parser: LdParser) -> (LdParser, text):
     (p, acc)
 
 fn ld_parse_expr(parser: LdParser) -> (LdParser, text):
-    """Parse an expression (+ - * < and calls) into canonical text."""
+    """Parse an expression into canonical text.
+
+    Levels: unary (- ! ~), multiplicative (* / %), additive (+ -), then one
+    left-associative level for shifts, comparisons, bitwise and logical ops.
+    The text keeps source token order, so printing is lossless; evaluation
+    (boot_layout) supports only the arithmetic subset and rejects the rest."""
     val (p0, acc0) = _ld_parse_sum(parser)
     var p = p0
     var acc = acc0
-    while _ld_ok(p) and (_ld_at_kind(p, LdTokenKind.Less) or _ld_at_kind(p, LdTokenKind.GreaterThan)):
+    while _ld_ok(p) and _ld_is_rel_op(_ld_peek(p)):
         val op = _ld_peek(p).value
         val (p2, rhs) = _ld_parse_sum(_ld_advance(p))
         p = p2
@@ -529,19 +564,34 @@ fn ld_parse_entry(parser: LdParser) -> (LdParser, text):
     val (p4, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
     (p4, sym_tok.value)
 
-fn _ld_parse_output_format(parser: LdParser) -> (LdParser, [text]):
-    """OUTPUT_FORMAT("bfd"[, "bfd", "bfd"]) — keyword already consumed."""
+fn _ld_parse_name_arg(parser: LdParser) -> (LdParser, text, bool):
+    """A BFD/arch name: "quoted" or bare (e.g. elf32-i386 lexes as Word Minus Word)."""
+    var p = parser
+    if _ld_at_kind(p, LdTokenKind.String):
+        return (_ld_advance(p), _ld_peek(p).value, true)
+    var name = ""
+    while _ld_live(p) and (_ld_at_kind(p, LdTokenKind.Word) or _ld_at_kind(p, LdTokenKind.Number) or _ld_at_kind(p, LdTokenKind.Minus)):
+        name = name + _ld_peek(p).value
+        p = _ld_advance(p)
+    if name == "":
+        return (_ld_fail(p, "expected a name"), "", false)
+    (p, name, false)
+
+fn _ld_parse_output_format(parser: LdParser) -> (LdParser, [text], bool):
+    """OUTPUT_FORMAT(bfd[, bfd, bfd]) — keyword already consumed. Returns quoted-ness."""
     val (p0, _lp) = _ld_expect_kind(parser, LdTokenKind.LParen)
     var p = p0
     var names: [text] = []
+    var quoted = true
     while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RParen):
-        val (p2, s) = _ld_expect_kind(p, LdTokenKind.String)
+        val (p2, name, q) = _ld_parse_name_arg(p)
         p = p2
-        names = names.push(s.value)
+        names = names.push(name)
+        quoted = q
         if _ld_at_kind(p, LdTokenKind.Comma):
             p = _ld_advance(p)
     val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
-    (p3, names)
+    (p3, names, quoted)
 
 # ============================================================================
 # MEMORY Parser
@@ -681,6 +731,21 @@ fn _ld_parse_stmt(parser: LdParser, allow_input: bool) -> (LdParser, LdStmt):
         val (p6, _rp) = _ld_expect_kind(p5, LdTokenKind.RParen)
         val kind = if tok.value == "PROVIDE": LdStmtKind.Provide else: LdStmtKind.ProvideHidden
         return (p6, _ld_stmt(kind, "", [], sym.value, e, ""))
+    if tok.kind == LdTokenKind.Word and tok.value == "INCLUDE":
+        val (p2, path) = _ld_expect_kind(_ld_advance(p), LdTokenKind.String)
+        return (p2, _ld_stmt(LdStmtKind.Include, "", [], "", "", path.value))
+    if tok.kind == LdTokenKind.Word and tok.value == "EXTERN":
+        val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+        var p3 = p2
+        var syms: [text] = []
+        while _ld_live(p3) and not _ld_at_kind(p3, LdTokenKind.RParen):
+            val (p4, sym) = _ld_expect_kind(p3, LdTokenKind.Word)
+            p3 = p4
+            syms = syms.push(sym.value)
+            if _ld_at_kind(p3, LdTokenKind.Comma):
+                p3 = _ld_advance(p3)
+        val (p5, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
+        return (p5, _ld_stmt(LdStmtKind.Extern, "", syms, "", "", ""))
     if tok.kind == LdTokenKind.Word and tok.value == "ASSERT":
         val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
         val (p3, e) = ld_parse_expr(p2)
@@ -846,6 +911,11 @@ fn ld_parse(input: text) -> Result<LdScript, text>:
     var cmds: [LdSectionsCmd] = []
     var top_stmts: [LdStmt] = []
     var order: [text] = []
+    var fmt_quoted = true
+    var arch_quoted = false
+    var fragment: [LdSectionsCmd] = []
+    var blocks: [i64] = []
+    val no_stmt = _ld_stmt(LdStmtKind.Assign, "", [], "", "", "")
 
     while _ld_live(p):
         val tok = _ld_peek(p)
@@ -859,16 +929,18 @@ fn ld_parse(input: text) -> Result<LdScript, text>:
             entry = sym
             order = order.push(word)
         else if word == "OUTPUT_FORMAT":
-            val (p2, names) = _ld_parse_output_format(_ld_advance(p))
+            val (p2, names, q) = _ld_parse_output_format(_ld_advance(p))
             p = p2
             formats = names
+            fmt_quoted = q
             order = order.push(word)
         else if word == "OUTPUT_ARCH":
             val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
-            val (p3, a) = _ld_expect_kind(p2, LdTokenKind.Word)
+            val (p3, a, q) = _ld_parse_name_arg(p2)
             val (p4, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
             p = p4
-            arch = a.value
+            arch = a
+            arch_quoted = q
             order = order.push(word)
         else if word == "MEMORY":
             val (p2, regions) = ld_parse_memory(_ld_advance(p))
@@ -883,9 +955,22 @@ fn ld_parse(input: text) -> Result<LdScript, text>:
         else if word == "SECTIONS":
             val (p2, sects, c) = _ld_parse_sections_full(_ld_advance(p))
             p = p2
-            sections = sects
-            cmds = c
+            for sc in c:
+                if sc.kind == LdCmdKind.Section:
+                    cmds = cmds.push(LdSectionsCmd(kind: sc.kind, section_index: sc.section_index + sections.len(), stmt: sc.stmt))
+                else:
+                    cmds = cmds.push(sc)
+            for sx in sects:
+                sections = sections.push(sx)
+            blocks = blocks.push(c.len())
             order = order.push(word)
+        else if _ld_at_output_section(p):
+            # SECTIONS-tail fragment (a file meant to be INCLUDEd inside SECTIONS)
+            val (p2, section) = _ld_parse_one_section(p)
+            p = p2
+            fragment = fragment.push(LdSectionsCmd(kind: LdCmdKind.Section, section_index: sections.len(), stmt: no_stmt))
+            sections = sections.push(section)
+            order = order.push("FRAGMENT")
         else:
             val (p2, st) = _ld_parse_stmt(p, false)
             p = p2
@@ -896,8 +981,9 @@ fn ld_parse(input: text) -> Result<LdScript, text>:
         return Err("linker script parse error: {p.err}")
     val fmt = if formats.len() > 0: formats[0] else: ""
     Ok(LdScript(entry: entry, memory: memory, sections: sections, output_format: fmt,
-        output_formats: formats, output_arch: arch, phdrs: phdrs, commands: cmds,
-        top_stmts: top_stmts, top_order: order))
+        output_formats: formats, output_format_quoted: fmt_quoted, output_arch: arch,
+        output_arch_quoted: arch_quoted, phdrs: phdrs, commands: cmds,
+        top_stmts: top_stmts, top_order: order, fragment_cmds: fragment, sections_blocks: blocks))
 
 # ============================================================================
 # Canonical Printer
@@ -916,6 +1002,10 @@ fn _ld_print_stmt(st: LdStmt) -> text:
         return "PROVIDE(" + st.symbol + " = " + st.expr + ");"
     if st.kind == LdStmtKind.ProvideHidden:
         return "PROVIDE_HIDDEN(" + st.symbol + " = " + st.expr + ");"
+    if st.kind == LdStmtKind.Include:
+        return "INCLUDE \"" + st.message + "\""
+    if st.kind == LdStmtKind.Extern:
+        return "EXTERN(" + st.patterns.join(" ") + ")"
     "ASSERT(" + st.expr + ", \"" + st.message + "\")"
 
 fn _ld_print_section(sec: LdOutputSection) -> [text]:
@@ -948,16 +1038,20 @@ fn ld_print(script: LdScript) -> text:
     """Print a parsed script in canonical form. Token-equivalent (modulo `;`) to its source."""
     var lines: [text] = []
     var stmt_i: i64 = 0
+    var cmd_i: i64 = 0
+    var block_i: i64 = 0
+    var frag_i: i64 = 0
     for d in script.top_order:
         if d == "ENTRY":
             lines = lines.push("ENTRY(" + script.entry + ")")
         else if d == "OUTPUT_FORMAT":
             var quoted: [text] = []
             for f in script.output_formats:
-                quoted = quoted.push("\"" + f + "\"")
+                quoted = quoted.push(if script.output_format_quoted: "\"" + f + "\"" else: f)
             lines = lines.push("OUTPUT_FORMAT(" + quoted.join(", ") + ")")
         else if d == "OUTPUT_ARCH":
-            lines = lines.push("OUTPUT_ARCH(" + script.output_arch + ")")
+            val a = if script.output_arch_quoted: "\"" + script.output_arch + "\"" else: script.output_arch
+            lines = lines.push("OUTPUT_ARCH(" + a + ")")
         else if d == "MEMORY":
             lines = lines.push("MEMORY")
             lines = lines.push("{")
@@ -985,13 +1079,21 @@ fn ld_print(script: LdScript) -> text:
         else if d == "SECTIONS":
             lines = lines.push("SECTIONS")
             lines = lines.push("{")
-            for c in script.commands:
+            val block_end = cmd_i + script.sections_blocks[block_i]
+            block_i = block_i + 1
+            while cmd_i < block_end:
+                val c = script.commands[cmd_i]
+                cmd_i = cmd_i + 1
                 if c.kind == LdCmdKind.Section:
                     for l in _ld_print_section(script.sections[c.section_index]):
                         lines = lines.push(l)
                 else:
                     lines = lines.push("    " + _ld_print_stmt(c.stmt))
             lines = lines.push("}")
+        else if d == "FRAGMENT":
+            for l in _ld_print_section(script.sections[script.fragment_cmds[frag_i].section_index]):
+                lines = lines.push(l)
+            frag_i = frag_i + 1
         else:
             lines = lines.push(_ld_print_stmt(script.top_stmts[stmt_i]))
             stmt_i = stmt_i + 1
@@ -1024,7 +1126,8 @@ fn ld_tokens_equivalent(a: text, b: text) -> bool:
 fn ld_script_new() -> LdScript:
     """Create an empty linker script."""
     LdScript(entry: "", memory: [], sections: [], output_format: "", output_formats: [],
-        output_arch: "", phdrs: [], commands: [], top_stmts: [], top_order: [])
+        output_format_quoted: true, output_arch: "", output_arch_quoted: false, phdrs: [],
+        commands: [], top_stmts: [], top_order: [], fragment_cmds: [], sections_blocks: [])
 
 fn ld_has_entry(script: LdScript) -> bool:
     """Check if the script specifies an entry point."""

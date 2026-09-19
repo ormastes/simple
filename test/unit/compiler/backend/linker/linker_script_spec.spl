@@ -304,3 +304,128 @@ describe "linker_script - round-trips all 6 src/os/kernel/arch/*/linker.ld":
         val printed = ld_print(ld_parse(src).unwrap())
         val mutated = printed.replace("AT(ADDR(.text) - 0xFFFFFFFF80000000)", "AT(ADDR(.text))")
         expect(ld_tokens_equivalent(src, mutated)).to_equal(false)
+
+# ============================================================================
+# 10. Every in-tree linker script (git ls-files '*.ld', 50 files, 2026-09-19)
+# ============================================================================
+
+val ALL_LD_SCRIPTS: [text] = [
+    "examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld",
+    "examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld",
+    "examples/09_embedded/simple_os/arch/arm32/fs_exec_linker.ld",
+    "examples/09_embedded/simple_os/arch/arm32/linker.ld",
+    "examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld",
+    "examples/09_embedded/simple_os/arch/arm64/linker.ld",
+    "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld",
+    "examples/09_embedded/simple_os/arch/common/linker_riscv_common.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/ghdl_linux_acceptance_linker.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/linker.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/linker_tiny.ld",
+    "examples/09_embedded/simple_os/arch/riscv32/linker_tiny64.ld",
+    "examples/09_embedded/simple_os/arch/riscv64/ghdl_boot_info_linker.ld",
+    "examples/09_embedded/simple_os/arch/riscv64/linker.ld",
+    "examples/09_embedded/simple_os/arch/x86_32/linker.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/boot/multiboot2_elf64_loader.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/hello_user/user.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/linker.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/linker_low1mb.ld",
+    "examples/09_embedded/simple_os/arch/x86_64/memory_leveling_qemu.ld",
+    "examples/09_embedded/simpleos_nvme_fw/baremetal_rv32/linker.ld",
+    "src/compiler/70.backend/baremetal/arm/linker.ld",
+    "src/compiler/70.backend/baremetal/cortex_m33/linker.ld",
+    "src/compiler/70.backend/baremetal/cortex_m33/linker_ra4m1.ld",
+    "src/compiler/70.backend/baremetal/cortex_m33/linker_stm32u585.ld",
+    "src/compiler/70.backend/baremetal/riscv/linker.ld",
+    "src/compiler/70.backend/baremetal/x86_64/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/arm/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/riscv/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/riscv32/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/test/linker.ld",
+    "src/lib/nogc_async_mut_noalloc/baremetal/x86/linker.ld",
+    "src/os/kernel/arch/arm32/cosmos/cosmos_linker.ld",
+    "src/os/kernel/arch/arm32/linker.ld",
+    "src/os/kernel/arch/arm64/linker.ld",
+    "src/os/kernel/arch/riscv32/fpga_linker.ld",
+    "src/os/kernel/arch/riscv32/linker.ld",
+    "src/os/kernel/arch/riscv64/fpga_linker.ld",
+    "src/os/kernel/arch/riscv64/linker.ld",
+    "src/os/kernel/arch/riscv64/platform/fpga_linker.ld",
+    "src/os/kernel/arch/riscv64/starfive_jh7110_linker.ld",
+    "src/os/kernel/arch/x86_32/linker.ld",
+    "src/os/kernel/arch/x86_64/linker.ld",
+    "src/os/kernel/arch/x86_64/up_squared/linker.ld",
+    "src/os/realtime/boot/arm.ld",
+    "src/os/realtime/boot/riscv32.ld",
+    "src/os/realtime/boot/x86_64.ld",
+    "test/02_integration/os/cosmos/cosmos_abort_contract_test.ld",
+    "test/fixtures/baremetal/stm_semihost_smoke.ld",
+]
+
+fn _ld_roundtrip_path(path: text) -> text:
+    val src = file_read(path)
+    if src.len() == 0:
+        return "empty read: {path}"
+    val first = ld_parse(src)
+    if first.is_err():
+        return "{path}: {first.unwrap_err()}"
+    val printed = ld_print(first.unwrap())
+    if not ld_tokens_equivalent(src, printed):
+        return "{path}: printed script is not token-equivalent"
+    val second = ld_parse(printed)
+    if second.is_err():
+        return "{path}: reparse failed: {second.unwrap_err()}"
+    if ld_print(second.unwrap()) != printed:
+        return "{path}: print is not idempotent"
+    "ok"
+
+describe "linker_script - every in-tree .ld script":
+    it "parses and round-trips all 50 scripts":
+        var failures: [text] = []
+        for path in ALL_LD_SCRIPTS:
+            val r = _ld_roundtrip_path(path)
+            if r != "ok":
+                failures = failures.push(r)
+        expect(failures).to_equal([])
+        expect(ALL_LD_SCRIPTS.len()).to_equal(50)
+
+describe "linker_script - operators, INCLUDE, EXTERN, bare names":
+    it "tokenizes compound and bitwise operators instead of dropping them":
+        val tokens = ld_tokenize("a <= b >= c ! d & e % f ~ g")
+        expect(tokens[1].kind == LdTokenKind.Op).to_equal(true)
+        expect(tokens[1].value).to_equal("<=")
+        expect(tokens[3].value).to_equal(">=")
+        expect(tokens[5].value).to_equal("!")
+        expect(tokens[7].value).to_equal("&")
+        expect(tokens[9].value).to_equal("%")
+        expect(tokens[11].value).to_equal("~")
+
+    it "keeps an unknown character as a token and rejects it by name":
+        val tokens = ld_tokenize("ENTRY(@)")
+        expect(tokens[2].kind == LdTokenKind.Unknown).to_equal(true)
+        expect(tokens[2].value).to_equal("@")
+        val r = ld_parse("ENTRY(_start) _x = 0x1000 @ 4;")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("'@'")).to_equal(true)
+
+    it "parses ASSERT with <= and ORIGIN/LENGTH":
+        val script = ld_parse("ASSERT(_stack_top <= ORIGIN(RAM) + LENGTH(RAM), \"Stack overflows RAM\")").unwrap()
+        expect(script.top_stmts[0].kind == LdStmtKind.Assert).to_equal(true)
+        expect(script.top_stmts[0].expr).to_equal("_stack_top <= ORIGIN(RAM) + LENGTH(RAM)")
+
+    it "keeps INCLUDE as an unresolved directive node":
+        val script = ld_parse("INCLUDE \"common.ld\"").unwrap()
+        expect(script.top_stmts[0].kind == LdStmtKind.Include).to_equal(true)
+        expect(script.top_stmts[0].message).to_equal("common.ld")
+
+    it "parses EXTERN symbol lists":
+        val script = ld_parse("ENTRY(_entry32) EXTERN(_entry32 _other)").unwrap()
+        expect(script.top_stmts[0].kind == LdStmtKind.Extern).to_equal(true)
+        expect(script.top_stmts[0].patterns).to_equal(["_entry32", "_other"])
+
+    it "parses unquoted OUTPUT_FORMAT and quoted OUTPUT_ARCH":
+        val script = ld_parse("OUTPUT_FORMAT(elf32-i386) OUTPUT_ARCH(\"riscv\")").unwrap()
+        expect(script.output_format).to_equal("elf32-i386")
+        expect(script.output_format_quoted).to_equal(false)
+        expect(script.output_arch).to_equal("riscv")
+        expect(script.output_arch_quoted).to_equal(true)

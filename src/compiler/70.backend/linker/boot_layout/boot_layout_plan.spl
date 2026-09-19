@@ -39,6 +39,7 @@ struct BootSectionPlan:
     """One output section of the boot image."""
     name: text
     vma_expr: text       # explicit address expression or "" (follows location counter)
+    dot_expr: text       # `. = expr` between the previous section and this one, or ""
     align_expr: text     # ALIGN(...) after the colon or ""
     lma_expr: text       # AT(...) or ""
     has_lma_bias: bool   # lma_expr has the shape ADDR(<self>) - C
@@ -76,6 +77,7 @@ struct BootLayoutPlan:
     symbols: [BootSymbol]
     assertions: [BootAssertion]
     gc_roots: [text]     # union of all KEEP globs, in order
+    extern_symbols: [text]   # EXTERN(...) — forced-undefined symbols (link roots)
     discard_patterns: [text]
 
 # ============================================================================
@@ -233,6 +235,8 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
     """Build the typed BootLayoutPlan from a parsed script (fail-closed)."""
     if script.entry == "":
         return Err("boot layout: script has no ENTRY")
+    if script.fragment_cmds.len() > 0:
+        return Err("boot layout: script is a SECTIONS fragment (output sections outside SECTIONS); plan the including script")
     var regions: [BootRegion] = []
     for m in script.memory:
         regions = regions.push(BootRegion(name: m.name, attrs: m.attrs, origin: m.origin, length: m.length))
@@ -253,9 +257,16 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
     var start_expr = ""
     var seen_section = false
     var sticky_segment = ""
+    var pending_dot = ""
 
+    var externs: [text] = []
     for st in script.top_stmts:
-        if st.kind == LdStmtKind.Assert:
+        if st.kind == LdStmtKind.Include:
+            return Err("boot layout: INCLUDE \"{st.message}\" is not resolved; plan the expanded script")
+        if st.kind == LdStmtKind.Extern:
+            for sym in st.patterns:
+                externs = externs.push(sym)
+        else if st.kind == LdStmtKind.Assert:
             assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
         else if st.symbol != ".":
             symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
@@ -264,13 +275,19 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
     for c in script.commands:
         if c.kind == LdCmdKind.Stmt:
             val st = c.stmt
+            if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
+                return Err("boot layout: INCLUDE/EXTERN inside SECTIONS is not modelled; plan the expanded script")
             if st.kind == LdStmtKind.Assert:
                 assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
             else if st.symbol == ".":
-                if not seen_section and st.kind == LdStmtKind.Assign:
+                if st.kind != LdStmtKind.Assign:
+                    return Err("boot layout: location-counter statement '. += {st.expr}' between output sections is not modelled")
+                if not seen_section:
                     start_expr = st.expr
                 else:
-                    return Err("boot layout: location-counter statement '. {st.expr}' between output sections is not modelled")
+                    if pending_dot != "":
+                        return Err("boot layout: two location-counter assignments between output sections")
+                    pending_dot = st.expr
             else:
                 symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
                     provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
@@ -296,14 +313,21 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
                         discard = discard.push(pat)
             else if st.kind == LdStmtKind.Assert:
                 assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+            else if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
+                return Err("boot layout: {sec.name}: INCLUDE/EXTERN inside an output section is not modelled")
             else if st.symbol == ".":
                 if st.kind == LdStmtKind.AddAssign:
                     match boot_eval(st.expr, boot_eval_ctx(0)):
                         case Ok(v): pad = pad + v
                         case Err(e): return Err("boot layout: {sec.name}: {e}")
                 else:
-                    # Only `. = ALIGN(n)` is modelled inside a section body.
+                    # Only `. = ALIGN(n)` and `. = . + n` are modelled inside a section body.
                     val toks = ld_tokenize(st.expr)
+                    if toks.len() == 4 and toks[0].value == "." and toks[1].kind == LdTokenKind.Plus:
+                        match boot_eval(toks[2].value, boot_eval_ctx(0)):
+                            case Ok(v): pad = pad + v
+                            case Err(e): return Err("boot layout: {sec.name}: {e}")
+                        continue
                     if toks.len() != 5 or toks[0].value != "ALIGN":
                         return Err("boot layout: {sec.name}: unsupported location-counter assignment '. = {st.expr}'")
                     aligns = aligns.push(ld_parse_number(toks[2].value))
@@ -327,16 +351,19 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
                 return Err("boot layout: allocated section {sec.name} has no PHDRS segment")
 
         val (has_bias, bias) = _boot_lma_bias(sec.name, sec.lma_expr)
-        sections = sections.push(BootSectionPlan(name: sec.name, vma_expr: sec.address_expr,
+        sections = sections.push(BootSectionPlan(name: sec.name, vma_expr: sec.address_expr, dot_expr: pending_dot,
             align_expr: sec.align_expr, lma_expr: sec.lma_expr, has_lma_bias: has_bias, lma_bias: bias,
             input_patterns: inputs, keep_patterns: keeps, noload: sec.section_type == "NOLOAD",
             pad_bytes: pad, inner_aligns: aligns, segment: segment, region: sec.region,
             discard: is_discard, defined_symbols: defined))
+        pending_dot = ""
 
+    if pending_dot != "":
+        return Err("boot layout: trailing location-counter assignment '. = {pending_dot}' after the last output section")
     Ok(BootLayoutPlan(output_format: script.output_format, output_arch: script.output_arch,
         entry: script.entry, start_expr: start_expr, regions: regions, segments: segments,
         sections: sections, symbols: symbols, assertions: assertions, gc_roots: gc_roots,
-        discard_patterns: discard))
+        extern_symbols: externs, discard_patterns: discard))
 
 fn boot_layout_from_text(input: text) -> Result<BootLayoutPlan, text>:
     """Parse a linker script and build its BootLayoutPlan."""
