@@ -140,13 +140,17 @@ linked by ANY linker, and because the fixes are what this claim rests on.
 | Kernel | Linker | Size | sha256 |
 |---|---|---|---|
 | `kernel_ext.elf` | `ld.lld --gc-sections` (the producer's own link) | 128232 | `7615ee42f03d7e5c35f90c9067ce206779ce7040671ea0fdf0558c94395c916d` |
-| `ext_O0.elf` | `ld.lld -O0 --no-relax`, no GC | 222176 | `73283884a4dc5906f144b0ae4691d5229ee925bf3ad26751c844bff2859743e7` |
-| `kernel_int.elf` | `elf_boot_link` (internal engine, no GC) | 204640 | `ea0de1d162623105d1169e1519ea3399155c1955fd82a89efca55bb61969a589` |
+| `ext_O0.elf` | `ld.lld -O0 --no-relax`, no GC | 222112 | `2ced9ffc8a7b1624b0fccde28a5c544620fd3d220f8230d0d30f21157b234dec` |
+| `kernel_int.elf` | `elf_boot_link` (internal engine, no GC) | 204568 | `20c8d929b7327505a0ef9919d07cfbc0b7e313fe602b68332c9ddd2a071679a2` |
 
-Measured after the `tlbi vmalle1` fix below. `kernel_ext.elf`'s hash is unchanged by that fix,
-because `--gc-sections` discards `rt_arm64_tlbi_alle1` — nothing on the gated path calls it. The
-two no-GC hashes moved. Pre-fix hashes, for the record: `ext_O0.elf` `58ca725a…`, `kernel_int.elf`
-`e35a7778…`.
+Measured on the final tree, after the `tlbi vmalle1` fix below and after dropping
+`mmio_invalidate_tlb` from the `mmio.spl` restore (see that file's header: it was the one added
+direct `rt_*` call site, and both wrapper alternatives drag their module's whole extern surface
+into the freestanding closure — 140 and 16 undefined symbols respectively in a no-GC link).
+`kernel_ext.elf`'s hash is unchanged by either change, because `--gc-sections` discards both
+symbols; the no-GC hashes moved with each. Earlier hashes, for the record: `ext_O0.elf`
+`58ca725a…` then `73283884…`, `kernel_int.elf` `e35a7778…` then `ea0de1d1…`. The gate verdict is
+the same on all three.
 
 `ext_O0.elf` is the comparison target, because the engine has no section GC. The
 file sizes differ only in the non-loaded `.symtab`.
@@ -162,7 +166,8 @@ defsyms:**
 - Entry identical: 0xffffffff80109a14.
 - **Loaded bytes byte-identical**: `cmp` over 0x10000..0x253d0 (87056 bytes) and
   0x26000..0x29020 (12320 bytes), i.e. every byte either `LOAD` segment covers.
-- Symbols: `llvm-nm -g --defined-only` lists **626 in each**, with identical names and
+- Symbols: `llvm-nm -g --defined-only` lists **625 in each** (626 before `mmio_invalidate_tlb`
+  was dropped), with identical names and
   identical values — `diff` over (value, name) is empty, and that includes `_start`,
   `__simple_entry_start` and `spl_start`. Two entries differ only in nm's type letter:
   `_bss_end` and `_kernel_end` are `B` from ld.lld and `A`/`D` from the engine, i.e.
