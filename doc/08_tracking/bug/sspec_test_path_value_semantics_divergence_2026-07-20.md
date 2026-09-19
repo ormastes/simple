@@ -134,3 +134,28 @@ per their `describe`/file naming) — i.e. these assert previously-working
 behavior and are currently red under `bin/simple test`, the project's default
 test-running path.
 
+## 2026-09-19 — twin spec `test/system/features/ffi_system_spec.spl` carries the same two red examples
+
+Verified during shard3 suite-fix triage (seed interpreter,
+`bin/simple test test/system/features/ffi_system_spec.spl --mode=interpreter`):
+2 of 33 examples fail — `workflow 2 - error handling`
+(`verify(error.? == true)`, "expected false to equal true") and
+`error 5 - missing key` (`verify(dict.get("b").? == false)`, same message).
+`integration 5 - error propagation` passes on this binary.
+
+`ffi_system_spec.spl` is a wave-6 verify-filler twin of
+`test/03_system/interpreter/interpreter_system_spec.spl` (same example bodies,
+different header/`@cover`; created by `dd5b3c98e1b`), so this is the same seed
+debt, not a new defect.
+
+Run-mode probe on the 2026-09-19 seed confirms the documented mechanism:
+`.?` yields the payload at value positions (`error.?` -> `"Empty input"`, so
+the comparison inside the `verify` helper — not a direct `expect` subject —
+never gets the `eval_assertion_operand` bool collapse), and unwrapping the
+missing-key `dict.get` result prints the raw nil sentinel as `3`
+(`nil == 3` compares true on this seed, `nil == 0/1/false` false). The
+`verify`-indirection defeat is identical to the original filing.
+
+Disposition unchanged: spec pins stay RED until the test-path evaluator is
+fixed; do not patch the spec (no `.?` -> `!= nil` migration, no weakening).
+
