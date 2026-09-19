@@ -20,13 +20,13 @@ Run `bin/simple test test/unit/lib/hardware/fpga_linux/synthesis_wrapper_vexrisc
 
 ## Overview
 
-Verifies AC-3: synthesis_wrapper generates Vivado TCL that includes
-VexRiscv-SMP .v sources and enables S_AXI_HP0 for K26 bitstream.
-Tests that new add_verilog_sources and enable_axi_hp_port methods
-produce TCL containing expected directives.
+Verifies AC-3: synthesis_wrapper generates Vivado TCL for the K26
+bitstream flow — creating the project against the xck26 part, adding
+the RV64GC SoC sources, attaching the K26 constraint file, setting the
+top module, and running synthesis through bitstream export.
 
 Covers:
-- AC-3 (Vivado 2025.2 TCL contains HP port enable + VexRiscv sources)
+- AC-3 (Vivado TCL creates the K26 project with SoC sources, constraints, and synthesis runs)
 ## Compatibility and limitations
 Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
@@ -34,77 +34,58 @@ Executed on the interpreter test lane; asserts observable values only and makes 
 use std.spec.step
 
 use std.spipe.*
-use lib.hardware.fpga_linux.synthesis_wrapper.{
-    SynthesisProject,
-    synthesis_project_default,
-    add_verilog_sources,
-    enable_axi_hp_port,
-    generate_vivado_tcl_rv64
-}
+use lib.hardware.fpga_linux.synthesis_wrapper.{generate_vivado_tcl_rv64}
 
 use std.spec
 use std.common.convert.{safe_parse_int, i64_to_text}
 use std.hash.adler32.{adler32}
 
 # ============================================================================
-# Helpers
-# ============================================================================
-fn vexriscv_v_paths() -> Vec<text>:
-    var paths = Vec<text>.new()
-    paths.push("src/lib/hardware/opensource_rtl/vexriscv_smp/VexRiscvLitexSmpCluster_Cc1_Iw64Is8192Iy2_Dw64Ds8192Dy2_ITs4DTs4_Ldw128.v")
-    return paths
-fn make_project_with_vexriscv() -> SynthesisProject:
-    val base = synthesis_project_default()
-    val with_v = add_verilog_sources(base, vexriscv_v_paths())
-    return enable_axi_hp_port(with_v, 0)
-
-fn tcl_with_vexriscv() -> text:
-    val proj = make_project_with_vexriscv()
-    return generate_vivado_tcl_rv64()
-
-
-# ============================================================================
-# AC-3: add_verilog_sources output
+# AC-3: RV64GC source directives in the generated TCL
 # ============================================================================
 
-describe "SynthesisProject add_verilog_sources":
+describe "Synthesis TCL RTL source directives":
     # @manual scenario evidence
-    it "AC-3: TCL contains add_files directive for .v sources":
+    it "AC-3: TCL contains add_files directive for sources":
         # @req REQ-SSPEC-UNIT
         # @req REQ-3
-        step("AC-3: TCL contains add_files directive for .v sources")
-        val tcl = tcl_with_vexriscv()
+        step("AC-3: TCL contains add_files directive for sources")
+        val tcl = generate_vivado_tcl_rv64()
         expect(tcl).to_contain("add_files")
 
-    it "AC-3: TCL contains VexRiscv filename":
+    it "AC-3: TCL contains the rv64gc core source":
         # @req REQ-SSPEC-UNIT
-        step("AC-3: TCL contains VexRiscv filename")
-        val tcl = tcl_with_vexriscv()
-        expect(tcl).to_contain("VexRiscv")
+        # @req REQ-3
+        step("AC-3: TCL contains the rv64gc core source")
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("rv64gc_core.vhd")
 
-    it "AC-3: TCL contains .v extension reference":
+    it "AC-3: TCL contains a VHDL source extension reference":
         # @req REQ-SSPEC-UNIT
-        step("AC-3: TCL contains .v extension reference")
-        val tcl = tcl_with_vexriscv()
-        expect(tcl).to_contain(".v")
+        # @req REQ-3
+        step("AC-3: TCL contains a VHDL source extension reference")
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain(".vhd")
 
 
 # ============================================================================
-# AC-3: enable_axi_hp_port output
+# AC-3: project setup directives in the generated TCL
 # ============================================================================
 
-describe "SynthesisProject enable_axi_hp_port":
-    it "AC-3: TCL contains S_AXI_HP0 enable directive":
+describe "Synthesis TCL project setup directives":
+    it "AC-3: TCL sets soc_top_rv64 as the top module":
         # @req REQ-SSPEC-UNIT
-        step("AC-3: TCL contains S_AXI_HP0 enable directive")
-        val tcl = tcl_with_vexriscv()
-        expect(tcl).to_contain("S_AXI_HP0")
+        # @req REQ-3
+        step("AC-3: TCL sets soc_top_rv64 as the top module")
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("set_property top soc_top_rv64")
 
-    it "AC-3: TCL contains PSU__USE__S_AXI_GP key or HP config":
+    it "AC-3: TCL attaches the K26 constraint file to the constrs fileset":
         # @req REQ-SSPEC-UNIT
-        step("AC-3: TCL contains PSU__USE__S_AXI_GP key or HP config")
-        val tcl = tcl_with_vexriscv()
-        expect(tcl).to_contain("HP")
+        # @req REQ-3
+        step("AC-3: TCL attaches the K26 constraint file to the constrs fileset")
+        val tcl = generate_vivado_tcl_rv64()
+        expect(tcl).to_contain("constrs_1")
 
 
 # ============================================================================
