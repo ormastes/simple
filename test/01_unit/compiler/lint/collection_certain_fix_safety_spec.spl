@@ -205,3 +205,78 @@ describe "round 2: statement and block extent is the parser's answer":
         bound more than once in a function is refused outright."""
         assert_false(is_some(fix002(B7_FOR_SHADOW_SRC)))
         assert_false(is_some(fix020(B7_FOR_SHADOW_SRC)))
+
+# ---------------------------------------------------------------------------
+# Round 3: four more wrong rewrites, one cause — the proofs were ALLOW-lists
+# over enumerated cases, so anything not enumerated defaulted to "safe". The
+# AST move in round 2 was right; the DEFAULTS were still inverted. Every
+# default is now fail-closed: block traversal is generic over each statement
+# kind's child lists, an unknown kind or unreadable binding form makes the
+# whole function uninspectable, method calls on the array are unsafe unless
+# the name is a proven reader, and a receiver that merely mentions the array
+# is a mutation. Record: doc/08_tracking/bug/
+# coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md
+#
+# Fixtures byte-identical to the review's r3/**/*.spl minus the `print`
+# driver.
+# ---------------------------------------------------------------------------
+
+val C1_ELSE_MUT_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        if x > 100:\n            out.push(0)\n        else:\n            val dropped = seen.pop()\n    out\n"
+val C1B_ELIF_MUT_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        if x > 100:\n            out.push(0)\n        elif x > 0:\n            val dropped = seen.pop()\n    out\n"
+val C1C_ELSE_COLL002_SRC = "fn keep(xs: [i64]) -> [i64]:\n    var allowed: [i64] = [1, 2, 3]\n    var out: [i64] = []\n    for x in xs:\n        if allowed.contains(x):\n            out.push(x)\n        if x > 100:\n            out.push(0)\n        else:\n            val dropped = allowed.pop()\n    out\n"
+val C2_FILL_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        if seen.len() > 0:\n            val r = seen.fill(99)\n    out\n"
+val C3_DESTRUCTURE_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        var (seen, k) = ([], 0)\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n    out\n"
+val C4_INDEX_RECEIVER_SRC = "fn bounded(groups: [[i64]]) -> i64:\n    var seen: [[i64]] = []\n    for g in groups:\n        if not seen.contains(g):\n            seen.push(g)\n        seen[0].push(7)\n    seen.len()\n"
+
+describe "round 3: every default is fail-closed":
+    it "c1: an `else` body is walked":
+        step("c1: an `else` body is walked")
+        """`stmts_have_unsafe_use` visited only `stmt_get_body(if)`, the
+        then-branch, so `val dropped = seen.pop()` in an `else` was never
+        seen: [1,2,1,3,3] -> [1,2,3]. Traversal is generic over each
+        statement kind's child statement lists now, so `else` is covered by
+        construction rather than by being listed."""
+        assert_false(is_some(fix020(C1_ELSE_MUT_SRC)))
+
+    it "c1b: an `elif` body is walked":
+        step("c1b: an `elif` body is walked")
+        assert_false(is_some(fix020(C1B_ELIF_MUT_SRC)))
+
+    it "c1c: the COLL002 sibling walks `else` too":
+        step("c1c: the COLL002 sibling walks `else` too")
+        """`allowed.pop()` in an `else` shrank the array the Dict was built
+        from: [1,2] -> [1,2,3,1]."""
+        assert_false(is_some(fix002(C1C_ELSE_COLL002_SRC)))
+
+    it "c2: an unknown method on the array is a mutation, not a read":
+        step("c2: an unknown method on the array is a mutation, not a read")
+        """`fill` is a real runtime mutator that was absent from the mutating
+        whitelist, so it read as harmless: [1,2,1,2] -> [1,2]. The list is
+        now an allow-list of proven readers and the default is UNSAFE, so a
+        method nobody has vetted refuses the fix instead of permitting it."""
+        assert_false(is_some(fix020(C2_FILL_SRC)))
+
+    it "c3: a destructuring binding counts as a binding":
+        step("c3: a destructuring binding counts as a binding")
+        """`var (seen, k) = ([], 0)` rebinds `seen` inside the loop. It does
+        NOT yield an empty `stmt_get_name` as first assumed — the name is the
+        literal `"(seen,k)"`, a pattern rendered as text — so an emptiness
+        test missed it and the Dict was built from the wrong array:
+        [1,1,2] -> [1,2]. Any binding name that is not a single plain
+        identifier now makes the function uninspectable."""
+        assert_false(is_some(fix020(C3_DESTRUCTURE_SRC)))
+
+    it "c4: a call on an indexed receiver mutates the array":
+        step("c4: a call on an indexed receiver mutates the array")
+        """`seen[0].push(7)` has receiver EXPR_INDEX, not EXPR_IDENT, so the
+        old check saw a call on nothing at all: 1 -> 3. A receiver that
+        MENTIONS the tracked array without BEING it reaches the same storage
+        through a shape this analysis does not model, and is unsafe."""
+        assert_false(is_some(fix020(C4_INDEX_RECEIVER_SRC)))
+
+    it "still fixes the plain single-array dedup (non-vacuity)":
+        step("still fixes the plain single-array dedup (non-vacuity)")
+        """Fail-closed defaults are only worth having if something still
+        passes them; six refusals in a row prove nothing on their own."""
+        val plain = "fn dedup(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        if not out.contains(x):\n            out.push(x)\n    out\n"
+        assert_true(is_some(fix020(plain)))

@@ -51,9 +51,14 @@ use compiler.core.types.{
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_RETURN,
+    STMT_BREAK, STMT_CONTINUE, STMT_MATCH, STMT_DEFER, STMT_ERRDEFER,
+    STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIND,
+    STMT_LAZY_VAL_DECL, STMT_GPU_LAUNCH,
     stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body, stmt_get_type,
-    stmt_get_span
+    stmt_get_span, stmt_get_if_single_else,
+    arm_get_pattern, arm_get_guard, arm_get_body, elif_get_else
 }
+use compiler.core.ast_traversal.{flat_stmt_child_exprs}
 use compiler.core.ast.{
     DECL_FN, DECL_VAR, decl_get_tag, decl_get_name, decl_get_body,
     decl_get_param_names, decl_get_param_types
@@ -899,8 +904,30 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
 # Plain array-of-arrays (`b[i].push(x)` on [[T]]) mutates in place and must
 # never fire; it only can via kind 1, which requires dict evidence.
 
-# Mutating methods whose effect is lost on a value copy. Read-only methods
-# (len, contains, ...) are fine on a copy and must not fire.
+# Methods PROVEN not to change the receiver. This is an allow-list and the
+# default is UNSAFE, which is the opposite of the mutating-name whitelist it
+# replaced: that list omitted `fill`, a real runtime mutator, so
+# `seen.fill(99)` read as a harmless call and the rewrite turned
+# [1,2,1,2] into [1,2]. Omitting a reader here costs a suggestion; omitting a
+# mutator there cost correctness. `sort`/`reverse` are deliberately absent —
+# whether they mutate in place is not something this rule should be guessing.
+fn is_readonly_collection_method(name: text) -> bool:
+    if name == "contains" or name == "contains_key" or name == "has":
+        return true
+    if name == "len" or name == "length" or name == "size" or name == "count":
+        return true
+    if name == "is_empty" or name == "index_of" or name == "find_index":
+        return true
+    if name == "get" or name == "first" or name == "last" or name == "at":
+        return true
+    if name == "keys" or name == "values":
+        return true
+    if name == "to_text" or name == "to_string" or name == "join":
+        return true
+    false
+
+# Mutating methods whose effect is lost on a value copy (COLL019 only; the
+# Certain-fix proofs use the allow-list above, not this one).
 fn is_mutating_collection_method(name: text) -> bool:
     if name == "push" or name == "pop" or name == "insert" or name == "remove":
         return true
@@ -1367,30 +1394,26 @@ fn manual_distinct_warning(fn_name: text, span_id: i64) -> CollectionLintWarning
 fn manual_distinct_guards_in_loop(stmts: [i64]) -> [i64]:
     var found: [i64] = []
     for s in real_stmts(stmts):
-        val tag = stmt_get_tag(s)
         if is_manual_distinct_guard(s):
             found.push(s)
-        elif tag == STMT_IF or tag == STMT_BLOCK:
-            for nested in manual_distinct_guards_in_loop(stmt_get_body(s)):
+        elif not coll_stmt_is_loop(stmt_get_tag(s)):
+            # Generic descent through every child list this kind owns, so an
+            # `else`/`elif` body or a match arm is reached by construction.
+            for nested in manual_distinct_guards_in_loop(coll_stmt_child_stmts(s)):
                 found.push(nested)
     found
 
 fn check_manual_distinct_stmts(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
-    for s in stmts:
-        if s < 0:
-            continue
-        val tag = stmt_get_tag(s)
-        if tag == STMT_FOR or tag == STMT_WHILE:
+    for s in real_stmts(stmts):
+        if coll_stmt_is_loop(stmt_get_tag(s)):
             val loop_body = stmt_get_body(s)
             for guard in manual_distinct_guards_in_loop(loop_body):
                 warnings.push(manual_distinct_warning(fn_name, stmt_anchor_span(guard)))
-            val nested = check_manual_distinct_stmts(loop_body, fn_name)
-            for w in nested:
+            for w in check_manual_distinct_stmts(loop_body, fn_name):
                 warnings.push(w)
-        elif tag == STMT_IF or tag == STMT_BLOCK:
-            val nested = check_manual_distinct_stmts(stmt_get_body(s), fn_name)
-            for w in nested:
+        else:
+            for w in check_manual_distinct_stmts(coll_stmt_child_stmts(s), fn_name):
                 warnings.push(w)
     warnings
 
@@ -1444,23 +1467,156 @@ fn coll_proof_unsafe(code: text, receiver: text, reason: text) -> CollectionFixP
         code: code, receiver: receiver, value: "", guard_line: 0, push_line: 0,
         decl_line: 0, loop_line: 0, safe: false, reason: reason)
 
+# --- generic traversal, fail-closed -----------------------------------------
+#
+# Round 3 broke the proofs four more ways, all one defect: they were written
+# as ALLOW-lists over enumerated cases, so anything not enumerated defaulted
+# to "safe". `stmts_have_unsafe_use` walked only `stmt_get_body(if)`, so a
+# `seen.pop()` in an `else` (or `elif`) was invisible. The mutating-method
+# list was a whitelist, so the real runtime method `fill` read as a mutation-
+# free call. `var (seen, k) = ([], 0)` has an empty `stmt_get_name`, so
+# destructuring did not count as a binding. A receiver that was not a bare
+# identifier (`seen[0].push(7)`) read as no receiver at all.
+#
+# Every default below is inverted: children are enumerated for the statement
+# kinds this analysis KNOWS, and an unknown kind makes the whole function
+# uninspectable rather than empty. Callers must refuse on uninspectable.
+
+# All child statements of `s`, across every list the kind owns. `else`/`elif`
+# bodies, match/receive arm bodies and a single-statement `else` are children
+# here; they were not before.
+fn coll_stmt_child_stmts(s: i64) -> [i64]:
+    val tag = stmt_get_tag(s)
+    var children: [i64] = []
+    if tag == STMT_IF:
+        # Measured layout (probe, 2026-09-19): `stmt_get_type` is the elif
+        # record index and is ALWAYS >= 0 — 0 for a plain `if` — so it is not
+        # a "has else" signal. `elif_get_body` MIRRORS the then-branch, so
+        # adding it would visit every then-statement twice and double-count
+        # bindings. `elif_get_else` is the else body and is empty when there
+        # is none; `stmt_get_if_single_else` points at that same statement,
+        # so it is not added again. An `elif` chain appears as a nested
+        # STMT_IF inside the else body and is reached by recursion.
+        for c in stmt_get_body(s):
+            children.push(c)
+        val elif_idx = stmt_get_type(s)
+        if elif_idx >= 0:
+            for c in elif_get_else(elif_idx):
+                children.push(c)
+        return children
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        for arm in stmt_get_body(s):
+            if arm >= 0:
+                for c in arm_get_body(arm):
+                    children.push(c)
+        if tag == STMT_RECEIVE:
+            val timeout_body = stmt_get_type(s)
+            if timeout_body >= 0:
+                children.push(timeout_body)
+        return children
+    if (tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_WHILE
+        or tag == STMT_BLOCK or tag == STMT_COMPTIME or tag == STMT_DEFER
+        or tag == STMT_ERRDEFER or tag == STMT_LABELED_LOOP or tag == STMT_GPU_LAUNCH):
+        return stmt_get_body(s)
+    children
+
+# All child expressions of `s`, including the ones `stmt_get_expr` alone
+# misses (an assignment's value lives in the body slot) and match/receive arm
+# patterns and guards.
+fn coll_stmt_child_exprs(s: i64) -> [i64]:
+    var children: [i64] = []
+    for e in flat_stmt_child_exprs(s):
+        children.push(e)
+    val tag = stmt_get_tag(s)
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        for arm in stmt_get_body(s):
+            if arm >= 0:
+                val pattern = arm_get_pattern(arm)
+                if pattern >= 0:
+                    children.push(pattern)
+                val guard = arm_get_guard(arm)
+                if guard >= 0:
+                    children.push(guard)
+    # No elif-record condition here: it MIRRORS the statement's own condition
+    # (ast_traversal.spl says to take only ELSE from the record), and counting
+    # it twice made one `known.contains(x)` look like two COLL002 candidates,
+    # which `collection_single_safe_proof` then refused as ambiguous. A real
+    # `elif` condition belongs to the nested STMT_IF in the else body.
+    children
+
+# Statement kinds whose children (above) are fully enumerated, and whose
+# binding form (below) can be read. Anything else makes the function
+# uninspectable — the caller refuses rather than walking a subset.
+fn coll_stmt_kind_known(tag: i64) -> bool:
+    if tag == STMT_EXPR or tag == STMT_RETURN or tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        return true
+    if tag == STMT_BREAK or tag == STMT_CONTINUE:
+        return true
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL or tag == STMT_BIND:
+        return true
+    if tag == STMT_IF or tag == STMT_MATCH or tag == STMT_RECEIVE:
+        return true
+    if (tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_WHILE
+        or tag == STMT_BLOCK or tag == STMT_COMPTIME or tag == STMT_DEFER
+        or tag == STMT_ERRDEFER or tag == STMT_LABELED_LOOP or tag == STMT_GPU_LAUNCH):
+        return true
+    false
+
+# A binding whose name is a single plain identifier is one this analysis can
+# reason about. A destructuring form does NOT produce an empty name, as first
+# assumed — `var (seen, k) = ([], 0)` yields the literal `"(seen,k)"`, a
+# pattern rendered as text — so an emptiness test missed it and the rewrite
+# built a Dict from a rebound `seen` ([1,1,2] -> [1,2]). Anything that is not
+# `[A-Za-z_][A-Za-z0-9_]*` is a pattern this does not model, and makes the
+# function uninspectable.
+fn coll_is_plain_identifier(name: text) -> bool:
+    if name == "":
+        return false
+    var i = 0
+    while i < name.len():
+        val c = name.slice(i, i + 1)
+        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or
+            (i > 0 and c >= "0" and c <= "9")
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn coll_stmt_binds(tag: i64) -> bool:
+    (tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL
+     or tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_BIND)
+
+# False when any statement in the tree has a kind this analysis does not
+# enumerate, or a binding form it cannot read (`var (seen, k) = ([], 0)` has
+# an empty name — a destructuring pattern, which may well bind the tracked
+# array). A function that is not fully inspectable gets no Certain fix.
+fn coll_stmts_inspectable(stmts: [i64]) -> bool:
+    for s in real_stmts(stmts):
+        val tag = stmt_get_tag(s)
+        if not coll_stmt_kind_known(tag):
+            return false
+        if coll_stmt_binds(tag) and not coll_is_plain_identifier(stmt_get_name(s)):
+            return false
+        if not coll_stmts_inspectable(coll_stmt_child_stmts(s)):
+            return false
+    true
+
 # --- bindings ---------------------------------------------------------------
 #
-# Every name BOUND anywhere in a statement tree: `val`/`var` declarations and
-# loop variables alike. A `for allowed in groups` binding is a binding even
-# though it is not a `val|var` line, which is precisely what the textual
-# declaration search could not see (fixture a8: the Dict was built from an
-# outer array shadowed by the loop variable, turning 1 into 0).
+# Every name BOUND anywhere in a statement tree. A `for allowed in groups`
+# binding counts even though it is not a `val|var` line — fixture a8 built the
+# Dict from an outer array shadowed by a loop variable, turning 1 into 0 — and
+# so do `bind`, `lazy val` and `static for`. A binding whose name cannot be
+# read is not silently skipped; `coll_stmts_inspectable` has already refused
+# the function by the time this runs.
 fn collect_binding_names(stmts: [i64], acc: [text]) -> [text]:
     var names = acc
     for s in real_stmts(stmts):
-        val tag = stmt_get_tag(s)
-        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_FOR:
+        if coll_stmt_binds(stmt_get_tag(s)):
             val n = stmt_get_name(s)
             if n != "":
                 names.push(n)
-        val nested = collect_binding_names(stmt_get_body(s), names)
-        names = nested
+        names = collect_binding_names(coll_stmt_child_stmts(s), names)
     names
 
 fn count_bindings_of(stmts: [i64], name: text) -> i64:
@@ -1487,13 +1643,13 @@ fn collect_expr_idents(e: i64, acc: [text]) -> [text]:
 fn collect_stmt_idents(stmts: [i64], acc: [text]) -> [text]:
     var names = acc
     for s in real_stmts(stmts):
-        val tag = stmt_get_tag(s)
-        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_FOR:
+        if coll_stmt_binds(stmt_get_tag(s)):
             val n = stmt_get_name(s)
             if n != "":
                 names.push(n)
-        names = collect_expr_idents(stmt_get_expr(s), names)
-        names = collect_stmt_idents(stmt_get_body(s), names)
+        for e in coll_stmt_child_exprs(s):
+            names = collect_expr_idents(e, names)
+        names = collect_stmt_idents(coll_stmt_child_stmts(s), names)
     names
 
 fn collection_module_names(decl_indices: [i64]) -> [text]:
@@ -1524,7 +1680,13 @@ fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
     if tag == EXPR_METHOD_CALL:
         val recv = expr_get_left(e)
         val on_name = recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == name
-        if on_name and is_mutating_collection_method(expr_get_str(e)) and e != allowed_mutation:
+        # A receiver that MENTIONS the array without BEING it — `seen[0]`,
+        # `seen.field`, `f(seen)` — reaches the same storage through a shape
+        # this analysis does not model. `seen[0].push(7)` used to read as a
+        # call on nothing at all (1 -> 3).
+        if not on_name and expr_mentions_ident(recv, name):
+            return true
+        if on_name and e != allowed_mutation and not is_readonly_collection_method(expr_get_str(e)):
             return true
         for a in expr_get_args(e):
             if expr_mentions_ident(a, name):
@@ -1533,10 +1695,15 @@ fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
             return expr_has_unsafe_use(recv, name, allowed_mutation)
         return false
     if tag == EXPR_CALL:
+        if expr_mentions_ident(expr_get_left(e), name):
+            return true
         for a in expr_get_args(e):
             if expr_mentions_ident(a, name):
                 return true
-        return expr_has_unsafe_use(expr_get_left(e), name, allowed_mutation)
+        return false
+    # The array escaping into an aggregate leaves this analysis' sight.
+    if tag == EXPR_ARRAY_LIT or tag == EXPR_DICT_LIT or tag == EXPR_TUPLE or tag == EXPR_STRUCT_LIT:
+        return expr_mentions_ident(e, name)
     if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
         val target = expr_get_left(e)
         if target >= 0:
@@ -1559,9 +1726,10 @@ fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
 
 fn stmts_have_unsafe_use(stmts: [i64], name: text, allowed_mutation: i64) -> bool:
     for s in real_stmts(stmts):
-        if expr_has_unsafe_use(stmt_get_expr(s), name, allowed_mutation):
-            return true
-        if stmts_have_unsafe_use(stmt_get_body(s), name, allowed_mutation):
+        for e in coll_stmt_child_exprs(s):
+            if expr_has_unsafe_use(e, name, allowed_mutation):
+                return true
+        if stmts_have_unsafe_use(coll_stmt_child_stmts(s), name, allowed_mutation):
             return true
     false
 
@@ -1612,15 +1780,25 @@ fn find_plain_contains_call(e: i64) -> i64:
 # Plain-contains sites directly inside one loop body, descending through
 # `if`/block wrappers but not into a nested loop (that loop is the innermost
 # one for its own sites).
+fn guard_has_else(s: i64) -> bool:
+    if stmt_get_if_single_else(s) >= 0:
+        return true
+    val elif_idx = stmt_get_type(s)
+    elif_idx >= 0 and elif_get_else(elif_idx).len() > 0
+
+fn coll_stmt_is_loop(tag: i64) -> bool:
+    (tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_STATIC_FOR
+     or tag == STMT_LABELED_LOOP)
+
 fn plain_contains_sites_in_loop(stmts: [i64]) -> [i64]:
     var found: [i64] = []
     for s in real_stmts(stmts):
-        val hit = find_plain_contains_call(stmt_get_expr(s))
-        if hit >= 0:
-            found.push(hit)
-        val tag = stmt_get_tag(s)
-        if tag == STMT_IF or tag == STMT_BLOCK:
-            for nested in plain_contains_sites_in_loop(stmt_get_body(s)):
+        for e in coll_stmt_child_exprs(s):
+            val hit = find_plain_contains_call(e)
+            if hit >= 0:
+                found.push(hit)
+        if not coll_stmt_is_loop(stmt_get_tag(s)):
+            for nested in plain_contains_sites_in_loop(coll_stmt_child_stmts(s)):
                 found.push(nested)
     found
 
@@ -1645,6 +1823,12 @@ fn coll020_proof(
     val kept_push = guard_kept_push(guard, receiver)
     if kept_push < 0:
         return coll_proof_unsafe("COLL020", receiver, "no push onto the guarded array")
+    # An `elif`/`else` on the guard runs when the value WAS present. The
+    # rewrite says nothing about that branch, so it is not a shape this
+    # proves; lint still warns. Tested on the else BODY, not on the elif
+    # record index, which every `if` has (see `coll_stmt_child_stmts`).
+    if guard_has_else(guard):
+        return coll_proof_unsafe("COLL020", receiver, "guard has an elif/else branch")
     # Name freshness aside, four proofs, in the order they are cheapest.
     if name_in_list(param_names, receiver):
         return coll_proof_unsafe("COLL020", receiver, "tracking array is a parameter, not a local")
@@ -1690,28 +1874,44 @@ fn collect_proofs_in_block(
     var proofs = acc
     for s in real_stmts(block):
         val tag = stmt_get_tag(s)
-        if tag == STMT_FOR or tag == STMT_WHILE:
+        if tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_STATIC_FOR or tag == STMT_LABELED_LOOP:
             val loop_body = stmt_get_body(s)
             for guard in manual_distinct_guards_in_loop(loop_body):
                 proofs.push(coll020_proof(guard, s, block, fn_body, param_names))
             for site in plain_contains_sites_in_loop(loop_body):
                 proofs.push(coll002_proof(site, s, block, fn_body, param_names))
             proofs = collect_proofs_in_block(loop_body, fn_body, param_names, proofs)
-        elif tag == STMT_IF or tag == STMT_BLOCK:
-            proofs = collect_proofs_in_block(stmt_get_body(s), fn_body, param_names, proofs)
+        else:
+            # Generic descent: every child statement list of every kind, so an
+            # `else`/`elif` body or a match arm containing a loop is reached
+            # by construction rather than by being listed here.
+            proofs = collect_proofs_in_block(
+                coll_stmt_child_stmts(s), fn_body, param_names, proofs)
     proofs
 
 fn collection_fix_proofs(decl_indices: [i64]) -> [CollectionFixProof]:
     """Every COLL002/COLL020 fix candidate in the module, each marked safe or not.
 
     A caller may render a fix ONLY for a `safe` proof, and only at the lines
-    the proof names. Every judgement here is made on parser output.
+    the proof names. Every judgement here is made on parser output, and every
+    default is fail-closed: a function this analysis cannot fully inspect
+    yields an UNSAFE proof for each of its candidates rather than none.
     """
     var proofs: [CollectionFixProof] = []
     for idx in decl_indices:
         if decl_get_tag(idx) == DECL_FN:
             val body = decl_get_body(idx)
-            proofs = collect_proofs_in_block(body, body, decl_get_param_names(idx), proofs)
+            val inspectable = coll_stmts_inspectable(body)
+            for proof in collect_proofs_in_block(body, body, decl_get_param_names(idx), []):
+                if inspectable:
+                    proofs.push(proof)
+                else:
+                    # Downgraded, not dropped: a silently skipped function
+                    # would leave its candidate invisible, and a sibling's
+                    # safe proof would look like the file's only one.
+                    proofs.push(coll_proof_unsafe(
+                        proof.code, proof.receiver,
+                        "function contains a statement kind or binding form this analysis cannot inspect"))
     proofs
 
 # ============================================================================

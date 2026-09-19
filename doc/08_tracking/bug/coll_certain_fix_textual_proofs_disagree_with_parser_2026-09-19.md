@@ -2,7 +2,7 @@
 
 **Status:** FIXED 2026-09-19 on `work/coll-gaps` — all four proofs moved onto
 the AST; the textual proof helpers are deleted, not merely bypassed.
-**Severity:** Blocking — twelve `Certain`-confidence rewrites across two
+**Severity:** Blocking — sixteen `Certain`-confidence rewrites across three
 review rounds turned working programs into wrong ones. `simple fix <file>`
 needs no flag and writes in place.
 **Affected files:** `src/compiler/35.semantics/lint/collection_patterns.spl`
@@ -11,7 +11,7 @@ needs no flag and writes in place.
 **Spec file:** `test/01_unit/compiler/lint/collection_certain_fix_safety_spec.spl`,
 mirrored byte-identically at `test/unit/compiler/lint/`
 **Predecessor:** `coll_certain_fix_rewrites_working_programs_wrongly_2026-09-19.md`
-(round 1, five fixtures). This record is round 2 and supersedes that record's
+(round 1, five fixtures). This record covers rounds 2 and 3 and supersedes that record's
 *mechanism*: its fix was correct in intent and wrong in kind.
 **Path:** `bug` track.
 
@@ -53,9 +53,60 @@ renderer. Nothing in it reads a line, trims a string or counts an indent.
 |---|---|
 | **Site containment** | candidates are collected FROM a loop's body statement list, so "inside the innermost loop" is structural, not a line range |
 | **Dominance** | `decl_sibling_before`: the declaration must be a `val`/`var` statement in the SAME statement list as the loop, at an earlier position. Sibling order is the parser's answer to "does this dominate" |
-| **Whole-function mutation** | `stmts_have_unsafe_use` / `expr_has_unsafe_use`: a mutating method call on the name, an assignment to it or through its index, its appearance anywhere inside a call's ARGUMENTS (so named and line-split arguments are the same node), or capture by a lambda. Only the one kept-in-step push is exempt |
+| **Whole-function mutation** | `stmts_have_unsafe_use` / `expr_has_unsafe_use`: ANY method call on the name whose method is not a proven reader, a call whose receiver merely MENTIONS the name (`seen[0].push`, `seen.field.push`, `f(seen).push`), an assignment to it or through its index, its appearance anywhere inside a call's ARGUMENTS (so named and line-split arguments are the same node) or inside an aggregate literal, or capture by a lambda. Only the one kept-in-step push is exempt |
 | **Name freshness** | `collection_module_names`: every identifier the module binds or mentions, from the AST. `{receiver}_set`..`_set10`, else refuse |
-| **Shadowing** | `count_bindings_of` counts `val`/`var`/**`for`** bindings. A name bound more than once in a function is refused outright, which is what `a8_for_shadow` needed |
+| **Shadowing** | `count_bindings_of` counts `val`/`var`/`lazy val`/`bind`/**`for`**/`static for` bindings across every child statement list. A name bound more than once in a function is refused outright, which is what `a8_for_shadow` needed |
+| **Inspectability** | `coll_stmts_inspectable`: a statement kind whose child lists this analysis does not enumerate, or a binding whose name is not a single plain identifier, makes the whole function uninspectable and downgrades every candidate in it to unsafe |
+
+## Round 3 — the AST was right, the DEFAULTS were still inverted
+
+The table above describes the code as it stands. It did not when first
+written: a review broke the round-2 proofs four more ways, and all four were
+one defect — the proofs were ALLOW-lists over enumerated cases, so anything
+not enumerated defaulted to *safe*. The claims "a mutating method call
+anywhere in the function" and "`count_bindings_of` counts val/var and for"
+were, as written, false of the code.
+
+| fixture | what the enumeration missed | original -> rewritten |
+|---|---|---|
+| `b1_else_mut` | only `stmt_get_body(if)` (the then-branch) was walked, so `seen.pop()` in an `else` was invisible | `[1,2,1,3,3]` -> `[1,2,3]` |
+| `b1b_elif_mut` | same, via `elif` | `[1,2,1,3,3]` -> `[1,2,3]` |
+| `b1c_else_coll002` | same, COLL002 side: `allowed.pop()` in an `else` | `[1,2]` -> `[1,2,3,1]` |
+| `m_fill` | the mutating-method list was a whitelist; `fill` is a real runtime mutator that was not on it | `[1,2,1,2]` -> `[1,2]` |
+| `b11c_var_destructure` | `var (seen, k) = ([], 0)` was not counted as a binding | `[1,1,2]` -> `[1,2]` |
+| `b8b_nested_elem` | `seen[0].push(7)` has an EXPR_INDEX receiver, so it read as a call on nothing | `1` -> `3` |
+
+What changed, with the measured facts that made each necessary:
+
+- **Generic traversal.** `coll_stmt_child_stmts` returns every child
+  statement list a kind owns — `else` bodies, match/receive arm bodies, loop
+  and block bodies, defer/comptime/labelled-loop bodies — and
+  `coll_stmt_child_exprs` adds an assignment's value (it lives in the body
+  slot, not `stmt_get_expr`) and arm patterns/guards. Every walker uses them,
+  so a kind added later is covered by construction. Two traps measured by
+  probe, not assumed: `stmt_get_type` on an `if` is the elif RECORD index and
+  is always `>= 0` — `0` for a plain `if` — so it is not a "has else" signal
+  (testing it refused every guard, including the control); and
+  `elif_get_body`/`elif_get_cond` MIRROR the then-branch and condition, so
+  including them double-counted bindings and made one `known.contains(x)`
+  look like two COLL002 candidates, which the ambiguity rule then refused.
+  Only `elif_get_else` is taken from the record, exactly as
+  `ast_traversal.spl` says.
+- **Unknown kinds fail closed.** `coll_stmt_kind_known` enumerates the kinds
+  handled; anything else makes the function uninspectable and every candidate
+  in it unsafe. Downgraded rather than dropped, so a sibling function's safe
+  proof cannot look like the file's only candidate.
+- **Readers, not mutators, are listed.** `is_readonly_collection_method`
+  admits `contains`/`len`/`get`/… and everything else on the tracked array is
+  a mutation. `sort` and `reverse` are deliberately absent. Omitting a reader
+  costs a suggestion; omitting a mutator cost correctness.
+- **Binding names must be plain identifiers.** Destructuring does not produce
+  an empty name as first assumed — `var (seen, k) = ([], 0)` yields the
+  literal `"(seen,k)"` — so the emptiness test missed it. Anything that is
+  not `[A-Za-z_][A-Za-z0-9_]*` makes the function uninspectable.
+- **A guard with an `else`/`elif` is refused** for the fix (lint still warns):
+  that branch runs when the value WAS present and the rewrite says nothing
+  about it.
 
 `entry_and_fixes.spl` now only RENDERS: byte offsets, the element-type
 annotation to copy into `Dict<T, bool>`, the exact substring replaced. It is
@@ -129,3 +180,26 @@ consuming matching declarations" fails (`expected 1 to equal 0`, a
 LINTREV001 from an arena-generation mismatch). Reproduced identically with
 this lane's two source files reverted to `84a3c865853` AND to the lane base
 `7c875a81067`, so it predates the lane entirely.
+
+## Round 3 verification — real CLI, all runs from `/home/yoon/dev/simple-coll-gaps`
+
+```
+controls (must fix):
+  coll020            [COLL020] ... `out_set`
+  coll020_two_array  [COLL020] ... `seen_set`
+  coll002_fixable    [COLL002] hoist `known`
+  whileidx           [COLL020] ... `seen_set`
+round 3 breaks (must refuse):
+  b1_else_mut / b1b_elif_mut / b1c_else_coll002 / m_fill /
+  b11c_var_destructure / b8b_nested_elem        ->  No fixes available
+rounds 1-2 (12 fixtures) re-run: all still refused, except setname_clash
+  which still renders the proven-equivalent `seen_set2`.
+all other r3 fixtures (b2/b3/b5/b6*/b7*/b9/b11/b13/b15/b17*/b18/b22,
+  m_dedup/m_delete/m_drain/m_pop_front/m_remove_*/m_replace/m_resize/
+  m_retain/m_swap_remove) -> No fixes available.
+```
+
+The envelope did NOT collapse to useless: the plain single-array dedup, the
+two-array dedup, the `while`-with-index dedup and the COLL002 hoist all still
+render, and the safety spec asserts that explicitly as a non-vacuity check —
+six refusals in a row prove nothing on their own.
