@@ -74,6 +74,7 @@ struct ImageConfig:
     kernel_path: text
     bootloader_config: text
     package_dir: text
+    simple_binary: text
     include_installer: bool
 struct PartitionLayout:
     efi_start_sector: u64
@@ -131,6 +132,26 @@ pub fn image_builder_set_screen(screen_type: text, screen_res: text, screen_simd
     _image_builder_screen_simd = s
     Result.Ok(true)
 
+pub struct ImageSimpleboxValidationMetricsV1:
+    validation_calls: i64
+    hash_bytes: i64
+    executable_admission_calls: i64
+
+class _ImageSimpleboxValidationObserverV1:
+    validation_calls: i64
+    hash_bytes: i64
+    executable_admission_calls: i64
+impl _ImageSimpleboxValidationObserverV1:
+    static fn new() -> _ImageSimpleboxValidationObserverV1:
+        _ImageSimpleboxValidationObserverV1(
+            validation_calls: 0, hash_bytes: 0,
+            executable_admission_calls: 0)
+    fn snapshot() -> ImageSimpleboxValidationMetricsV1:
+        ImageSimpleboxValidationMetricsV1(
+            validation_calls: self.validation_calls,
+            hash_bytes: self.hash_bytes,
+            executable_admission_calls: self.executable_admission_calls)
+
 class ImageBuilder:
     config: ImageConfig
     layout: PartitionLayout
@@ -141,13 +162,15 @@ impl ImageBuilder:
         ImageBuilder(config: config, layout: layout)
 
     fn build(observer: _ImageSimpleboxValidationObserverV1) -> Result<text, text>:
-        if self.config.image_size_mb < MIN_IMAGE_SIZE_MB_V1:
-            return Err("SimpleOS image size must be at least {MIN_IMAGE_SIZE_MB_V1} MB")
         val arch_name = pkg_arch_to_text(self.config.arch)
         val artifact_kind = if self.config.include_installer: "installer-dvd" else: "disk-image"
-        val simple_binary = _effective_simple_binary(self.config)
+        val simple_binary = image_effective_simple_binary(self.config.simple_binary)
         if simple_binary != "":
-            val simple_check = _validate_simple_binary(simple_binary, self.config.arch)
+            # Provenance-validation observer: one validation call per build that
+            # configures a Simple payload (hash/admission counters stay 0 here
+            # because image_validate_simple_binary does not report them).
+            observer.validation_calls = observer.validation_calls + 1
+            val simple_check = image_validate_simple_binary(simple_binary, self.config.arch)
             if val Err(e) = simple_check:
                 return Err(e)
         var font_guest_paths: [text] = []
@@ -184,7 +207,7 @@ impl ImageBuilder:
         write_text(manifest_path, deploy_manifest)
         write_text(_sidecar_manifest_path(self.config.output_path), deploy_manifest)
 
-        val artifact_result = self._materialize_primary_artifact(manifest_path)
+        val artifact_result = self._materialize_primary_artifact(rootfs_root, manifest_path)
         if val Err(e) = artifact_result:
             return Result.Err(e)
 
@@ -220,8 +243,11 @@ impl ImageBuilder:
         write_text("{rootfs_root}/etc/pkg/repos.sdn", _pkg_repo_template())
         write_text("{rootfs_root}/etc/shell/profile.sdn", "shell = \"/bin/shell\"\n")
         write_text("{rootfs_root}/etc/rootfs.sdn", image_rootfs_backend_payload(_image_builder_rootfs_backend))
+        write_text("{rootfs_root}/sbin/init", _init_payload())
+        write_text("{rootfs_root}/boot/kernel.elf", _kernel_payload(self.config.kernel_path, self.config.arch))
+        write_text("{rootfs_root}/bin/simplebox", _simplebox_payload())
         _ensure_dir("{rootfs_root}/SYS")
-        write_text("{rootfs_root}/SYS/ROOTFS.CFG", _rootfs_boot_marker_payload(_image_builder_rootfs_backend))
+        write_text("{rootfs_root}/SYS/ROOTFS.CFG", image_rootfs_boot_marker(_image_builder_rootfs_backend))
 
         var manifest = ""
         manifest = manifest + _manifest_file("/etc/hostname", "system-config", "simpleos-core")
@@ -230,13 +256,9 @@ impl ImageBuilder:
         manifest = manifest + _manifest_file("/etc/pkg/repos.sdn", "pkg-config", "simpleos-tools")
         manifest = manifest + _manifest_file("/etc/shell/profile.sdn", "shell-config", "simpleos-shell")
         manifest = manifest + _manifest_file("/etc/rootfs.sdn", "rootfs-config", "simpleos-core")
-        manifest = manifest + image_package_payload_decision_v1(
-            "simpleos-core", "/sbin/init", [], image_target_architecture(self.config.arch)).inventory_row
-        manifest = manifest + self._native_payload_manifest(
-            "{rootfs_root}/boot/kernel.elf", "/boot/kernel.elf",
-            "simpleos-kernel", "runtime-kernel", kernel_bytes)
-        manifest = manifest + image_package_payload_decision_v1(
-            "simpleos-core", "/bin/simplebox", [], image_target_architecture(self.config.arch)).inventory_row
+        manifest = manifest + _manifest_file("/sbin/init", "runtime-init", "simpleos-core")
+        manifest = manifest + _manifest_file("/boot/kernel.elf", "runtime-kernel", "simpleos-kernel")
+        manifest = manifest + _manifest_file("/bin/simplebox", "userland-tool", "simpleos-core")
         manifest = manifest + _manifest_file("/SYS/ROOTFS.CFG", "rootfs-boot-marker", "simpleos-core")
 
         val packages = list_all_packages(self.config.arch)
@@ -246,7 +268,7 @@ impl ImageBuilder:
         manifest = manifest + self._stage_simple_toolchain_payload(rootfs_root)
         manifest = manifest + self._stage_clang_toolchain_payload(rootfs_root)
         manifest = manifest + self._stage_rust_toolchain_payload(rootfs_root)
-        manifest
+        Ok(manifest)
 
     fn _stage_simple_toolchain_payload(rootfs_root: text) -> Result<text, text>:
         val simple_binary = image_effective_simple_binary(self.config.simple_binary)
@@ -260,7 +282,7 @@ impl ImageBuilder:
             simple_binary, self.config.arch)?
 
         var manifest = ""
-        for guest_path in _SIMPLE_TOOLCHAIN_ROLE_PATHS:
+        for guest_path in IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS:
             val target_path = "{rootfs_root}{guest_path}"
             _ensure_parent_dirs(rootfs_root, guest_path)
             val ok = _copy_file(simple_binary, target_path)
@@ -268,9 +290,9 @@ impl ImageBuilder:
                 manifest = manifest + _manifest_file(guest_path, "simple-toolchain-role", "simpleos-tools")
 
         _ensure_dir("{rootfs_root}/SYS")
-        write_text("{rootfs_root}/SYS/SIMPLETOOL.SDN", _simple_toolchain_manifest_payload(simple_binary))
+        write_text("{rootfs_root}/SYS/SIMPLETOOL.SDN", image_simple_toolchain_manifest(simple_binary))
         manifest = manifest + _manifest_file("/SYS/SIMPLETOOL.SDN", "simple-toolchain-manifest", "simpleos-tools")
-        manifest
+        Ok(manifest)
 
     # Embed the REAL guest-native clang toolchain when build/os/clang_static is
     # present; otherwise leave the package-staged fixture in place and record a
@@ -278,25 +300,25 @@ impl ImageBuilder:
     # so it is copied with `cp` rather than read into a Simple buffer; the 2000+
     # header sysroot is bulk-copied with `cp -a`.
     fn _stage_clang_toolchain_payload(rootfs_root: text) -> text:
-        val clang_binary = _effective_clang_binary()
+        val clang_binary = image_effective_clang_binary()
         if clang_binary == "" or not rt_file_exists(clang_binary):
             _ensure_dir("{rootfs_root}/SYS")
-            write_text("{rootfs_root}/SYS/CLANGTOOL.SDN", _clang_toolchain_fixture_payload())
+            write_text("{rootfs_root}/SYS/CLANGTOOL.SDN", image_clang_fixture_payload())
             return _manifest_file("/SYS/CLANGTOOL.SDN", "clang-toolchain-fixture", "simpleos-tools")
 
         var manifest = ""
-        for guest_path in _CLANG_GUEST_BIN_PATHS:
+        for guest_path in IMAGE_CLANG_GUEST_BIN_PATHS:
             _ensure_parent_dirs(rootfs_root, guest_path)
             if _copy_file(clang_binary, "{rootfs_root}{guest_path}"):
                 manifest = manifest + _manifest_file(guest_path, "clang-toolchain-binary", "simpleos-tools")
 
-        val sysroot = _effective_sysroot_dir()
+        val sysroot = image_effective_sysroot_dir(self.config.arch)
         var sysroot_embedded = false
         if sysroot != "" and rt_file_exists(sysroot):
             _ensure_dir("{rootfs_root}/usr/lib")
             _ensure_dir("{rootfs_root}/usr/share/simpleos")
-            val libs_ok = _copy_tree("{sysroot}/lib", "{rootfs_root}/usr/lib")
-            val sysroot_ok = _copy_tree(sysroot, "{rootfs_root}/usr/share/simpleos")
+            val libs_ok = image_copy_tree("{sysroot}/lib", "{rootfs_root}/usr/lib")
+            val sysroot_ok = image_copy_tree(sysroot, "{rootfs_root}/usr/share/simpleos")
             sysroot_embedded = libs_ok and sysroot_ok
             if libs_ok:
                 manifest = manifest + _manifest_file("/usr/lib", "clang-sysroot-libs", "simpleos-tools")
@@ -304,26 +326,26 @@ impl ImageBuilder:
                 manifest = manifest + _manifest_file("/usr/share/simpleos", "clang-sysroot", "simpleos-tools")
 
         _ensure_dir("{rootfs_root}/SYS")
-        write_text("{rootfs_root}/SYS/CLANGTOOL.SDN", _clang_toolchain_embedded_payload(clang_binary, sysroot, sysroot_embedded))
+        write_text("{rootfs_root}/SYS/CLANGTOOL.SDN", image_clang_embedded_payload(clang_binary, sysroot, sysroot_embedded, self.config.arch, ""))
         manifest = manifest + _manifest_file("/SYS/CLANGTOOL.SDN", "clang-toolchain-manifest", "simpleos-tools")
         manifest
 
     # Optional symmetric rustc_static embedding — shares the clang sysroot.
     fn _stage_rust_toolchain_payload(rootfs_root: text) -> text:
-        val rustc_binary = _effective_rustc_binary()
+        val rustc_binary = image_effective_rustc_binary()
         if rustc_binary == "" or not rt_file_exists(rustc_binary):
             _ensure_dir("{rootfs_root}/SYS")
-            write_text("{rootfs_root}/SYS/RUSTTOOL.SDN", _rust_toolchain_fixture_payload())
+            write_text("{rootfs_root}/SYS/RUSTTOOL.SDN", image_rust_fixture_payload())
             return _manifest_file("/SYS/RUSTTOOL.SDN", "rust-toolchain-fixture", "simpleos-tools")
 
         var manifest = ""
-        for guest_path in _RUSTC_GUEST_BIN_PATHS:
+        for guest_path in IMAGE_RUSTC_GUEST_BIN_PATHS:
             _ensure_parent_dirs(rootfs_root, guest_path)
             if _copy_file(rustc_binary, "{rootfs_root}{guest_path}"):
                 manifest = manifest + _manifest_file(guest_path, "rust-toolchain-binary", "simpleos-tools")
 
         _ensure_dir("{rootfs_root}/SYS")
-        write_text("{rootfs_root}/SYS/RUSTTOOL.SDN", _rust_toolchain_embedded_payload(rustc_binary))
+        write_text("{rootfs_root}/SYS/RUSTTOOL.SDN", image_rust_embedded_payload(rustc_binary))
         manifest = manifest + _manifest_file("/SYS/RUSTTOOL.SDN", "rust-toolchain-manifest", "simpleos-tools")
         manifest
 
@@ -404,6 +426,7 @@ fn build_usb_installer_image(
         kernel_path: kernel_path,
         bootloader_config: _installer_bootloader_config(arch),
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: true
     )
     _image_builder_rootfs_backend = "fat32"
@@ -424,10 +447,11 @@ fn build_usb_installer_image_with_rootfs(
         kernel_path: kernel_path,
         bootloader_config: _installer_bootloader_config(arch),
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: true
     )
-    _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
-    ImageBuilder.new(config).build()
+    _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
+    _build_image_v1(config)
 
 fn build_install_image(
     arch: PkgArch,
@@ -443,12 +467,32 @@ fn build_install_image(
         kernel_path: kernel_path,
         bootloader_config: "",
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
-    val observer = _ImageSimpleboxValidationObserverV1.new()
-    val built = ImageBuilder.new(config).build(observer)?
-    Ok((built, observer.snapshot()))
+    _build_image_v1(config)
+
+fn build_install_image_with_simple_binary(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64,
+    simple_binary: text
+) -> Result<text, text>:
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: "",
+        package_dir: package_dir,
+        simple_binary: simple_binary,
+        include_installer: false
+    )
+    _image_builder_rootfs_backend = "fat32"
+    _build_image_v1(config)
 
 fn build_install_image_with_rootfs(
     arch: PkgArch,
@@ -465,10 +509,11 @@ fn build_install_image_with_rootfs(
         kernel_path: kernel_path,
         bootloader_config: "",
         package_dir: package_dir,
+        simple_binary: "",
         include_installer: false
     )
-    _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
-    ImageBuilder.new(config).build()
+    _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
+    _build_image_v1(config)
 
 fn _print_image_usage():
     print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
@@ -507,7 +552,7 @@ fn run_image_builder(args: [text]) -> i32:
         else if arg.starts_with("--size="):
             size_mb = arg.slice(7, arg.len()).to_u64()
         else if arg.starts_with("--kernel="):
-            kernel = arg.slice(9, arg.len())
+            kernel_elf = arg.slice(9, arg.len())
         else if arg.starts_with("--packages="):
             packages = arg.slice(11, arg.len())
         else if arg.starts_with("--simple-binary="):
@@ -546,8 +591,8 @@ fn run_image_builder(args: [text]) -> i32:
             simple_binary: simple_binary,
             include_installer: true
         )
-        _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
-        ImageBuilder.new(config).build()
+        _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
+        _build_image_v1(config)
     else:
         val config = ImageConfig(
             arch: arch,
@@ -559,8 +604,8 @@ fn run_image_builder(args: [text]) -> i32:
             simple_binary: simple_binary,
             include_installer: false
         )
-        _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
-        ImageBuilder.new(config).build()
+        _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
+        _build_image_v1(config)
 
     if val Ok(path) = result:
         print "Artifact created: {path}"
@@ -611,20 +656,127 @@ fn _ensure_dir(path: text):
         return
     val parts = path.split("/")
     var current = ""
+    val absolute = path.starts_with("/")
     for raw in parts:
         val part = raw.trim()
         if part == "":
             continue
-        current = current + "/" + part
+        if current == "":
+            current = if absolute: "/" + part else: part
+        else:
+            current = current + "/" + part
         mkdir(current)
+
+fn _write_placeholder_payload(rootfs_root: text, file_path: text, pkg: ExtendedManifest, arch: PkgArch):
+    _ensure_parent_dirs(rootfs_root, file_path)
+    if file_path == "/SYS/LLVMMAN.TXT":
+        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload(arch, "llvm", "LLVM", "/sys/apps/llvm", "local-ir-inspection", "/usr/share/simpleos/toolchain/llvm/hello.ll", "object-assembly-inspection", "/usr/share/simpleos/toolchain/llvm/hello.s", "compile-pipeline-step", "/usr/share/simpleos/toolchain/llvm/pipeline.step"))
+        return
+    if file_path == "/SYS/CLANGMAN.TXT":
+        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload(arch, "clang", "Clang", "/sys/apps/clang", "local-c-source-inspection", "/usr/share/simpleos/toolchain/clang/hello.c", "driver-flag-inspection", "/usr/share/simpleos/toolchain/clang/flags.rsp", "compile-pipeline-step", "/usr/share/simpleos/toolchain/clang/pipeline.step"))
+        return
+    if file_path == "/SYS/RUSTMAN.TXT":
+        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload(arch, "rust", "Rust", "/sys/apps/rust", "local-source-inspection", "/usr/share/simpleos/toolchain/rust/hello.rs", "package-layout-inspection", "/usr/share/simpleos/toolchain/rust/Cargo.toml", "build-pipeline-step", "/usr/share/simpleos/toolchain/rust/pipeline.step"))
+        return
+    if file_path == "/SYS/TOOLSET.SDN":
+        write_text("{rootfs_root}{file_path}", _toolset_payload(arch))
+        return
+    if file_path == "/SYS/LLVMVER.TXT":
+        write_text("{rootfs_root}{file_path}", "SimpleOS LLVM standalone app v1\n")
+        return
+    if file_path == "/SYS/CLANGVER.TXT":
+        write_text("{rootfs_root}{file_path}", "clang version 20.0.0\n")
+        return
+    if file_path == "/SYS/RUSTVER.TXT":
+        write_text("{rootfs_root}{file_path}", "SimpleOS Rust standalone app v1\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/llvm/hello.ll":
+        write_text("{rootfs_root}{file_path}", "; SimpleOS staged LLVM IR\nsource_filename = \"hello.simple\"\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/llvm/hello.s":
+        write_text("{rootfs_root}{file_path}", "; SimpleOS staged assembly\n_start:\n    ret\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/llvm/pipeline.step":
+        write_text("{rootfs_root}{file_path}", "pipeline=compile-pipeline-step\ninput=/work/hello.simple\noutput=/work/hello.ll\nnext=/sys/apps/simple_loader\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/clang/hello.c":
+        write_text("{rootfs_root}{file_path}", "int main(void) " + "{\n    return 0;\n}\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/clang/flags.rsp":
+        write_text("{rootfs_root}{file_path}", "--target=x86_64-unknown-simpleos\n-ffreestanding\n-nostdlib\n-O2\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/clang/pipeline.step":
+        write_text("{rootfs_root}{file_path}", "pipeline=compile-pipeline-step\ninput=/work/hello.c\noutput=/work/hello.o\nnext=/sys/apps/simple_loader\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/rust/hello.rs":
+        write_text("{rootfs_root}{file_path}", "fn main() " + "{\n    println!(\"hello from simpleos\");\n}\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/rust/Cargo.toml":
+        write_text("{rootfs_root}{file_path}", "[package]\nname = \"hello-simpleos\"\nversion = \"0.1.0\"\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/rust/pipeline.step":
+        write_text("{rootfs_root}{file_path}", "pipeline=build-pipeline-step\ninput=/work/Cargo.toml\noutput=/work/target/hello\nnext=/sys/apps/simple_loader\n")
+        return
+    var content = "# simpleos staged payload\n"
+    content = content + "package = \"{pkg.base.name}\"\n"
+    content = content + "arch = \"{pkg_arch_to_text(arch)}\"\n"
+    content = content + "target = \"{file_path}\"\n"
+    if file_path.ends_with(".sdn"):
+        content = content + "kind = \"config\"\n"
+    else:
+        content = content + "kind = \"placeholder\"\n"
+    write_text("{rootfs_root}{file_path}", content)
+
+fn _toolchain_lane(arch: PkgArch) -> text:
+    match arch:
+        PkgArch.X86_64: "x86_64-uefi-hardware"
+        PkgArch.Arm64: "arm64-virtio-fat32-smf"
+        PkgArch.Riscv64: "riscv64-hosted"
+        PkgArch.Riscv32: "riscv32-virtio-fat32-smf"
+        PkgArch.Any: "x86_64-uefi-hardware"
+
+fn _toolchain_manifest_payload(arch: PkgArch, payload: text, title: text, app_path: text,
+                               cap_a: text, proof_a: text,
+                               cap_b: text, proof_b: text,
+                               cap_c: text, proof_c: text) -> text:
+    val lane = _toolchain_lane(arch)
+    var out = "payload={payload}\n"
+    out = out + "title={title}\n"
+    out = out + "entry_app={app_path}\n"
+    out = out + "lane={lane}\n"
+    out = out + "mode=native-filesystem-app\n"
+    out = out + "status=standalone-required\n"
+    out = out + "capability_primary={cap_a}\n"
+    out = out + "proof_primary={proof_a}\n"
+    out = out + "capability_secondary={cap_b}\n"
+    out = out + "proof_secondary={proof_b}\n"
+    out = out + "capability_pipeline={cap_c}\n"
+    out = out + "proof_pipeline={proof_c}\n"
+    out
+
+fn _toolset_payload(arch: PkgArch) -> text:
+    val lane = _toolchain_lane(arch)
+    var out = "[toolchain]\n"
+    out = out + "lane = \"{lane}\"\n"
+    out = out + "llvm = \"/sys/apps/llvm status=standalone-required\"\n"
+    out = out + "clang = \"/sys/apps/clang status=standalone-required\"\n"
+    out = out + "rust = \"/sys/apps/rust status=standalone-required\"\n"
+    out = out + "developer_export_llvm = \"/usr/bin/clang optional\"\n"
+    out = out + "developer_export_rust = \"/usr/bin/rustc optional\"\n"
+    out
 
 fn _ensure_parent_dirs(rootfs_root: text, file_path: text):
     for dir in parent_dir_chain(rootfs_root, file_path):
         mkdir(dir)
 
+fn _copy_file(src: text, dst: text) -> bool:
+    val cmd = "cp -f " + _shell_quote(src) + " " + _shell_quote(dst)
+    val (_o, _e, code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 60000)
+    code == 0 and rt_file_exists(dst)
+
 fn _manifest_header(config: ImageConfig, layout: PartitionLayout) -> text:
     val kind = if config.include_installer: "installer-dvd" else: "disk-image"
-    val rootfs_backend = _normalized_rootfs_backend(_image_builder_rootfs_backend)
+    val rootfs_backend = image_normalized_rootfs_backend(_image_builder_rootfs_backend)
     var out = "[artifact]\n"
     out = out + "arch = \"{pkg_arch_to_text(config.arch)}\"\n"
     out = out + "output = \"{config.output_path}\"\n"
@@ -679,20 +831,22 @@ fn detect_iso_tool() -> text:
         return "iso-tool-missing"
     _basename(found)
 
-fn _rootfs_backend_payload(rootfs_backend: text) -> text:
-    val backend = _normalized_rootfs_backend(rootfs_backend)
-    var out = "[rootfs]\n"
-    out = out + "backend = \"{backend}\"\n"
-    out = out + "carrier = \"fat32\"\n"
-    out = out + "boot_mode = \"fat32-carrier\"\n"
+fn _basename(path: text) -> text:
+    var out = path
+    for seg in path.split("/"):
+        if seg.trim() != "":
+            out = seg.trim()
     out
+
+fn _shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
 
 # make_os_disk.shs argv: SIZE_BITS IMAGE [KERNEL] [PLATFORM]. The KERNEL slot
 # must be the host kernel ELF path (may be empty -> missing-kernel marker);
 # passing a directory there makes make_os_disk die("file read failed") and
 # forces the descriptor fallback.
 fn _make_os_disk_command(config: ImageConfig) -> text:
-    val simple_binary = _effective_simple_binary(config)
+    val simple_binary = image_effective_simple_binary(config.simple_binary)
     var command = ""
     if simple_binary != "":
         command = command + "SIMPLEOS_SIMPLE_BINARY=" + _shell_quote(simple_binary) + " "
@@ -711,6 +865,22 @@ fn _rc_conf_template() -> text:
 
 fn _pkg_repo_template() -> text:
     "[repositories]\nlocal = \"/var/cache/pkg/local\"\n"
+
+fn _init_payload() -> text:
+    "#!/bin/simple-init\nprint(\"SIMPLEOS_INIT_OK\")\n"
+
+fn _simplebox_payload() -> text:
+    """Packed /bin/simplebox. Uses the binary compiled by build_simplebox
+    (src/os/tools/simplebox/simplebox_build.spl -> build/os/rootfs/bin/simplebox)
+    when present; otherwise a placeholder descriptor so the image always has the
+    multi-call entry. The real binary genuinely runs the pure-Simple libc."""
+    val content = read_text("build/os/rootfs/bin/simplebox")
+    if content != "":
+        return content
+    "# placeholder simplebox — run: build_simplebox(\"simpleos\")\ncommand = \"simplebox --list\"\n"
+
+fn _installer_payload(arch: PkgArch) -> text:
+    "# install-media entrypoint\narch = \"{pkg_arch_to_text(arch)}\"\ncommand = \"installer install\"\n"
 
 fn _write_artifact_descriptor(config: ImageConfig, layout: PartitionLayout, manifest_path: text):
     var out = _manifest_header(config, layout)
