@@ -203,3 +203,58 @@ The envelope did NOT collapse to useless: the plain single-array dedup, the
 two-array dedup, the `while`-with-index dedup and the COLL002 hoist all still
 render, and the safety spec asserts that explicitly as a non-vacuity check —
 six refusals in a row prove nothing on their own.
+
+## Round 4 — retraction: "covered by construction" was true of STATEMENTS only
+
+The round-3 section above says the generic traversal covers new kinds "by
+construction" and that "nothing was demoted to warning-only". Both claims
+were scoped to the STATEMENT layer, and the text did not say so. At the
+EXPRESSION layer the traversal was still an allow-list: `expr_child_exprs`
+yields neither child STATEMENTS (a `do:`/`unsafe:` block, a block-bodied
+lambda) nor MATCH ARMS, and no `coll_expr_kind_known` existed, so
+`EXPR_ASM`/`EXPR_CUSTOM_BLOCK` were silently safe. Five more wrong rewrites:
+
+| fixture | what the expression walk missed | original -> rewritten |
+|---|---|---|
+| `y1_interp` | `print "{seen.pop()}"` — the hole is inside a plain string literal | `[1,3]` -> `[3]` |
+| `y1b_interp_val` | same hole in a `val` initializer | `[1,3]` -> `[3]` |
+| `y24_coll002_interp` | same, COLL002 side | `[1,2]` -> `[1,2,2]` |
+| `y2_unsafe` | `unsafe:` block body — statements hanging off an expression | `[1,3]` -> `[3]` |
+| `y6_match_expr` | `val r = match x: case 2: seen.pop()` — arms of a match EXPRESSION | `[1,3]` -> `[3]` |
+
+Now: `expr_mentions_ident`, `expr_escapes_ident`, `expr_has_unsafe_use`,
+`collect_expr_idents`, `collect_expr_binding_names` and `coll_expr_inspectable`
+all recurse through `expr_child_exprs` **and** `expr_child_stmts` **and**
+`expr_child_arms`; `coll_expr_kind_known` mirrors `coll_stmt_kind_known`, so
+an expression kind nothing can enumerate makes the function uninspectable.
+
+**String interpolation is the one thing still not covered by the tree**, and
+this record no longer claims otherwise. `"{x}"` parses as `EXPR_STRING_LIT`
+with zero children, so the interim rule is textual on purpose: a literal with
+a `{` that mentions the tracked name as a bare token counts as a use. It is
+over-approximate and cannot be otherwise. The real fix is filed as
+`doc/02_requirements/feature/parser_interpolation_holes_as_child_expressions.md`
+and benefits every analysis, not this one.
+
+## Round 4 — coverage, and one deliberate tightening
+
+Measured over the tree: **68 real dedup sites in 52 files**; only 5 (7%)
+got a Certain fix. Two precision limits, both fixed:
+
+- **Reader results may flow into calls.** `print(seen.len())` passes a FRESH
+  value; the old rule refused any argument mentioning the name. ~24 sites.
+  `expr_escapes_ident` now treats the result of a proven read-only method as
+  not-an-escape, while the array itself still escapes.
+- **The Dict moved beside the DECLARATION.** It used to be emitted before the
+  loop, which is what made nesting unsafe; emitted after the array's `val`/
+  `var` it shares the array's lifetime exactly, so nesting stops mattering.
+  ~16 sites. `decl_sibling_before` is replaced by `decl_visible_for`, which
+  looks the declaration up among those in scope on the path to the site.
+  `nested.spl` and `a1_while_paren` therefore now FIX, verified by execution
+  (`[1,2,3,4]` -> `[1,2,3,4]` for both), and their spec examples are flipped
+  with that evidence.
+
+One shape got STRICTER, deliberately: `print seen` — the array itself as a
+call argument — is now refused where round 3 allowed it. Proving a callee
+does not mutate its argument needs interprocedural analysis this does not
+have, so it fails closed. `print seen.len()` is fine.

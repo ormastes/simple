@@ -42,7 +42,15 @@ use compiler.core.ast_expr.{
     EXPR_INTERPOLATED_STRING, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_DICT_LIT,
     EXPR_UNARY, EXPR_LAMBDA, EXPR_CALL,
     expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts,
-    expr_get_span, expr_child_exprs
+    expr_get_span, expr_child_exprs, expr_child_stmts, expr_child_arms,
+    EXPR_FLOAT_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_RANGE, EXPR_TUPLE,
+    EXPR_STRUCT_LIT, EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST,
+    EXPR_UNIT, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
+    EXPR_SUFFIXED_LIT, EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_DO_BLOCK,
+    EXPR_ATOM, EXPR_SPREAD, EXPR_EXISTS_CHECK, EXPR_FORCE_UNWRAP, EXPR_TRY,
+    EXPR_NEW, EXPR_LIST_COMP, EXPR_DICT_COMP, EXPR_ARRAY_REPEAT,
+    EXPR_UNSAFE_BLOCK, EXPR_BLOCK, EXPR_MATCH, EXPR_IF, EXPR_RETURN,
+    EXPR_BREAK, EXPR_CONTINUE
 }
 use compiler.core.types.{
     TYPE_TEXT, TYPE_DICT, TYPE_DICT_BASE, TYPE_TUPLE_BASE,
@@ -1088,12 +1096,85 @@ fn expr_equal_idents(a: i64, b: i64) -> bool:
 fn expr_mentions_ident(e: i64, name: text) -> bool:
     if e < 0:
         return false
-    if expr_get_tag(e) == EXPR_IDENT:
+    val tag = expr_get_tag(e)
+    if tag == EXPR_IDENT:
         return expr_get_str(e) == name
+    if tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING:
+        return literal_hole_mentions(e, name)
     for child in expr_child_exprs(e):
         if expr_mentions_ident(child, name):
             return true
+    # Expression-level BLOCKS carry STATEMENTS, and match/receive expressions
+    # carry ARMS. `expr_child_exprs` yields neither, so a `do:`/`unsafe:`
+    # block body or a `match` arm was invisible to every walker in this file
+    # — `val r = match x: case 2: seen.pop()` turned [1,3] into [3].
+    for s in expr_child_stmts(e):
+        if stmts_mention_ident([s], name):
+            return true
+    for arm in expr_child_arms(e):
+        if arm_mentions_ident(arm, name):
+            return true
     false
+
+fn arm_mentions_ident(arm: i64, name: text) -> bool:
+    if arm < 0:
+        return false
+    if expr_mentions_ident(arm_get_pattern(arm), name):
+        return true
+    if expr_mentions_ident(arm_get_guard(arm), name):
+        return true
+    stmts_mention_ident(arm_get_body(arm), name)
+
+fn stmts_mention_ident(stmts: [i64], name: text) -> bool:
+    for s in real_stmts(stmts):
+        if coll_stmt_binds(stmt_get_tag(s)) and stmt_get_name(s) == name:
+            return true
+        for e in coll_stmt_child_exprs(s):
+            if expr_mentions_ident(e, name):
+                return true
+        if stmts_mention_ident(coll_stmt_child_stmts(s), name):
+            return true
+    false
+
+# String interpolation is OPAQUE: `"{seen.pop()}"` parses as a plain
+# EXPR_STRING_LIT whose text is the literal `{seen.pop()}`, with zero child
+# expressions (measured; see the note above `expr_contains_interpolation`).
+# So a hole naming the tracked array is invisible to any AST walk, and
+# `print "{seen.pop()}"` silently mutated it — [1,3] became [3].
+#
+# Interim rule, fail-closed: a literal that has an interpolation hole AND
+# mentions the name as a bare token counts as a use. The real fix is for the
+# parser to expose holes as child expressions, which would serve every
+# analysis rather than this one — filed as
+# doc/02_requirements/feature/parser_interpolation_holes_as_child_expressions.md.
+fn literal_hole_mentions(e: i64, name: text) -> bool:
+    val body = expr_get_str(e)
+    if not body.contains("{"):
+        return false
+    var pos = 0
+    while pos < body.len():
+        val idx = coll_text_index_from(body, name, pos)
+        if idx < 0:
+            return false
+        val after = idx + name.len()
+        val prev = if idx > 0: body.slice(idx - 1, idx) else: ""
+        val before_ok = prev == "" or not coll_is_ident_char(prev)
+        val after_ok = after >= body.len() or not coll_is_ident_char(body.slice(after, after + 1))
+        if before_ok and after_ok:
+            return true
+        pos = idx + 1
+    false
+
+fn coll_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn coll_text_index_from(s: text, needle: text, from: i64) -> i64:
+    if from >= s.len():
+        return -1
+    val rel = s.substring(from, s.len()).index_of(needle)
+    if rel < 0:
+        return -1
+    from + rel
 
 # String interpolation is OPAQUE on this path, and NOT as
 # EXPR_INTERPOLATED_STRING. Measured 2026-09-19 by dumping the arena for
@@ -1582,6 +1663,70 @@ fn coll_is_plain_identifier(name: text) -> bool:
         i = i + 1
     true
 
+# Expression kinds whose children are fully yielded by the arena's own
+# `expr_child_exprs` / `expr_child_stmts` / `expr_child_arms`. Mirrors
+# `coll_stmt_kind_known` one level down: an expression kind absent here makes
+# the whole function uninspectable, so a kind added later cannot default to
+# "safe". EXPR_ASM / EXPR_ASM_MATCH / EXPR_CUSTOM_BLOCK are deliberately
+# absent — no accessor yields their children, so nothing can vouch for them.
+fn coll_expr_kind_known(tag: i64) -> bool:
+    if tag == EXPR_INT_LIT or tag == EXPR_FLOAT_LIT or tag == EXPR_STRING_LIT:
+        return true
+    if tag == EXPR_BOOL_LIT or tag == EXPR_NIL_LIT or tag == EXPR_IDENT:
+        return true
+    if tag == EXPR_UNIT or tag == EXPR_ATOM or tag == EXPR_SUFFIXED_LIT:
+        return true
+    if tag == EXPR_PASS or tag == EXPR_PASS_TODO or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN:
+        return true
+    if tag == EXPR_BREAK or tag == EXPR_CONTINUE:
+        return true
+    if tag == EXPR_BINARY or tag == EXPR_UNARY or tag == EXPR_INDEX or tag == EXPR_RANGE:
+        return true
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN or tag == EXPR_NULL_COALESCE:
+        return true
+    if tag == EXPR_ARRAY_REPEAT or tag == EXPR_FIELD_ACCESS or tag == EXPR_RETURN:
+        return true
+    if tag == EXPR_AWAIT or tag == EXPR_YIELD or tag == EXPR_SPAWN or tag == EXPR_SPREAD:
+        return true
+    if tag == EXPR_EXISTS_CHECK or tag == EXPR_FORCE_UNWRAP or tag == EXPR_TRY:
+        return true
+    if tag == EXPR_CAST or tag == EXPR_OPTIONAL_CHAIN or tag == EXPR_NEW:
+        return true
+    if tag == EXPR_CALL or tag == EXPR_METHOD_CALL or tag == EXPR_LAMBDA:
+        return true
+    if tag == EXPR_ARRAY_LIT or tag == EXPR_TUPLE or tag == EXPR_DICT_LIT or tag == EXPR_STRUCT_LIT:
+        return true
+    if tag == EXPR_INTERPOLATED_STRING or tag == EXPR_SLICE:
+        return true
+    if tag == EXPR_IF or tag == EXPR_MATCH or tag == EXPR_BLOCK:
+        return true
+    if tag == EXPR_FOR or tag == EXPR_WHILE or tag == EXPR_DO_BLOCK or tag == EXPR_UNSAFE_BLOCK:
+        return true
+    if tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP:
+        return true
+    false
+
+fn coll_expr_inspectable(e: i64) -> bool:
+    if e < 0:
+        return true
+    if not coll_expr_kind_known(expr_get_tag(e)):
+        return false
+    for child in expr_child_exprs(e):
+        if not coll_expr_inspectable(child):
+            return false
+    for s in expr_child_stmts(e):
+        if not coll_stmts_inspectable([s]):
+            return false
+    for arm in expr_child_arms(e):
+        if arm >= 0:
+            if not coll_expr_inspectable(arm_get_pattern(arm)):
+                return false
+            if not coll_expr_inspectable(arm_get_guard(arm)):
+                return false
+            if not coll_stmts_inspectable(arm_get_body(arm)):
+                return false
+    true
+
 fn coll_stmt_binds(tag: i64) -> bool:
     (tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL
      or tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_BIND)
@@ -1597,6 +1742,9 @@ fn coll_stmts_inspectable(stmts: [i64]) -> bool:
             return false
         if coll_stmt_binds(tag) and not coll_is_plain_identifier(stmt_get_name(s)):
             return false
+        for e in coll_stmt_child_exprs(s):
+            if not coll_expr_inspectable(e):
+                return false
         if not coll_stmts_inspectable(coll_stmt_child_stmts(s)):
             return false
     true
@@ -1616,7 +1764,25 @@ fn collect_binding_names(stmts: [i64], acc: [text]) -> [text]:
             val n = stmt_get_name(s)
             if n != "":
                 names.push(n)
+        # Expression-level blocks (`do:`, `unsafe:`, a block-bodied lambda)
+        # and match arms hold statements too, and a binding there shadows
+        # just as well as one in a statement block.
+        for e in coll_stmt_child_exprs(s):
+            names = collect_expr_binding_names(e, names)
         names = collect_binding_names(coll_stmt_child_stmts(s), names)
+    names
+
+fn collect_expr_binding_names(e: i64, acc: [text]) -> [text]:
+    var names = acc
+    if e < 0:
+        return names
+    for child in expr_child_exprs(e):
+        names = collect_expr_binding_names(child, names)
+    for s in expr_child_stmts(e):
+        names = collect_binding_names([s], names)
+    for arm in expr_child_arms(e):
+        if arm >= 0:
+            names = collect_binding_names(arm_get_body(arm), names)
     names
 
 fn count_bindings_of(stmts: [i64], name: text) -> i64:
@@ -1638,6 +1804,13 @@ fn collect_expr_idents(e: i64, acc: [text]) -> [text]:
         return names
     for child in expr_child_exprs(e):
         names = collect_expr_idents(child, names)
+    for s in expr_child_stmts(e):
+        names = collect_stmt_idents([s], names)
+    for arm in expr_child_arms(e):
+        if arm >= 0:
+            names = collect_expr_idents(arm_get_pattern(arm), names)
+            names = collect_expr_idents(arm_get_guard(arm), names)
+            names = collect_stmt_idents(arm_get_body(arm), names)
     names
 
 fn collect_stmt_idents(stmts: [i64], acc: [text]) -> [text]:
@@ -1673,37 +1846,81 @@ fn collection_module_names(decl_indices: [i64]) -> [text]:
 # line-split arguments are the same node here), or its capture by a lambda.
 # `allowed_mutation` is the one method-call node the rewrite keeps in step
 # with the Dict (-1 when there is none).
+# True when `name` reaches a place this analysis can no longer follow: a bare
+# mention, an element or field of it, an interpolation hole. The one thing
+# that does NOT escape is the RESULT of a proven read-only method: `R.len()`
+# is a fresh value, so passing it to a call tells the callee nothing about R
+# and cannot mutate it.
+#
+# That distinction is the difference between a fix that fires and one that
+# does not. Measured over the tree: of 68 real dedup sites, ~24 were refused
+# solely because a reader result was passed somewhere (`print(seen.len())`).
+fn expr_escapes_ident(e: i64, name: text) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_IDENT:
+        return expr_get_str(e) == name
+    if tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING:
+        return literal_hole_mentions(e, name)
+    if tag == EXPR_METHOD_CALL:
+        val recv = expr_get_left(e)
+        val on_name = recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == name
+        if on_name and is_readonly_collection_method(expr_get_str(e)):
+            for a in expr_get_args(e):
+                if expr_escapes_ident(a, name):
+                    return true
+            return false
+    for child in expr_child_exprs(e):
+        if expr_escapes_ident(child, name):
+            return true
+    for s in expr_child_stmts(e):
+        if stmts_mention_ident([s], name):
+            return true
+    for arm in expr_child_arms(e):
+        if arm_mentions_ident(arm, name):
+            return true
+    false
+
 fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
     if e < 0:
         return false
     val tag = expr_get_tag(e)
+    if tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING:
+        # An interpolation hole can call anything on the name, including a
+        # mutator, and the AST shows nothing inside it.
+        return literal_hole_mentions(e, name)
     if tag == EXPR_METHOD_CALL:
         val recv = expr_get_left(e)
         val on_name = recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == name
-        # A receiver that MENTIONS the array without BEING it — `seen[0]`,
-        # `seen.field`, `f(seen)` — reaches the same storage through a shape
-        # this analysis does not model. `seen[0].push(7)` used to read as a
-        # call on nothing at all (1 -> 3).
-        if not on_name and expr_mentions_ident(recv, name):
+        # A receiver that reaches the array without BEING it — `seen[0]`,
+        # `seen.field`, `f(seen)` — touches the same storage through a shape
+        # this analysis does not model. A reader CHAIN (`seen.len().to_text()`)
+        # does not: its receiver is already a fresh value.
+        if not on_name and expr_escapes_ident(recv, name):
             return true
         if on_name and e != allowed_mutation and not is_readonly_collection_method(expr_get_str(e)):
             return true
         for a in expr_get_args(e):
-            if expr_mentions_ident(a, name):
+            if expr_escapes_ident(a, name):
+                return true
+            if expr_has_unsafe_use(a, name, allowed_mutation):
                 return true
         if not on_name:
             return expr_has_unsafe_use(recv, name, allowed_mutation)
         return false
     if tag == EXPR_CALL:
-        if expr_mentions_ident(expr_get_left(e), name):
+        if expr_escapes_ident(expr_get_left(e), name):
             return true
         for a in expr_get_args(e):
-            if expr_mentions_ident(a, name):
+            if expr_escapes_ident(a, name):
+                return true
+            if expr_has_unsafe_use(a, name, allowed_mutation):
                 return true
         return false
     # The array escaping into an aggregate leaves this analysis' sight.
     if tag == EXPR_ARRAY_LIT or tag == EXPR_DICT_LIT or tag == EXPR_TUPLE or tag == EXPR_STRUCT_LIT:
-        return expr_mentions_ident(e, name)
+        return expr_escapes_ident(e, name)
     if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
         val target = expr_get_left(e)
         if target >= 0:
@@ -1721,6 +1938,15 @@ fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
         return expr_mentions_ident(e, name)
     for child in expr_child_exprs(e):
         if expr_has_unsafe_use(child, name, allowed_mutation):
+            return true
+    # Statements and arms hanging off an EXPRESSION — a `do:`/`unsafe:` block
+    # body, a `match` arm. Any mention there is unsafe: this walker has no
+    # `allowed_mutation` context to grant inside them.
+    for s in expr_child_stmts(e):
+        if stmts_mention_ident([s], name):
+            return true
+    for arm in expr_child_arms(e):
+        if arm_mentions_ident(arm, name):
             return true
     false
 
@@ -1741,20 +1967,26 @@ fn coll_stmt_line(s: i64) -> i64:
 fn coll_expr_line(e: i64) -> i64:
     coll_span_line(expr_anchor_span(e))
 
-# The declaration statement of `name` in `block`, at a position BEFORE
-# `loop_stmt`, or -1. Sibling position IS the dominance proof: the parser
-# already decided which statements share a block and in what order, so no
-# indentation is counted and no block end is guessed.
-fn decl_sibling_before(block: [i64], name: text, loop_stmt: i64) -> i64:
+# The declaration of `name` among the declarations in scope at the candidate
+# site, or -1. `visible_decls` is accumulated while descending: the `val`/
+# `var` statements that precede, on the path from the function body to this
+# loop, in each enclosing block. Sibling position and block membership are the
+# parser's answer, so nothing is counted or guessed.
+#
+# This is the dominance proof, and it no longer requires the declaration to be
+# a sibling of the loop itself. It does not need to, because the Dict is now
+# emitted immediately AFTER the declaration rather than before the loop: the
+# two then have exactly the same lifetime, whatever loops sit between them.
+# The old placement is what made a nested loop unsafe (the Dict was recreated
+# per outer iteration while the array was not, so membership reset); emitting
+# it beside the declaration removes the hazard instead of detecting it.
+# Measured: ~16 of 68 real dedup sites were refused for nesting alone.
+fn decl_visible_for(visible_decls: [i64], name: text) -> i64:
     var found = -1
-    for s in real_stmts(block):
-        if s == loop_stmt:
-            return found
-        val tag = stmt_get_tag(s)
-        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            if stmt_get_name(s) == name:
-                found = s
-    -1
+    for s in visible_decls:
+        if s >= 0 and stmt_get_name(s) == name:
+            found = s
+    found
 
 # The `<ident>.contains(<x>)` call inside `e` that is NOT the inner of a
 # `not`, or -1. (A negated one is COLL020's guard, a different rule.)
@@ -1815,7 +2047,7 @@ fn guard_kept_push(guard: i64, receiver: text) -> i64:
 # --- proof construction -----------------------------------------------------
 
 fn coll020_proof(
-    guard: i64, loop_stmt: i64, block: [i64], fn_body: [i64], param_names: [text]
+    guard: i64, loop_stmt: i64, visible_decls: [i64], fn_body: [i64], param_names: [text]
 ) -> CollectionFixProof:
     val contains_call = is_not_contains_call(stmt_get_expr(guard))
     val receiver = expr_get_str(expr_get_left(contains_call))
@@ -1834,10 +2066,10 @@ fn coll020_proof(
         return coll_proof_unsafe("COLL020", receiver, "tracking array is a parameter, not a local")
     if count_bindings_of(fn_body, receiver) != 1:
         return coll_proof_unsafe("COLL020", receiver, "name is bound more than once (shadowed)")
-    val decl = decl_sibling_before(block, receiver, loop_stmt)
+    val decl = decl_visible_for(visible_decls, receiver)
     if decl < 0:
         return coll_proof_unsafe(
-            "COLL020", receiver, "declaration does not dominate the loop the Dict is hoisted to")
+            "COLL020", receiver, "no local declaration of the array is in scope at this site")
     if stmts_have_unsafe_use(fn_body, receiver, kept_push):
         return coll_proof_unsafe("COLL020", receiver, "array is mutated or aliased elsewhere")
     CollectionFixProof(
@@ -1847,17 +2079,17 @@ fn coll020_proof(
         safe: true, reason: "")
 
 fn coll002_proof(
-    site: i64, loop_stmt: i64, block: [i64], fn_body: [i64], param_names: [text]
+    site: i64, loop_stmt: i64, visible_decls: [i64], fn_body: [i64], param_names: [text]
 ) -> CollectionFixProof:
     val receiver = expr_get_str(expr_get_left(site))
     if name_in_list(param_names, receiver):
         return coll_proof_unsafe("COLL002", receiver, "array is a parameter, not a local")
     if count_bindings_of(fn_body, receiver) != 1:
         return coll_proof_unsafe("COLL002", receiver, "name is bound more than once (shadowed)")
-    val decl = decl_sibling_before(block, receiver, loop_stmt)
+    val decl = decl_visible_for(visible_decls, receiver)
     if decl < 0:
         return coll_proof_unsafe(
-            "COLL002", receiver, "declaration does not dominate the loop the Dict is hoisted to")
+            "COLL002", receiver, "no local declaration of the array is in scope at this site")
     # COLL002 builds the Dict ONCE from the array, so there is no kept-in-step
     # statement: any mutation at all disqualifies.
     if stmts_have_unsafe_use(fn_body, receiver, -1):
@@ -1869,24 +2101,32 @@ fn coll002_proof(
         safe: true, reason: "")
 
 fn collect_proofs_in_block(
-    block: [i64], fn_body: [i64], param_names: [text], acc: [CollectionFixProof]
+    block: [i64], fn_body: [i64], param_names: [text], visible_decls: [i64],
+    acc: [CollectionFixProof]
 ) -> [CollectionFixProof]:
     var proofs = acc
+    # Declarations accumulate as the walk descends, so a candidate sees every
+    # `val`/`var` that precedes it on its own path — including ones in blocks
+    # further out. Appended AFTER the statement is processed, so a declaration
+    # never sees itself.
+    var in_scope = visible_decls
     for s in real_stmts(block):
         val tag = stmt_get_tag(s)
         if tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_STATIC_FOR or tag == STMT_LABELED_LOOP:
             val loop_body = stmt_get_body(s)
             for guard in manual_distinct_guards_in_loop(loop_body):
-                proofs.push(coll020_proof(guard, s, block, fn_body, param_names))
+                proofs.push(coll020_proof(guard, s, in_scope, fn_body, param_names))
             for site in plain_contains_sites_in_loop(loop_body):
-                proofs.push(coll002_proof(site, s, block, fn_body, param_names))
-            proofs = collect_proofs_in_block(loop_body, fn_body, param_names, proofs)
+                proofs.push(coll002_proof(site, s, in_scope, fn_body, param_names))
+            proofs = collect_proofs_in_block(loop_body, fn_body, param_names, in_scope, proofs)
         else:
             # Generic descent: every child statement list of every kind, so an
             # `else`/`elif` body or a match arm containing a loop is reached
             # by construction rather than by being listed here.
             proofs = collect_proofs_in_block(
-                coll_stmt_child_stmts(s), fn_body, param_names, proofs)
+                coll_stmt_child_stmts(s), fn_body, param_names, in_scope, proofs)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            in_scope.push(s)
     proofs
 
 fn collection_fix_proofs(decl_indices: [i64]) -> [CollectionFixProof]:
@@ -1902,7 +2142,7 @@ fn collection_fix_proofs(decl_indices: [i64]) -> [CollectionFixProof]:
         if decl_get_tag(idx) == DECL_FN:
             val body = decl_get_body(idx)
             val inspectable = coll_stmts_inspectable(body)
-            for proof in collect_proofs_in_block(body, body, decl_get_param_names(idx), []):
+            for proof in collect_proofs_in_block(body, body, decl_get_param_names(idx), [], []):
                 if inspectable:
                     proofs.push(proof)
                 else:

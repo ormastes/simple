@@ -1,7 +1,10 @@
 # The Certain COLL002/COLL020 auto-fix rewrote working programs into wrong ones
 
-**Status:** FIXED 2026-09-19 on `work/coll-gaps` — the Certain door now proves
-safety or refuses.
+**Status:** SUPERSEDED 2026-09-19 by
+coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md. The
+symptoms below are accurate and were executed; the FIX section is a
+retraction, because the code it described is deleted. Originally: "the
+Certain door now proves safety or refuses."
 **Severity:** Blocking — a `Certain`-confidence machine-applied rewrite
 silently changed program output. `simple fix <file>` needs no flag and writes
 in place.
@@ -55,35 +58,35 @@ invisible, and the Dict kept entries the array no longer had.
 **(c) `{receiver}_set` was emitted unconditionally**, shadowing a user
 binding of the same name.
 
-## Fix — a narrow envelope: prove it, or refuse
+## Fix — SUPERSEDED, see the record below
 
-Four checks, all in `entry_and_fixes.spl`, all fail-closed. Hint-only
-(advisory) is an acceptable outcome; wrong code is not.
+**Everything this section used to describe has been replaced and its code
+deleted.** It claimed four textual checks — `collection_decl_dominates_loop`,
+`collection_function_mutates_outside`, `collection_line_mutates_name`,
+`collection_fresh_identifier` and their helpers — in the present tense. None
+of those functions exists in `src/` any more (0 definitions), and describing
+deleted code as current is how a record stops being evidence.
 
-1. **Dominance** — `collection_decl_dominates_loop`: the declaration must
-   precede the hoisted-to loop with NO loop header between them and its block
-   still open (no line of smaller indent in between). Rejects (a).
-2. **Site containment** (COLL020) — the guard and the push must BOTH lie
-   inside that one innermost loop (`loop_line < idx <= block_end`). Nothing
-   checked this before.
-3. **Whole-function mutation proof** — `collection_function_mutates_outside`
-   scans every line of the enclosing function at token boundaries via
-   `collection_line_mutates_name` / `collection_rest_is_mutation`, which
-   recognise `.<mutating-method>(`, `[i] =`, `=`, `+=`, `-=` at ANY position,
-   against a 24-name mutating-method list. Permitted sites: the declaration
-   line, and (COLL020 only) the one guarded push the rewrite keeps in step
-   with the Dict. A line that both mentions the name and contains `;` is
-   refused outright — statement separation on one physical line defeats every
-   line-oriented judgement this file makes, so it is not judged. Rejects (b).
-   This REPLACES the prefix whitelist as the load-bearing check; the old range
-   scans are kept as a cheap pre-filter.
-4. **Fresh generated names** — `collection_fresh_identifier` tries
-   `{receiver}_set`, then `…_set2`..`…_set10`, against a bare-token scan of
-   the WHOLE FILE (stricter than scope, and needs no scope model), and
-   returns "" (no fix) when all are taken. Applied to COLL002's `_v` loop
-   variable too, which had the same collision hazard. Fixes (c).
+The approach was right in intent and wrong in kind: it answered questions
+about statement extent, block extent, argument position and binding by
+reading source TEXT, and a later review broke all four of those checks seven
+more ways, then four more after that. The proofs now live on the AST, in
+`collection_fix_proofs` (`collection_patterns.spl`), and
+`entry_and_fixes.spl` only renders the edit at sites the AST proved. The
+Dict is emitted beside the ARRAY DECLARATION rather than before the loop, so
+the nesting hazard class (a) describes is removed rather than detected.
 
-## Verification — real CLI
+**Read instead:**
+`doc/08_tracking/bug/coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md`,
+which supersedes this section and carries rounds 2, 3 and 4.
+
+This record is retained for its SYMPTOM table above — the five executed
+before/after outputs, and the fact that classes (a) and (c) were offered at
+the lane base `7c875a81067` and are therefore a defect in the shipped
+auto-fix, not only a regression. That part remains true and is the reason
+`work/rc1-dataframe-sosix` must not land the old generator as-is.
+
+## Verification — real CLI (as of round 1; superseded, see the record above)
 
 ```
 $ bin/simple fix fx/nested.spl        --dry-run  ->  No fixes available
@@ -116,16 +119,20 @@ above — `outer_mut.spl` is the COLL020 analogue of exactly that shape. Under
 mutation elsewhere in the function), so it is now hint-only. The example and
 its docstring record the flip and why.
 
-## Not holes (checked, negative results kept)
+## Not holes (round-1 findings; the first two are still true, the third was wrong)
 
 - `val s2 = seen` — arrays are value-copied at runtime, so assignment
   aliasing is not a mutation channel (probed).
 - Closure capture IS by reference, but a fixture proving a WRONG rewrite
-  through it did not reproduce. Unproven, not counted — and
-  `\y: seen.push(y)` is caught by the token-boundary mutation scan anyway.
-- `truncate`/`remove_at`/`delete` do not exist on Array today; they are in the
-  mutating-method list regardless, so a future one cannot slip through a list
-  nobody re-reads.
+  through it did not reproduce. Unproven, not counted. A mention inside a
+  lambda is treated as unsafe regardless.
+- CORRECTION, round 3: this bullet used to say `truncate`/`remove_at`/
+  `delete` were in a mutating-method list so a future mutator could not slip
+  through. It did the opposite — `fill`, a real runtime mutator, was absent
+  from that list and read as a harmless call, turning [1,2,1,2] into [1,2].
+  The list is now an allow-list of proven READERS and the default is unsafe.
 - COLL022 has no fix generator at all (`grep -rln COLL022
   src/compiler/90.tools/` is empty), so its known string-interpolation blind
-  spot is advisory-only and cannot corrupt code.
+  spot is advisory-only and cannot corrupt code. The parser-side fix is filed
+  as doc/02_requirements/feature/
+  parser_interpolation_holes_as_child_expressions.md.

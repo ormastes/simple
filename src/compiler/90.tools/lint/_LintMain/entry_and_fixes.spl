@@ -760,16 +760,21 @@ fn collection_020_fix_proven(
     val push_end = push_start + push_trimmed.len()
     val new_push = "{push_trimmed}\n{push_ws}{set_name}[{arg}] = true"
 
-    val loop_ws = collection_ws_prefix(lines[loop_idx])
+    # Emit the Dict immediately AFTER the array's declaration, not before the
+    # loop. The two then share a lifetime exactly, so a loop nested inside
+    # another cannot reset one without resetting the other — the hazard that
+    # made nested shapes unsafe, and that refused ~16 of 68 real dedup sites
+    # in this tree. Removing the hazard beats detecting it.
+    val decl_ws = collection_ws_prefix(lines[decl_idx])
     val empty_dict = "{" + "}"
-    val decl_text = "{loop_ws}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n"
-    val decl_at = collection_line_start_offset(lines, loop_idx)
+    val decl_text = "{decl_ws}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n"
+    val decl_at = collection_line_start_offset(lines, decl_idx + 1)
 
     var fix = EasyFix.create(
         "COLL020", "track membership in `{set_name}` Dict instead of `.contains` on `{receiver}`",
         FixConfidence.Certain)
     fix.add_replacement(Replacement.create(
-        file_path, decl_at, decl_at, proof.loop_line, loop_ws.len(), decl_text))
+        file_path, decl_at, decl_at, proof.decl_line + 1, decl_ws.len(), decl_text))
     fix.add_replacement(Replacement.create(
         file_path, guard_start, guard_end, proof.guard_line, guard_ws.len(), new_guard))
     fix.add_replacement(Replacement.create(
@@ -824,12 +829,15 @@ fn collection_002_fix_proven(
         return nil
     val site_ws = collection_ws_prefix(lines[site_idx])
 
-    val loop_ws = collection_ws_prefix(lines[loop_idx])
+    # Same placement rule as COLL020: beside the declaration, not before the
+    # loop. The array is proven un-mutated for this rule, so building the Dict
+    # at the declaration reads exactly the same elements the loop would have.
+    val decl_ws = collection_ws_prefix(lines[decl_idx])
     val empty_dict = "{" + "}"
     val insert_text = (
-        "{loop_ws}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n" +
-        "{loop_ws}for {elem_var} in {proof.receiver}: {set_name}[{elem_var}] = true\n")
-    val insert_at = collection_line_start_offset(lines, loop_idx)
+        "{decl_ws}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n" +
+        "{decl_ws}for {elem_var} in {proof.receiver}: {set_name}[{elem_var}] = true\n")
+    val insert_at = collection_line_start_offset(lines, decl_idx + 1)
 
     val call_line_start = collection_line_start_offset(lines, site_idx)
     val call_start = call_line_start + site_ws.len() + recv_start_in_trimmed
@@ -840,7 +848,7 @@ fn collection_002_fix_proven(
         "COLL002", "hoist `{proof.receiver}` into a membership Dict before the loop",
         FixConfidence.Certain)
     fix.add_replacement(Replacement.create(
-        file_path, insert_at, insert_at, proof.loop_line, loop_ws.len(), insert_text))
+        file_path, insert_at, insert_at, proof.decl_line + 1, decl_ws.len(), insert_text))
     fix.add_replacement(Replacement.create(
         file_path, call_start, call_end, proof.guard_line,
         site_ws.len() + recv_start_in_trimmed, new_call))

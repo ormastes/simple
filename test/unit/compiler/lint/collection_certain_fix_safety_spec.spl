@@ -54,12 +54,20 @@ val F_COLL002_POP_SRC = "fn keep(xs: [i64]) -> [i64]:\n    var allowed: [i64] = 
 val F_SETNAME_CLASH_SRC = "fn dedup(xs: [i64]) -> i64:\n    var seen: [i64] = []\n    var seen_set: Dict<i64, bool> = " + "{" + "}" + "\n    seen_set[99] = true\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    seen_set.len()\n"
 
 describe "class (a): the declaration must dominate the hoisted loop":
-    it "nested: refuses when the array lives outside an enclosing loop":
-        step("nested: refuses when the array lives outside an enclosing loop")
-        """The Dict would be declared in front of `for x in g:` while `seen`
-        is declared outside `for g in groups:`, so it resets every outer
-        iteration. Measured before this change: [1,2,3,4] -> [1,2,2,3,1,3,4]."""
-        assert_false(is_some(fix020(F_NESTED_SRC)))
+    it "nested: fixes, with the Dict beside the declaration":
+        step("nested: fixes, with the Dict beside the declaration")
+        """FLIPPED round 4, and this is the hazard being REMOVED rather than
+        detected. The Dict used to be emitted in front of the innermost loop
+        while `seen` was declared outside the outer one, so membership reset
+        every outer iteration: [1,2,3,4] -> [1,2,2,3,1,3,4]. Emitting it
+        immediately after the declaration gives the two exactly the same
+        lifetime, so nesting stops mattering. Verified by execution:
+        [1,2,3,4] -> [1,2,3,4]. This shape accounted for ~16 of the 68 real
+        dedup sites in the tree."""
+        val applied = applied020(F_NESTED_SRC)
+        expect(applied).to_contain("    var seen: [i64] = []\n    var seen_set: Dict<i64, bool> = {}\n    for g in groups:")
+        expect(applied).to_contain("if not seen_set.contains_key(x):")
+        expect(applied).to_contain("seen_set[x] = true")
 
     it "outer_mut: refuses the same shape with an outer-loop push as well":
         step("outer_mut: refuses the same shape with an outer-loop push as well")
@@ -155,10 +163,17 @@ describe "round 2: statement and block extent is the parser's answer":
         so `while(gi < groups.len()):` was not a loop header and the array's
         declaration appeared to dominate the INNER `for`. The Dict was hoisted
         there and membership reset every outer iteration:
-        [1,2,3,4] -> [1,2,2,3,1,3,4]. On the AST the outer statement is a
-        STMT_WHILE whatever its spelling, and the declaration is not a sibling
-        of the inner loop."""
-        assert_false(is_some(fix020(B1_WHILE_PAREN_SRC)))
+        [1,2,3,4] -> [1,2,2,3,1,3,4].
+
+        FLIPPED round 4 for the same reason as `nested`: the Dict is now
+        emitted beside the declaration, so the nesting this fixture was built
+        around is no longer a hazard and the rewrite is correct. Verified by
+        execution: [1,2,3,4] -> [1,2,3,4]. What the fixture still proves is
+        that the loop is RECOGNISED — the spelling `while(` no longer decides
+        anything, because the statement is a STMT_WHILE on the AST."""
+        val applied = applied020(B1_WHILE_PAREN_SRC)
+        expect(applied).to_contain("    var seen: [i64] = []\n    var seen_set: Dict<i64, bool> = {}")
+        expect(applied).to_contain("if not seen_set.contains_key(x):")
 
     it "b2: a column-0 comment does not end a block":
         step("b2: a column-0 comment does not end a block")
@@ -280,3 +295,78 @@ describe "round 3: every default is fail-closed":
         passes them; six refusals in a row prove nothing on their own."""
         val plain = "fn dedup(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        if not out.contains(x):\n            out.push(x)\n    out\n"
         assert_true(is_some(fix020(plain)))
+
+# ---------------------------------------------------------------------------
+# Round 4: five more, one level down. The STATEMENT traversal was generic;
+# the EXPRESSION traversal was still an allow-list, and `expr_child_exprs`
+# yields neither child STATEMENTS (a `do:`/`unsafe:` block, a block-bodied
+# lambda) nor MATCH ARMS. Plus string interpolation, which is opaque at this
+# stage. Every expression walker now also recurses through
+# `expr_child_stmts` / `expr_child_arms`, `coll_expr_kind_known` mirrors
+# `coll_stmt_kind_known` so an unknown expression kind makes the function
+# uninspectable, and a string literal with an interpolation hole that names
+# the array counts as a use. Record: doc/08_tracking/bug/
+# coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md
+#
+# The `{` in the two interpolation fixtures is built by concatenation: a
+# literal brace in this spec's own source is interpolated HERE, in the spec's
+# scope, and never reaches the linter.
+# ---------------------------------------------------------------------------
+
+val D1_INTERP_PRINT_SRC = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        if x == 2:\n            print \"" + "{" + "seen.pop()" + "}" + "\"\n    seen\n"
+val D1B_INTERP_VAL_SRC = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        if x == 2:\n            val m = \"last=" + "{" + "seen.pop()" + "}" + "\"\n    seen\n"
+val D1C_INTERP_COLL002_SRC = "fn f(xs: [i64]) -> [i64]:\n    var allowed: [i64] = [1, 2]\n    var out: [i64] = []\n    for x in xs:\n        if allowed.contains(x):\n            out.push(x)\n        if x == 2:\n            print \"" + "{" + "allowed.pop()" + "}" + "\"\n    out\n"
+val D2_UNSAFE_BLOCK_SRC = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        if x == 2:\n            unsafe:\n                val d = seen.pop()\n    seen\n"
+val D3_MATCH_EXPR_SRC = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        val r = match x:\n            case 2: seen.pop()\n            case _: 0\n    seen\n"
+
+describe "round 4: expression traversal is generic too":
+    it "d1: an interpolation hole that names the array is a use":
+        step("d1: an interpolation hole that names the array is a use")
+        """`print "{seen.pop()}"` parses as a plain EXPR_STRING_LIT whose text
+        is the literal `{seen.pop()}`, with zero child expressions, so the
+        mutation was invisible to every AST walk: [1,3] -> [3]. Interim rule,
+        fail-closed: a literal with a hole that mentions the name as a bare
+        token counts as a use. The real fix is for the parser to expose holes
+        as child expressions — filed as doc/02_requirements/feature/
+        parser_interpolation_holes_as_child_expressions.md."""
+        assert_false(is_some(fix020(D1_INTERP_PRINT_SRC)))
+
+    it "d1b: the same hole inside a `val` initializer":
+        step("d1b: the same hole inside a `val` initializer")
+        assert_false(is_some(fix020(D1B_INTERP_VAL_SRC)))
+
+    it "d1c: the COLL002 sibling refuses an interpolated mutation too":
+        step("d1c: the COLL002 sibling refuses an interpolated mutation too")
+        """`print "{allowed.pop()}"` shrank the array the Dict was built
+        from: [1,2] -> [1,2,2]."""
+        assert_false(is_some(fix002(D1C_INTERP_COLL002_SRC)))
+
+    it "d2: an `unsafe:` block body is walked":
+        step("d2: an `unsafe:` block body is walked")
+        """An expression-level block carries STATEMENTS, and
+        `expr_child_exprs` yields none of them, so `val d = seen.pop()`
+        inside `unsafe:` was invisible: [1,3] -> [3]. Every expression walker
+        now recurses through `expr_child_stmts` as well."""
+        assert_false(is_some(fix020(D2_UNSAFE_BLOCK_SRC)))
+
+    it "d3: a `match` EXPRESSION's arms are walked":
+        step("d3: a `match` EXPRESSION's arms are walked")
+        """`val r = match x: case 2: seen.pop()` hangs its arms off an
+        EXPRESSION, not a statement, and `expr_child_arms` was never
+        consulted: [1,3] -> [3]."""
+        assert_false(is_some(fix020(D3_MATCH_EXPR_SRC)))
+
+    it "a reader result may flow into a call argument":
+        step("a reader result may flow into a call argument")
+        """Coverage, not safety. `print(seen.len())` passes a FRESH value, so
+        it tells the callee nothing about `seen` and cannot mutate it — but
+        the old rule refused any argument that merely mentioned the name, and
+        that alone accounted for ~24 of the 68 real dedup sites in the tree.
+        Passing the array ITSELF is still refused, immediately below."""
+        val reader_arg = "fn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        print(seen.len())\n    seen\n"
+        assert_true(is_some(fix020(reader_arg)))
+
+    it "but the array itself may not":
+        step("but the array itself may not")
+        val escapes = "fn grow(a: [i64], v: i64):\n    a.push(v)\n\nfn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        grow(seen, x)\n    seen\n"
+        assert_false(is_some(fix020(escapes)))
