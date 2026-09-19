@@ -1,6 +1,6 @@
 # BUG: a nested `fn` declared inside a LAMBDA body does not capture the lambda's locals — spec `it` blocks are just the common case
 
-**Status: FIXED (2026-09-19) in the Rust seed's call dispatch. Not yet deployed — `bin/simple` still carries the defect. See "Fix" below.**
+**Status: FIXED and DEPLOYED (2026-09-19). The fix is in the Rust seed's call dispatch; `bin/simple` on this host now carries it. See "Fix" below.**
 
 ## Fix 2026-09-19
 
@@ -117,6 +117,49 @@ not diagnosed. The spec deliberately does not assert this example — asserting
 it would add a red, and dropping it silently would hide a real finding, so it
 is recorded here instead.
 
+### Deployed 2026-09-19 09:09 KST
+
+`bin/release/aarch64-unknown-linux-gnu/simple` — the target of the `bin/simple`
+symlink and the binary every session on this host runs — was replaced with a seed
+built from `origin/main` **42413e40caf plus this fix**, so the deployed artifact
+is current rather than carrying the fix on a stale base.
+
+| | before | after |
+|---|---|---|
+| sha256 | `308de6af84db5c26e2c08713…` | `350328bab5142ff443505ceb…` |
+| size | 51,645,288 B | 51,607,912 B |
+| built | 2026-09-18 | 2026-09-19 |
+
+Method, unchanged from the 2026-09-18 redeploy: the new binary was staged beside
+the target, its sha256 compared against the build output, and only then moved
+over the target with `mv -f`. The rename is atomic, so the **29** processes
+already running the old inode (MCP servers across several sessions) were not
+disturbed; they pick the new binary up on their next start. The previous binary
+is kept for rollback at
+`bin/release/aarch64-unknown-linux-gnu/simple.stale-2026-09-19` (gitignored), and
+restoring it is a single `mv` back over the same path. The target had a single
+hard link, verified before the swap, so no sibling directory entry was broken.
+
+Verified **before** the swap, on the candidate:
+
+- `scripts/check/check-deployed-binary-optional-unwrap.shs --binary <candidate>`
+  — `PASS — 6 row(s) checked, default and interpret lanes agree`.
+- `nested_fn_in_lambda_capture_spec.spl` — 7/7.
+- Five spec files (157 examples) run on the candidate and on the then-deployed
+  binary: identical pass/fail counts on every one.
+
+Verified **after** the swap, through `bin/simple` itself:
+
+- the guard again — `PASS — 6 row(s) checked on /home/yoon/dev/simple/bin/simple`;
+- `nested_fn_in_lambda_capture_spec.spl` — 7/7;
+- the lambda repro from this record now prints `7` instead of failing with
+  `semantic: variable ... not found`.
+
+What deployment does **not** change: the JIT still drops a module containing this
+shape to the interpreter (the separate `stmt_lowering.rs` defect named above), and
+the spec-runner route still loses the enclosing local for a recursive nested `fn`
+in a plain function body. Both remain open.
+
 ### What this does NOT fix, measured
 
 - **`test/01_unit/os/acpi/acpi_test.spl` still fails its same 3 examples.** This
@@ -132,9 +175,11 @@ is recorded here instead.
   Ok(vec![])` with the comment "Nested function definitions are ignored in native
   lowering for now". This change is interpreter-only and deliberately does not
   touch it, so the perf cliff remains.
-- **Deployment.** `bin/simple` is shared by other sessions on this host and is not
-  swapped here. Until it is redeployed, the defect is still live for everything
-  that runs through it.
+- **Deployment — done 2026-09-19**, see the section above. `bin/simple` on this
+  host now carries the fix. This bullet is kept rather than deleted because the
+  gap it named was real for part of the day: the fix landed in source before the
+  shared binary carried it, and anything measured against `bin/simple` in that
+  window saw the old behaviour.
 
 ### One question left open, deliberately not asserted
 
