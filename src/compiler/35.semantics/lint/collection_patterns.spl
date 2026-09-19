@@ -1127,7 +1127,7 @@ fn arm_mentions_ident(arm: i64, name: text) -> bool:
 
 fn stmts_mention_ident(stmts: [i64], name: text) -> bool:
     for s in real_stmts(stmts):
-        if coll_stmt_binds(stmt_get_tag(s)) and stmt_get_name(s) == name:
+        if coll_stmt_binds(stmt_get_tag(s)) and coll_binding_binds(stmt_get_name(s), name):
             return true
         for e in coll_stmt_child_exprs(s):
             if expr_mentions_ident(e, name):
@@ -1643,25 +1643,65 @@ fn coll_stmt_kind_known(tag: i64) -> bool:
         return true
     false
 
-# A binding whose name is a single plain identifier is one this analysis can
-# reason about. A destructuring form does NOT produce an empty name, as first
-# assumed — `var (seen, k) = ([], 0)` yields the literal `"(seen,k)"`, a
-# pattern rendered as text — so an emptiness test missed it and the rewrite
-# built a Dict from a rebound `seen` ([1,1,2] -> [1,2]). Anything that is not
-# `[A-Za-z_][A-Za-z0-9_]*` is a pattern this does not model, and makes the
-# function uninspectable.
-fn coll_is_plain_identifier(name: text) -> bool:
+# A destructuring form does NOT produce an empty name, as first assumed —
+# `var (seen, k) = ([], 0)` yields the literal `"(seen,k)"`, a pattern
+# rendered as text — so an emptiness test missed it and the rewrite built a
+# Dict from a rebound `seen` ([1,1,2] -> [1,2]).
+#
+# Round 3 asked for destructuring to COUNT AS A BINDING. What landed was
+# stricter than that: any non-plain binding made the whole function
+# uninspectable, so `val (source_content, source_count) = f()` refused a fix
+# for `dependency_ids`, a name the pattern does not bind at all. That is
+# over-refusal against the round-3 requirement, not safety, and it was the
+# single largest remaining cause of refusals in the tree.
+#
+# The names a binding pattern binds, or `nil` when the pattern is one this
+# does not model. The input is the PARSER's rendering of the pattern
+# (`stmt_get_name`), not a line of source: `var (seen, k) = ([], 0)` yields
+# the literal `"(seen,k)"`. Only identifiers, `(`, `)`, `,` and spaces are
+# accepted; anything else (`[`, `.`, `*`, `..`) is a form this does not model
+# and refuses the function, exactly as before.
+#
+# The direction is fail-closed by construction. Over-counting bindings can
+# only ADD refusals — a name that is bound is a name that may be a different
+# array — so `Some(seen)` yielding both `Some` and `seen` is safe, and
+# `(a, b)` yielding neither the receiver is the case being unlocked. Only the
+# inspectability gate is relaxed, and only for patterns whose every bound name
+# is readable.
+fn coll_binding_names_of(name: text) -> [text]?:
     if name == "":
-        return false
+        return nil
+    var names: [text] = []
+    var current = ""
     var i = 0
     while i < name.len():
         val c = name.slice(i, i + 1)
-        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or
-            (i > 0 and c >= "0" and c <= "9")
-        if not ok:
-            return false
+        val is_ident = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+            c == "_" or (c >= "0" and c <= "9")
+        if is_ident:
+            current = current + c
+        elif c == "(" or c == ")" or c == "," or c == " ":
+            if current != "":
+                names.push(current)
+                current = ""
+        else:
+            return nil
         i = i + 1
-    true
+    if current != "":
+        names.push(current)
+    if names.len() == 0:
+        return nil
+    names
+
+fn coll_binding_readable(name: text) -> bool:
+    match coll_binding_names_of(name):
+        case Some(_): true
+        case nil: false
+
+fn coll_binding_binds(name: text, target: text) -> bool:
+    match coll_binding_names_of(name):
+        case Some(names): names.contains(target)
+        case nil: true
 
 # Expression kinds whose children are fully yielded by the arena's own
 # `expr_child_exprs` / `expr_child_stmts` / `expr_child_arms`. Mirrors
@@ -1740,7 +1780,7 @@ fn coll_stmts_inspectable(stmts: [i64]) -> bool:
         val tag = stmt_get_tag(s)
         if not coll_stmt_kind_known(tag):
             return false
-        if coll_stmt_binds(tag) and not coll_is_plain_identifier(stmt_get_name(s)):
+        if coll_stmt_binds(tag) and not coll_binding_readable(stmt_get_name(s)):
             return false
         for e in coll_stmt_child_exprs(s):
             if not coll_expr_inspectable(e):
@@ -1761,9 +1801,11 @@ fn collect_binding_names(stmts: [i64], acc: [text]) -> [text]:
     var names = acc
     for s in real_stmts(stmts):
         if coll_stmt_binds(stmt_get_tag(s)):
-            val n = stmt_get_name(s)
-            if n != "":
-                names.push(n)
+            match coll_binding_names_of(stmt_get_name(s)):
+                case Some(bound):
+                    for n in bound:
+                        names.push(n)
+                case nil: val _ = 0
         # Expression-level blocks (`do:`, `unsafe:`, a block-bodied lambda)
         # and match arms hold statements too, and a binding there shadows
         # just as well as one in a statement block.
@@ -1817,9 +1859,11 @@ fn collect_stmt_idents(stmts: [i64], acc: [text]) -> [text]:
     var names = acc
     for s in real_stmts(stmts):
         if coll_stmt_binds(stmt_get_tag(s)):
-            val n = stmt_get_name(s)
-            if n != "":
-                names.push(n)
+            match coll_binding_names_of(stmt_get_name(s)):
+                case Some(bound):
+                    for n in bound:
+                        names.push(n)
+                case nil: val _ = 0
         for e in coll_stmt_child_exprs(s):
             names = collect_expr_idents(e, names)
         names = collect_stmt_idents(coll_stmt_child_stmts(s), names)

@@ -303,3 +303,30 @@ level down. A diagnostic now carries the fix for its OWN site only:
 `collection_render_proven_fixes` takes a `for_line`, and the warning's span
 and the proof's `guard_line` are the same node resolved the same way, so the
 match is exact.
+
+### Round 3's destructuring rule was implemented stricter than it was written
+
+Round 3 asked for destructuring to **count as a binding**. What landed was
+stricter: any binding whose `stmt_get_name` was not a single plain identifier
+made the whole FUNCTION uninspectable. That refused a fix for
+`dependency_ids` in `native_module_witness_facts.spl` because the function
+contains `val (source_content, source_count) = ...` — a pattern that does not
+bind `dependency_ids` at all. Sampling the refused sites in the tree, this was
+the single largest remaining cause.
+
+`coll_binding_names_of` now reads the names a pattern binds out of the
+PARSER's rendering of it (`stmt_get_name`, e.g. the literal `"(seen,k)"`) —
+not out of a line of source; that distinction is the whole point of the
+round-2 move onto the AST and is not being walked back. Accepted characters
+are identifiers, `(`, `)`, `,` and spaces; anything else (`[`, `.`, `*`) is a
+form this does not model and still takes the function with it.
+
+The direction is fail-closed by construction: over-counting bindings can only
+ADD refusals, because a bound name is a name that may be a different array.
+`Some(seen)` yields both `Some` and `seen` and refuses; `(a, b)` yields
+neither the receiver and proceeds. Only the inspectability gate is relaxed,
+and only for patterns whose every bound name is readable.
+`coll_is_plain_identifier` is deleted. Covered by
+`collection_certain_fix_safety_spec` c3 (unchanged: rebinding `seen` still
+refuses), c3b (binds other names: fixes) and c3c (a `[p, q]` list pattern:
+still refuses the function).
