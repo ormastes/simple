@@ -47,7 +47,7 @@ use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_L
 use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_gnu_support_args}
-use compiler.backend.linker._LinkerWrapper.native_linking.{native_direct_platform_flags}
+use compiler.backend.linker._LinkerWrapper.native_linking.{native_direct_platform_flags, INTERNAL_ELF_UNPRODUCIBLE_FLAGS}
 use compiler.backend.linker._LinkerWrapper.native_linking.{internal_link_plan, internal_resolve_library, internal_absorb_link_args, internal_link_native, InternalLinkPlan, InternalResolvedLib}
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 use compiler.backend.linker.linker_wrapper.{link_to_native}
@@ -379,9 +379,11 @@ describe "internal ELF route - the hardening flags reach the output binary":
         val linked = internal_link_native("linux", "aarch64", true,
             [HELLO_A64_OBJ], out, [], [], [], [], [], "", false, true)
         expect(linked.is_ok()).to_equal(true)
-        val dyn = shell("readelf -d '{out}'")
+        # `to_contain("NOW")` would be satisfied by the BIND_NOW line above,
+        # leaving DF_1_NOW unpinned -- assert the whole flag word.
+        val dyn = shell("readelf -dW '{out}'")
         expect(dyn.stdout).to_contain("BIND_NOW")
-        expect(dyn.stdout).to_contain("NOW")
+        expect(dyn.stdout).to_contain("Flags: NOW PIE")
         val run = shell("'{out}'")
         expect(run.exit_code).to_equal(42)
 
@@ -396,6 +398,24 @@ describe "internal ELF route - the hardening flags reach the output binary":
         expect(folded.unwrap().gc_sections).to_equal(true)
         expect(folded.unwrap().bind_now).to_equal(true)
 
+    it "the internal flag set is the lld set minus icf minus the unproducible three":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Pushing a probe flag onto the result only tests absorb; the property that matters is that the SHARED list reaches the route, reduced by exactly the declared exclusions")
+        val lld_flags = native_direct_platform_flags("linux", "lld", false)
+        val internal_flags = native_direct_platform_flags("linux", "internal", false)
+        var expected: [text] = []
+        for flag in lld_flags:
+            if flag == "--icf=all":
+                continue
+            if INTERNAL_ELF_UNPRODUCIBLE_FLAGS.contains(flag):
+                continue
+            expected = expected.push(flag)
+        expect(internal_flags).to_equal(expected)
+        # And the reduction is not vacuous in either direction.
+        expect(internal_flags.len() < lld_flags.len()).to_equal(true)
+        expect(internal_flags.contains("--gc-sections")).to_equal(true)
+        expect(internal_flags.contains("--icf=all")).to_equal(false)
+
     it "refuses a flag the producer grows that the engine cannot honour":
         # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
         step("Drift probe: a NEW flag added to the shared producer must be refused by name, not linked clean -- that is what makes folding the producer meaningful")
@@ -406,6 +426,14 @@ describe "internal ELF route - the hardening flags reach the output binary":
         expect(folded.is_err()).to_equal(true)
         expect(folded.unwrap_err()).to_contain("--g1probe-flag")
         expect(folded.unwrap_err()).to_contain("refused rather than ignored")
+
+    it "each subtracted flag is one absorb would refuse, not one it silently accepts":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Subtraction is only safe while the translator would REFUSE these. If absorb ever learns one, the subtraction would silently withhold it instead -- this row fails the day that happens")
+        for flag in INTERNAL_ELF_UNPRODUCIBLE_FLAGS:
+            val folded = internal_absorb_link_args(empty_plan(), [flag], "subtraction probe")
+            expect(folded.is_err()).to_equal(true)
+            expect(folded.unwrap_err()).to_contain(flag)
 
 describe "internal ELF route - --gc-sections works on input carrying .eh_frame":
     it "links and runs an object with .eh_frame instead of refusing it":

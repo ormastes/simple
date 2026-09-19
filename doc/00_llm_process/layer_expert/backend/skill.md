@@ -310,6 +310,13 @@ Traps worth knowing:
   `INTERNAL_ELF_UNPRODUCIBLE_FLAGS`, never given the internal route a list of
   its own -- a separate list would silently withhold every future flag,
   whereas subtraction means a new flag still arrives and is refused by name.
+- `--gc-sections` on this engine is a DATA-ONLY collector on real input.
+  `.eh_frame` is an unconditional GC root and a root's relocations are
+  followed; with clang's default `-fasynchronous-unwind-tables` every function
+  has an FDE, so every function stays live. Correct and safe (no dangling FDE
+  possible), but do not tell anyone dead code is removed — it is not. Recovering
+  code GC needs real per-FDE liveness. The `SHT_X86_64_UNWIND` root arm is
+  untested on this aarch64 host.
 - `-l` resolution follows ld's search rule (`lib<name>.so`, then `lib<name>.a`,
   then error) with ONE stated limit: a GROUP linker script resolves to its
   first readable ELF member, and a `-l<name>` member inside a script is not

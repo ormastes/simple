@@ -112,6 +112,30 @@ function an FDE describes stays live — which is the point: an FDE whose target
 had been collected would carry a dangling pc-begin relocation. Retaining a
 section lld would have dropped makes the image larger, never wrong.
 
+### Read this before assuming `--gc-sections` removes dead CODE
+
+**On real compiler output, code GC is effectively OFF. Only data is collected.**
+
+`.eh_frame` is an unconditional root and a root's relocations are followed.
+clang and gcc default to `-fasynchronous-unwind-tables`, so on this platform
+EVERY function gets an FDE, and every FDE relocation points at its function's
+section. Following them marks every function live. The result is correct and
+safe — nothing that is reachable is dropped, and no FDE can dangle — but a
+reader who sees "`--gc-sections` supported" and expects unreferenced functions
+to disappear will be wrong. They do not. `.data.*`/`.rodata.*` sections that
+nothing references ARE still collected, which is where the measured 4824 B ->
+4424 B on the fixture comes from.
+
+The fixture's `never_called_fn` survives for exactly this reason, and that is
+the +32 B delta below — it is one instance of the general rule, not a corner
+case. Recovering code GC needs real per-FDE liveness (parse `.eh_frame` CIEs
+and FDEs, drop the FDEs of collected sections, then rebuild the section);
+until then, treat `--gc-sections` on this engine as a data-only collector.
+
+**Unexercised path:** the `SHT_X86_64_UNWIND` arm of `elf_gc_is_root` has no
+coverage — this host is aarch64, where unwind data is the ordinary
+`.eh_frame` section. It is there for x86_64 correctness and is untested.
+
 Checked, not assumed: `.init_array`, `.fini_array`, `.preinit_array`,
 `SHT_NOTE`, `SHF_GNU_RETAIN` and the `.init`/`.fini`/`.ctors`/`.dtors`/`.jcr`
 families were ALREADY roots before this change, and `.gcc_except_table` is
