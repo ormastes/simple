@@ -414,6 +414,13 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
   this lane's gates were justified as needing "a real GPU or display"; both were
   measured GREEN on a plain Linux host with neither. Corrected 2026-08-16.
 
+
+## FreeBSD QEMU bootstrap lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/freebsd_qemu_bootstrap/skill.md`.
+- **Scope:** native FreeBSD x86_64 bootstrap inside QEMU (`check-freebsd-bootstrap-qemu.shs --full`)
+  through Stage 3 PASS, then Stage 4 full CLI and FreeBSD spec runs.
+- **Timeouts:** ssh cap >= bootstrap budget (#1121); Stage 2 per-file cap 1800s under TCG (#1122).
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under
