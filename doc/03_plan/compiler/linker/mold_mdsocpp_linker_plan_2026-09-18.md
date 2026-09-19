@@ -270,3 +270,15 @@ A full self-host internal link does **not** need a deployed pure-Simple binary
 — the seed interprets `native-build`, and that is the path to `link_to_native`.
 The wall is the interpreted engine's cost at 411 MB of archive input, plus
 `retained_symbols` and TLS.
+
+### Second parity defect, also found by comparison rather than by reading
+
+`libraries=["c"]` emitted **two** `DT_NEEDED libc.so.6` entries. The implicit
+libc input is `{libdir}/libc.so.6` while `libc.so`'s `GROUP()` names
+`/lib/<triple>/libc.so.6` — textually different, the same file — and this
+engine writes one `DT_NEEDED` per shared input, whereas `ld.lld` keys on
+SONAME and emits one. Shared inputs are now de-duplicated by content digest.
+Red → green: `native_linking_internal_spec` 13/14 → 14/14, both trees
+identical. The real bootstrap link config passes `libraries: []`, so this was
+not on the critical path — it was on the path of anything that starts passing
+`-l` names, which is where this lane is heading.
