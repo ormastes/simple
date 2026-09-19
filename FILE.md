@@ -50,7 +50,6 @@ FILE.md files) are allowed.
 | `.claude-plugin` | Claude Code plugin manifest |
 | `build` | Build output (mutable, includes target/ and bootstrap/) |
 | `tmp` | Temporary files (mutable) |
-| `docs` | Generated spec samples (INDEX/README/test-spec); distinct from `doc/` |
 | `assets` | Fonts and other binary assets consumed by tests and packaging |
 | `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
 | `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
