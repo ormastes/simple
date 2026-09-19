@@ -80,3 +80,16 @@ output; must not be rebuilt/replaced here), and the project direction is
 to replace the seed with the pure-Simple binary rather than patch the
 seed runtime. Fix direction: pure-Simple test runner must wire
 rt_process_run through in test mode (parity with run mode).
+
+## Cross-reference 2026-09-19 (enum_single_field_payload triage)
+
+Also blocks `test/01_unit/compiler/interpreter/enum_single_field_payload_spec.spl`
+(4/4 examples FAIL, every assertion `expected <empty> to contain PASS ...`):
+the spec's oracle is a subprocess probe
+(`test/01_unit/compiler/interpreter/probe_enum_single_field_payload.spl`
+spawned via `std.io_runtime.process_run`), and the neutered test-mode spawn
+returns empty output. Verified the pinned tree behavior is correct: the
+probe prints `ENUM_PAYLOAD PROBE: ALL PASS` under `bin/simple.exe run` in
+both `SIMPLE_EXECUTION_MODE=jit` and `=interpreter`. Not the original
+`interp_run_enum_single_field_payload_corrupt_2026-06-15.md` defect (closed,
+run-path only) — pure seed test-mode spawn debt.
