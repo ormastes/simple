@@ -81,6 +81,34 @@ describe "linker_script - tokenizer":
         expect(tokens[0].kind == LdTokenKind.Number).to_equal(true)
         expect(tokens[0].value).to_equal("0x1000")
 
+    it "tokenizes a CRLF linker script identically to the LF form":
+        # A .ld authored on Windows -- or generated there, or copied off a
+        # Windows share at link time -- carries \r\n. .gitattributes forces
+        # eol=lf for this repo so a CI checkout never sees CRLF, but a script
+        # handed to the linker at RUNTIME can, and a bare \r that is not
+        # treated as whitespace derails every token after it.
+        # Nothing in this suite covered that: deleting the `ch == "\r"` arm of
+        # _ld_is_whitespace left all 51 pre-existing examples green.
+        val lf = "ENTRY(_start)\nMEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }\n"
+        val crlf = "ENTRY(_start)\r\nMEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }\r\n"
+        expect(ld_tokens_equivalent(lf, crlf)).to_equal(true)
+        val script = ld_parse(crlf).unwrap()
+        expect(script.entry).to_equal("_start")
+        expect(ld_region_count(script)).to_equal(1)
+
+    it "treats a lone CR between tokens as whitespace":
+        val tokens = ld_tokenize("ENTRY\r(\r_start\r)")
+        expect(tokens[0].value).to_equal("ENTRY")
+        expect(tokens[1].kind == LdTokenKind.LParen).to_equal(true)
+        expect(tokens[2].value).to_equal("_start")
+        expect(tokens[3].kind == LdTokenKind.RParen).to_equal(true)
+        expect(tokens[4].kind == LdTokenKind.Eof).to_equal(true)
+
+    it "ends a // line comment at CRLF without leaking the CR":
+        val tokens = ld_tokenize("// windows comment\r\nENTRY(_start)")
+        expect(tokens[0].value).to_equal("ENTRY")
+        expect(tokens[2].value).to_equal("_start")
+
 # ============================================================================
 # 3. ENTRY Directive
 # ============================================================================

@@ -1,0 +1,317 @@
+#!/bin/sh
+# check-linker-specs-portable.shs
+#
+# Runs the HOST-INDEPENDENT half of the pure-Simple mold-like linker spec suite
+# and fails when any of them is broken. Its reason to exist is Windows: every
+# linker fix in this repo has so far been proven only on Linux, because
+# .github/workflows/windows-tests.yml's Windows jobs execute no spec at all
+# (they print "Native Windows binary not yet available" and exit 0) and
+# .github/workflows/windows-build.yml only ever calls `native-build`. A linker
+# regression that is Windows-only -- a path separator, a text-mode read
+# corrupting fixture bytes, a CRLF in a linker script -- could therefore land
+# green. This guard is what windows-build.yml invokes to close that hole; it is
+# deliberately OS-agnostic so the identical logic is dry-runnable on Linux.
+#
+# WHY A NAMED LIST AND NOT A DIRECTORY GLOB
+# -----------------------------------------
+# Eight of the 27 linker specs cannot run on a Windows runner. Globbing the
+# directory and tolerating their failure would be a silent skip -- the exact
+# false-green this guard exists to prevent -- so each one is excluded BY NAME
+# with its reason, and the count of what DID run is asserted.
+#
+#   (a) reads the host glibc out of /usr/lib/aarch64-linux-gnu or
+#       /lib64/ld-linux-x86-64.so.2 as a link input. Verified 2026-09-19:
+#       none of these has a file_exists/platform self-skip, so on Windows they
+#       hard-fail on a missing input rather than reporting a skip.
+#         elf_dynamic_link_spec.spl
+#         elf_gnu_hash_spec.spl
+#         elf_symtab_spec.spl
+#         elf_x64_dynamic_spec.spl
+#   (b) links against the host C runtime (Scrt1.o/crti.o/crtn.o + libc.so.6)
+#       and then EXECUTES the linked ELF, asserting "hi from libc\n" / exit 42.
+#       A Windows host can neither supply those inputs nor run an ELF.
+#         link_engine_external_spec.spl
+#         native_linking_internal_spec.spl
+#   (c) shells out to POSIX utilities (`process_run("sh", ...)` over a guard
+#       script; `shell()` with `test`/`grep` invocations).
+#         link_corpus_recipe_spec.spl
+#         linker_dead_imports_spec.spl
+#
+# The 19 that remain are pure computation over committed fixture bytes -- ELF
+# parse/write/layout/relocation encode, archive parse, gnu.hash-free symtab
+# ordering, boot layout planning, linker-script tokenize/parse, and the
+# link_{policy,receipt,request}_v1 schema contracts. They read fixtures through
+# file_read/file_read_bytes on repo-relative forward-slash paths, which Win32
+# accepts, and they spawn nothing.
+#
+# FAIL-CLOSED CONTRACT
+# --------------------
+# The failure mode being designed against is a job that goes green because it
+# ran nothing. Every one of these is a FAIL or an ERROR, never a pass:
+#   - a spec produced no `SPEC FILE VERDICT:` line at all (crash, parse error,
+#     unknown command, missing binary)       -> FAIL, named
+#   - a verdict with failed>0 or outcome!=OK -> FAIL, named
+#   - a verdict with executed=0              -> FAIL, named (a file that
+#     "passes" having run zero examples is vacuous)
+#   - fewer verdict lines collected than specs in the list -> ERROR
+#   - an empty spec list                     -> ERROR
+#   - no executable binary                   -> ERROR (absence of a binary is
+#     absence of evidence, not a pass)
+# Specs are driven DIRECTLY (`"$BINARY" <spec>`), not through `simple test`:
+# the driver epilogue emits the verdict either way, and the direct path spawns
+# no child test runner, so nothing in this guard depends on POSIX process
+# semantics.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
+#   PASS  - <n> spec(s) executed, <m> example(s) passed, 0 failed   exit 0
+#   FAIL  - ...                                                     exit 1
+#   ERROR - nothing was checked (...)                               exit 2
+#
+# Usage:
+#   sh scripts/check/check-linker-specs-portable.shs [--binary PATH]
+#   sh scripts/check/check-linker-specs-portable.shs --selftest
+#
+# --selftest runs first and is fatal. It drives three fixtures through the SAME
+# run_specs() parsing path used by the real scan, so the contract above is
+# proven rather than asserted:
+#   1. a spec whose `expect` fails      -> must FAIL and name the file
+#   2. a spec that does not parse (so no verdict line is ever emitted)
+#                                       -> must FAIL and name the file
+#   3. an empty spec list               -> must ERROR
+# Fixture 2 is the important one: it is the shape of "the job ran nothing".
+
+set -u
+
+BINARY="bin/simple"
+SELFTEST=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY="$2"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        *) printf 'ERROR - nothing was checked (unknown argument: %s)\n' "$1"; exit 2 ;;
+    esac
+done
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || { printf 'ERROR - nothing was checked (cannot cd to repo root)\n'; exit 2; }
+
+# The 19 host-independent linker specs. Keep in sync with the exclusion list in
+# the header comment: 19 here + 8 excluded = the 27 specs under
+# test/01_unit/compiler/backend/linker/ and test/01_unit/lib/common/linker/.
+PORTABLE_SPECS="
+test/01_unit/compiler/backend/linker/archive_parser_spec.spl
+test/01_unit/compiler/backend/linker/boot_layout_ops_spec.spl
+test/01_unit/compiler/backend/linker/boot_layout_plan_spec.spl
+test/01_unit/compiler/backend/linker/elf_archive_closure_spec.spl
+test/01_unit/compiler/backend/linker/elf_boot_link_spec.spl
+test/01_unit/compiler/backend/linker/elf_exec_writer_spec.spl
+test/01_unit/compiler/backend/linker/elf_got_static_spec.spl
+test/01_unit/compiler/backend/linker/elf_parser_spec.spl
+test/01_unit/compiler/backend/linker/elf_reloc_target_section_spec.spl
+test/01_unit/compiler/backend/linker/elf_section_header_field_parity_spec.spl
+test/01_unit/compiler/backend/linker/elf_static_link_spec.spl
+test/01_unit/compiler/backend/linker/elf_static_pie_spec.spl
+test/01_unit/compiler/backend/linker/elf_writer_spec.spl
+test/01_unit/compiler/backend/linker/linker_script_spec.spl
+test/01_unit/compiler/backend/linker/reloc_engine_spec.spl
+test/01_unit/compiler/backend/linker/sym_resolver_spec.spl
+test/01_unit/lib/common/linker/link_policy_v1_spec.spl
+test/01_unit/lib/common/linker/link_receipt_v1_spec.spl
+test/01_unit/lib/common/linker/link_request_v1_spec.spl
+"
+
+# run_specs <binary> <workdir> <spec>...
+#
+# Sets, on stdout, nothing; writes results into these files under <workdir>:
+#   verdicts   one collected `SPEC FILE VERDICT:` line per spec that emitted one
+#   offenders  one "<path> (<reason>)" per failing spec
+#   counts     "<executed_specs> <passed_examples>"
+# Returns 0 always; the caller decides the verdict. Kept as one function so
+# --selftest and the real scan cannot diverge.
+run_specs() {
+    _bin="$1"; shift
+    _wd="$1"; shift
+
+    : > "$_wd/verdicts"
+    : > "$_wd/offenders"
+    _nspecs=0
+    _npassed=0
+
+    for _spec in "$@"; do
+        [ -n "$_spec" ] || continue
+        if [ ! -f "$_spec" ]; then
+            printf '%s (spec file does not exist)\n' "$_spec" >> "$_wd/offenders"
+            continue
+        fi
+
+        # Exit status is read DIRECTLY into a variable on the line after the
+        # invocation -- never through a pipe. A pipeline's $? is the last
+        # command's status and has produced false greens in this repo before.
+        "$_bin" "$_spec" > "$_wd/out" 2>&1
+        _rc=$?
+
+        _verdict=$(grep -m1 '^SPEC FILE VERDICT:' "$_wd/out" 2>/dev/null || true)
+        if [ -z "$_verdict" ]; then
+            printf '%s (no SPEC FILE VERDICT line; exit %s)\n' "$_spec" "$_rc" \
+                >> "$_wd/offenders"
+            continue
+        fi
+
+        printf '%s\n' "$_verdict" >> "$_wd/verdicts"
+        _nspecs=$((_nspecs + 1))
+
+        _exec=$(printf '%s\n' "$_verdict" | sed -n 's/.*[ ]executed=\([0-9]*\).*/\1/p')
+        _fail=$(printf '%s\n' "$_verdict" | sed -n 's/.*[ ]failed=\([0-9]*\).*/\1/p')
+        _pass=$(printf '%s\n' "$_verdict" | sed -n 's/.*[ ]passed=\([0-9]*\).*/\1/p')
+        _out=$(printf '%s\n' "$_verdict" | sed -n 's/.*[ ]outcome=\([A-Za-z_]*\).*/\1/p')
+        [ -n "$_exec" ] || _exec=0
+        [ -n "$_fail" ] || _fail=0
+        [ -n "$_pass" ] || _pass=0
+        [ -n "$_out" ] || _out=UNKNOWN
+
+        _npassed=$((_npassed + _pass))
+
+        if [ "$_out" != "OK" ]; then
+            printf '%s (outcome=%s)\n' "$_spec" "$_out" >> "$_wd/offenders"
+        elif [ "$_fail" -gt 0 ]; then
+            printf '%s (failed=%s)\n' "$_spec" "$_fail" >> "$_wd/offenders"
+        elif [ "$_exec" -eq 0 ]; then
+            printf '%s (executed=0, vacuous)\n' "$_spec" >> "$_wd/offenders"
+        fi
+    done
+
+    printf '%s %s\n' "$_nspecs" "$_npassed" > "$_wd/counts"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest
+# ---------------------------------------------------------------------------
+selftest() {
+    _bin="$1"
+    # Deliberately NOT mktemp -d. On a Windows runner under git-bash, /tmp is
+    # MSYS-converted to a C:\...\Temp path when handed to the native
+    # simple.exe, and it is out-of-tree for `use std.spec.*` resolution --
+    # two variables the real scan does not have. Keeping the fixtures
+    # repo-relative under build/ (gitignored) gives them the same path shape
+    # as the 19 real specs, so a selftest failure means the parsing logic is
+    # wrong rather than the fixture location being exotic.
+    _t="build/linker-specs-selftest.$$"
+    rm -rf "$_t"
+    mkdir -p "$_t/fx" || { printf 'ERROR - nothing was checked (cannot create %s)\n' "$_t"; exit 2; }
+    _rv=0
+
+    # Fixture 1: a spec whose expect() fails.
+    cat > "$_t/fx/st_failing_spec.spl" <<'EOF'
+use std.spec.*
+
+describe "selftest failing":
+    it "fails on purpose":
+        expect(1).to_equal(2)
+EOF
+
+    # Fixture 2: a file that does not parse, so the driver epilogue never runs
+    # and NO verdict line is emitted. This is the "ran nothing" shape.
+    cat > "$_t/fx/st_unparsable_spec.spl" <<'EOF'
+use std.spec.*
+
+describe "selftest unparsable":
+    it "never gets here":
+        expect(((((
+EOF
+
+    # 1. failing expect must FAIL, be named, AND have gone through the parsed
+    #    verdict path. Asserting only "appears in offenders" would also be
+    #    satisfied by "(no SPEC FILE VERDICT line)", so a binary that cannot
+    #    interpret ANY spec would pass all three fixtures. Requiring
+    #    `outcome=` plus a non-empty verdicts file makes this fixture the thing
+    #    that reports "this binary cannot run specs here" directly -- which
+    #    matters on Windows, where no job has ever interpreted a spec.
+    run_specs "$_bin" "$_t" "$_t/fx/st_failing_spec.spl"
+    if ! grep -q 'st_failing_spec.*outcome=' "$_t/offenders" || [ ! -s "$_t/verdicts" ]; then
+        printf 'selftest: FAIL - a spec with a failing expect did not reach the parsed verdict path\n' >&2
+        _rv=1
+    fi
+
+    # 2. unparsable file must FAIL and be named (no verdict line at all).
+    run_specs "$_bin" "$_t" "$_t/fx/st_unparsable_spec.spl"
+    if ! grep -q 'st_unparsable_spec.*no SPEC FILE VERDICT' "$_t/offenders"; then
+        printf 'selftest: FAIL - a spec emitting no verdict line was not flagged\n' >&2
+        _rv=1
+    fi
+    if [ -s "$_t/verdicts" ]; then
+        printf 'selftest: FAIL - a verdict was collected for an unparsable spec\n' >&2
+        _rv=1
+    fi
+
+    # 3. empty list must yield 0 executed specs, forcing the caller to ERROR.
+    run_specs "$_bin" "$_t"
+    if [ "$(cut -d' ' -f1 < "$_t/counts")" != "0" ]; then
+        printf 'selftest: FAIL - empty spec list did not report 0 executed specs\n' >&2
+        _rv=1
+    fi
+
+    rm -rf "$_t"
+    return $_rv
+}
+
+# Accept a bare path or its .exe sibling, so the same invocation works on a
+# Windows runner and on Linux. Anything else is ERROR, never a pass: absence of
+# a binary is absence of evidence.
+if [ ! -x "$BINARY" ] && [ -x "$BINARY.exe" ]; then
+    BINARY="$BINARY.exe"
+fi
+if [ ! -x "$BINARY" ]; then
+    printf 'ERROR - nothing was checked (no executable Simple binary at %s)\n' "$BINARY"
+    exit 2
+fi
+
+if ! selftest "$BINARY"; then
+    printf 'ERROR - nothing was checked (selftest failed; see stderr)\n'
+    exit 2
+fi
+[ "$SELFTEST" -eq 0 ] || { printf 'PASS - selftest only, 3 fixture(s) verified\n'; exit 0; }
+
+# ---------------------------------------------------------------------------
+# real scan
+# ---------------------------------------------------------------------------
+EXPECTED=$(printf '%s\n' "$PORTABLE_SPECS" | grep -c '_spec\.spl$')
+if [ "$EXPECTED" -eq 0 ]; then
+    printf 'ERROR - nothing was checked (empty portable spec list)\n'
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { printf 'ERROR - nothing was checked (mktemp failed)\n'; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+# shellcheck disable=SC2086
+run_specs "$BINARY" "$WORK" $PORTABLE_SPECS
+
+NSPECS=$(cut -d' ' -f1 < "$WORK/counts")
+NPASSED=$(cut -d' ' -f2 < "$WORK/counts")
+
+if [ "$NSPECS" -eq 0 ]; then
+    printf 'ERROR - nothing was checked (0 of %s spec(s) produced a verdict; binary %s)\n' \
+        "$EXPECTED" "$BINARY"
+    exit 2
+fi
+
+if [ -s "$WORK/offenders" ]; then
+    printf 'linker spec offenders:\n'
+    sed 's/^/  /' "$WORK/offenders"
+    printf 'FAIL - %s of %s spec(s) produced a verdict, %s offender(s): %s\n' \
+        "$NSPECS" "$EXPECTED" "$(wc -l < "$WORK/offenders" | tr -d ' ')" \
+        "$(sed 's/ .*//' "$WORK/offenders" | sed 's#.*/##' | tr '\n' ' ' | sed 's/ $//')"
+    exit 1
+fi
+
+if [ "$NSPECS" -ne "$EXPECTED" ]; then
+    printf 'ERROR - nothing was checked (%s of %s spec(s) produced a verdict)\n' \
+        "$NSPECS" "$EXPECTED"
+    exit 2
+fi
+
+printf 'PASS - %s spec(s) executed, %s example(s) passed, 0 failed (binary %s)\n' \
+    "$NSPECS" "$NPASSED" "$BINARY"
+exit 0
