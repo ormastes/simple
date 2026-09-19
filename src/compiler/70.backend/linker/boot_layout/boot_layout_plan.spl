@@ -1,0 +1,391 @@
+# BootLayoutPlan - typed boot/kernel layout plan derived from a linker script
+#
+# Lane A9 (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md §9).
+# Translates a parsed GNU ld script (linker_script.spl) into the typed plan the
+# internal linker needs to lay out a freestanding kernel: memory regions,
+# program-header segments, output sections (VMA/LMA expressions, KEEP roots,
+# NOLOAD, `. +=` padding, inner ALIGN), symbols and assertions.
+#
+# Fail-closed: a `:phdr` naming an undeclared segment, a `> region` naming an
+# undeclared region, a missing ENTRY, or an allocated section left without a
+# segment while PHDRS is declared is an Err, never a silently dropped field.
+#
+# The external `-T` linker path stays the producer; this plan is the internal
+# engine's input and the object of the equivalence ladder (design §9).
+
+use compiler.backend.linker.linker_script.{
+    LdScript, LdOutputSection, LdStmt, LdStmtKind, LdCmdKind, LdToken, LdTokenKind,
+    ld_parse, ld_tokenize, ld_parse_number
+}
+
+# ============================================================================
+# Plan Types
+# ============================================================================
+
+struct BootRegion:
+    """A MEMORY region."""
+    name: text
+    attrs: text
+    origin: i64
+    length: i64
+
+struct BootSegment:
+    """A PHDRS program header."""
+    name: text
+    phdr_type: text      # e.g. "PT_LOAD"
+    flags: i64           # p_flags (PF_X=1, PF_W=2, PF_R=4) or -1 if not given
+
+struct BootSectionPlan:
+    """One output section of the boot image."""
+    name: text
+    vma_expr: text       # explicit address expression or "" (follows location counter)
+    dot_expr: text       # `. = expr` between the previous section and this one, or ""
+    align_expr: text     # ALIGN(...) after the colon or ""
+    lma_expr: text       # AT(...) or ""
+    has_lma_bias: bool   # lma_expr has the shape ADDR(<self>) - C
+    lma_bias: i64        # C, i.e. VMA - LMA (higher-half bias); 0 when not biased
+    input_patterns: [text]   # every input section glob, in order (KEEP included)
+    keep_patterns: [text]    # KEEP(...) globs — GC roots
+    noload: bool         # (NOLOAD): SHT_NOBITS, no file bytes
+    pad_bytes: i64       # sum of `. += n` inside the body
+    inner_aligns: [i64]  # `. = ALIGN(n)` inside the body, in order
+    segment: text        # PHDRS segment ("" when PHDRS is not used or section is discarded/non-alloc)
+    region: text         # MEMORY region or ""
+    discard: bool        # /DISCARD/
+    defined_symbols: [text]  # symbols assigned inside the body
+
+struct BootSymbol:
+    """A symbol assignment (plain or PROVIDE)."""
+    name: text
+    expr: text
+    provide: bool
+    section: text        # enclosing output section, "" at SECTIONS level
+
+struct BootAssertion:
+    expr: text
+    message: text
+
+struct BootLayoutPlan:
+    """Typed layout plan for a freestanding boot image."""
+    output_format: text
+    output_arch: text
+    entry: text
+    start_expr: text     # `. = expr` before the first output section, or ""
+    regions: [BootRegion]
+    segments: [BootSegment]
+    sections: [BootSectionPlan]
+    symbols: [BootSymbol]
+    assertions: [BootAssertion]
+    gc_roots: [text]     # union of all KEEP globs, in order
+    extern_symbols: [text]   # EXTERN(...) — forced-undefined symbols (link roots)
+    discard_patterns: [text]
+
+# ============================================================================
+# Constant-expression evaluator
+# ============================================================================
+
+struct BootEvalCtx:
+    """Evaluation context: location counter plus named values (symbols, ADDR(sec))."""
+    dot: i64
+    names: [text]
+    values: [i64]
+
+struct _BootEv:
+    pos: i64
+    value: i64
+    err: text
+
+fn boot_eval_ctx(dot: i64) -> BootEvalCtx:
+    BootEvalCtx(dot: dot, names: [], values: [])
+
+fn boot_eval_bind(ctx: BootEvalCtx, name: text, value: i64) -> BootEvalCtx:
+    BootEvalCtx(dot: ctx.dot, names: ctx.names.push(name), values: ctx.values.push(value))
+
+fn _boot_lookup(ctx: BootEvalCtx, name: text) -> (bool, i64):
+    var i = ctx.names.len() - 1
+    while i >= 0:
+        if ctx.names[i] == name:
+            return (true, ctx.values[i])
+        i = i - 1
+    (false, 0)
+
+fn boot_align_up(value: i64, align: i64) -> i64:
+    """Round value up to a multiple of align (align <= 1 is identity)."""
+    if align <= 1:
+        return value
+    val rem = value % align
+    if rem == 0:
+        return value
+    if rem < 0:
+        return value - rem
+    value + (align - rem)
+
+fn _boot_tok(toks: [LdToken], pos: i64) -> LdToken:
+    if pos < toks.len():
+        return toks[pos]
+    LdToken(kind: LdTokenKind.Eof, value: "")
+
+fn _boot_fail(pos: i64, msg: text) -> _BootEv:
+    _BootEv(pos: pos, value: 0, err: msg)
+
+fn _boot_eval_primary(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    val tok = _boot_tok(toks, pos)
+    if tok.kind == LdTokenKind.Number:
+        return _BootEv(pos: pos + 1, value: ld_parse_number(tok.value), err: "")
+    if tok.kind == LdTokenKind.Minus:
+        val inner = _boot_eval_primary(toks, pos + 1, ctx)
+        return _BootEv(pos: inner.pos, value: 0 - inner.value, err: inner.err)
+    if tok.kind == LdTokenKind.LParen:
+        val inner = _boot_eval_sum(toks, pos + 1, ctx)
+        if inner.err != "":
+            return inner
+        if _boot_tok(toks, inner.pos).kind != LdTokenKind.RParen:
+            return _boot_fail(inner.pos, "expected ')'")
+        return _BootEv(pos: inner.pos + 1, value: inner.value, err: "")
+    if tok.kind == LdTokenKind.Word:
+        if _boot_tok(toks, pos + 1).kind == LdTokenKind.LParen:
+            val fname = tok.value
+            if fname == "ADDR" or fname == "LOADADDR" or fname == "SIZEOF" or fname == "ORIGIN" or fname == "LENGTH":
+                val arg = _boot_tok(toks, pos + 2)
+                if _boot_tok(toks, pos + 3).kind != LdTokenKind.RParen:
+                    return _boot_fail(pos, "{fname}() takes one name")
+                val (found, v) = _boot_lookup(ctx, fname + "(" + arg.value + ")")
+                if not found:
+                    return _boot_fail(pos, "unknown {fname}({arg.value})")
+                return _BootEv(pos: pos + 4, value: v, err: "")
+            if fname == "ALIGN":
+                val arg = _boot_eval_sum(toks, pos + 2, ctx)
+                if arg.err != "":
+                    return arg
+                if _boot_tok(toks, arg.pos).kind != LdTokenKind.RParen:
+                    return _boot_fail(arg.pos, "ALIGN takes one argument")
+                return _BootEv(pos: arg.pos + 1, value: boot_align_up(ctx.dot, arg.value), err: "")
+            return _boot_fail(pos, "unsupported function {fname}")
+        if tok.value == ".":
+            return _BootEv(pos: pos + 1, value: ctx.dot, err: "")
+        val (found, v) = _boot_lookup(ctx, tok.value)
+        if not found:
+            return _boot_fail(pos, "unknown symbol {tok.value}")
+        return _BootEv(pos: pos + 1, value: v, err: "")
+    _boot_fail(pos, "expected expression")
+
+fn _boot_eval_term(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    var acc = _boot_eval_primary(toks, pos, ctx)
+    while acc.err == "" and _boot_tok(toks, acc.pos).kind == LdTokenKind.Star:
+        val rhs = _boot_eval_primary(toks, acc.pos + 1, ctx)
+        if rhs.err != "":
+            return rhs
+        acc = _BootEv(pos: rhs.pos, value: acc.value * rhs.value, err: "")
+    acc
+
+fn _boot_eval_sum(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
+    var acc = _boot_eval_term(toks, pos, ctx)
+    while acc.err == "" and (_boot_tok(toks, acc.pos).kind == LdTokenKind.Plus or _boot_tok(toks, acc.pos).kind == LdTokenKind.Minus):
+        val is_plus = _boot_tok(toks, acc.pos).kind == LdTokenKind.Plus
+        val rhs = _boot_eval_term(toks, acc.pos + 1, ctx)
+        if rhs.err != "":
+            return rhs
+        val v = if is_plus: acc.value + rhs.value else: acc.value - rhs.value
+        acc = _BootEv(pos: rhs.pos, value: v, err: "")
+    acc
+
+fn boot_eval(expr: text, ctx: BootEvalCtx) -> Result<i64, text>:
+    """Evaluate a canonical linker-script expression (numbers, + - *, ., ALIGN, ADDR, symbols)."""
+    val toks = ld_tokenize(expr)
+    val r = _boot_eval_sum(toks, 0, ctx)
+    if r.err != "":
+        return Err("cannot evaluate '{expr}': {r.err}")
+    if _boot_tok(toks, r.pos).kind != LdTokenKind.Eof:
+        return Err("cannot evaluate '{expr}': trailing tokens")
+    Ok(r.value)
+
+# ============================================================================
+# Script -> Plan
+# ============================================================================
+
+fn _boot_lma_bias(section_name: text, lma_expr: text) -> (bool, i64):
+    """Recognise AT(ADDR(<self>) - C) and return (true, C)."""
+    val toks = ld_tokenize(lma_expr)
+    # ADDR ( name ) - Number Eof
+    if toks.len() != 7:
+        return (false, 0)
+    if toks[0].value != "ADDR" or toks[1].kind != LdTokenKind.LParen or toks[2].value != section_name:
+        return (false, 0)
+    if toks[3].kind != LdTokenKind.RParen or toks[4].kind != LdTokenKind.Minus or toks[5].kind != LdTokenKind.Number:
+        return (false, 0)
+    (true, ld_parse_number(toks[5].value))
+
+fn _boot_is_non_alloc(sec: LdOutputSection) -> bool:
+    # Debug sections are pinned at address 0 and carry no SHF_ALLOC input.
+    sec.name.starts_with(".debug") or sec.name.starts_with(".comment")
+
+fn _boot_find_segment(segments: [BootSegment], name: text) -> bool:
+    for s in segments:
+        if s.name == name:
+            return true
+    false
+
+fn _boot_find_region(regions: [BootRegion], name: text) -> bool:
+    for r in regions:
+        if r.name == name:
+            return true
+    false
+
+fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
+    """Build the typed BootLayoutPlan from a parsed script (fail-closed)."""
+    if script.entry == "":
+        return Err("boot layout: script has no ENTRY")
+    if script.fragment_cmds.len() > 0:
+        return Err("boot layout: script is a SECTIONS fragment (output sections outside SECTIONS); plan the including script")
+    var regions: [BootRegion] = []
+    for m in script.memory:
+        regions = regions.push(BootRegion(name: m.name, attrs: m.attrs, origin: m.origin, length: m.length))
+    var segments: [BootSegment] = []
+    for h in script.phdrs:
+        var flags: i64 = -1
+        if h.flags_expr != "":
+            match boot_eval(h.flags_expr, boot_eval_ctx(0)):
+                case Ok(v): flags = v
+                case Err(e): return Err("boot layout: PHDRS {h.name}: {e}")
+        segments = segments.push(BootSegment(name: h.name, phdr_type: h.phdr_type, flags: flags))
+
+    var sections: [BootSectionPlan] = []
+    var symbols: [BootSymbol] = []
+    var assertions: [BootAssertion] = []
+    var gc_roots: [text] = []
+    var discard: [text] = []
+    var start_expr = ""
+    var seen_section = false
+    var sticky_segment = ""
+    var pending_dot = ""
+
+    var externs: [text] = []
+    for st in script.top_stmts:
+        if st.kind == LdStmtKind.Include:
+            return Err("boot layout: INCLUDE \"{st.message}\" is not resolved; plan the expanded script")
+        if st.kind == LdStmtKind.Extern:
+            for sym in st.patterns:
+                externs = externs.push(sym)
+        else if st.kind == LdStmtKind.Assert:
+            assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+        else if st.symbol != ".":
+            symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
+                provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
+
+    for c in script.commands:
+        if c.kind == LdCmdKind.Stmt:
+            val st = c.stmt
+            if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
+                return Err("boot layout: INCLUDE/EXTERN inside SECTIONS is not modelled; plan the expanded script")
+            if st.kind == LdStmtKind.Assert:
+                assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+            else if st.symbol == ".":
+                if st.kind != LdStmtKind.Assign:
+                    return Err("boot layout: location-counter statement '. += {st.expr}' between output sections is not modelled")
+                if not seen_section:
+                    start_expr = st.expr
+                else:
+                    if pending_dot != "":
+                        return Err("boot layout: two location-counter assignments between output sections")
+                    pending_dot = st.expr
+            else:
+                symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
+                    provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: ""))
+            continue
+
+        seen_section = true
+        val sec = script.sections[c.section_index]
+        val is_discard = sec.name == "/DISCARD/"
+        var inputs: [text] = []
+        var keeps: [text] = []
+        var pad: i64 = 0
+        var aligns: [i64] = []
+        var defined: [text] = []
+        for st in sec.body:
+            if st.kind == LdStmtKind.Input or st.kind == LdStmtKind.Keep:
+                for pat in st.patterns:
+                    inputs = inputs.push(pat)
+                    if st.kind == LdStmtKind.Keep:
+                        keeps = keeps.push(pat)
+                        if not is_discard:
+                            gc_roots = gc_roots.push(pat)
+                    if is_discard:
+                        discard = discard.push(pat)
+            else if st.kind == LdStmtKind.Assert:
+                assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
+            else if st.kind == LdStmtKind.Include or st.kind == LdStmtKind.Extern:
+                return Err("boot layout: {sec.name}: INCLUDE/EXTERN inside an output section is not modelled")
+            else if st.symbol == ".":
+                if st.kind == LdStmtKind.AddAssign:
+                    match boot_eval(st.expr, boot_eval_ctx(0)):
+                        case Ok(v): pad = pad + v
+                        case Err(e): return Err("boot layout: {sec.name}: {e}")
+                else:
+                    # Only `. = ALIGN(n)` and `. = . + n` are modelled inside a section body.
+                    val toks = ld_tokenize(st.expr)
+                    if toks.len() == 4 and toks[0].value == "." and toks[1].kind == LdTokenKind.Plus:
+                        match boot_eval(toks[2].value, boot_eval_ctx(0)):
+                            case Ok(v): pad = pad + v
+                            case Err(e): return Err("boot layout: {sec.name}: {e}")
+                        continue
+                    if toks.len() != 5 or toks[0].value != "ALIGN":
+                        return Err("boot layout: {sec.name}: unsupported location-counter assignment '. = {st.expr}'")
+                    aligns = aligns.push(ld_parse_number(toks[2].value))
+            else:
+                defined = defined.push(st.symbol)
+                symbols = symbols.push(BootSymbol(name: st.symbol, expr: st.expr,
+                    provide: st.kind == LdStmtKind.Provide or st.kind == LdStmtKind.ProvideHidden, section: sec.name))
+
+        if sec.region != "" and not _boot_find_region(regions, sec.region):
+            return Err("boot layout: {sec.name} placed in undeclared region '{sec.region}'")
+        for ph in sec.phdrs:
+            if not _boot_find_segment(segments, ph):
+                return Err("boot layout: {sec.name} placed in undeclared segment '{ph}'")
+
+        var segment = ""
+        if not is_discard and not _boot_is_non_alloc(sec):
+            if sec.phdrs.len() > 0:
+                sticky_segment = sec.phdrs[0]
+            segment = sticky_segment
+            if segments.len() > 0 and segment == "":
+                return Err("boot layout: allocated section {sec.name} has no PHDRS segment")
+
+        val (has_bias, bias) = _boot_lma_bias(sec.name, sec.lma_expr)
+        sections = sections.push(BootSectionPlan(name: sec.name, vma_expr: sec.address_expr, dot_expr: pending_dot,
+            align_expr: sec.align_expr, lma_expr: sec.lma_expr, has_lma_bias: has_bias, lma_bias: bias,
+            input_patterns: inputs, keep_patterns: keeps, noload: sec.section_type == "NOLOAD",
+            pad_bytes: pad, inner_aligns: aligns, segment: segment, region: sec.region,
+            discard: is_discard, defined_symbols: defined))
+        pending_dot = ""
+
+    if pending_dot != "":
+        return Err("boot layout: trailing location-counter assignment '. = {pending_dot}' after the last output section")
+    Ok(BootLayoutPlan(output_format: script.output_format, output_arch: script.output_arch,
+        entry: script.entry, start_expr: start_expr, regions: regions, segments: segments,
+        sections: sections, symbols: symbols, assertions: assertions, gc_roots: gc_roots,
+        extern_symbols: externs, discard_patterns: discard))
+
+fn boot_layout_from_text(input: text) -> Result<BootLayoutPlan, text>:
+    """Parse a linker script and build its BootLayoutPlan."""
+    match ld_parse(input):
+        case Ok(script): boot_layout_from_script(script)
+        case Err(e): Err(e)
+
+fn boot_layout_find_section(plan: BootLayoutPlan, name: text) -> BootSectionPlan?:
+    for s in plan.sections:
+        if s.name == name:
+            return s
+    nil
+
+fn boot_layout_start_address(plan: BootLayoutPlan) -> Result<i64, text>:
+    """Initial location counter: the leading `. = expr`, else the first region's ORIGIN, else 0."""
+    if plan.start_expr != "":
+        return boot_eval(plan.start_expr, boot_eval_ctx(0))
+    if plan.regions.len() > 0:
+        return Ok(plan.regions[0].origin)
+    Ok(0)
+
+export BootRegion, BootSegment, BootSectionPlan, BootSymbol, BootAssertion, BootLayoutPlan
+export BootEvalCtx, boot_eval_ctx, boot_eval_bind, boot_eval, boot_align_up
+export boot_layout_from_script, boot_layout_from_text, boot_layout_find_section
+export boot_layout_start_address
