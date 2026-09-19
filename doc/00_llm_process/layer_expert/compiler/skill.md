@@ -54,3 +54,18 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   engine emits one `DT_NEEDED` per shared input, so both showed up as extra
   entries ld.lld does not write. Plan §13 carries the route, the comparison
   table and the ranked gap list.
+
+- 2026-09-19 linker route CORRECTION (lane F1 round 2): the entry above was
+  wrong for stage 2. `bootstrap-from-scratch.sh:2945` sets
+  `SIMPLE_NATIVE_BUILD_RUST=1` for the `:2959` stage-2 link, so
+  `driver/src/main.rs:168-178` routes it to the **Rust** native-build
+  (`native_build.rs:662` -> `native_project/mod.rs:1216 link_objects` ->
+  `linker.rs:1165` -> `:54`), which refuses `SIMPLE_LINKER=internal` by name.
+  The Rust linker therefore links stage-2 OBJECTS, not just cargo artifacts,
+  and an internal bootstrap dies at stage 2. Only stage 3 is Simple-side, and
+  via `bootstrap_main.spl:385` -> `bootstrap_focused_native_build` ->
+  `bootstrap_api_fixed` -> `driver_aot_native_output` -> `orchestrator:648` —
+  **not** `native_build_main.spl`/`native_build_worker.spl`. Third trap, worse
+  than the two above because comparing the DT_NEEDED *set* cannot see it:
+  DT_NEEDED **order** decides which library wins, ld.lld emits `-l` libraries
+  before libc, and a libc-first list silently loses every shadowing symbol.
