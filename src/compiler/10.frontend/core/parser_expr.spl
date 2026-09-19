@@ -288,7 +288,53 @@ fn parse_not() -> i64:
         parser_advance()
         val operand = parse_not()
         return expr_unary(57, operand, 0)
-    parse_comparison()
+    parse_bitwise_or()
+
+# Bitwise infix levels, between logical `not` and comparisons, matching
+# tok_precedence() (src/compiler/10.frontend/core/tokens.spl):
+#   pipe(121)=4 < caret(122)=5 < ampersand(120)=6 < ==/!= (7) < relational (8)
+# so `|`/`^`/`&` all bind looser than comparisons and tighter than
+# logical and/or. These operators used to be consumed at multiplication
+# level (same as `*`, `/`, `%`, `**`); they were moved here per
+# doc/08_tracking/bug/lean_parser_bitwise_pipe_precedence_divergence_2026-06-11.md
+fn parse_bitwise_or() -> i64:
+    # `|` (121) — loosest of the bitwise levels.
+    parser_expr_trace_step("bitwise-or")
+    var left = parse_bitwise_xor()
+    while true:
+        if par_kind_get() == 121:
+            parser_advance()
+            val right = parse_bitwise_xor()
+            left = expr_binary(121, left, right, 0)
+        else:
+            break
+    left
+
+fn parse_bitwise_xor() -> i64:
+    # `^` (122)
+    parser_expr_trace_step("bitwise-xor")
+    var left = parse_bitwise_and()
+    while true:
+        if par_kind_get() == 122:
+            parser_advance()
+            val right = parse_bitwise_and()
+            left = expr_binary(122, left, right, 0)
+        else:
+            break
+    left
+
+fn parse_bitwise_and() -> i64:
+    # `&` (120) — tightest of the bitwise levels.
+    parser_expr_trace_step("bitwise-and")
+    var left = parse_comparison()
+    while true:
+        if par_kind_get() == 120:
+            parser_advance()
+            val right = parse_comparison()
+            left = expr_binary(120, left, right, 0)
+        else:
+            break
+    left
 
 fn parse_comparison() -> i64:
     parser_expr_trace_step("comparison")
@@ -431,18 +477,6 @@ fn parse_multiplication() -> i64:
             parser_advance()
             val right = parse_unary()
             left = expr_binary(65, left, right, 0)
-        elif par_kind_get() == 120:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(120, left, right, 0)
-        elif par_kind_get() == 121:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(121, left, right, 0)
-        elif par_kind_get() == 122:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(122, left, right, 0)
         else:
             break
     left
@@ -490,7 +524,7 @@ fn parse_unary() -> i64:
 fn parse_binary_from(base: i64) -> i64:
     # Continue binary expression parsing from an already-parsed base.
     # Used by parse_call_arg when ident is already consumed.
-    # Handles: *, /, %, **, +, -, .., ..=, ??, comparisons, and, or
+    # Handles: *, /, %, **, +, -, .., ..=, ??, comparisons, |, ^, &, and, or
     var left = base
     # G14: as-cast at unary level (tighter than mul) — apply before multiplication loop
     for _cas in 0..20:
@@ -518,18 +552,6 @@ fn parse_binary_from(base: i64) -> i64:
             parser_advance()
             val right = parse_unary()
             left = expr_binary(65, left, right, 0)
-        elif par_kind_get() == 120:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(120, left, right, 0)
-        elif par_kind_get() == 121:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(121, left, right, 0)
-        elif par_kind_get() == 122:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(122, left, right, 0)
         else:
             break
     # Addition level
@@ -621,6 +643,31 @@ fn parse_binary_from(base: i64) -> i64:
             parser_advance()
             val is_right = parse_null_coalesce()
             left = expr_binary(TOK_KW_IS, left, is_right, 0)
+        else:
+            break
+    # Bitwise levels — & (120, tok_precedence 6) > ^ (122, 5) > | (121, 4),
+    # all looser than comparisons (7/8) and tighter than logical and (3).
+    # Mirrors the parse_bitwise_and/xor/or leveled functions; see the comment
+    # above parse_bitwise_or.
+    while true:
+        if par_kind_get() == 120:
+            parser_advance()
+            val right = parse_comparison()
+            left = expr_binary(120, left, right, 0)
+        else:
+            break
+    while true:
+        if par_kind_get() == 122:
+            parser_advance()
+            val right = parse_bitwise_and()
+            left = expr_binary(122, left, right, 0)
+        else:
+            break
+    while true:
+        if par_kind_get() == 121:
+            parser_advance()
+            val right = parse_bitwise_xor()
+            left = expr_binary(121, left, right, 0)
         else:
             break
     # And
