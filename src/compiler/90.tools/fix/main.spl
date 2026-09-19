@@ -18,7 +18,11 @@ use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_req
 # `simple lint --fix` and `simple fix` share one fix generator instead of two
 # drifting copies. `lazy` avoids pulling the full lint/parser frontend into
 # every `simple fix` invocation that never hits a COLL002/COLL020 file.
-use lazy compiler.tools.lint.main.{collection_002_fix, collection_020_fix}
+#
+# Sharing the GENERATOR was not enough: this file called it with no AST gate
+# while lint called it only behind one, so the two tools disagreed (see
+# `collection_certain_fixes`' header). Call the gated entry point instead.
+use lazy compiler.tools.lint.main.{collection_certain_fixes}
 
 # `stdin_read_char` is an always-linked runtime primitive (see
 # std.mcp_sdk.transport.stdio.stdio_read_line for the reference pattern).
@@ -233,23 +237,13 @@ pub fn collect_fixes_from_source(file_path: String, source: String) -> [EasyFix]
     # Use shared rules module for all text-scanning rules
     var fixes = check_all_rules(source, file_path)
 
-    # COLL002/COLL020 Certain fixes: reuse the exact generator `simple lint
-    # --fix` uses (see the lazy import above) rather than re-deriving the
-    # pattern here. Each function independently re-verifies its own
-    # precondition from `lines` and returns nil on anything but an exact,
-    # unambiguous match, so calling both unconditionally is safe.
-    # Perf gate: both generators re-scan the whole file line-by-line looking
-    # for a `.contains(` call; a file with none can never match either rule's
-    # precondition, so skip the scan entirely on a COLL-free file (measured
-    # 2.70s -> 3.60s on a COLL-free 251-line file before this gate).
-    if source.contains(".contains("):
-        val lines = source.split("\n")
-        match collection_002_fix(file_path, lines):
-            case Some(fix): fixes.push(fix)
-            case nil: pass_do_nothing
-        match collection_020_fix(file_path, lines):
-            case Some(fix): fixes.push(fix)
-            case nil: pass_do_nothing
+    # COLL002/COLL020 Certain fixes: go through the detector-gated entry point
+    # so this tool and `simple lint` cannot disagree about whether a shape is
+    # a COLL finding at all. It carries the same `.contains(` perf gate this
+    # call site used to (measured 2.70s -> 3.60s on a COLL-free 251-line file
+    # before that gate existed) and parses only on the files that pass it.
+    for f in collection_certain_fixes(file_path, source):
+        fixes.push(f)
 
     val primitive_api_fixes = check_primitive_api(source, file_path)
     for f in primitive_api_fixes:
