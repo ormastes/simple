@@ -330,3 +330,38 @@ and only for patterns whose every bound name is readable.
 `collection_certain_fix_safety_spec` c3 (unchanged: rebinding `seen` still
 refuses), c3b (binds other names: fixes) and c3c (a `[p, q]` list pattern:
 still refuses the function).
+
+### Coverage after round 4, and where the ceiling actually is
+
+Measured with `bin/simple fix --dry-run` from INSIDE the lane worktree over
+the 68 real dedup sites in 52 files:
+
+| change | sites fixed |
+|---|---|
+| round 3 baseline | 5 (7%) |
+| reader results may flow into calls; Dict beside the declaration | 7 |
+| per-site rendering (the exactly-one admission rule removed) | 8 |
+| destructuring binds names instead of blinding the function | **10 (15%)** |
+
+15% is well short of a share worth shipping the Certain door on, and the
+reason is no longer in the door. Sampling the refusals:
+
+- **26 of 68 (38%) are never warned about at all.** The detector only matches
+  a guard whose value is a bare identifier, so `seen.contains(dep.path)` —
+  the most common real shape — produces no COLL002 and no COLL020, and the
+  Certain door never sees it. Filed separately as
+  `coll020_detector_blind_to_non_identifier_guarded_value_2026-09-19.md`,
+  with the two-function CLI reduction that proves it.
+- 10 of 68 have a multi-statement guard body, which the detector also rejects.
+- The rest are the door working: the array is a parameter, or reassigned
+  (`xs = xs.sorted()`), or `.sort()`ed (an in-place reorder is
+  membership-preserving and could in principle be allowed, but that is 3
+  sites and a new class of reasoning), or the same receiver is deduped in two
+  loops (18 sites — one proof permits exactly one push, so two dedup loops on
+  one array refuse each other; that is the next real ceiling inside the door).
+
+**Verdict on shipping.** Lint-only is the shippable configuration: the
+diagnostics are correct and positioned, and the Certain door refuses rather
+than rewriting wrongly. 15% does not clear the bar for turning the fix on by
+default, and the honest next step is the detector record above, not further
+loosening of the proofs.
