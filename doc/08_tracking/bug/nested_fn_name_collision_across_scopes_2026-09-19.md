@@ -172,3 +172,46 @@ identical before and after, and the eighth is the one this fix is for.
   first-wins-on-a-bare-name class, one layer up. It is also why hoisting nested
   fns to module scope was rejected when fixing the JIT lowering: the hoist would
   have created exactly this collision at a layer where it *could* be silent.
+
+## Deployed 2026-09-19 15:40 KST
+
+`bin/release/aarch64-unknown-linux-gnu/simple` — the target of the `bin/simple`
+symlink — now carries this fix.
+
+| | before | after |
+|---|---|---|
+| sha256 | `350328bab5142ff443505ceb…` | `cb7944151f8b62b397c55b0b…` |
+| size | 51,607,912 B | 51,624,896 B |
+| built | 2026-09-19 09:09 | 2026-09-19 15:30 |
+
+This binary carries **four** changes: the original nested-fn capture fix (already
+deployed at 09:09), the JIT lowering, the AOT compilability arm, and this
+collision fix. The first three are on `main`; **this one was still an open PR at
+deploy time** (#1131), so for a window the shared binary is ahead of `main` by
+exactly this commit. That is stated rather than glossed because the same gap the
+other direction — source fixed, binary stale — is what
+`seed_jit_optional_unwrap_returns_enum_box_2026-09-18` cost days to.
+
+Verified through the deployed symlink after the swap, not against the build
+directory:
+
+- `check-deployed-binary-optional-unwrap.shs` — `PASS — 6 row(s) checked,
+  default and interpret lanes agree`. This is the guard that exists precisely to
+  catch a bad deploy, and it was run **before** the swap as well.
+- `check-nested-fn-jit-lowering.shs` — `PASS — 4 shape(s) checked`.
+- `nested_fn_name_collision_spec.spl` 6/6, `nested_fn_in_lambda_capture_spec.spl`
+  8/8, `optional_unwrap_payload_spec.spl` 11/11,
+  `mutate_through_index_shapes_spec.spl` 7/7.
+
+Pre-swap regression evidence: every spec in `test/01_unit/interpreter/` compared
+file by file between the old and new binary (identical except the one this fix
+is for), plus eight specs sampled from `test/01_unit/lib` and
+`test/01_unit/compiler` (all identical, including one that fails on both and
+stays failing).
+
+Method: staged beside the target, `chmod 0711`, `mv -f` so the rename is atomic
+and processes already running the old inode are untouched — they pick the new
+binary up on their next start. Rollback is a single `mv` back from
+`simple.stale-2026-09-19-1540` (gitignored via `.gitignore:108 bin/release/`).
+The morning rollback copy `simple.stale-2026-09-19` was left in place rather
+than overwritten, so both steps are reversible independently.
