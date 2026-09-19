@@ -604,6 +604,173 @@ fn collection_range_mutates(lines: [text], start_idx: i64, end_idx: i64, name: t
 fn collection_is_ident_char(c: text) -> bool:
     (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
 
+# ---------------------------------------------------------------------------
+# Safety PROOFS for the Certain rewrites (2026-09-19, after a review ran the
+# original and the rewritten program and found three classes of wrong output)
+#
+# `collection_is_mutation_of` above is a LINE-PREFIX whitelist: it only sees a
+# mutation when the tracking array's name is the first token on the line. A
+# review proved that is not enough, by executing both programs:
+#
+#   `if seen.len() > 2: val dropped = seen.pop()`   [1,2,3,3] -> [1,2,3]
+#   `out.push(x)` then `val used = allowed.pop()`   [3,1]     -> [3,3,3,1]
+#
+# Both mutate the tracked array where the prefix scan cannot see it. The three
+# helpers below replace "did I fail to spot a problem" with "can I prove there
+# is none", over the WHOLE enclosing function and at token boundaries. Any
+# doubt refuses the fix; hint-only is a fine outcome, wrong code is not.
+# See doc/08_tracking/bug/
+# coll_certain_fix_rewrites_working_programs_wrongly_2026-09-19.md.
+# ---------------------------------------------------------------------------
+
+# Methods that can change an array's contents or length. Superset of
+# `collection_is_mutation_of`'s prefix list; names that do not exist on Array
+# today are included deliberately, since a future one must not silently slip
+# through a list nobody re-reads.
+fn collection_is_mutating_method_name(name: text) -> bool:
+    if name == "push" or name == "pop" or name == "insert" or name == "remove":
+        return true
+    if name == "clear" or name == "append" or name == "extend" or name == "drain":
+        return true
+    if name == "sort" or name == "sort_by" or name == "reverse" or name == "shuffle":
+        return true
+    if name == "push_front" or name == "push_back" or name == "enqueue" or name == "dequeue":
+        return true
+    if name == "retain" or name == "truncate" or name == "remove_at" or name == "delete":
+        return true
+    if name == "fill" or name == "resize" or name == "swap" or name == "set":
+        return true
+    false
+
+# Given the text immediately FOLLOWING a bare occurrence of the tracked name,
+# decide whether that occurrence mutates it. Handles `.method(`, `[i] =` and
+# plain `=`/`+=` — none of which the prefix whitelist sees mid-line.
+fn collection_rest_is_mutation(rest: text) -> bool:
+    if rest.starts_with("."):
+        val after_dot = rest.slice(1)
+        var end = 0
+        while end < after_dot.len() and collection_is_ident_char(after_dot.slice(end, end + 1)):
+            end = end + 1
+        if end == 0:
+            return false
+        return collection_is_mutating_method_name(after_dot.slice(0, end))
+    if rest.starts_with("["):
+        val close = rest.index_of("]")
+        if close < 0:
+            return false
+        val tail = rest.slice(close + 1).trim()
+        return tail.starts_with("=") and not tail.starts_with("==")
+    if rest.starts_with("+=") or rest.starts_with("-="):
+        return true
+    if rest.starts_with("="):
+        return not rest.starts_with("==")
+    false
+
+# True when `line` mutates `name` at ANY position, not just as its first
+# token. A dotted receiver (`cfg.seen.pop()`) is a different value and is
+# skipped, matching the bare-identifier rule the two generators already use.
+fn collection_line_mutates_name(line: text, name: text) -> bool:
+    var pos = 0
+    while pos < line.len():
+        val idx = text_index_of_from(line, name, pos)
+        if idx < 0:
+            return false
+        val after = idx + name.len()
+        val prev = if idx > 0: line.slice(idx - 1, idx) else: ""
+        val before_ok = prev == "" or (not collection_is_ident_char(prev) and prev != ".")
+        val after_ok = after >= line.len() or not collection_is_ident_char(line.slice(after, after + 1))
+        if before_ok and after_ok:
+            if collection_rest_is_mutation(line.slice(after).trim()):
+                return true
+        pos = idx + 1
+    false
+
+# True when the tracked array is mutated anywhere in `fn_start..fn_end` other
+# than on its own declaration line and the one guarded statement the rewrite
+# keeps in step with the Dict. Also refuses a line that both mentions the name
+# and carries a `;`: statement separation on one physical line defeats every
+# line-oriented judgement this file makes, so it is not judged.
+fn collection_function_mutates_outside(
+    lines: [text], fn_start: i64, fn_end: i64, name: text,
+    decl_line: i64, kept_line: i64
+) -> bool:
+    var i = fn_start
+    while i <= fn_end:
+        if i != decl_line and i != kept_line:
+            if collection_line_mutates_name(lines[i], name):
+                return true
+        if lines[i].contains(";") and collection_ident_occurs_in_line(lines[i], name):
+            return true
+        i = i + 1
+    false
+
+# Bare-token occurrence of `name` anywhere in `line` (no mutation judgement).
+fn collection_ident_occurs_in_line(line: text, name: text) -> bool:
+    var pos = 0
+    while pos < line.len():
+        val idx = text_index_of_from(line, name, pos)
+        if idx < 0:
+            return false
+        val after = idx + name.len()
+        val prev = if idx > 0: line.slice(idx - 1, idx) else: ""
+        val before_ok = prev == "" or not collection_is_ident_char(prev)
+        val after_ok = after >= line.len() or not collection_is_ident_char(line.slice(after, after + 1))
+        if before_ok and after_ok:
+            return true
+        pos = idx + 1
+    false
+
+# A name not already used anywhere in the FILE, starting from `base` and
+# trying `base2`..`base9`; "" when all are taken (refuse rather than shadow).
+#
+# The generated `{receiver}_set` used to be emitted unconditionally. A review
+# proved the collision changes results: a file that already declares
+# `var seen_set: Dict<i64, bool> = {}` with one key returned 1 before the
+# rewrite and 2 after it. Whole-file rather than scope-accurate on purpose —
+# stricter, and it needs no scope model.
+fn collection_fresh_identifier(lines: [text], base: text) -> text:
+    var attempt = 0
+    while attempt < 10:
+        val candidate = if attempt == 0: base else: base + (attempt + 1).to_text()
+        var taken = false
+        var i = 0
+        while i < lines.len():
+            if collection_ident_occurs_in_line(lines[i], candidate):
+                taken = true
+                i = lines.len()
+            else:
+                i = i + 1
+        if not taken:
+            return candidate
+        attempt = attempt + 1
+    ""
+
+# True when the array's declaration DOMINATES the loop the Dict is hoisted to:
+# the declaration precedes it, no loop header lies between them, and the
+# declaration's block has not closed before the loop starts.
+#
+# Without this the Dict is hoisted in front of the INNERMOST loop while the
+# array lives outside an enclosing one, so membership resets on every outer
+# iteration. A review proved it by execution:
+# `for g in groups: for x in g: if not seen.contains(x): seen.push(x)`
+# turned [1, 2, 3, 4] into [1, 2, 2, 3, 1, 3, 4].
+fn collection_decl_dominates_loop(lines: [text], decl_line: i64, loop_line: i64) -> bool:
+    if decl_line < 0 or loop_line <= decl_line:
+        return false
+    val decl_indent = collection_line_indent(lines[decl_line])
+    if collection_line_indent(lines[loop_line]) < decl_indent:
+        return false
+    var i = decl_line + 1
+    while i < loop_line:
+        val trimmed = lines[i].trim()
+        if trimmed != "":
+            if collection_line_indent(lines[i]) < decl_indent:
+                return false
+            if trimmed.starts_with("for ") or trimmed.starts_with("while "):
+                return false
+        i = i + 1
+    true
+
 # Nearest enclosing top-level `fn ` header above `line_idx` (indentation 0),
 # found by an upward scan — same shape as `collection_enclosing_loop_line`.
 # -1 when no such header is found before the file start (should not happen
@@ -835,7 +1002,20 @@ fn collection_002_fix(file_path: text, lines: [text]) -> EasyFix?:
     # is a fresh per-iteration local, not a loop-invariant array.
     if decl.1 >= loop_line:
         return nil
+    # The declaration must DOMINATE the loop the Dict is hoisted in front of:
+    # no loop header between the two, and the declaration's block still open.
+    # See `collection_decl_dominates_loop`.
+    if not collection_decl_dominates_loop(lines, decl.1, loop_line):
+        return nil
     if collection_range_mutates(lines, loop_line + 1, collection_block_end(lines, loop_line), receiver):
+        return nil
+    # Whole-function mutation PROOF, replacing the line-prefix scan above as
+    # the load-bearing check: the array must not be mutated anywhere in the
+    # function except on its declaration line. The prefix scan could not see
+    # `val used = allowed.pop()` (proved to turn [3, 1] into [3, 3, 3, 1]).
+    # There is no kept-in-step statement for COLL002 — the hoisted Dict is
+    # built once from the array — so `kept_line` is -1 here.
+    if collection_function_mutates_outside(lines, fn_start, fn_end, receiver, decl.1, -1):
         return nil
     # The array can be aliased through any call in the enclosing function
     # that takes it as a bare argument (`grow(arr, x)`) — the callee could
@@ -850,12 +1030,20 @@ fn collection_002_fix(file_path: text, lines: [text]) -> EasyFix?:
     val close_in_trimmed = text_index_of_from(trimmed, ")", at_in_trimmed + marker.len())
     val line_indent = collection_line_indent(lines[contains_idx])
 
-    val set_name = "{receiver}_set"
+    # Both generated names must be unused in the file, or there is no fix:
+    # emitting `{receiver}_set` blindly was proved to change a result from 1
+    # to 2 in a file that already had a `seen_set`.
+    val set_name = collection_fresh_identifier(lines, "{receiver}_set")
+    if set_name == "":
+        return nil
+    val elem_var = collection_fresh_identifier(lines, "_v")
+    if elem_var == "":
+        return nil
     val loop_indent = lines[loop_line].slice(0, collection_line_indent(lines[loop_line]))
     val empty_dict = "{" + "}"
     val insert_text = (
         "{loop_indent}var {set_name}: Dict<{elem_type}, bool> = " + empty_dict + "\n" +
-        "{loop_indent}for _v in {receiver}: {set_name}[_v] = true\n")
+        "{loop_indent}for {elem_var} in {receiver}: {set_name}[{elem_var}] = true\n")
     val insert_at = collection_line_start_offset(lines, loop_line)
 
     val call_line_start = collection_line_start_offset(lines, contains_idx)
@@ -925,6 +1113,13 @@ fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
     if loop_line < 0:
         return nil
     val block_end = collection_block_end(lines, loop_line)
+    # Guard AND push must both live inside that one innermost loop. Nothing
+    # checked this before: a push located outside the loop the Dict is hoisted
+    # to would be tracked at a different frequency than the array.
+    if found_guard <= loop_line or found_guard > block_end:
+        return nil
+    if push_idx <= loop_line or push_idx > block_end:
+        return nil
     # No mutation of the array anywhere in the loop body other than the
     # guarded push itself — checked as two ranges split around the push line
     # (reusing `collection_range_mutates` rather than a bespoke scan; an
@@ -954,6 +1149,22 @@ fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
     val decl_init = collection_decl_parts(lines[decl.1].trim(), receiver).1
     if decl_init != "[]":
         return nil
+    # The declaration must DOMINATE the loop the Dict is hoisted in front of.
+    # Without this, `for g in groups: for x in g: if not seen.contains(x):
+    # seen.push(x)` got its Dict declared before the INNER loop while `seen`
+    # lived outside the outer one, so membership reset every outer iteration:
+    # proved by execution to turn [1, 2, 3, 4] into [1, 2, 2, 3, 1, 3, 4].
+    if not collection_decl_dominates_loop(lines, decl.1, loop_line):
+        return nil
+    # Whole-function mutation PROOF, replacing the two line-prefix range scans
+    # above as the load-bearing check. Those only see a mutation when the
+    # array's name is the FIRST token on the line, so
+    # `if seen.len() > 2: val dropped = seen.pop()` was invisible — proved by
+    # execution to turn [1, 2, 3, 3] into [1, 2, 3]. The guarded push is the
+    # one statement the rewrite keeps in step with the Dict, so it (and the
+    # declaration) are the only permitted mutation sites.
+    if collection_function_mutates_outside(lines, fn_start, fn_end, receiver, decl.1, push_idx):
+        return nil
     # The array can be aliased through any call in the enclosing function that
     # takes it as a bare argument (`grow(seen, x)`) — the callee can mutate or
     # replace it in ways `collection_range_mutates` cannot see, which would
@@ -970,7 +1181,12 @@ fn collection_020_fix(file_path: text, lines: [text]) -> EasyFix?:
 
     val guard_line_indent = collection_line_indent(lines[found_guard])
     val guard_trimmed = lines[found_guard].trim()
-    val set_name = "{receiver}_set"
+    # The generated name must be unused in the file, or there is no fix. A
+    # file that already declared `var seen_set: Dict<i64, bool> = {}` with one
+    # key returned 1 before the blind rewrite and 2 after it.
+    val set_name = collection_fresh_identifier(lines, "{receiver}_set")
+    if set_name == "":
+        return nil
     val new_guard = "if not {set_name}.contains_key({arg}):"
     val guard_start = collection_line_start_offset(lines, found_guard) + guard_line_indent
     val guard_end = guard_start + guard_trimmed.len()
