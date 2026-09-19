@@ -151,3 +151,122 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
 Next: RELRO, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed.
+
+## 13. Lane status — 2026-09-19 (F1: linking the `simple` binary itself)
+
+**Which linker links the `simple` binary today.** The question had two
+candidate routes and the answer is the Simple one, which is the opposite of
+what the seed's presence suggests:
+
+* The sanctioned bootstrap links stage2 and stage3 `simple` with
+  `native-build --target <triple> --backend llvm --runtime-bundle
+  core-c-bootstrap --source src/compiler --source src/app --source src/lib
+  --entry-closure --runtime-path <stage2-runtime-authority> --entry
+  src/app/cli/bootstrap_main.spl -o <stage bin>`
+  (`scripts/bootstrap/bootstrap-from-scratch.sh:2959` and `:3036`). Observed
+  live on this host on 2026-09-19 as a real stage-3 process from a parallel
+  bootstrap lane, so this is not a reading of the script alone.
+* `native-build` is **Simple**, interpreted by the seed:
+  `src/app/cli/native_build_main.spl` → `native_build_worker.spl` →
+  `cli_native_build_with_environment_variant_policy_v1` ->
+  `driver_aot_native_output.spl:2235` `link_llvm_native(object_files, output,
+  llvm_opts)` -> `llvm_native_link.spl` -> `llvm_native_link_orchestrator.spl:648`
+  `link_to_native(all_objects, output, link_config)` (every arrow grepped, not
+  inferred). That is the Simple-side
+  wrapper, so lane B3's `SIMPLE_LINKER=internal` route **is** on the path that
+  links the compiler itself.
+* The Rust seed's own `native_project/linker.rs` is therefore **not** the route
+  for the stage binaries. It is still the route for the Rust artifacts the
+  bootstrap consumes (`cargo build -p simple-driver / simple-native-all /
+  simple-runtime / simple-compiler-backfill`, linked by rustc's own `cc`), and
+  it rejects `internal` outright: `linker_alias` (`linker.rs:43-56`) accepts
+  only `mold`/`lld`/`ld.lld`/`lld-link`/`ld`/`gnu`/`bfd` and answers
+  `Unsupported SIMPLE_LINKER value: internal`. That reject is correct — there
+  is no internal engine on the Rust side — and it means `SIMPLE_LINKER=internal`
+  can never apply to the Rust half of the bootstrap.
+
+| Lane | Result | Evidence |
+|---|---|---|
+| F1 library search | **pass** | `NativeLinkConfig.libraries`/`library_paths` were lane B3 rejects and are now honoured: ld's order (caller `-L` entries, then the host crt libdir; `lib<name>.so` before `lib<name>.a`), a `lib<name>.so` that is a GNU ld script followed to its `GROUP()` members (required on glibc — `/usr/lib/aarch64-linux-gnu/libm.so` is a script, not ELF), inputs classified by ar/ELF magic rather than extension. `libraries=["m"]` links `hello_libm_a64.o` and the binary prints `sqrt=42`, exit 42 |
+| F1 DT_NEEDED parity | **pass, and it caught a real defect** | The first `GROUP()` parser also returned the `AS_NEEDED()` member, because the keyword and its `(` are separated by whitespace in glibc's script. Result was an extra `DT_NEEDED libmvec.so.1` that `ld.lld` does not emit — found by diffing `readelf -dW` against an external link, not by reading the code. Fixed and pinned by a parity spec |
+| F1 `runtime_path: "none"` | **pass** | The bootstrap stage link's own `NativeLinkConfig` carries `runtime_path: "none"`, the documented sentinel for "the LLVM pipeline supplies the runtime objects directly". Rejecting it was a false reject with nothing to honour, and it stopped the internal route at the one call site that links the compiler. A real `runtime_path` still rejects by name |
+| F1 full self-host link | **NOT achieved — blocked, stated as such** | See the ranked gap list below. No partial result is reported as a success |
+
+`native_linking_internal_spec` 5/13 → 13/13 (both trees byte-identical). All 27
+linker specs re-run individually: 27/27 `outcome=OK`, 0 failed.
+
+### Ranked gaps for a full self-host internal link
+
+1. **`retained_symbols` has no engine input.** It is the remaining hard reject
+   on the real bootstrap link config (`llvm_external_provider_retained_symbols`
+   fills it). `ElfLinkRequest` carries only `entry` — there is no extra-GC-roots
+   field — so a retained symbol living in an otherwise-unneeded archive member
+   would be dropped by the fixpoint. Needs an `elf_static_link.spl` change
+   (lane A7's file), not a `native_linking.spl` one.
+2. **TLS.** The deployed `simple` has `FLAGS BIND_NOW STATIC_TLS`; TLS
+   relocations are a named `UnsupportedFeature` in the engine (plan §11).
+3. **Interpreted-engine cost at real scale.** Measured on this host: the
+   per-byte `[i64]` widening `internal_link_native_read_i64` performs runs
+   100 MB in 9.2 s at 1.28 GB RSS under the JIT. The stage-3 link's inputs are
+   411 MB of archives (`libsimple_native_all.a` 390 MB,
+   `libsimple_compiler_backfill.a` 21 MB, `deps/libsimple_runtime.a` 43 MB),
+   so widening alone projects to ~40 s and >5 GB before any resolution,
+   fixpoint or relocation work — and the engine body runs interpreted, not
+   JIT-compiled. Plan §11 already names "running the engine natively instead
+   of in the interpreter" as required work; this is the measurement for it.
+4. **RELRO, symbol versions, section GC, `-O1` string merge** — already named
+   in §11/§12 as next work; the compiler's own link needs at least RELRO
+   (`BIND_NOW` is set on the shipped binary).
+5. **The stage-link inputs are not fully retained on this host.** The stage-3
+   directory keeps the three archives but not the generated entry object, and
+   no archive defines `main` (`nm --defined-only` over all three finds none),
+   so the real stage link cannot be reconstructed from retained artifacts — it
+   has to be re-driven through `native-build`.
+
+### Internal vs external, same object, measured 2026-09-19 (aarch64 host)
+
+`hello_libm_a64.o` + `libraries=["m"]`, internal (`SIMPLE_LINKER=internal`,
+through `link_to_native`) against `ld.lld 23` with the equivalent argv.
+
+| | internal | ld.lld |
+|---|---|---|
+| runs | `sqrt=42`, exit 42 | `sqrt=42`, exit 42 |
+| size | 4,392 B | 5,352 B |
+| `DT_NEEDED` | `libc.so.6`, `libm.so.6` | `libc.so.6`, `libm.so.6` (identical **after** the AS_NEEDED fix; before it the internal output carried a third, `libmvec.so.1`) |
+| segments | `PHDR INTERP NOTE LOAD×3 DYNAMIC GNU_STACK` | same plus `GNU_RELRO`, `LOAD×4` |
+| sections only in ld.lld's output | — | `.gnu.version`, `.gnu.version_r`, `.relro_padding`, `.comment` |
+
+The deltas are exactly the already-named gaps: no RELRO (hence 3 `PT_LOAD`
+instead of 4 and no `.relro_padding`) and no symbol versions. Nothing here is
+a silent difference — `.gnu.hash`, `.symtab`/`.strtab`, `.rela.dyn`,
+`.rela.plt`, `.plt`, `.got`/`.got.plt` are all present and the DT_NEEDED set
+matches byte for byte.
+
+### What was NOT done, stated plainly
+
+No internally linked `simple` binary exists, so `<out> --version`, a hello-world
+compile with it, and a spec run on it **did not happen**. The end-to-end
+`native-build` run that would have produced one is blocked on this host before
+the link step by SCV source-inventory admission, not by the linker:
+
+```
+$ SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_BOOTSTRAP=1 SIMPLE_LINKER=internal \
+    bin/simple native-build hello.spl -o hello_internal
+SCV-E-ADMISSION: filesystem-event-journal-missing        # cursor claims filesystem_rows=1 with the empty-string digest and no .scv/journal/events.log
+wall=247.31s rss=26942684kB rc=1
+# after rm -rf build/scv .simple:
+SCV-E-SNAPSHOT: snapshot-inventory-unavailable
+wall=157.82s rss=28078696kB rc=1
+```
+
+Two things worth recording independently of the linker: the SCV cursor
+`build/scv/compile-events/CURRENT` published `filesystem_rows=1` with
+`filesystem_digest` = the sha256 of the empty string and no journal file, which
+is a state the guard correctly refuses and nothing here can repair; and the
+interpreted native-build worker peaked at **27 GB RSS for a two-line hello
+world**, which is the same class of problem as gap 3 above.
+
+A full self-host internal link does **not** need a deployed pure-Simple binary
+— the seed interprets `native-build`, and that is the path to `link_to_native`.
+The wall is the interpreted engine's cost at 411 MB of archive input, plus
+`retained_symbols` and TLS.
