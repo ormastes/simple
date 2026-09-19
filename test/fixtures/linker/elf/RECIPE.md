@@ -112,3 +112,26 @@ ld.lld-23 -pie -dynamic-linker /lib/ld-linux-aarch64.so.1 \
     relro_a64.o /usr/lib/aarch64-linux-gnu/crtn.o \
     /usr/lib/aarch64-linux-gnu/libc.so.6 -o rpie_lld
 ```
+
+## Lane C1 fixture (--gc-sections)
+
+`gc_a64.o` is built with `-ffunction-sections -fdata-sections`, so every
+function and datum is its own input section: a live chain from `_start`
+(`gc_add` -> `gc_leaf`, `gc_msg`, `gc_base`, `gc_scratch`), an unreferenced
+dead chain (`gc_dead` -> `gc_dead_leaf`, `gc_dead_msg`, `gc_dead_base`,
+`gc_dead_scratch`), an `SHF_GNU_RETAIN` function (`gc_retained`), a `.init`
+function (`gc_in_init`) and a function reachable only through `.init_array`
+(`gc_ctor`). It writes `gc\n` and exits 42.
+
+```
+clang --target=aarch64-linux-gnu -c -O1 -ffreestanding -fno-pic \
+    -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables \
+    -fno-unwind-tables -nostdlib gc_a64.c -o gc_a64.o
+```
+
+GC oracle for `elf_gc_sections_spec`:
+
+```
+ld.lld-23 -static -e _start --gc-sections --print-gc-sections gc_a64.o -o gcy
+ld.lld-23 -static -e _start gc_a64.o -o gcn
+```

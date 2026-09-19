@@ -1,0 +1,168 @@
+# Section garbage collection — ld.lld's --gc-sections (lane C1).
+#
+# Marks input sections live from a root set and lets elf_static_link drop the
+# rest before placement. The graph is the section-level relocation graph: a
+# live section keeps every section that its relocations' symbols are defined
+# in (local symbols through their own st_shndx, globals through the resolved
+# definition), transitively.
+#
+# Roots are ld.lld's (MarkLive.cpp `isReserved`, plus the entry symbol):
+#   - SHT_INIT_ARRAY / SHT_FINI_ARRAY / SHT_PREINIT_ARRAY / SHT_NOTE sections
+#   - SHF_GNU_RETAIN sections (__attribute__((retain)))
+#   - names starting with .init / .fini / .ctors / .dtors / .jcr
+#   - the section defining the entry symbol
+# Non-allocatable sections (.note.GNU-stack, .comment, debug info) are never
+# placed by this linker, so they are neither roots nor candidates.
+#
+# Not modelled, and therefore rejected by name rather than silently kept or
+# dropped (elf_gc_reject):
+#   - .eh_frame / SHT_X86_64_UNWIND: ld.lld marks FDEs piecewise against the
+#     function they describe; keeping the section whole would keep every
+#     function that has unwind info, dropping it would dangle its relocations
+#   - SHT_GROUP (COMDAT): a live member must keep its whole group
+#   - SHF_LINK_ORDER: metadata sections whose liveness follows sh_link
+#
+# Symbol resolution, archive extraction and the undefined-symbol check all run
+# BEFORE this pass (like ld.lld), so an undefined symbol referenced only from
+# a dropped section is still a link error here — stricter than ld.lld, which
+# scans relocations after marking.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, elf_symbol_binding, elf_reloc_sym, elf_section_name,
+    SHN_UNDEF, STB_LOCAL
+}
+use compiler.backend.linker.sym_resolver.{SymResolution}
+
+val SHF_ALLOC_G: i64 = 0x2
+val SHF_LINK_ORDER_G: i64 = 0x80
+val SHF_GNU_RETAIN_G: i64 = 0x200000
+val SHT_GROUP_G: i64 = 17
+val SHT_NOTE_G: i64 = 7
+val SHT_INIT_ARRAY_G: i64 = 14
+val SHT_FINI_ARRAY_G: i64 = 15
+val SHT_PREINIT_ARRAY_G: i64 = 16
+val SHT_X86_64_UNWIND_G: i64 = 0x70000001
+val SHN_LORESERVE_G: i64 = 0xff00
+val SHN_ABS_G: i64 = 0xfff1
+
+struct ElfGcDef:
+    """Defining (object, section) of a relocation symbol; obj < 0 = nothing to mark."""
+    obj: i64
+    sec: i64
+
+fn elf_gc_all_live(objects: [ElfObject]) -> [[bool]]:
+    """Every section live — the shape elf_static_place expects with gc off."""
+    var out: [[bool]] = []
+    for obj in objects:
+        var row: [bool] = []
+        var si: i64 = 0
+        while si < obj.sections.len():
+            row = row.push(true)
+            si = si + 1
+        out = out.push(row)
+    out
+
+fn elf_gc_reject(objects: [ElfObject]) -> text:
+    """"" when every input is modelled by the mark pass, else the reason."""
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_type == SHT_GROUP_G:
+                return "object {oi}: gc_sections does not model SHT_GROUP (COMDAT) membership"
+            if sec.sh_flags & SHF_ALLOC_G != 0:
+                val name = elf_section_name(obj, si)
+                if name == ".eh_frame" or name.starts_with(".eh_frame.") or sec.sh_type == SHT_X86_64_UNWIND_G:
+                    return "object {oi}: gc_sections does not model per-FDE .eh_frame liveness (section {name})"
+                if sec.sh_flags & SHF_LINK_ORDER_G != 0:
+                    return "object {oi}: gc_sections does not model SHF_LINK_ORDER (section {name})"
+            si = si + 1
+        oi = oi + 1
+    ""
+
+fn elf_gc_is_root(obj: ElfObject, si: i64) -> bool:
+    """ld.lld MarkLive.cpp `isReserved`, restricted to allocatable sections."""
+    val sec = obj.sections[si]
+    if sec.sh_type == SHT_INIT_ARRAY_G or sec.sh_type == SHT_FINI_ARRAY_G or
+            sec.sh_type == SHT_PREINIT_ARRAY_G or sec.sh_type == SHT_NOTE_G:
+        return true
+    if sec.sh_flags & SHF_GNU_RETAIN_G != 0:
+        return true
+    val n = elf_section_name(obj, si)
+    n.starts_with(".init") or n.starts_with(".fini") or n.starts_with(".ctors") or
+        n.starts_with(".dtors") or n.starts_with(".jcr")
+
+fn elf_gc_def(objects: [ElfObject], res: SymResolution, oi: i64, sym_idx: i64) -> ElfGcDef:
+    """(object, section) a relocation's symbol is defined in; obj < 0 when there is none."""
+    val none = ElfGcDef(obj: -1, sec: -1)
+    if sym_idx <= 0 or sym_idx >= objects[oi].symbols.len():
+        return none
+    val sym = objects[oi].symbols[sym_idx]
+    if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
+        if not res.defined.has(sym.name):
+            return none
+        val e = res.defined[sym.name]
+        if e.section_idx == SHN_ABS_G or e.section_idx >= SHN_LORESERVE_G or e.section_idx < 0:
+            return none
+        return ElfGcDef(obj: e.obj_idx, sec: e.section_idx)
+    if sym.st_shndx == SHN_UNDEF or sym.st_shndx >= SHN_LORESERVE_G:
+        return none
+    ElfGcDef(obj: oi, sec: sym.st_shndx)
+
+fn elf_gc_live(objects: [ElfObject], res: SymResolution, entry: text) -> Result<[[bool]], text>:
+    """Allocatable sections reachable from the roots; Err for anything unmodelled."""
+    val reject = elf_gc_reject(objects)
+    if reject != "":
+        return Err(reject)
+    var live = elf_gc_all_live(objects)
+    var wl_o: [i64] = []
+    var wl_s: [i64] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            if obj.sections[si].sh_flags & SHF_ALLOC_G != 0:
+                live[oi][si] = false
+            si = si + 1
+        oi = oi + 1
+    oi = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            if obj.sections[si].sh_flags & SHF_ALLOC_G != 0 and elf_gc_is_root(obj, si) and not live[oi][si]:
+                live[oi][si] = true
+                wl_o = wl_o.push(oi)
+                wl_s = wl_s.push(si)
+            si = si + 1
+        oi = oi + 1
+    if not res.defined.has(entry):
+        return Err("entry symbol not defined: {entry}")
+    val e = res.defined[entry]
+    if e.section_idx >= 0 and e.section_idx < SHN_LORESERVE_G and not live[e.obj_idx][e.section_idx]:
+        live[e.obj_idx][e.section_idx] = true
+        wl_o = wl_o.push(e.obj_idx)
+        wl_s = wl_s.push(e.section_idx)
+    var head: i64 = 0
+    while head < wl_o.len():
+        val o = wl_o[head]
+        val s = wl_s[head]
+        head = head + 1
+        for r in objects[o].relocations:
+            if r.target_section_idx != s:
+                continue
+            val d = elf_gc_def(objects, res, o, elf_reloc_sym(r))
+            if d.obj < 0 or d.sec < 0 or d.sec >= objects[d.obj].sections.len():
+                continue
+            if objects[d.obj].sections[d.sec].sh_flags & SHF_ALLOC_G == 0 or live[d.obj][d.sec]:
+                continue
+            live[d.obj][d.sec] = true
+            wl_o = wl_o.push(d.obj)
+            wl_s = wl_s.push(d.sec)
+    Ok(live)
+
+export ElfGcDef
+export elf_gc_live, elf_gc_all_live, elf_gc_reject, elf_gc_is_root
