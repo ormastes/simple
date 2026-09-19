@@ -21,6 +21,7 @@ image_read:
   max_images: 5
   max_pixels: 40000000
   max_request_bytes: 20971520
+  max_working_set_bytes: 402653184
   max_output_tokens: 16384
   timeout_ms: 30000
   max_concurrency: 1
@@ -49,6 +50,7 @@ image_read:
   max_images: 5
   max_pixels: 40000000
   max_request_bytes: 20971520
+  max_working_set_bytes: 402653184
   max_output_tokens: 16384
   timeout_ms: 30000
   max_concurrency: 1
@@ -63,6 +65,12 @@ environment variable returns typed `missing_secret` before provider transport.
 ## SPipe
 
 Set `image_read_profile: <profile_id>` on the explicit image-to-Markdown action. If it is absent, SPipe returns `skipped: image_read_profile not configured` and performs zero model calls. A mismatched, text-only, unsafe-egress, oversized, or unsupported profile fails before transmission.
+
+`max_working_set_bytes` bounds the image adapter's estimated live source,
+byte-view, Base64/provider-serialization, and RGBA decode buffers. The default
+is 384 MiB. This is an admission budget, not an operating-system RSS limit for
+an external model server; deploy the model process with its own cgroup or
+service memory ceiling.
 
 Run the canonical SPipe action with:
 
