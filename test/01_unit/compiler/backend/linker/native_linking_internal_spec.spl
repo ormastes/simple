@@ -184,3 +184,49 @@ describe "native_linking - internal engine library search (NativeLinkConfig.libr
             expect(result.is_err()).to_equal(true)
             expect(result.unwrap_err()).to_contain("unsupported config field 'extra_flags'")
         )
+
+describe "native_linking - internal engine and the real bootstrap link config":
+    # Lane F1: the sanctioned bootstrap links stage2/stage3 `simple` with
+    # `native-build ... -o <stage bin>`, which reaches
+    # llvm_native_link_orchestrator's `link_to_native(all_objects, output,
+    # link_config)`. That link_config carries `runtime_path: "none"` -- the
+    # documented sentinel for "the LLVM pipeline supplies the runtime objects
+    # directly", not a path. Rejecting it stopped the internal route at the one
+    # call site that links the compiler itself, for a field with nothing to
+    # honour. A real runtime_path is still rejected.
+    it "accepts runtime_path=none, the sentinel the bootstrap stage link passes":
+        # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
+        step("SIMPLE_LINKER=internal + runtime_path='none' links and runs (not 'unsupported config field')")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/native_linking_internal_spec_runtime_none"
+            var cfg = NativeLinkConfig.default()
+            cfg.runtime_path = "none"
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+        )
+
+    it "still rejects a real runtime_path by name":
+        # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
+        step("SIMPLE_LINKER=internal + runtime_path=/opt/simple/runtime -> named 'unsupported config field' error")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.runtime_path = "/opt/simple/runtime"
+            val result = link_to_native([HELLO_A64_OBJ],
+                "/tmp/native_linking_internal_spec_runtime_real_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'runtime_path'")
+        )
+
+    it "names retained_symbols as unsupported - the engine has no GC-root input to honour them with":
+        # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
+        step("retained_symbols is the remaining hard reject on the real bootstrap link config: ElfLinkRequest has only `entry`, no extra-roots field, so a retained symbol living in an otherwise-unneeded archive member would be dropped by the fixpoint")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.retained_symbols = ["spl_init_args"]
+            val result = link_to_native([HELLO_A64_OBJ],
+                "/tmp/native_linking_internal_spec_retained_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'retained_symbols'")
+        )
