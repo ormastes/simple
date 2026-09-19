@@ -248,3 +248,12 @@ it is recorded here rather than papered over with more syntactic guessing.
 What IS true after round 5: a text receiver bound to a local `val`/`var`,
 in any branch of any nested block, no longer warns in either the positive or
 the negated form.
+
+### Re-sweep after the shared-traversal fix
+
+Removing the two false positives cost no true positives: the 52-file sample
+re-measures at **47 of 47 reachable in-loop sites diagnosed, 0 silent, 7
+blocked by a whole-file lint abort** — identical to the figure before the
+fix, with 73 raw COLL rows either way. That is the expected result, since the
+fix only ADDS text bindings to the exclusion set and the excluded sites were
+not dedup sites.
