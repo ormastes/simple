@@ -1405,6 +1405,316 @@ fn check_manual_distinct_all(decl_indices: [i64]) -> [CollectionLintWarning]:
     warnings
 
 # ============================================================================
+# Safety PROOFS for the COLL002/COLL020 Certain fixes — on the AST
+# ============================================================================
+#
+# Two review rounds produced twelve wrong rewrites, and every single one was
+# the same defect wearing a different hat: a safety decision made by reading
+# SOURCE TEXT disagreeing with the parser about where a statement or a block
+# begins and ends. `while(gi < n):` was not a loop because the scan wanted
+# `"while "`. A column-0 comment ended a block. A tab counted as zero indent.
+# `val d = (seen\n.pop())` was two lines, so neither was a `.pop()`. A named
+# argument `grow(k=x, a=seen)` was not "flanked by ( or ,". A `for allowed in
+# groups` binding was not a `val|var`, so a shadowed name resolved to the
+# wrong array.
+#
+# None of those is a missing case. Text is simply not where statement extent
+# lives, so the proofs live here instead, on the same nodes the detector
+# already walks. Nothing below reads a line, trims a string, or counts an
+# indent. `entry_and_fixes.spl` keeps only the RENDERING of the edit (byte
+# offsets, the annotation text to copy into `Dict<T, bool>`), and is handed
+# the proven sites rather than hunting for them.
+#
+# Record: doc/08_tracking/bug/
+# coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md
+
+struct CollectionFixProof:
+    code: text
+    receiver: text          # the tracking array
+    value: text             # COLL020: the guarded identifier; COLL002: the arg text is not needed
+    guard_line: i64         # 1-based line of the `if not R.contains(v):` / `R.contains(v)` site
+    push_line: i64          # COLL020: 1-based line of the kept `R.push(v)`; else 0
+    decl_line: i64          # 1-based line of R's declaration
+    loop_line: i64          # 1-based line of the innermost enclosing loop header
+    safe: bool
+    reason: text            # why not, when `safe` is false
+
+fn coll_proof_unsafe(code: text, receiver: text, reason: text) -> CollectionFixProof:
+    CollectionFixProof(
+        code: code, receiver: receiver, value: "", guard_line: 0, push_line: 0,
+        decl_line: 0, loop_line: 0, safe: false, reason: reason)
+
+# --- bindings ---------------------------------------------------------------
+#
+# Every name BOUND anywhere in a statement tree: `val`/`var` declarations and
+# loop variables alike. A `for allowed in groups` binding is a binding even
+# though it is not a `val|var` line, which is precisely what the textual
+# declaration search could not see (fixture a8: the Dict was built from an
+# outer array shadowed by the loop variable, turning 1 into 0).
+fn collect_binding_names(stmts: [i64], acc: [text]) -> [text]:
+    var names = acc
+    for s in real_stmts(stmts):
+        val tag = stmt_get_tag(s)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_FOR:
+            val n = stmt_get_name(s)
+            if n != "":
+                names.push(n)
+        val nested = collect_binding_names(stmt_get_body(s), names)
+        names = nested
+    names
+
+fn count_bindings_of(stmts: [i64], name: text) -> i64:
+    var total = 0
+    for n in collect_binding_names(stmts, []):
+        if n == name:
+            total = total + 1
+    total
+
+# Every identifier bound OR referenced anywhere in the module. Used for
+# generated-name freshness: strictly larger than "in scope", which is the safe
+# direction, and it needs no scope model the AST does not have.
+fn collect_expr_idents(e: i64, acc: [text]) -> [text]:
+    var names = acc
+    if e < 0:
+        return names
+    if expr_get_tag(e) == EXPR_IDENT:
+        names.push(expr_get_str(e))
+        return names
+    for child in expr_child_exprs(e):
+        names = collect_expr_idents(child, names)
+    names
+
+fn collect_stmt_idents(stmts: [i64], acc: [text]) -> [text]:
+    var names = acc
+    for s in real_stmts(stmts):
+        val tag = stmt_get_tag(s)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_FOR:
+            val n = stmt_get_name(s)
+            if n != "":
+                names.push(n)
+        names = collect_expr_idents(stmt_get_expr(s), names)
+        names = collect_stmt_idents(stmt_get_body(s), names)
+    names
+
+fn collection_module_names(decl_indices: [i64]) -> [text]:
+    """Every identifier the module binds or mentions, for name-freshness proofs."""
+    var names: [text] = []
+    for idx in decl_indices:
+        val n = decl_get_name(idx)
+        if n != "":
+            names.push(n)
+        for p in decl_get_param_names(idx):
+            names.push(p)
+        names = collect_stmt_idents(decl_get_body(idx), names)
+    names
+
+# --- use analysis -----------------------------------------------------------
+#
+# True when the tree contains any use of `name` that is not a plain read:
+# a mutating method call on it, an assignment to it or through its index, its
+# appearance anywhere inside a call's ARGUMENTS (the callee can alias it — and
+# an argument is an argument whatever its surface syntax, so named and
+# line-split arguments are the same node here), or its capture by a lambda.
+# `allowed_mutation` is the one method-call node the rewrite keeps in step
+# with the Dict (-1 when there is none).
+fn expr_has_unsafe_use(e: i64, name: text, allowed_mutation: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_METHOD_CALL:
+        val recv = expr_get_left(e)
+        val on_name = recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == name
+        if on_name and is_mutating_collection_method(expr_get_str(e)) and e != allowed_mutation:
+            return true
+        for a in expr_get_args(e):
+            if expr_mentions_ident(a, name):
+                return true
+        if not on_name:
+            return expr_has_unsafe_use(recv, name, allowed_mutation)
+        return false
+    if tag == EXPR_CALL:
+        for a in expr_get_args(e):
+            if expr_mentions_ident(a, name):
+                return true
+        return expr_has_unsafe_use(expr_get_left(e), name, allowed_mutation)
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        val target = expr_get_left(e)
+        if target >= 0:
+            if expr_get_tag(target) == EXPR_IDENT and expr_get_str(target) == name:
+                return true
+            if expr_get_tag(target) == EXPR_INDEX:
+                val base = expr_get_left(target)
+                if base >= 0 and expr_get_tag(base) == EXPR_IDENT and expr_get_str(base) == name:
+                    return true
+        if expr_has_unsafe_use(expr_get_left(e), name, allowed_mutation):
+            return true
+        return expr_has_unsafe_use(expr_get_right(e), name, allowed_mutation)
+    if tag == EXPR_LAMBDA:
+        # Closures capture by reference, so a mention inside one is enough.
+        return expr_mentions_ident(e, name)
+    for child in expr_child_exprs(e):
+        if expr_has_unsafe_use(child, name, allowed_mutation):
+            return true
+    false
+
+fn stmts_have_unsafe_use(stmts: [i64], name: text, allowed_mutation: i64) -> bool:
+    for s in real_stmts(stmts):
+        if expr_has_unsafe_use(stmt_get_expr(s), name, allowed_mutation):
+            return true
+        if stmts_have_unsafe_use(stmt_get_body(s), name, allowed_mutation):
+            return true
+    false
+
+# --- site location ----------------------------------------------------------
+
+fn coll_stmt_line(s: i64) -> i64:
+    coll_span_line(stmt_anchor_span(s))
+
+fn coll_expr_line(e: i64) -> i64:
+    coll_span_line(expr_anchor_span(e))
+
+# The declaration statement of `name` in `block`, at a position BEFORE
+# `loop_stmt`, or -1. Sibling position IS the dominance proof: the parser
+# already decided which statements share a block and in what order, so no
+# indentation is counted and no block end is guessed.
+fn decl_sibling_before(block: [i64], name: text, loop_stmt: i64) -> i64:
+    var found = -1
+    for s in real_stmts(block):
+        if s == loop_stmt:
+            return found
+        val tag = stmt_get_tag(s)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            if stmt_get_name(s) == name:
+                found = s
+    -1
+
+# The `<ident>.contains(<x>)` call inside `e` that is NOT the inner of a
+# `not`, or -1. (A negated one is COLL020's guard, a different rule.)
+fn find_plain_contains_call(e: i64) -> i64:
+    if e < 0:
+        return -1
+    val tag = expr_get_tag(e)
+    if tag == EXPR_UNARY and expr_get_int(e) == TOK_NOT:
+        val inner = expr_get_left(e)
+        if inner >= 0 and expr_get_tag(inner) == EXPR_METHOD_CALL and expr_get_str(inner) == "contains":
+            return -1
+    if tag == EXPR_METHOD_CALL and expr_get_str(e) == "contains":
+        val recv = expr_get_left(e)
+        if recv >= 0 and expr_get_tag(recv) == EXPR_IDENT:
+            if expr_get_args(e).len() == 1:
+                return e
+    for child in expr_child_exprs(e):
+        val hit = find_plain_contains_call(child)
+        if hit >= 0:
+            return hit
+    -1
+
+# Plain-contains sites directly inside one loop body, descending through
+# `if`/block wrappers but not into a nested loop (that loop is the innermost
+# one for its own sites).
+fn plain_contains_sites_in_loop(stmts: [i64]) -> [i64]:
+    var found: [i64] = []
+    for s in real_stmts(stmts):
+        val hit = find_plain_contains_call(stmt_get_expr(s))
+        if hit >= 0:
+            found.push(hit)
+        val tag = stmt_get_tag(s)
+        if tag == STMT_IF or tag == STMT_BLOCK:
+            for nested in plain_contains_sites_in_loop(stmt_get_body(s)):
+                found.push(nested)
+    found
+
+# The kept `R.push(v)` method-call node inside a proven dedup guard.
+fn guard_kept_push(guard: i64, receiver: text) -> i64:
+    for body_stmt in real_stmts(stmt_get_body(guard)):
+        val e = stmt_get_expr(body_stmt)
+        if e >= 0 and expr_get_tag(e) == EXPR_METHOD_CALL and expr_get_str(e) == "push":
+            val recv = expr_get_left(e)
+            if recv >= 0 and expr_get_tag(recv) == EXPR_IDENT and expr_get_str(recv) == receiver:
+                return e
+    -1
+
+# --- proof construction -----------------------------------------------------
+
+fn coll020_proof(
+    guard: i64, loop_stmt: i64, block: [i64], fn_body: [i64], param_names: [text]
+) -> CollectionFixProof:
+    val contains_call = is_not_contains_call(stmt_get_expr(guard))
+    val receiver = expr_get_str(expr_get_left(contains_call))
+    val value = expr_get_str(expr_get_args(contains_call)[0])
+    val kept_push = guard_kept_push(guard, receiver)
+    if kept_push < 0:
+        return coll_proof_unsafe("COLL020", receiver, "no push onto the guarded array")
+    # Name freshness aside, four proofs, in the order they are cheapest.
+    if name_in_list(param_names, receiver):
+        return coll_proof_unsafe("COLL020", receiver, "tracking array is a parameter, not a local")
+    if count_bindings_of(fn_body, receiver) != 1:
+        return coll_proof_unsafe("COLL020", receiver, "name is bound more than once (shadowed)")
+    val decl = decl_sibling_before(block, receiver, loop_stmt)
+    if decl < 0:
+        return coll_proof_unsafe(
+            "COLL020", receiver, "declaration does not dominate the loop the Dict is hoisted to")
+    if stmts_have_unsafe_use(fn_body, receiver, kept_push):
+        return coll_proof_unsafe("COLL020", receiver, "array is mutated or aliased elsewhere")
+    CollectionFixProof(
+        code: "COLL020", receiver: receiver, value: value,
+        guard_line: coll_stmt_line(guard), push_line: coll_expr_line(kept_push),
+        decl_line: coll_stmt_line(decl), loop_line: coll_stmt_line(loop_stmt),
+        safe: true, reason: "")
+
+fn coll002_proof(
+    site: i64, loop_stmt: i64, block: [i64], fn_body: [i64], param_names: [text]
+) -> CollectionFixProof:
+    val receiver = expr_get_str(expr_get_left(site))
+    if name_in_list(param_names, receiver):
+        return coll_proof_unsafe("COLL002", receiver, "array is a parameter, not a local")
+    if count_bindings_of(fn_body, receiver) != 1:
+        return coll_proof_unsafe("COLL002", receiver, "name is bound more than once (shadowed)")
+    val decl = decl_sibling_before(block, receiver, loop_stmt)
+    if decl < 0:
+        return coll_proof_unsafe(
+            "COLL002", receiver, "declaration does not dominate the loop the Dict is hoisted to")
+    # COLL002 builds the Dict ONCE from the array, so there is no kept-in-step
+    # statement: any mutation at all disqualifies.
+    if stmts_have_unsafe_use(fn_body, receiver, -1):
+        return coll_proof_unsafe("COLL002", receiver, "array is mutated or aliased elsewhere")
+    CollectionFixProof(
+        code: "COLL002", receiver: receiver, value: "",
+        guard_line: coll_expr_line(site), push_line: 0,
+        decl_line: coll_stmt_line(decl), loop_line: coll_stmt_line(loop_stmt),
+        safe: true, reason: "")
+
+fn collect_proofs_in_block(
+    block: [i64], fn_body: [i64], param_names: [text], acc: [CollectionFixProof]
+) -> [CollectionFixProof]:
+    var proofs = acc
+    for s in real_stmts(block):
+        val tag = stmt_get_tag(s)
+        if tag == STMT_FOR or tag == STMT_WHILE:
+            val loop_body = stmt_get_body(s)
+            for guard in manual_distinct_guards_in_loop(loop_body):
+                proofs.push(coll020_proof(guard, s, block, fn_body, param_names))
+            for site in plain_contains_sites_in_loop(loop_body):
+                proofs.push(coll002_proof(site, s, block, fn_body, param_names))
+            proofs = collect_proofs_in_block(loop_body, fn_body, param_names, proofs)
+        elif tag == STMT_IF or tag == STMT_BLOCK:
+            proofs = collect_proofs_in_block(stmt_get_body(s), fn_body, param_names, proofs)
+    proofs
+
+fn collection_fix_proofs(decl_indices: [i64]) -> [CollectionFixProof]:
+    """Every COLL002/COLL020 fix candidate in the module, each marked safe or not.
+
+    A caller may render a fix ONLY for a `safe` proof, and only at the lines
+    the proof names. Every judgement here is made on parser output.
+    """
+    var proofs: [CollectionFixProof] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val body = decl_get_body(idx)
+            proofs = collect_proofs_in_block(body, body, decl_get_param_names(idx), proofs)
+    proofs
+
+# ============================================================================
 # COLL021: manual_group (advisory, no fix — narrow shape, see note)
 # ============================================================================
 #

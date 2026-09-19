@@ -110,14 +110,98 @@ describe "class (c): generated names must be fresh":
 
     it "refuses when every candidate name is already taken":
         step("refuses when every candidate name is already taken")
-        """`collection_fresh_identifier` tries `seen_set` then `seen_set2`..
-        `seen_set10`; with all of them mentioned in the file there is no safe
-        name left and the fix must not be offered."""
+        """`collection_fresh_name` tries `seen_set` then `seen_set2`..
+        `seen_set10` against the AST's own identifier set; with every one of
+        them BOUND there is no safe name left and the fix must not be
+        offered. The names have to be real bindings, not text: freshness is
+        proved on the parsed module now, so a comment mentioning `seen_set`
+        correctly does not reserve it."""
         var taken = ""
         var n = 1
         while n <= 10:
             val suffix = if n == 1: "" else: n.to_text()
-            taken = taken + "# reserved: seen_set" + suffix + "\n"
+            taken = taken + "    val seen_set" + suffix + ": i64 = " + n.to_text() + "\n"
             n = n + 1
-        val src = taken + "fn dedup(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    seen\n"
+        val src = "fn dedup(xs: [i64]) -> [i64]:\n" + taken + "    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    seen\n"
         assert_false(is_some(fix020(src)))
+
+# ---------------------------------------------------------------------------
+# Round 2: seven more wrong rewrites, every one of them a TEXTUAL proof
+# disagreeing with the parser about statement or block extent. They are not
+# seven missing cases — they are one structural defect, and the response was
+# to move all four proofs (dominance, site containment, whole-function
+# mutation, name freshness) onto the AST the detector already walks. Record:
+# doc/08_tracking/bug/
+# coll_certain_fix_textual_proofs_disagree_with_parser_2026-09-19.md
+#
+# Fixtures byte-identical to the review's scratchpad/d2/r2/*.spl minus the
+# trailing `print` driver. The TAB in b3 is written with an escape so that no
+# editor or formatter can silently turn it into spaces and make the example
+# vacuous.
+# ---------------------------------------------------------------------------
+
+val B1_WHILE_PAREN_SRC = "fn dedup_all(groups: [[i64]]) -> [i64]:\n    var seen: [i64] = []\n    var gi = 0\n    while(gi < groups.len()):\n        val g = groups[gi]\n        for x in g:\n            if not seen.contains(x):\n                seen.push(x)\n        gi = gi + 1\n    seen\n"
+val B2_COL0_COMMENT_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n# keep the window small\n        if seen.len() > 2:\n            val dropped = seen.pop()\n    out\n"
+val B3_TAB_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n\t\tif seen.len() > 2:\n\t\t\tval dropped = seen.pop()\n    out\n"
+val B4_CONTINUATION_SRC = "fn bounded(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        if seen.len() > 2:\n            val dropped = (seen\n                .pop())\n    out\n"
+val B5_NAMED_ARG_SRC = "fn grow(a: [i64], k: i64):\n    a.push(k)\n\nfn collect(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        grow(k=x + 100, a=seen)\n    out\n"
+val B6_MULTILINE_CALL_SRC = "fn grow(a: [i64], k: i64):\n    a.push(k)\n\nfn collect(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    var out: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n            out.push(x)\n        grow(\n            seen, x + 100)\n    out\n"
+val B7_FOR_SHADOW_SRC = "fn count_hits(groups: [[i64]]) -> i64:\n    var allowed: [i64] = [1, 2]\n    var n = 0\n    for allowed in groups:\n        if allowed.contains(5):\n            n = n + 1\n    n\n"
+
+describe "round 2: statement and block extent is the parser's answer":
+    it "b1: `while(...)` with no space is still a loop":
+        step("b1: `while(...)` with no space is still a loop")
+        """The textual dominance scan looked for a line starting `"while "`,
+        so `while(gi < groups.len()):` was not a loop header and the array's
+        declaration appeared to dominate the INNER `for`. The Dict was hoisted
+        there and membership reset every outer iteration:
+        [1,2,3,4] -> [1,2,2,3,1,3,4]. On the AST the outer statement is a
+        STMT_WHILE whatever its spelling, and the declaration is not a sibling
+        of the inner loop."""
+        assert_false(is_some(fix020(B1_WHILE_PAREN_SRC)))
+
+    it "b2: a column-0 comment does not end a block":
+        step("b2: a column-0 comment does not end a block")
+        """The block scan stopped at the first line indented no further than
+        the header, and a comment at column 0 qualified — so the
+        `val dropped = seen.pop()` after it was never examined:
+        [1,2,3,3] -> [1,2,3]. The parser does not end a block at a comment."""
+        assert_false(is_some(fix020(B2_COL0_COMMENT_SRC)))
+
+    it "b3: a tab is indentation":
+        step("b3: a tab is indentation")
+        """`collection_line_indent` counted spaces only, so tab-indented lines
+        measured as indent 0 and fell outside every range: same corruption,
+        [1,2,3,3] -> [1,2,3]. Indentation is now nobody's business here."""
+        assert_false(is_some(fix020(B3_TAB_SRC)))
+
+    it "b4: a statement split across lines is one statement":
+        step("b4: a statement split across lines is one statement")
+        """`val dropped = (seen` / `.pop())` is a single STMT_VAL_DECL whose
+        initializer is a `.pop()` on the tracked array. To a line scan it was
+        two lines, neither of which was a `.pop()`: [1,2,3,3] -> [1,2,3]."""
+        assert_false(is_some(fix020(B4_CONTINUATION_SRC)))
+
+    it "b5: a named argument is an argument":
+        step("b5: a named argument is an argument")
+        """Alias detection required the name to be immediately flanked by `(`
+        or `,`, so `grow(k=x + 100, a=seen)` passed the array to a mutating
+        callee unseen: [1,2] -> [1,101,2]. On the AST an argument is an
+        argument whatever its surface syntax."""
+        assert_false(is_some(fix020(B5_NAMED_ARG_SRC)))
+
+    it "b6: a call split across lines is one call":
+        step("b6: a call split across lines is one call")
+        """Same alias hand-off as b5, hidden by a newline instead of a name:
+        [1,2] -> [1,101,2]."""
+        assert_false(is_some(fix020(B6_MULTILINE_CALL_SRC)))
+
+    it "b7: a `for` binding shadows the array it is named after":
+        step("b7: a `for` binding shadows the array it is named after")
+        """`for allowed in groups` binds `allowed`, but the declaration search
+        only recognised `val`/`var` lines, so `allowed.contains(5)` inside the
+        loop was resolved to the OUTER array and the Dict was built from the
+        wrong value: 1 -> 0. Bindings are counted on the AST now, and a name
+        bound more than once in a function is refused outright."""
+        assert_false(is_some(fix002(B7_FOR_SHADOW_SRC)))
+        assert_false(is_some(fix020(B7_FOR_SHADOW_SRC)))
