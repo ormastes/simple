@@ -130,6 +130,75 @@ The gate itself has NOT passed for any internally linked kernel. That needs the 
 objects linked internally, which is still open. No board run was attempted, because there is no
 board on this host.
 
+## Rung 4 with the full kernel: BLOCKED upstream (2026-09-19, lane C3)
+
+The full kernel is the one the gate checks. Its build fails before any linker comparison can
+start: **the external `ld.lld` link fails too.** So there is no reference ELF, no internal ELF, no
+sha256 for either, and no gate verdict. Nothing was substituted and no ELF was faked.
+
+**Producer.** The producer is `scripts/os/build-simpleos-aarch64-limine-kernel.shs`, with entry
+`examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl` and script
+`examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld`. The same command was run at
+`7c875a81067` with objects kept. The seed was
+`/home/yoon/dev/simple/src/compiler_rust/target/release/simple`, built 2026-09-06, sha256
+`e74d6e3ec00f4c9feac900813016b767fb0d3a3470ee0006d0079b72ce6f8497`.
+
+```sh
+SIMPLE_BOOTSTRAP=1 SIMPLE_KEEP_NATIVE_OBJS=1 $SEED native-build --backend cranelift --entry-closure \
+  --timeout 1200 --entry examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl \
+  --target aarch64-unknown-none-elf \
+  --linker-script examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld --verbose -o kernel_ext.elf
+# Compiled: 14/14 (0 cached, 14 fresh, 0 failed) in 0.2s
+# Freestanding unresolved symbol check: 35 unexpected symbol(s)
+# Freestanding unresolved precheck deferred to linker: 32 candidate symbol(s)
+# Build failed: link failed: ld.lld: error: undefined symbol: rt_arm64_mrs_mpidr_el1
+#   >>> referenced by mod_2.o:(os__kernel__arch__arm64__cpu__mrs_mpidr_el1)
+# ld.lld: error: undefined symbol: rt_value_u64
+#   >>> referenced by mod_10.o:(os__kernel__memory__pmm___pmm_reset_contiguous_registry)
+# (plus mmio_disable_test_mode, referenced by mod_6.o:(...limine_aarch64_boot_main))
+```
+
+**Object set.** The link uses 17 objects: `_boot_freestanding_runtime.o`, `mod_0.o` … `mod_13.o`,
+`_init_all.o` and `_stubs_freestanding.o`. It passes `--entry=_start`, three `--defsym`s
+(`_start`, `__simple_entry_start` and `spl_start`, each set to
+`examples__09_embedded__simple_os__arch__aarch64__limine_entry___start`), `--gc-sections` and
+`-z muldefs`.
+
+**Missing symbols.** With `--gc-sections`, 3 symbols are missing. Without it (`ld.lld -O0
+--no-relax`, which is the engine's model), 23 are missing. They fall into three groups:
+
+| Class | Symbols | Owner |
+|---|---|---|
+| Merge-dropped Simple function | `mmio_disable_test_mode`: imported by `src/os/kernel/boot/limine_boot_aarch64.spl:39`, called at `:532`, defined nowhere. It was last defined at `src/os/kernel/boot/mmio.spl:71` in the first parent of merge `e274cd33719` (2026-08-27), and that merge deleted it | kernel |
+| Arm64 system-register externs that the aarch64 freestanding runtime does not define | `rt_arm64_{mrs_currentel,mrs_mpidr_el1,mrs/msr_ttbr0_el1,mrs/msr_ttbr1_el1,msr_tcr_el1,msr_mair_el1,msr_sctlr_el1,msr_vbar_el1,isb,dsb,dmb,wfi,wfe,tlbi_alle1,tlbi_vae1,daif_set,daif_clr}` (from `src/os/kernel/arch/arm64/cpu.spl`) | kernel / freestanding runtime |
+| Codegen-emitted hosted runtime API | `rt_value_u64`, `rt_value_as_u64`, `rt_unwrap_or_trap` | freestanding runtime (same class as the `rt_struct_alloc` gap in `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`) |
+
+**Internal engine on the same inputs.** The same 17 objects, script and defsyms were run through
+the Appendix driver (`elf_boot_link_named`, interpreter, 1m55s). The engine returned `Err`, not an
+image:
+
+```
+bootlink: ERROR undefined symbol: rt_arm64_mrs_currentel; ...; rt_value_u64; rt_value_as_u64; rt_unwrap_or_trap
+```
+
+The engine's 23-symbol set is identical to ld.lld's `-O0 --no-relax` set (`diff` is empty). So the
+engine does not mask undefined symbols. The engine also relocated every placed input before
+reporting the undefined set, and it hit no unsupported relocation or script construct. The
+kernel's relocations are 1127 `ABS64`, 680 `CALL26`, 143 `ADR_PREL_PG_HI21`, 140
+`ADD_ABS_LO12_NC`, 3 `LDST64_ABS_LO12_NC`, 3 `ADR_GOT_PAGE`, 3 `LD64_GOT_LO12_NC` and 1 `PREL32`.
+**No linker work is pending for this kernel.** What blocks it is the missing symbols.
+
+**What unblocks rung 4:**
+
+1. The kernel lane restores `mmio_disable_test_mode`.
+2. The kernel lane defines the `rt_arm64_*` externs and `rt_value_u64`, `rt_value_as_u64` and
+   `rt_unwrap_or_trap` in `examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`.
+3. Because the engine has no section GC, all 23 must resolve, not just the 3 reachable ones. The
+   other option is to land section GC first.
+
+Then rerun the steps above, and the Rung 4 gate command with `KERNEL_ELF` set to each ELF.
+Evidence is local only, in `build/os/c3/` (logs, objects, and both undefined lists).
+
 ## Why rung 3 was not reached before lane B1 (historical)
 
 This is unimplemented engine work. It is not a tooling block. The internal ELF engine
@@ -188,8 +257,9 @@ kernel in about 0.2 s with the Rust seed. Two limits apply:
    - Section GC (KEEP roots), so the engine can match the shipped `--gc-sections` image.
    - lld's `-O1` string-merge order.
    - A committed parity script (`scripts/check/check-boot-layout-parity.shs`) and its CI step.
-3. Done (lane B1): rung 4 with the hello kernel. Still open: rung 4 with the full kernel. That
-   needs its objects, and the full kernel prints the gate's `[BOOT]` markers.
+3. Done (lane B1): rung 4 with the hello kernel. Still open: rung 4 with the full kernel. It is
+   blocked upstream because the kernel does not link with ld.lld either (23 undefined symbols).
+   See "Rung 4 with the full kernel".
 4. Close this record with a board transcript.
 
 ## Appendix: reproducing rungs 3-4
