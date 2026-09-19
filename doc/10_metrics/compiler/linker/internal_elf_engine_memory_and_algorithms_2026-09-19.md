@@ -41,7 +41,7 @@ same binary on progressively more of the path:
 | the same script CALLING `elf_link` with ZERO objects | 0.90 s | **130.6 MB** |
 | static fixture, 2 small objects (`elf_link` 12 ms) | 0.87 s | 149.0 MB |
 | synth-20 (320 KB in, 70 KB out) | 1.53 s | 186.8 MB |
-| synth-200 (3.2 MB in, 698 KB out) | 8.25 s | 501.5 MB |
+| synth-200 (3.2 MB in, 698 KB out) | 8.54 s | 472.2 MB |
 
 So of the 22x RSS gap, **130.6 MB is fixed cost that no linker change can
 touch**, and `ld.lld`'s entire footprint is 23 MB — the same as this
@@ -58,13 +58,66 @@ away. That is not inferred; the run prints it:
 That is lane J1's problem, and it is the single largest item between this
 engine and `ld.lld` on BOTH axes: ~0.9 s and ~130 MB before the first input
 byte is read. Engine-owned data is the remainder: ~56 MB at synth-20 and
-~370 MB at synth-200.
+~340 MB at synth-200 before this lane's changes, ~36 MB and ~235 MB after.
 
 ## Before / after
 
-Medians of 3 interleaved BEFORE/AFTER rounds (`--runs 1` each).
+Medians of 3 interleaved BEFORE/AFTER rounds (`--runs 1` each), load 19-23 on a
+20-CPU shared box. BEFORE and AFTER ran back to back inside each round, from two
+worktrees pinned to their own shas, so both sides saw the same machine.
 
-<!--RESULTS-->
+| input | metric | before | after | ld.lld-23 | mold 2.42 |
+|---|---|---|---|---|---|
+| static fixture, 2 objs | `elf_link` | 25 ms | **13 ms** | — | — |
+| | wall / RSS | 1.41 s / 144.8 MB | 1.46 s / 145.2 MB | 0.01 s / 25.0 MB | 0.08 s / 7.1 MB |
+| static PIE, 2 objs | `elf_link` | 15 ms | 30 ms | — | — |
+| | wall / RSS | 1.36 s / 146.4 MB | 1.30 s / 144.9 MB | 0.00 s / 25.0 MB | 0.03 s / 7.2 MB |
+| dynamic, 4 objs + libc.so.6 | `elf_link` | 424 ms | **276 ms** | — | — |
+| | wall / RSS | 1.51 s / 154.9 MB | 1.29 s / 146.8 MB | 0.01 s / 26.1 MB | 0.08 s / 7.2 MB |
+| synth 20 objects | `elf_link` | 433 ms | **374 ms** | — | — |
+| | wall / RSS | 1.29 s / 183.7 MB | 1.11 s / **166.9 MB** | 0.00 s / 25.2 MB | 0.03 s / 10.9 MB |
+| synth 200 objects | `elf_link` | 5,863 ms | **5,046 ms** | — | — |
+| | wall / RSS | 8.54 s / 472.2 MB | **6.39 s / 365.1 MB** | 0.01 s / 27.6 MB | 0.10 s / 7.4 MB |
+
+Read this with three caveats.
+
+- **`elf_link` excludes the caller-side fix; wall and RSS include it.** Change 1
+  below moves work out of `elf_link`'s caller, which production shares (the same
+  widening lived in `internal_link_native_read_i64`). That is why synth-200 wall
+  falls 25% while `elf_link` falls 14%.
+- **The static and PIE `elf_link` columns are noise.** 13-30 ms on a box whose
+  load moved by 3x during the run says nothing; the PIE row reading "worse" is
+  the clearest evidence of that. Those two fixtures are 2 small objects, and
+  their wall time is ~97% fixed interpreter+JIT cost either way.
+- **`ld.lld` and `mold` wall times are at the harness's timer resolution** and
+  are dominated by process startup on a loaded box; treat them as "under
+  0.1 s", not as a measured ratio. Their RSS is solid: 25-28 MB and 7-11 MB.
+
+Net, against `ld.lld` on synth-200: **6.39 s vs 0.01 s** and **365 MB vs 28 MB**
+after, from 8.54 s / 472 MB before. RSS improved by **107 MB (-23%)**, which is
+the packed-input change; the remaining 365 MB is ~130 MB fixed (above) plus the
+engine's own boxed-per-byte buffers.
+
+### Sampling profile, synth-200, same corpus, both sha `32405fe5d2d28022`
+
+Whole-process totals at a 5 ms interval — the absolute sample COUNTS matter as
+much as the shares, because the totals differ:
+
+| frame | before (1,818 samples) | after (1,292 samples) |
+|---|---|---|
+| `main` (the caller's byte widening + output write) | **424 (23.3%)** | below the top 9 |
+| `elf_static_contents` | 272 (15.0%) | 245 (19.0%) |
+| `elf_write_image` | 187 (10.3%) | 207 (16.0%) |
+| `elf_append_symtab` | 119 (6.6%) | 177 (13.7%) |
+| `elf_build_symtab` (inclusive) | 163 (9.0%) | **81 (6.3%)** |
+| `elf_sym_row` | 48 (2.6%) | gone (deleted) |
+| `elf_read_u64_le` | 99 (5.5%) | 52 (4.0%) |
+
+Total interpreted samples fell **1,818 -> 1,292 (-29%)**. The caller's widening
+frame disappears entirely; the symbol table halves in absolute cost and its
+helper is gone. The three byte-copy loops are unchanged in absolute terms (they
+were not touched in the landed set) and so rise as a share of a smaller total.
+
 
 ## What changed
 
@@ -100,12 +153,15 @@ The six parallel `Elf64_Sym` output columns were carried in a struct threaded
 through a per-symbol helper (`rows = elf_sym_row(rows, ...)`). The helper read
 each column back out of the struct and pushed to it — and a push to an array
 the struct still holds copies the whole column — so **every symbol copied all
-six arrays**. In the sampling profile that was `elf_build_symtab` at **30.69%
-inclusive of a synth-200 link**, the largest frame there. The columns are now
-six locals appended inline.
+six arrays**. Measured on synth-200 (table above): `elf_build_symtab` inclusive falls from
+163 to 81 samples and its per-row helper's own 48 samples disappear — the
+symbol table's absolute cost roughly halves. The columns are now six locals
+appended inline.
 
-This is the one genuinely ALGORITHMIC defect C5 found: O(symbols^2), and it
-only shows up at scale, which is why C4's 20-object measurements did not
+This is the one genuinely ALGORITHMIC defect C5 found: O(symbols^2). Its
+coefficient is small at these sizes — the baseline already scaled roughly
+linearly from 20 to 200 objects — so it is a real but modest win here and a
+growing one as inputs get larger, which is why 20-object measurements do not
 surface it.
 
 ### 4. Header patches no longer copy the image
@@ -204,7 +260,31 @@ in the engine's own live bytes.
 - **Mutation gate**: `sh scripts/check/check-link-mutation-gates.shs`.
 - **Lint** on the changed files small enough to lint.
 
-<!--VERIFICATION-->
+- **Byte-identical output, all 5 fixtures, all 3 rounds** — sha256 first 16 hex,
+  identical BEFORE and AFTER: static `cfd7235c285f5ca5`, PIE
+  `9bbe8caeb29c47df`, dynamic `c4f2b7dd1617abad`, synth-20 `51373e104c901b2c`,
+  synth-200 `32405fe5d2d28022`. Every output was executed and exited 42.
+- **36 spec files, 0 failures, 554 assertions executed**, one
+  `bin/simple test --no-session-daemon <spec>` each, reading `SPEC FILE
+  VERDICT`: all 32 under `test/01_unit/compiler/backend/linker/`, plus
+  `compiler/linker/gpu_smf/smf_reloc_formulas_spec.spl` and the three
+  `compiler/loader/` reloc consumers (`loader_reloc_oracle`,
+  `loader_reloc_wire4`, `reloc_apply`). Largest: `linker_script` 54,
+  `pe_exec_writer` 42, `reloc_engine` 60, `smf_reloc_formulas` 32,
+  `archive_parser` 27, `elf_boot_link` 25, `boot_layout_plan` 25,
+  `native_linking_internal` 21, `sym_resolver` 20.
+- **Mutation gate**: `sh scripts/check/check-link-mutation-gates.shs` ->
+  `SELFTEST PASS — 7 fixture(s) checked` then twelve `RED <name> — ... turned
+  red as expected` rows and the verdict `PASS — 12 mutation(s) each turned
+  their gate red`.
+- **Lint**: `elf_parser.spl` 0 errors / 2 warnings and `reloc_engine.spl`
+  0 errors / 14 warnings — every warning is an `export use *` in ANOTHER file
+  (`src/lib/**`, `src/compiler/{10.frontend,35.semantics,90.tools}/**`), none on
+  a changed line. `elf_static_link.spl` (1,563 lines) and `native_linking.spl`
+  were not linted: per `.claude/rules/commands.md` the linter's cost is
+  superlinear in file content and files that size exceed the practical budget
+  on this host — the same exemption lane C4 took.
+
 
 ## What is still between this engine and ld.lld
 
@@ -216,18 +296,27 @@ Honest accounting for synth-200, where the gap is widest:
    this. It is bigger than everything below combined on the small fixtures, and
    it is why the static and PIE rows will not improve no matter what the engine
    does.
-2. **~26% of `elf_link` is `elf_static_contents`**, copying input section bytes
-   into output section buffers one interpreted push per byte. Packed assembly
-   removes it outright (measured), and is blocked on the two seed gaps above.
-3. **~12% each `elf_append_symtab` and `elf_write_image`**, same shape, same
-   blocker.
-4. **The rest is genuinely per-symbol and per-relocation interpreted work** —
+2. **`elf_static_contents` is 19% of the whole process** (245 of 1,292
+   samples), copying input section bytes into output section buffers one
+   interpreted push per byte. Packed assembly removes it outright (measured),
+   and is blocked on the two seed gaps above.
+3. **`elf_write_image` 16% and `elf_append_symtab` 14%** (207 and 177 samples),
+   same shape, same blocker. These three are half the remaining work.
+4. **`archives` are still widened to `[[i64]]`.** `ElfLinkRequest.archives`
+   keeps the old representation because `archive_parser.spl` indexes those
+   bytes throughout and every one of its readers would need the same `as i64`
+   audit change 5 applied to `reloc_engine`. It costs 32 bytes per archive byte;
+   in practice the only archive on the hosted path is `libc_nonshared.a`, which
+   is small, so this was left rather than half-done.
+5. **The rest is genuinely per-symbol and per-relocation interpreted work** —
    `elf_read_u64_le`, `elf_collect_refs`, `elf_ref_addr`, `elf_parse_symbols`.
    There is no bulk primitive to reach for here; it is one interpreted
    operation per ELF field, and it is what the ~100x interpreter tax looks like
    once the per-byte loops are gone.
 
-No quadratic behaviour remains that C5 could find: after the symbol-table fix
-the engine grows close to linearly in input size, and the profile is flat
-enough that no single remaining frame is worth more than a few percent except
-the three byte-copy loops, all of which are blocked on the same seed change.
+No quadratic behaviour remains that C5 could find. The engine already scaled
+close to linearly from 20 to 200 objects BEFORE the symbol-table fix (the
+quadratic term's coefficient was small at these sizes), and the profile is now
+flat enough that no single remaining frame is worth more than a few percent
+except the three byte-copy loops above, all of which are blocked on the same
+seed change.
