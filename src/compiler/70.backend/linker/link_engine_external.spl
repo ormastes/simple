@@ -44,7 +44,8 @@ use compiler.backend.linker.mold.{find_linker_path, linker_type_for_path, Linker
 use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.crt_discovery.{find_crt_files, path_dirname}
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_write_bytes, shell}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.io.process_ops.{process_run}
 
 # ============================================================================
 # A3-local target vocabulary
@@ -378,8 +379,10 @@ fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
     if not file_write_bytes(output, bytes):
         debug("link-engine-external", "internal:elf could not write {output}")
         return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.ResourceFailure, LinkAccountingClassV1.NotCertified)
-    val marked = shell("chmod +x '{output}'")
-    if marked.exit_code != 0:
+    # argv array, no shell: a quote in the output path cannot break the command.
+    # (nogc_sync_mut file_set_mode is a stub that never chmods — see bug record.)
+    val (_co, _ce, chmod_code) = process_run("chmod", ["755", output])
+    if chmod_code != 0:
         debug("link-engine-external", "internal:elf could not mark {output} executable")
         return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.ResourceFailure, LinkAccountingClassV1.NotCertified)
     base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
