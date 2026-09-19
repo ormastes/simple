@@ -89,3 +89,100 @@ The x86_64 dynamic outputs are compared with
 `ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
 (`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
 executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
+
+## Lane C1 fixture (RELRO)
+
+`relro_a64.o` gives a dynamic PIE one input section for every PT_GNU_RELRO
+member ld.lld places: `.init_array` (constructor), `.fini_array` (destructor),
+`.data.rel.ro` (a `const` table of code pointers), plus `.got`/`.dynamic` from
+the link itself and a non-RELRO `.data`/`.got.plt`/`.bss`. It prints
+`relro ok` and exits 42. Same compiler as above, run from this directory:
+
+```
+clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables \
+    -fno-unwind-tables relro_a64.c -o relro_a64.o
+```
+
+RELRO oracle for `elf_relro_spec` (needs the host glibc startup objects, like
+`hello_libc_a64.o`):
+
+```
+ld.lld-23 -pie -dynamic-linker /lib/ld-linux-aarch64.so.1 \
+    /usr/lib/aarch64-linux-gnu/Scrt1.o /usr/lib/aarch64-linux-gnu/crti.o \
+    relro_a64.o /usr/lib/aarch64-linux-gnu/crtn.o \
+    /usr/lib/aarch64-linux-gnu/libc.so.6 -o rpie_lld
+```
+
+## Lane C1 fixture (--gc-sections)
+
+`gc_a64.o` is built with `-ffunction-sections -fdata-sections`, so every
+function and datum is its own input section: a live chain from `_start`
+(`gc_add` -> `gc_leaf`, `gc_msg`, `gc_base`, `gc_scratch`), an unreferenced
+dead chain (`gc_dead` -> `gc_dead_leaf`, `gc_dead_msg`, `gc_dead_base`,
+`gc_dead_scratch`), an `SHF_GNU_RETAIN` function (`gc_retained`), a `.init`
+function (`gc_in_init`) and a function reachable only through `.init_array`
+(`gc_ctor`). It writes `gc\n` and exits 42.
+
+```
+clang --target=aarch64-linux-gnu -c -O1 -ffreestanding -fno-pic \
+    -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables \
+    -fno-unwind-tables -nostdlib gc_a64.c -o gc_a64.o
+```
+
+GC oracle for `elf_gc_sections_spec`:
+
+```
+ld.lld-23 -static -e _start --gc-sections --print-gc-sections gc_a64.o -o gcy
+ld.lld-23 -static -e _start gc_a64.o -o gcn
+```
+
+## Lane C1 fixtures (SHF_MERGE string merge)
+
+`merge_a_a64.o` and `merge_b_a64.o` share the literals `hi\n` and `dup\n` and
+each add one of their own, so a `-O1` link must drop two duplicates. `_start`
+compares `a_dup()` with `b_dup()` and adds 2 only when they merged to one
+address: exit 42 means merged, exit 40 means not. Same compiler as above:
+
+```
+CF="-c -O2 -ffreestanding -fno-pic -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=aarch64-linux-gnu $CF merge_a_a64.c -o merge_a_a64.o
+clang --target=aarch64-linux-gnu $CF merge_b_a64.c -o merge_b_a64.o
+```
+
+(`-fmerge-constants` is accepted by gcc but warned-and-ignored by this clang;
+clang emits `.rodata.str1.1` as `SHF_MERGE|SHF_STRINGS` regardless, which is
+what the merge path consumes.)
+
+Merge oracle for `elf_merge_strings_spec`:
+
+```
+ld.lld-23 -static -e _start -O1 merge_a_a64.o merge_b_a64.o -o mrg1   # .rodata 0x19, exit 42
+ld.lld-23 -static -e _start -O0 merge_a_a64.o merge_b_a64.o -o mrg0   # .rodata 0x22, exit 40
+```
+
+### Wide-literal, end-of-section and demotion fixtures (lane C1 review)
+
+`merge_wide_a64.o` + `merge_wideb_a64.o` share one `L"wide"` literal in
+`.rodata.str4.4` (`SHF_MERGE|SHF_STRINGS`, `sh_entsize 4`); ld.lld MERGES
+multi-byte strings (`splitStrings` -> `findNull` scans entsize-sized NUL
+units), so `-O1` gives one copy and exit 42, `-O0` two copies and exit 40.
+`merge_strend_a64.o` defines a global at the very END of a merged section
+(`st_value == sh_size`), which ld.lld accepts: for a named Defined symbol
+`splitSections` (SyntheticSections.cpp) anchors any `v >= size` on the last
+piece, and the `offset > size` error in `getSymVA` applies only to SECTION
+symbols plus addend.
+`merge_relin_a64.o` has `.rodata.cst8` holding `.quad target`, i.e. a
+relocation INTO a merge section, which ld.lld demotes to a regular input
+section. All three exit 42.
+
+```
+CF="-c -O2 -ffreestanding -fno-pic -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+for f in merge_wide_a64 merge_wideb_a64 merge_strend_a64 merge_relin_a64; do
+  clang --target=aarch64-linux-gnu $CF $f.c -o $f.o
+done
+ld.lld-23 -static -e _start -O1 merge_wide_a64.o merge_wideb_a64.o   # .rodata 0x14 es 4, exit 42
+ld.lld-23 -static -e _start -O0 merge_wide_a64.o merge_wideb_a64.o   # .rodata 0x28 es 4, exit 40
+ld.lld-23 -static -e _start -O1 merge_strend_a64.o                   # links, exit 42
+ld.lld-23 -static -e _start -O1 merge_relin_a64.o                    # .rodata 0x08 AM es 8
+ld.lld-23 -static -e _start -O1 merge_relin_a64.o merge_b_a64.o      # .rodata 0x19 es 0
+```

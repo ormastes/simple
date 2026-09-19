@@ -4,10 +4,14 @@
 # PT_LOAD segments and serializes the image through the _ElfWriter byte codec
 # (reached via the elf_writer facade). No file I/O — returns raw [i64] bytes.
 #
-# Layout (same shape as ld.lld without -z separate-code / -z relro):
+# Layout (same shape as ld.lld without -z separate-code):
 #   PT_LOAD R   : ELF header + program headers + every ELF_SEG_R section
 #   PT_LOAD RX  : every ELF_SEG_RX section
 #   PT_LOAD RW  : every ELF_SEG_RW section (NOBITS last: memsz > filesz)
+#   With an ELF_RELRO_PADDING section (ld.lld -z relro, lane C1) the RW class
+#   becomes two loads: RELRO sections + padding to the next ELF_COMMON_PAGE,
+#   then the rest at the next max-page, plus a PT_GNU_RELRO (R, align 1)
+#   mirroring the first.
 # plus PT_PHDR + PT_INTERP (when a .interp section exists), PT_DYNAMIC (when a
 # .dynamic section exists), PT_GNU_STACK (RW, non-executable) and one PT_NOTE
 # per SHT_NOTE section. Segments are packed in the file; each segment's vaddr
@@ -15,7 +19,7 @@
 # (offset mod page), so p_offset == p_vaddr (mod p_align) holds and no two
 # segments with different permissions share a page.
 #
-# Not produced (slice 2 limits): PT_GNU_RELRO, PT_TLS, PT_GNU_EH_FRAME.
+# Not produced: PT_TLS, PT_GNU_EH_FRAME.
 
 use compiler.backend.linker.elf_writer.{
     ElfLayoutSection,
@@ -37,6 +41,7 @@ val PT_INTERP: i64 = 3
 val PT_NOTE: i64 = 4
 val PT_PHDR: i64 = 6
 val PT_GNU_STACK: i64 = 0x6474e551
+val PT_GNU_RELRO: i64 = 0x6474e552
 val PF_X: i64 = 1
 val PF_W: i64 = 2
 val PF_R: i64 = 4
@@ -54,6 +59,13 @@ val SHT_NOBITS_E: i64 = 8
 val ELF_SEG_R: i64 = 0
 val ELF_SEG_RX: i64 = 1
 val ELF_SEG_RW: i64 = 2
+
+# A NOBITS section of this name, placed right after the RELRO sections of the
+# RW class, splits that class into a RELRO PT_LOAD (padded by it to the next
+# ELF_COMMON_PAGE) and a non-RELRO PT_LOAD, and adds a PT_GNU_RELRO.
+val ELF_RELRO_PADDING: text = ".relro_padding"
+# ld.lld default -z common-page-size on x86_64 and aarch64.
+val ELF_COMMON_PAGE: i64 = 0x1000
 
 # ============================================================================
 # Types
@@ -133,6 +145,8 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     var notes: i64 = 0
     var prev_seg: i64 = 0
     var seen_nobits = false
+    var has_relro = false
+    var after_relro = false     # RW sections follow .relro_padding (a second RW PT_LOAD)
     for s in secs:
         # Same rule, same predicate, as the loader's segment mapper
         # (src/compiler/99.loader/segment_mapper.spl): a section aligned more
@@ -145,10 +159,21 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
             return Err("section {s.name} is out of segment order")
         if seen_nobits and s.sh_type != SHT_NOBITS_E:
             return Err("section {s.name} follows a NOBITS section")
-        if s.sh_type == SHT_NOBITS_E:
-            if s.seg != ELF_SEG_RW:
-                return Err("NOBITS section {s.name} must be writable")
-            seen_nobits = true
+        if s.name == ELF_RELRO_PADDING:
+            if s.sh_type != SHT_NOBITS_E or s.seg != ELF_SEG_RW:
+                return Err("{ELF_RELRO_PADDING} must be a writable NOBITS section")
+            if has_relro:
+                return Err("more than one {ELF_RELRO_PADDING}")
+            if prev_seg != ELF_SEG_RW or not has_seg[ELF_SEG_RW]:
+                return Err("{ELF_RELRO_PADDING} must follow the RELRO sections")
+            has_relro = true
+        else:
+            if s.sh_type == SHT_NOBITS_E:
+                if s.seg != ELF_SEG_RW:
+                    return Err("NOBITS section {s.name} must be writable")
+                seen_nobits = true
+            if has_relro:
+                after_relro = true
         prev_seg = s.seg
         has_seg[s.seg] = true
         if s.name == ".interp":
@@ -167,6 +192,10 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
         phnum = phnum + 1
     if has_dynamic:
         phnum = phnum + 1
+    if has_relro:
+        phnum = phnum + 1       # PT_GNU_RELRO
+    if after_relro:
+        phnum = phnum + 1       # the non-RELRO RW PT_LOAD
 
     var offsets: [i64] = []
     var vaddrs: [i64] = []
@@ -174,6 +203,9 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     var off = ELF64_HEADER_SIZE + phnum * ELF64_PHDR_SIZE
     var vend = base
     var file_end = off
+    var relro_segs: [ElfExecSegment] = []
+    var pad_idx: i64 = -1
+    var pad_size: i64 = 0
     var seg: i64 = 0
     var i: i64 = 0
     while seg < 3:
@@ -184,11 +216,24 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
             var filesz: i64 = 0
             var memsz: i64 = 0
             var v = base + off
+            var ends_relro = false
             while i < secs.len() and secs[i].seg == seg:
                 val s = secs[i]
                 var al = s.align
                 if al < 1:
                     al = 1
+                if s.name == ELF_RELRO_PADDING:
+                    # ld.lld: the RELRO load is padded (no file bytes) to the next
+                    # COMMON page; the non-RELRO rest gets its own PT_LOAD
+                    val pend = align_up(v, ELF_COMMON_PAGE)
+                    offsets = offsets.push(off)
+                    vaddrs = vaddrs.push(v)
+                    pad_idx = i
+                    pad_size = pend - v
+                    memsz = pend - seg_v
+                    ends_relro = true
+                    i = i + 1
+                    break
                 if s.sh_type == SHT_NOBITS_E:
                     val bv = align_up(v, al)
                     if not started:
@@ -223,9 +268,25 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
                 memsz = off
             loads = loads.push(ElfExecSegment(p_type: PT_LOAD, p_flags: elf_exec_seg_flags(seg), p_offset: seg_off,
                 p_vaddr: seg_v, p_paddr: seg_v, p_filesz: filesz, p_memsz: memsz, p_align: page))
+            if ends_relro:
+                relro_segs = relro_segs.push(ElfExecSegment(p_type: PT_GNU_RELRO, p_flags: PF_R, p_offset: seg_off,
+                    p_vaddr: seg_v, p_paddr: seg_v, p_filesz: filesz, p_memsz: memsz, p_align: 1))
             vend = seg_v + memsz
             file_end = off
+            if ends_relro and i < secs.len() and secs[i].seg == seg:
+                continue
         seg = seg + 1
+
+    var placed: [ElfOutSec] = []
+    var pi: i64 = 0
+    while pi < secs.len():
+        val s = secs[pi]
+        if pi == pad_idx:
+            placed = placed.push(ElfOutSec(name: s.name, sh_type: s.sh_type, sh_flags: s.sh_flags, align: s.align,
+                size: pad_size, entsize: s.entsize, link: s.link, info: s.info, seg: s.seg))
+        else:
+            placed = placed.push(s)
+        pi = pi + 1
 
     # Program header table in conventional order.
     var segs: [ElfExecSegment] = []
@@ -247,6 +308,8 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
             segs = segs.push(ElfExecSegment(p_type: PT_DYNAMIC, p_flags: PF_R | PF_W, p_offset: offsets[k],
                 p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: 8))
         k = k + 1
+    for r in relro_segs:
+        segs = segs.push(r)
     segs = segs.push(ElfExecSegment(p_type: PT_GNU_STACK, p_flags: PF_R | PF_W, p_offset: 0, p_vaddr: 0, p_paddr: 0,
         p_filesz: 0, p_memsz: 0, p_align: 0))
     k = 0
@@ -256,7 +319,7 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
                 p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: secs[k].align))
         k = k + 1
 
-    Ok(ElfExecPlan(secs: secs, offsets: offsets, vaddrs: vaddrs, segments: segs, file_end: file_end))
+    Ok(ElfExecPlan(secs: placed, offsets: offsets, vaddrs: vaddrs, segments: segs, file_end: file_end))
 
 # ============================================================================
 # Serialization
@@ -325,6 +388,7 @@ fn elf_write_image(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExecPlan,
 export ElfOutSec, ElfExecSegment, ElfExecPlan
 export elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image
 export ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW
-export PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_PHDR, PT_GNU_STACK, PF_X, PF_W, PF_R
+export ELF_RELRO_PADDING, ELF_COMMON_PAGE
+export PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_PHDR, PT_GNU_STACK, PT_GNU_RELRO, PF_X, PF_W, PF_R
 export SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR
 export SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOTE_E, SHT_NOBITS_E

@@ -1,0 +1,186 @@
+# Internal ELF linker: --gc-sections equivalent (mark from roots) — lane C1
+#
+# `ElfLinkRequest.gc_sections` runs ld.lld's --gc-sections: every allocatable
+# input section unreachable from the roots is dropped before placement. Roots
+# are ld.lld's (MarkLive.cpp `isReserved` plus the entry symbol):
+# SHT_INIT_ARRAY / SHT_FINI_ARRAY / SHT_PREINIT_ARRAY / SHT_NOTE sections,
+# SHF_GNU_RETAIN sections, sections whose name starts with .init/.fini/.ctors/
+# .dtors/.jcr, and the section defining the entry symbol. Non-allocatable
+# sections (.note.GNU-stack, .comment, debug info) are never placed at all, so
+# they are neither roots nor candidates.
+#
+# Oracle (test/fixtures/linker/elf/gc_a64.o, RECIPE.md — -ffunction-sections
+# -fdata-sections, so every function and datum is its own input section):
+#
+#   ld.lld-23 -static -e _start --gc-sections --print-gc-sections gc_a64.o
+#     removed: .text (empty) .text.gc_dead_leaf .text.gc_dead
+#              .rodata.gc_dead_msg .data.gc_dead_base .bss.gc_dead_scratch
+#     kept:    .rodata 0x4  .text 0x80  .init 0x8  .init_array 0x8
+#              .data 0x8  .bss 0x10
+#   without --gc-sections:
+#     kept:    .rodata 0xa  .text 0xb8  .init 0x8  .init_array 0x8
+#              .data 0x10 .bss 0x18
+#
+# `.text` 0x80 = _start 0x40 + gc_add 0x18 + gc_leaf 0x10 (transitively live
+# from _start) + gc_retained 0x8 (SHF_GNU_RETAIN) + gc_ctor 0x10 (reached only
+# through the .init_array root). Both linked images still run (exit 42).
+#
+# Anything the mark pass does not model is a named error, never a silent keep
+# or drop: per-FDE .eh_frame liveness, SHT_GROUP (COMDAT) membership and
+# SHF_LINK_ORDER dependencies.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_write_bytes, process_run}
+
+val FIX: text = "test/fixtures/linker/elf"
+val GLIBC: text = "/usr/lib/aarch64-linux-gnu"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < rd16(b, 0x3c):
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_size(b: [i64], name: text) -> i64:
+    val h = shdr_by_name(b, name)
+    if h < 0:
+        return -1
+    rd64(b, h + 32)
+
+# Sizes of the allocated output sections, in the oracle's order.
+fn alloc_sizes(b: [i64]) -> [i64]:
+    [sec_size(b, ".rodata"), sec_size(b, ".text"), sec_size(b, ".init"),
+        sec_size(b, ".init_array"), sec_size(b, ".data"), sec_size(b, ".bss")]
+
+# Names in .symtab (any binding), in table order.
+fn symtab_names(b: [i64]) -> [text]:
+    val h = shdr_by_name(b, ".symtab")
+    val so = rd64(b, h + 24)
+    val n = rd64(b, h + 32) / 24
+    val str = rd64(b, rd64(b, 0x28) + rd32(b, h + 40) * 64 + 24)
+    var out: [text] = []
+    var i: i64 = 1
+    while i < n:
+        out = out.push(cstr(b, str + rd32(b, so + i * 24)))
+        i = i + 1
+    out
+
+fn has_sym(b: [i64], name: text) -> bool:
+    for n in symtab_names(b):
+        if n == name:
+            return true
+    false
+
+fn link_gc(objs: [[i64]], gc: bool) -> Result<[i64], text>:
+    elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [], entry: "_start",
+        target: RelocArch.AArch64, mode: ELF_LINK_STATIC_EXEC, interp: "", gc_sections: gc))
+
+fn link_or_empty(objs: [[i64]], gc: bool) -> [i64]:
+    val r = link_gc(objs, gc)
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn gc_obj() -> [[i64]]:
+    [load_path("{FIX}/gc_a64.o")]
+
+fn run_image(b: [i64], path: text) -> i64:
+    if b.len() == 0:
+        return -1
+    var bytes: [u8] = []
+    for x in b:
+        bytes = bytes.push(x as u8)
+    if not file_write_bytes(path, bytes):
+        return -1
+    val (_o, _e, c) = process_run("chmod", ["755", path])
+    if c != 0:
+        return -1
+    val (_o2, _e2, rc) = process_run(path, [])
+    rc
+
+describe "elf_link - --gc-sections (mark from roots)":
+    it "is off by default: every input section is placed (ld.lld without --gc-sections)":
+        expect(alloc_sizes(link_or_empty(gc_obj(), false))).to_equal([0xa, 0xb8, 0x8, 0x8, 0x10, 0x18])
+
+    it "gc_sections keeps exactly ld.lld --gc-sections' section sizes":
+        expect(alloc_sizes(link_or_empty(gc_obj(), true))).to_equal([0x4, 0x80, 0x8, 0x8, 0x8, 0x10])
+
+    it "drops the unreferenced chain (gc_dead -> gc_dead_leaf, its rodata/data/bss)":
+        val b = link_or_empty(gc_obj(), true)
+        for n in ["gc_dead", "gc_dead_leaf", "gc_dead_msg", "gc_dead_base", "gc_dead_scratch"]:
+            expect(has_sym(b, n)).to_equal(false)
+
+    it "keeps what the roots reach: entry, its callees, SHF_GNU_RETAIN, .init, .init_array":
+        val b = link_or_empty(gc_obj(), true)
+        for n in ["_start", "gc_add", "gc_leaf", "gc_msg", "gc_base", "gc_scratch",
+                "gc_retained", "gc_in_init", "gc_ctor", "gc_ctor_ran"]:
+            expect(has_sym(b, n)).to_equal(true)
+
+    it "without gc_sections the dead chain is still there":
+        val b = link_or_empty(gc_obj(), false)
+        expect(has_sym(b, "gc_dead")).to_equal(true)
+        expect(has_sym(b, "gc_dead_leaf")).to_equal(true)
+
+    it "both images run (exit 42) and the gc'd one is smaller":
+        val g = link_or_empty(gc_obj(), true)
+        val n = link_or_empty(gc_obj(), false)
+        expect(run_image(g, "/tmp/elf_gc_sections_spec_gc")).to_equal(42)
+        expect(run_image(n, "/tmp/elf_gc_sections_spec_nogc")).to_equal(42)
+        expect(g.len() < n.len()).to_equal(true)
+
+    it "an allocatable .eh_frame is a named error under gc_sections (no per-FDE liveness)":
+        val objs = [load_path("{GLIBC}/crt1.o"), load_path("{GLIBC}/crti.o"),
+            load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
+        val r = elf_link(ElfLinkRequest(objects: objs, archives: [],
+            shared: [file_read_bytes("{GLIBC}/libc.so.6")], entry: "_start",
+            target: RelocArch.AArch64, mode: ELF_LINK_DYNAMIC_PIE,
+            interp: "/lib/ld-linux-aarch64.so.1", gc_sections: true))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains(".eh_frame")).to_equal(true)
+        expect(r.unwrap_err().contains("gc_sections")).to_equal(true)
+
+    it "the same inputs link without gc_sections (the reject is the gc pass, not the inputs)":
+        val objs = [load_path("{GLIBC}/crt1.o"), load_path("{GLIBC}/crti.o"),
+            load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
+        val r = elf_link(ElfLinkRequest(objects: objs, archives: [],
+            shared: [file_read_bytes("{GLIBC}/libc.so.6")], entry: "_start",
+            target: RelocArch.AArch64, mode: ELF_LINK_DYNAMIC_PIE,
+            interp: "/lib/ld-linux-aarch64.so.1", gc_sections: false))
+        expect(r.is_ok()).to_equal(true)

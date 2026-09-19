@@ -1,0 +1,278 @@
+# Internal ELF linker: PT_GNU_RELRO (ld.lld -z relro parity) — lane C1
+#
+# ld.lld 23 (its default -z relro) groups the RELRO sections first in the
+# writable part — .data.rel.ro/.init_array/.fini_array/.preinit_array in input
+# order, then .dynamic, then .got — gives them their own RW PT_LOAD, pads that
+# load with a NOBITS .relro_padding up to the next COMMON page (4 KiB, not the
+# 64 KiB max-page), and starts the non-RELRO RW PT_LOAD (.data, .got.plt,
+# .bss) at the next max-page boundary with the file offset continuing. A
+# PT_GNU_RELRO (flags R, align 1) mirrors the RELRO load, and sits after
+# PT_DYNAMIC and before PT_GNU_STACK. Oracle, from
+# test/fixtures/linker/elf (RECIPE.md):
+#
+#   ld.lld-23 -pie -dynamic-linker /lib/ld-linux-aarch64.so.1 Scrt1.o crti.o
+#       relro_a64.o crtn.o libc.so.6
+#     LOAD      0x6c0 0x206c0 filesz 0x1d8 memsz 0x940 RW
+#     LOAD      0x898 0x30898 filesz 0x48  memsz 0x54  RW
+#     GNU_RELRO 0x6c0 0x206c0 filesz 0x1d8 memsz 0x940 R align 0x1
+#     RW order: .data.rel.ro .init_array .fini_array .dynamic .got
+#               .relro_padding | .data .got.plt .bss
+#
+# Absolute sizes differ from lld for two pre-existing, non-RELRO reasons: no
+# symbol versioning (.dynamic is 3 tags shorter) and undefined-weak
+# __gmon_start__ is not exported (one PLT slot fewer). The spec therefore pins
+# the RELRO shape and derives sizes from our own section headers.
+#
+# The same shape holds for a static PIE (.dynamic only) and a static ET_EXEC
+# that keeps a .got; an output with no RELRO section has no PT_GNU_RELRO.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest,
+    ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_PIE, ELF_LINK_DYNAMIC_EXEC
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_write_bytes, process_run}
+
+val FIX: text = "test/fixtures/linker/elf"
+val GLIBC: text = "/usr/lib/aarch64-linux-gnu"
+val INTERP: text = "/lib/ld-linux-aarch64.so.1"
+val PT_LOAD: i64 = 1
+val PT_DYNAMIC: i64 = 2
+val PT_GNU_STACK: i64 = 0x6474e551
+val PT_GNU_RELRO: i64 = 0x6474e552
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 16)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+# Names of the writable allocated sections, in section-header order.
+fn rw_sections(b: [i64]) -> [text]:
+    val shoff = rd64(b, 0x28)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var out: [text] = []
+    var i: i64 = 1
+    while i < rd16(b, 0x3c):
+        val h = shoff + i * 64
+        if rd64(b, h + 8) & 3 == 3:
+            out = out.push(cstr(b, stroff + rd32(b, h)))
+        i = i + 1
+    out
+
+fn phdr_types(b: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        out = out.push(rd32(b, rd64(b, 32) + i * 56))
+        i = i + 1
+    out
+
+fn phdr_find(b: [i64], p_type: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        if rd32(b, rd64(b, 32) + i * 56) == p_type:
+            return i
+        i = i + 1
+    -1
+
+# Field of program header i at byte offset off (4-byte for p_flags, else 8).
+fn ph(b: [i64], i: i64, off: i64) -> i64:
+    val p = rd64(b, 32) + i * 56
+    if off == 4:
+        return rd32(b, p + 4)
+    rd64(b, p + off)
+
+# Program header indexes of the RW (flags 6) PT_LOADs.
+fn rw_loads(b: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        if ph(b, i, 0) & 0xffffffff == PT_LOAD and ph(b, i, 4) == 6:
+            out = out.push(i)
+        i = i + 1
+    out
+
+fn in_relro(b: [i64], name: text) -> bool:
+    val r = phdr_find(b, PT_GNU_RELRO)
+    val lo = ph(b, r, 16)
+    val hi = lo + ph(b, r, 40)
+    val a = sec_addr(b, name)
+    a >= lo and a + sec_size(b, name) <= hi
+
+fn link(objs: [[i64]], mode: i64, libc: bool) -> [i64]:
+    var shared: [[u8]] = []
+    var interp = ""
+    if libc:
+        shared = [file_read_bytes("{GLIBC}/libc.so.6")]
+        interp = INTERP
+    val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: shared, entry: "_start",
+        target: RelocArch.AArch64, mode: mode, interp: interp))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn libc_objs(crt1: text) -> [[i64]]:
+    [load_path("{GLIBC}/{crt1}"), load_path("{GLIBC}/crti.o"), load_path("{FIX}/relro_a64.o"),
+        load_path("{GLIBC}/crtn.o")]
+
+fn relro_pie() -> [i64]:
+    link(libc_objs("Scrt1.o"), ELF_LINK_DYNAMIC_PIE, true)
+
+# Write the image, run it, return its exit status (-1 when it could not run).
+fn run_image(b: [i64], path: text) -> i64:
+    if b.len() == 0:
+        return -1
+    var bytes: [u8] = []
+    for x in b:
+        bytes = bytes.push(x as u8)
+    if not file_write_bytes(path, bytes):
+        return -1
+    val (_o, _e, c) = process_run("chmod", ["755", path])
+    if c != 0:
+        return -1
+    val (_o2, _e2, rc) = process_run(path, [])
+    rc
+
+describe "elf_link - PT_GNU_RELRO (ld.lld -z relro parity)":
+    it "dynamic PIE orders RELRO sections first, then .relro_padding, then the rest (lld order)":
+        val b = relro_pie()
+        expect(rw_sections(b)).to_equal([".data.rel.ro", ".init_array", ".fini_array", ".dynamic", ".got",
+            ".relro_padding", ".data", ".got.plt", ".bss"])
+
+    it "dynamic PIE PT_GNU_RELRO mirrors the first RW PT_LOAD and ends on a 4 KiB page":
+        val b = relro_pie()
+        val r = phdr_find(b, PT_GNU_RELRO)
+        expect(r >= 0).to_equal(true)
+        val loads = rw_loads(b)
+        expect(loads.len()).to_equal(2)
+        val l = loads[0]
+        expect(ph(b, r, 4)).to_equal(4)
+        expect(ph(b, r, 48)).to_equal(1)
+        expect(ph(b, r, 8)).to_equal(ph(b, l, 8))
+        expect(ph(b, r, 16)).to_equal(ph(b, l, 16))
+        expect(ph(b, r, 32)).to_equal(ph(b, l, 32))
+        expect(ph(b, r, 40)).to_equal(ph(b, l, 40))
+        expect((ph(b, r, 16) + ph(b, r, 40)) % 0x1000).to_equal(0)
+        # filesz = the RELRO sections' file bytes (lld: 0x1d8 = 8+8+8+0x1b0+0x10;
+        # ours is 0x30 smaller: no DT_VERSYM/DT_VERNEED/DT_VERNEEDNUM yet)
+        expect(ph(b, r, 32)).to_equal(sec_addr(b, ".got") + sec_size(b, ".got") - sec_addr(b, ".data.rel.ro"))
+
+    it "dynamic PIE .relro_padding is NOBITS WA align 1 and fills to the page end":
+        val b = relro_pie()
+        val h = shdr_by_name(b, ".relro_padding")
+        expect(h >= 0).to_equal(true)
+        expect(rd32(b, h + 4)).to_equal(8)
+        expect(rd64(b, h + 8)).to_equal(3)
+        expect(rd64(b, h + 48)).to_equal(1)
+        expect((sec_addr(b, ".relro_padding") + sec_size(b, ".relro_padding")) % 0x1000).to_equal(0)
+        expect(sec_addr(b, ".relro_padding")).to_equal(sec_addr(b, ".got") + sec_size(b, ".got"))
+
+    it "dynamic PIE non-RELRO RW load starts at the next 64 KiB page with the file offset continuing":
+        val b = relro_pie()
+        val loads = rw_loads(b)
+        val r0 = loads[0]
+        val r1 = loads[1]
+        val relro_end = ph(b, r0, 16) + ph(b, r0, 40)
+        val off1 = ph(b, r1, 8)
+        expect(off1).to_equal(ph(b, r0, 8) + ph(b, r0, 32))
+        expect(ph(b, r1, 16)).to_equal(((relro_end + 0xffff) / 0x10000) * 0x10000 + off1 % 0x10000)
+        expect(sec_addr(b, ".data")).to_equal(ph(b, r1, 16))
+        # lld: filesz 0x48 (.data 4, pad, .got.plt 0x40), memsz 0x54 (+ .bss 0xc);
+        # our .got.plt is one slot shorter (undefined-weak __gmon_start__ is not
+        # exported to .dynsym), so compare against our own section extents
+        expect(ph(b, r1, 32)).to_equal(sec_addr(b, ".got.plt") + sec_size(b, ".got.plt") - sec_addr(b, ".data"))
+        expect(ph(b, r1, 40)).to_equal(sec_addr(b, ".bss") + sec_size(b, ".bss") - sec_addr(b, ".data"))
+        expect(sec_size(b, ".bss")).to_equal(0xc)
+
+    it "dynamic PIE RELRO covers every RELRO section and none of the others":
+        val b = relro_pie()
+        for n in [".data.rel.ro", ".init_array", ".fini_array", ".dynamic", ".got"]:
+            expect(in_relro(b, n)).to_equal(true)
+        for n in [".data", ".got.plt", ".bss"]:
+            expect(in_relro(b, n)).to_equal(false)
+
+    it "program headers put GNU_RELRO after DYNAMIC and before GNU_STACK":
+        val t = phdr_types(relro_pie())
+        var d: i64 = -1
+        var r: i64 = -1
+        var s: i64 = -1
+        var i: i64 = 0
+        while i < t.len():
+            if t[i] == PT_DYNAMIC:
+                d = i
+            if t[i] == PT_GNU_RELRO:
+                r = i
+            if t[i] == PT_GNU_STACK:
+                s = i
+            i = i + 1
+        expect(r).to_equal(d + 1)
+        expect(s).to_equal(r + 1)
+
+    it "dynamic PIE and dynamic exec with RELRO still run (constructor, table, puts: exit 42)":
+        expect(run_image(relro_pie(), "/tmp/elf_relro_spec_pie")).to_equal(42)
+        expect(run_image(link(libc_objs("crt1.o"), ELF_LINK_DYNAMIC_EXEC, true), "/tmp/elf_relro_spec_exec")).to_equal(42)
+
+    it "static PIE: RELRO holds .dynamic, padded to a 4 KiB page, and still runs":
+        val b = link([load_path("{FIX}/pie_start_a64.o"), load_path("{FIX}/pie_lib_a64.o")], ELF_LINK_STATIC_PIE, false)
+        val r = phdr_find(b, PT_GNU_RELRO)
+        expect(r >= 0).to_equal(true)
+        expect(ph(b, r, 16)).to_equal(sec_addr(b, ".dynamic"))
+        expect(ph(b, r, 32)).to_equal(sec_size(b, ".dynamic"))
+        expect((ph(b, r, 16) + ph(b, r, 40)) % 0x1000).to_equal(0)
+        expect(rw_loads(b).len()).to_equal(2)
+        expect(run_image(b, "/tmp/elf_relro_spec_spie")).to_equal(42)
+
+    it "static exec that keeps a .got gets RELRO like ld.lld -static; one with no RELRO section does not":
+        val g = link([load_path("{FIX}/pic_start_a64.o"), load_path("{FIX}/pic_lib_a64.o")], ELF_LINK_STATIC_EXEC, false)
+        val r = phdr_find(g, PT_GNU_RELRO)
+        expect(r >= 0).to_equal(true)
+        expect(ph(g, r, 16)).to_equal(sec_addr(g, ".got"))
+        expect(ph(g, r, 32)).to_equal(0x18)
+        expect(run_image(g, "/tmp/elf_relro_spec_sgot")).to_equal(42)
+        val p = link([load_path("{FIX}/start_a64.o"), load_path("{FIX}/lib_a64.o")], ELF_LINK_STATIC_EXEC, false)
+        expect(phdr_find(p, PT_GNU_RELRO)).to_equal(-1)
+        expect(shdr_by_name(p, ".relro_padding")).to_equal(-1)
+        expect(rw_loads(p).len()).to_equal(1)
