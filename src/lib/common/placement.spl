@@ -1,0 +1,217 @@
+# ============================================================================
+# std.common.placement — the ONE binary-placement oracle (lane F2).
+#
+# "Placement" is: choosing the address or file offset at which a run of bytes
+# lands, the rounding that makes that address satisfy an alignment, the cap
+# that says an alignment is unsatisfiable by the mapper that will consume it,
+# and the page congruence an ELF PT_LOAD needs. It is NOT symbol resolution
+# and NOT relocation VALUE computation — lane A4b already unified the latter
+# in compiler/70.backend/linker/gpu_smf/smf_reloc_formulas.spl, and this
+# module is its placement sibling.
+#
+# WHY IT LIVES IN std.common, NOT under the linker
+# ------------------------------------------------
+# The callers span three layers that cannot all see each other:
+#
+#   * src/compiler/70.backend/linker/**   — ELF exec/PIE, static link, boot
+#                                           link, SMF layout
+#   * src/compiler/99.loader/**           — module loader, bytecode writer
+#   * src/lib/{nogc_sync_mut,nogc_async_mut}/debug/remote/exec/**
+#                                         — the REMOTE target code allocator
+#
+# A module under src/lib cannot import `compiler.*`, so the linker's own tree
+# could never have been the shared home once the remote allocator is in
+# scope. `std.common` is reachable from all three and is already where the
+# repo keeps pure arithmetic (structure.md: "common/ — Pure functions").
+# This module is pure: no I/O, no allocation of real memory, no globals.
+#
+# WHAT IT REPLACED
+# ----------------
+# Six independent copies of the same primitive, which DISAGREED:
+#
+#   copy                                              align_up(10,6)  (-5,8)
+#   ------------------------------------------------  --------------  ------
+#   _ElfWriter/encoding.spl:213  v + (a - rem)                     12       8
+#   boot_layout/boot_layout_plan.spl:141  (+ neg branch)           12       0
+#   gpu_smf/smf_section_layout.spl:64  ((v+a-1)/a)*a               12  (rejected)
+#   */debug/remote/exec/memory_alloc.spl:48  (v+m) & ~m           10*       0
+#   linker/smf_writer.spl:640  v + (a - rem)                       12       8
+#
+#   * 10 is >= the input -- the mask formula never goes backwards -- but is
+#     not a multiple of 6. Its defect is MISALIGNMENT, never overlap.
+#   99.loader/loader/bytecode_writer.spl:241  while-loop      (hangs*)  (hangs*)
+#
+#   * the while-loop `while (off % align) != 0: off = off + 1` never
+#     terminates for a non-positive alignment and is O(align) otherwise.
+#
+# The unified answer is the mathematically correct ceiling: the smallest
+# multiple of `alignment` that is >= `value`, for every sign of `value`.
+# For the inputs real ELF/SMF layout produces (non-negative value,
+# power-of-two alignment) all surviving copies already agreed, so adopting
+# it changes no existing green behaviour — it only removes the wrong
+# answers at the edges.
+#
+# LAYERED POLICY, NOT LAYERED PRIMITIVE
+# -------------------------------------
+# `placement_align_up` accepts alignment 0 and 1 as "no constraint", because
+# ELF `sh_addralign = 0` legally means exactly that. `placement_pack`, the
+# layout pass, still REJECTS alignment 0 and any non-power-of-two: a layout
+# that cannot state its own alignment is a bug, not a relaxation. Keeping
+# the permissive primitive and the strict pass separate is what lets both
+# the ELF writer and the SMF layout share one implementation.
+#
+# Composition only, no inheritance (repo rule): one result struct plus free
+# functions.
+# ============================================================================
+
+# i64 max (2^63 - 1), spelled out. Every overflow guard compares against this
+# BEFORE any add, so no intermediate value can wrap.
+val PLACEMENT_I64_MAX: i64 = 9223372036854775807
+
+# The page size every mapper in this repo assumes: mmap returns a
+# page-aligned base on all supported hosts, and the loader's segment mapper
+# (src/compiler/99.loader/segment_mapper.spl) and the ELF exec planner
+# (src/compiler/70.backend/linker/elf/elf_exec_writer.spl) both cap section
+# alignment at it. A PE writer passes its own section alignment to
+# `placement_align_within` instead of using this constant.
+val PLACEMENT_PAGE_SIZE: i64 = 4096
+
+# ----------------------------------------------------------------------------
+# PlacementPack — the outcome of one layout pass.
+# ----------------------------------------------------------------------------
+
+struct PlacementPack:
+    """Result of `placement_pack`. On success `ok` is true, `offsets[i]` is
+    the absolute address or file offset assigned to item i in INPUT ORDER,
+    and `total_size` is the span from `base` to the end of the last item
+    (final cursor - base). On any reject `ok` is false, `offsets` is empty
+    and `total_size` is 0 — a rejected layout never leaks partial
+    addresses."""
+    ok: bool
+    offsets: [i64]
+    total_size: i64
+
+fn placement_pack_reject() -> PlacementPack:
+    """The single reject value: ok false, no offsets, zero size."""
+    PlacementPack(ok: false, offsets: [], total_size: 0)
+
+# ----------------------------------------------------------------------------
+# The primitive.
+# ----------------------------------------------------------------------------
+
+fn placement_align_up(value: i64, alignment: i64) -> i64:
+    """Smallest multiple of `alignment` that is >= `value`.
+
+    `alignment <= 1` is identity (ELF `sh_addralign = 0` means "no
+    constraint"). Correct for a NEGATIVE `value`: `-5` aligned to 8 is 0,
+    not 8 — the remainder operator truncates toward zero, so a negative
+    remainder is subtracted rather than added. Correct for a
+    non-power-of-two `alignment` too: `align_up(10, 6)` is 12, which the
+    mask formula `(v + a - 1) & ~(a - 1)` gets wrong -- it answers 10,
+    which is >= the input (that formula never goes backwards) but is not a
+    multiple of 6. The defect is MISALIGNMENT, not overlap.
+
+    Does NOT guard overflow — callers that can approach i64 max ask
+    `placement_align_up_overflows` first, which is exact for a
+    power-of-two alignment."""
+    if alignment <= 1:
+        return value
+    val rem = value % alignment
+    if rem == 0:
+        return value
+    if rem < 0:
+        return value - rem
+    value + (alignment - rem)
+
+fn placement_alignment_is_power_of_two(alignment: i64) -> bool:
+    """True when `alignment` is usable by a layout pass: strictly positive
+    and a power of two (`n & (n - 1) == 0`)."""
+    alignment > 0 and (alignment & (alignment - 1)) == 0
+
+fn placement_align_up_overflows(value: i64, alignment: i64) -> bool:
+    """True when rounding `value` up to `alignment` would leave i64 range.
+    Checked BEFORE the add so nothing ever wraps. For a power-of-two
+    alignment this guard is exact: the largest representable multiple of
+    `alignment` is `PLACEMENT_I64_MAX - (alignment - 1)`."""
+    if alignment <= 1:
+        return false
+    value > PLACEMENT_I64_MAX - (alignment - 1)
+
+fn placement_align_within(alignment: i64, cap: i64) -> bool:
+    """True when `alignment` is satisfiable by a consumer whose strongest
+    guaranteed alignment is `cap`.
+
+    This is the one rule that `elf_exec_writer.elf_exec_plan` ("section
+    alignment exceeds page size") and `segment_mapper._map_segment`
+    ("alignment exceeds page alignment") each used to spell out with their
+    own constant and their own error text. A PE writer passes its section
+    alignment as `cap` rather than a page size."""
+    alignment <= cap
+
+fn placement_page_congruent(prev_end: i64, file_offset: i64, page: i64) -> i64:
+    """First address at or past the next `page` boundary after `prev_end`
+    that is congruent to `file_offset` modulo `page`.
+
+    This is the ELF PT_LOAD rule `p_offset == p_vaddr (mod p_align)`, which
+    lets a segment be mapped directly from the file with no per-segment
+    copy. It is OPT-IN: a format that does not require congruence (PE maps
+    by RVA, with file alignment independent of section alignment) simply
+    does not call it."""
+    placement_align_up(prev_end, page) + (file_offset % page)
+
+# ----------------------------------------------------------------------------
+# The layout pass: a sequential aligned prefix-sum.
+# ----------------------------------------------------------------------------
+
+fn placement_pack(base: i64, sizes: [i64], alignments: [i64]) -> PlacementPack:
+    """Assign each item its address by a sequential aligned prefix-sum
+    starting at `base`, preserving input order. `sizes[i]` and
+    `alignments[i]` are positionally paired:
+
+        offsets[i] = align_up(cursor, alignments[i])
+        cursor     = offsets[i] + sizes[i]
+
+    Rejects (ok false, empty offsets, total_size 0):
+      - sizes/alignments length mismatch,
+      - negative `base` or any negative size,
+      - any alignment <= 0 or not a power of two,
+      - i64 overflow at ANY step — both the round-up and the advance are
+        guarded BEFORE the add, so the cursor can never wrap.
+
+    Zero-size items occupy no bytes but are still aligned, so the next item
+    may land on the same address.
+
+    This is the single layout algorithm behind: SMF section layout
+    (`smf_layout_sections`), the loader's bytecode section writer, the
+    remote target code allocator, and — called twice, once over file
+    offsets with the file alignment and once over RVAs with the section
+    alignment — a PE/COFF writer."""
+    if sizes.len() != alignments.len():
+        return placement_pack_reject()
+    if base < 0:
+        return placement_pack_reject()
+    var offsets: [i64] = []
+    var cursor = base
+    var i = 0
+    val n = sizes.len()
+    while i < n:
+        val size = sizes[i]
+        val alignment = alignments[i]
+        if size < 0:
+            return placement_pack_reject()
+        if not placement_alignment_is_power_of_two(alignment):
+            return placement_pack_reject()
+        if placement_align_up_overflows(cursor, alignment):
+            return placement_pack_reject()
+        val offset = placement_align_up(cursor, alignment)
+        if offset > PLACEMENT_I64_MAX - size:
+            return placement_pack_reject()
+        offsets.push(offset)
+        cursor = offset + size
+        i = i + 1
+    PlacementPack(ok: true, offsets: offsets, total_size: cursor - base)
+
+export PlacementPack, PLACEMENT_I64_MAX, PLACEMENT_PAGE_SIZE
+export placement_pack_reject, placement_align_up
+export placement_alignment_is_power_of_two, placement_align_up_overflows
+export placement_align_within, placement_page_congruent, placement_pack

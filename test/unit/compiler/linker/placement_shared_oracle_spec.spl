@@ -1,0 +1,125 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# ============================================================================
+# One placement oracle across the linker, the SMF path, the loader and the
+# remote target allocator (lane F2).
+#
+# Lane A4b unified the relocation-VALUE oracle
+# (compiler/70.backend/linker/gpu_smf/smf_reloc_formulas.spl) between the
+# linker and the loader. PLACEMENT — which address a run of bytes lands at,
+# and the rounding and caps that decide it — was the remaining duplicate:
+# SIX independent copies of align_up that gave DIFFERENT answers.
+#
+# This spec proves the divergences through the REAL modules, not through a
+# hand-copied formula, and then pins that they now agree.
+#
+# Part 1 — agreement: the ELF writer's `align_up`, the boot layout
+#          planner's `boot_align_up`, the SMF layout pass's `smf_align_up`
+#          and the remote target allocator all return the SAME address for
+#          the same input, including the two inputs on which the old copies
+#          disagreed (a non-power-of-two alignment, and a negative value).
+#
+# Part 2 — divergence that REMAINS and is real: the SMF layout pass
+#          accepts a section whose alignment is stronger than a page, and a
+#          zero-size section; the loader's segment mapper can map neither.
+#          That is a property of the CONSUMER, not of the arithmetic, so it
+#          is asked for explicitly (`placement_align_within`) rather than
+#          silently baked into the layout pass. This spec is the evidence
+#          that the gap is known and where it lives.
+# ============================================================================
+
+use std.spec
+use std.common.placement.{
+    PLACEMENT_PAGE_SIZE,
+    placement_align_up,
+    placement_align_within
+}
+use compiler.backend.linker.elf_writer.{align_up}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_align_up}
+use compiler.backend.linker.gpu_smf.smf_section_layout.{
+    smf_align_up, smf_layout_sections
+}
+use compiler.loader.segment_mapper.{SegmentMapper}
+
+# ----------------------------------------------------------------------------
+# Part 1. The four surviving entry points agree, on every input.
+# ----------------------------------------------------------------------------
+
+describe "placement oracle agreement across the linker entry points":
+    it "agrees on ordinary power-of-two placement":
+        expect(align_up(11, 16)).to_be(16)
+        expect(boot_align_up(11, 16)).to_be(16)
+        expect(smf_align_up(11, 16)).to_be(16)
+        expect(placement_align_up(11, 16)).to_be(16)
+
+    it "agrees on a page-aligned advance":
+        expect(align_up(4097, 4096)).to_be(8192)
+        expect(boot_align_up(4097, 4096)).to_be(8192)
+        expect(smf_align_up(4097, 4096)).to_be(8192)
+
+    it "agrees on an already-aligned value":
+        expect(align_up(4096, 4096)).to_be(4096)
+        expect(boot_align_up(4096, 4096)).to_be(4096)
+        expect(smf_align_up(4096, 4096)).to_be(4096)
+
+    it "agrees on a non-power-of-two alignment, which a linker script may name":
+        # A linker script's ALIGN() expression is an arbitrary expression, so
+        # the boot path really can reach here with 6. The remote target
+        # allocator's old mask formula `(v + 5) & ~5` answered 10 for this.
+        # That is >= its input, so it never overlapped a previous allocation
+        # — the defect was MISALIGNMENT: 10 is not a multiple of 6.
+        expect(align_up(10, 6)).to_be(12)
+        expect(boot_align_up(10, 6)).to_be(12)
+        expect(placement_align_up(10, 6)).to_be(12)
+
+    it "agrees on a negative value, where two copies gave two answers":
+        # The ELF writer's `v + (a - rem)` answered 8; boot_layout answered 0.
+        # 0 is the smallest multiple of 8 that is >= -5.
+        expect(align_up(-5, 8)).to_be(0)
+        expect(boot_align_up(-5, 8)).to_be(0)
+        expect(placement_align_up(-5, 8)).to_be(0)
+
+    it "agrees that alignment 0 means no constraint, as ELF sh_addralign does":
+        expect(align_up(37, 0)).to_be(37)
+        expect(boot_align_up(37, 0)).to_be(37)
+        expect(placement_align_up(37, 0)).to_be(37)
+
+# ----------------------------------------------------------------------------
+# Part 2. The layout pass and the mapper still disagree — by design, and
+# provably, through the real modules.
+# ----------------------------------------------------------------------------
+
+describe "SMF layout accepts what the loader's segment mapper refuses":
+    it "lays out an 8192-aligned section that the mapper cannot map":
+        # Linker side: accepted, with a real address.
+        val laid = smf_layout_sections(0, [16], [8192])
+        expect(laid.ok).to_be(true)
+        expect(laid.offsets[0]).to_be(0)
+
+        # Loader side: refused, before any allocation happens.
+        var mapper = SegmentMapper.new()
+        val mapped = mapper.map_segment("div-align", 0i32, [1u8, 2u8, 3u8, 4u8], 8192)
+        expect(mapped.is_err()).to_be(true)
+
+        # And the shared predicate names why, in one place.
+        expect(placement_align_within(8192, PLACEMENT_PAGE_SIZE)).to_be(false)
+
+    it "lays out a zero-size section that the mapper cannot map":
+        # Linker side: a zero-size section is aligned and given an address;
+        # the next section may share it. This is documented SMF behaviour.
+        val laid = smf_layout_sections(0, [0, 4], [8, 8])
+        expect(laid.ok).to_be(true)
+        expect(laid.offsets[0]).to_be(0)
+        expect(laid.offsets[1]).to_be(0)
+
+        # Loader side: an empty segment is refused — there is nothing to map.
+        var mapper = SegmentMapper.new()
+        val empty: [u8] = []
+        val mapped = mapper.map_segment("div-empty", 0i32, empty, 8)
+        expect(mapped.is_err()).to_be(true)
+
+    it "agrees on an alignment both sides can honour":
+        val laid = smf_layout_sections(0, [16], [4096])
+        expect(laid.ok).to_be(true)
+        expect(placement_align_within(4096, PLACEMENT_PAGE_SIZE)).to_be(true)

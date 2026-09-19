@@ -1,0 +1,232 @@
+# ============================================================================
+# std.common.placement — the ONE placement oracle (lane F2).
+#
+# Before this module the repo carried SIX independent copies of the same
+# "round an address up to an alignment" primitive, and they DISAGREED:
+#
+#   src/compiler/70.backend/linker/_ElfWriter/encoding.spl:213   align_up
+#   src/compiler/70.backend/linker/boot_layout/boot_layout_plan.spl:141
+#                                                              boot_align_up
+#   src/compiler/70.backend/linker/gpu_smf/smf_section_layout.spl:64
+#                                                              smf_align_up
+#   src/lib/nogc_sync_mut/debug/remote/exec/memory_alloc.spl:48  align_up
+#   src/lib/nogc_async_mut/debug/remote/exec/memory_alloc.spl:48 align_up
+#   src/compiler/99.loader/loader/bytecode_writer.spl:241  (inline while-loop)
+#
+# This spec PINS the divergences that made the copies observably different,
+# then pins the unified semantics every caller now shares.
+#
+# Claims:
+#   1. NON-POWER-OF-TWO — the remote target allocator's mask formula
+#      `(v + (a-1)) & ~(a-1)` is WRONG for a non-power-of-two alignment:
+#      it answers 10 for align_up(10, 6) where the true ceiling is 12.
+#      10 is >= the input -- that formula never goes backwards, so it never
+#      overlapped a previous allocation -- but 10 is not a multiple of 6.
+#      The defect is MISALIGNMENT, not overlap.
+#      The shared oracle answers 12.
+#   2. NEGATIVE VALUE — the ELF writer's `v + (a - rem)` formula answers 8
+#      for align_up(-5, 8); the true smallest multiple of 8 that is >= -5
+#      is 0. The shared oracle answers 0 (boot_layout already did).
+#   3. IDENTITY — alignment 0 and 1 are identity, because ELF
+#      `sh_addralign = 0` legally means "no constraint". The SMF layout
+#      pass still REJECTS 0 through its own validity predicate; that is a
+#      layout policy, not a primitive difference.
+#   4. VALIDITY + OVERFLOW predicates behave as the SMF pass needs.
+#   5. PACK — the aligned prefix-sum is the single layout algorithm: mixed
+#      alignments, zero-size sections, non-zero base, empty input, and
+#      fail-closed rejects that leak no partial addresses.
+#   6. PAGE CAP — one predicate for the rule the ELF exec planner
+#      (elf_exec_writer.spl:132) and the loader's segment mapper
+#      (segment_mapper.spl:170) each used to spell out separately.
+#   7. PAGE CONGRUENCE — p_offset == p_vaddr (mod p_align), the rule
+#      elf_exec_page_align encodes, now shared so a PE writer can opt out
+#      of it by simply not calling it.
+# ============================================================================
+
+use std.spec
+use std.common.placement.{
+    PlacementPack,
+    PLACEMENT_PAGE_SIZE,
+    PLACEMENT_I64_MAX,
+    placement_align_up,
+    placement_alignment_is_power_of_two,
+    placement_align_up_overflows,
+    placement_align_within,
+    placement_page_congruent,
+    placement_pack,
+    placement_pack_reject
+}
+
+# ----------------------------------------------------------------------------
+# 1. Non-power-of-two: the mask formula's bug, pinned.
+# ----------------------------------------------------------------------------
+
+describe "placement_align_up non-power-of-two":
+    it "answers the true ceiling where the mask formula under-rounds":
+        # Remote target allocator formula: (10 + 5) & ~5 == 15 & ...11111010
+        # == 10. Forward of the input, so never an overlap — but 10 is not a
+        # multiple of 6. The true ceiling is 12.
+        expect(placement_align_up(10, 6)).to_be(12)
+
+    it "rounds an already-aligned value to itself":
+        expect(placement_align_up(12, 6)).to_be(12)
+
+    it "rounds up to a multiple of three":
+        expect(placement_align_up(10, 3)).to_be(12)
+
+# ----------------------------------------------------------------------------
+# 2. Negative value: three copies gave three answers.
+# ----------------------------------------------------------------------------
+
+describe "placement_align_up negative values":
+    it "returns the smallest multiple >= a negative value":
+        # encoding.spl's `v + (a - rem)` gave 8 here; boot_layout gave 0.
+        expect(placement_align_up(-5, 8)).to_be(0)
+
+    it "returns an exactly-aligned negative value unchanged":
+        expect(placement_align_up(-16, 8)).to_be(-16)
+
+    it "rounds a negative value up to the next negative multiple":
+        expect(placement_align_up(-13, 8)).to_be(-8)
+
+# ----------------------------------------------------------------------------
+# 3. Identity alignments.
+# ----------------------------------------------------------------------------
+
+describe "placement_align_up identity alignments":
+    it "treats alignment 0 as no constraint":
+        expect(placement_align_up(37, 0)).to_be(37)
+
+    it "treats alignment 1 as no constraint":
+        expect(placement_align_up(37, 1)).to_be(37)
+
+    it "treats a negative alignment as no constraint":
+        expect(placement_align_up(37, -8)).to_be(37)
+
+# ----------------------------------------------------------------------------
+# 4. Validity and overflow predicates.
+# ----------------------------------------------------------------------------
+
+describe "placement alignment predicates":
+    it "accepts positive powers of two":
+        expect(placement_alignment_is_power_of_two(1)).to_be(true)
+        expect(placement_alignment_is_power_of_two(4096)).to_be(true)
+
+    it "rejects zero, negatives and non-powers of two":
+        expect(placement_alignment_is_power_of_two(0)).to_be(false)
+        expect(placement_alignment_is_power_of_two(-8)).to_be(false)
+        expect(placement_alignment_is_power_of_two(6)).to_be(false)
+
+    it "flags a round-up that would leave i64 range before any add":
+        expect(placement_align_up_overflows(PLACEMENT_I64_MAX, 8)).to_be(true)
+        expect(placement_align_up_overflows(PLACEMENT_I64_MAX - 7, 8)).to_be(false)
+        expect(placement_align_up_overflows(0, 4096)).to_be(false)
+
+# ----------------------------------------------------------------------------
+# 5. placement_pack — the single aligned prefix-sum.
+# ----------------------------------------------------------------------------
+
+describe "placement_pack layout":
+    it "lays out mixed alignments from base 0 as hand-computed":
+        # cursor 0  -> align 1    -> off 0,    +5  -> 5
+        # cursor 5  -> align 8    -> off 8,    +3  -> 11
+        # cursor 11 -> align 16   -> off 16,   +10 -> 26
+        # cursor 26 -> align 4096 -> off 4096, +1  -> 4097
+        val r = placement_pack(0, [5, 3, 10, 1], [1, 8, 16, 4096])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_be(4)
+        expect(r.offsets[0]).to_be(0)
+        expect(r.offsets[1]).to_be(8)
+        expect(r.offsets[2]).to_be(16)
+        expect(r.offsets[3]).to_be(4096)
+        expect(r.total_size).to_be(4097)
+
+    it "gives two zero-size sections the same aligned address":
+        val r = placement_pack(0, [4, 0, 0, 1], [1, 8, 8, 8])
+        expect(r.ok).to_be(true)
+        expect(r.offsets[0]).to_be(0)
+        expect(r.offsets[1]).to_be(8)
+        expect(r.offsets[2]).to_be(8)
+        expect(r.offsets[3]).to_be(8)
+        expect(r.total_size).to_be(9)
+
+    it "measures total_size from a non-zero base":
+        val r = placement_pack(1000, [10], [16])
+        expect(r.ok).to_be(true)
+        expect(r.offsets[0]).to_be(1008)
+        expect(r.total_size).to_be(18)
+
+    it "accepts empty input":
+        val r = placement_pack(0, [], [])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_be(0)
+        expect(r.total_size).to_be(0)
+
+describe "placement_pack rejects":
+    it "rejects a length mismatch with no partial addresses":
+        val r = placement_pack(0, [1, 2], [8])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_be(0)
+        expect(r.total_size).to_be(0)
+
+    it "rejects a negative base":
+        expect(placement_pack(-1, [1], [8]).ok).to_be(false)
+
+    it "rejects a negative size":
+        expect(placement_pack(0, [-1], [8]).ok).to_be(false)
+
+    it "rejects alignment 0 as a layout policy even though align_up allows it":
+        expect(placement_align_up(37, 0)).to_be(37)
+        expect(placement_pack(0, [1], [0]).ok).to_be(false)
+
+    it "rejects a non-power-of-two alignment":
+        expect(placement_pack(0, [1], [6]).ok).to_be(false)
+
+    it "rejects an overflowing advance and leaks nothing":
+        val r = placement_pack(0, [PLACEMENT_I64_MAX, 1], [1, 1])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_be(0)
+
+    it "names its own reject value":
+        val r = placement_pack_reject()
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_be(0)
+        expect(r.total_size).to_be(0)
+
+# ----------------------------------------------------------------------------
+# 6. The page-cap rule, once.
+# ----------------------------------------------------------------------------
+
+describe "placement_align_within":
+    it "uses a 4096-byte page by default constant":
+        expect(PLACEMENT_PAGE_SIZE).to_be(4096)
+
+    it "admits an alignment at or under the cap":
+        expect(placement_align_within(4096, PLACEMENT_PAGE_SIZE)).to_be(true)
+        expect(placement_align_within(8, PLACEMENT_PAGE_SIZE)).to_be(true)
+
+    it "refuses an alignment stronger than the cap":
+        # This is the linker/loader divergence: placement_pack HAPPILY lays
+        # out an 8192-aligned section, and the segment mapper cannot map it.
+        expect(placement_pack(0, [16], [8192]).ok).to_be(true)
+        expect(placement_align_within(8192, PLACEMENT_PAGE_SIZE)).to_be(false)
+
+    it "supports a PE-style section alignment cap that is not a page":
+        expect(placement_align_within(512, 512)).to_be(true)
+        expect(placement_align_within(1024, 512)).to_be(false)
+
+# ----------------------------------------------------------------------------
+# 7. Page congruence (ELF PT_LOAD), opt-in.
+# ----------------------------------------------------------------------------
+
+describe "placement_page_congruent":
+    it "returns the first address past prev_end congruent to the file offset":
+        # align_up(5000, 4096) == 8192; 8192 + (300 % 4096) == 8492
+        expect(placement_page_congruent(5000, 300, 4096)).to_be(8492)
+
+    it "keeps p_offset == p_vaddr (mod page)":
+        val v = placement_page_congruent(5000, 300, 4096)
+        expect(v % 4096).to_be(300 % 4096)
+
+    it "still advances a whole page for an already page-aligned prev_end":
+        expect(placement_page_congruent(4096, 0, 4096)).to_be(4096)
