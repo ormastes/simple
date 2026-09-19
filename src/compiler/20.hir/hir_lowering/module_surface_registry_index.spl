@@ -7,7 +7,24 @@ use std.common.crypto.sha256.{sha256_text}
 
 val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v1"
 
+# BOOT-20 (2026-09-19): per-import-item memo of the stable resolution
+# generation, keyed on the registry generation. Before this memo, EVERY
+# import-resolution trace recomputed the generation: an O(n^2) array-copying
+# insertion sort over all ~826 registry names plus a sha256 over the joined
+# manifest. Measured via SIGPROF sampling of the stage2-native stage3 build:
+# sha256 rounds were ~43% of all wedge samples (driver.spl HIR spun 9+
+# hours at 100% CPU); the registry is frozen for the whole of phase 3, so the
+# value is constant per generation and the memo reduces it to one computation.
+# Module-scope single-entry cache (not a class field): generation changes are
+# rare (freeze / registry rebuild) and the key check makes stale reuse
+# impossible.
+var _stable_resolution_generation_memo_for: i64 = -1
+var _stable_resolution_generation_memo: text = ""
+
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:
+    if _stable_resolution_generation_memo_for == registry.generation and
+            _stable_resolution_generation_memo != "":
+        return _stable_resolution_generation_memo
     var rows: [text] = []
     var index = 0
     while index < registry.ordered_names.len() and index < registry.ordered_indices.len():
@@ -27,7 +44,9 @@ fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName
             next.push(current)
         if not inserted: next.push(row)
         sorted = next
-    sha256_text(sorted.join("\n"))
+    _stable_resolution_generation_memo_for = registry.generation
+    _stable_resolution_generation_memo = sha256_text(sorted.join("\n"))
+    _stable_resolution_generation_memo
 
 pub(package) fn module_surfaces_validate_index_alignment(
     surfaces: [ModuleSurface],
