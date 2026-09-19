@@ -34,6 +34,14 @@ for layer ownership, wrapper-boundary rules, and scenario evidence.
 
 Template: [layer_skill.md](../../template/layer_skill.md)
 
+## Session update 2026-09-19 — one-liners
+
+- Host file mapping moved under SOSIX as two ops (`sosix_file_map` ACTUAL
+  access, `sosix_file_map_prefetch` CACHING; Windows prefetch is a no-op):
+  `doc/00_llm_process/feature_expert/sosix_runtime_unification/skill.md`
+  § "Ownership and paths" (File mapping row). `std.io.file_ops.file_mmap` is
+  gone; the core-C lane now defines `rt_mmap` statically.
+
 ## Session update 2026-09-11 — one-liners
 
 - CPU<->GPU boundary fix campaign (Engine2D Vulkan rect batching, route-key

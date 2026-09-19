@@ -21,14 +21,6 @@ extern fn rt_file_unlock(handle: i64) -> bool
 extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 @unsafe(reason: "raw positional file-write ABI; negative status is the provider failure sentinel", capabilities: [ffi])
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
-@unsafe(reason: "raw memory-map ABI; the returned address is an unvalidated provider handle", capabilities: [ffi, raw_ptr])
-extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64
-@unsafe(reason: "raw memory-unmap ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
-extern fn rt_munmap(addr: i64, size: i64) -> bool
-@unsafe(reason: "raw memory-advice ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
-extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
-@unsafe(reason: "raw memory-sync ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
-extern fn rt_msync(addr: i64, size: i64) -> bool
 use std.io_runtime.{process_run}
 @unsafe(reason: "raw file-existence predicate; false conflates missing, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -350,42 +342,8 @@ fn file_fsync_cached(path: text) -> bool:
     # Portable fallback mirrors file_fsync without forcing hosted file SFFI.
     file_fsync(path)
 
-# --- Memory-Mapped File I/O ---
-
-# reason positional io file_ops API
-fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
-    # Memory-map a file into process address space.
-    #
-    # Fail closed on arguments that can never name a mappable region — empty
-    # path, non-existent path, non-positive extent, negative offset — and
-    # return the documented invalid-handle sentinel -1 without entering the
-    # raw `rt_mmap` boundary. `rt_mmap` is not registered in every execution
-    # lane (the interpreter lane aborts with `unknown extern function:
-    # rt_mmap`), so without this guard the negative-handle contract this
-    # function promises is unobservable there. Existence is probed through the
-    # typed `file_exists` alias above rather than a new raw `rt_*` call site.
-    if path == "" or size <= 0 or offset < 0 or not file_exists(path):
-        return -1
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_mmap(path, size, offset, if readonly: 1 else: 0)
-
-# reason positional io file_ops API
-fn file_munmap(addr: i64, size: i64) -> bool:
-    # Unmap a memory-mapped file region.
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_munmap(addr, size)
-
-# reason positional io file_ops API
-fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
-    # Give advice about memory access patterns.
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_madvise(addr, size, advice)
-
-# reason positional io file_ops API
-fn file_msync(addr: i64, size: i64) -> bool:
-    # Synchronize mapped memory with file on disk.
-    unsafe(capabilities: [ffi, raw_ptr]):
-        rt_msync(addr, size)
+# Host file mapping is owned by `std.nogc_async_mut.sosix.file_map`
+# (`sosix_file_map` / `sosix_file_unmap` / `sosix_file_map_prefetch`).
 
 # --- Additional File Functions ---
 
