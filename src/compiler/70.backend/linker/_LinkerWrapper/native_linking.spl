@@ -26,6 +26,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_read_nullable, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
 # std.nogc_sync_mut.env.platform.detect_os() -- the same detector proven
@@ -648,6 +649,27 @@ fn internal_is_elf_file(path: text) -> bool:
     val raw = file_read_bytes(path)
     raw.len() >= 4 and raw[0] == 0x7f and raw[1] == 0x45 and raw[2] == 0x4c and raw[3] == 0x46
 
+fn internal_shared_dedup_key(path: text, raw: [u8]) -> text:
+    """The key ld de-duplicates shared inputs on: DT_SONAME.
+
+    Keying on file content instead was wrong in a way the content key cannot
+    see: two DIFFERENT files can carry the SAME SONAME -- a script member
+    given by absolute path plus a `-l` to a local build of the same library --
+    and ld records ONE DT_NEEDED for them while a digest records two.
+    Measured on this host before the fix.
+
+    The digest is kept only as the fallback for a library with no SONAME at
+    all. Those are already refused further down (elf_static_link needs a
+    SONAME to write DT_NEEDED), so the fallback never decides a real link; it
+    exists so this function is total and a no-SONAME input cannot collide
+    with an unrelated one on the empty string."""
+    val parsed = elf_parse_shared(raw)
+    if parsed.is_ok():
+        val soname = parsed.unwrap().soname
+        if soname != "":
+            return "soname:{soname}"
+    "bytes:{file_hash_sha256(path)}"
+
 fn internal_is_archive_file(path: text) -> bool:
     """True when `path` starts with the ar magic `!<ar`."""
     val raw = file_read_bytes(path)
@@ -810,7 +832,7 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     # engine writes one per shared input) where ld.lld, which keys on SONAME,
     # emits one. Measured on this host before the fix.
     var extra_shared: [[u8]] = []
-    var shared_digests: [text] = []
+    var shared_keys: [text] = []
     for libname in libraries:
         val resolved = internal_resolve_library(libname,
             internal_library_search_dirs(library_paths, libdir))
@@ -821,9 +843,9 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
             if raw.len() >= 8 and raw[0] == 0x21 and raw[1] == 0x3c and raw[2] == 0x61 and raw[3] == 0x72:
                 archives = archives.push(internal_link_native_read_i64(path))
             elif raw.len() >= 4 and raw[0] == 0x7f and raw[1] == 0x45 and raw[2] == 0x4c and raw[3] == 0x46:
-                val digest = file_hash_sha256(path)
-                if not shared_digests.contains(digest):
-                    shared_digests = shared_digests.push(digest)
+                val key = internal_shared_dedup_key(path, raw)
+                if not shared_keys.contains(key):
+                    shared_keys = shared_keys.push(key)
                     extra_shared = extra_shared.push(raw)
             else:
                 return Err("internal engine: library '{libname}' resolved to {path}, which is neither an ar archive nor an ELF file")
@@ -842,15 +864,17 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     # argv exits 42. The old parity claim compared the DT_NEEDED SET, which is
     # identical in both orders, and therefore could not see this.
     #
-    # De-duplication keeps the FIRST occurrence, as ld does by SONAME: an
-    # explicit `-lc` keeps its own position in the caller's order and it is
-    # the implicit copy that is dropped, so `libraries=["c","m"]` yields
-    # libc,libm exactly as ld.lld does rather than libm,libc.
+    # De-duplication keeps the FIRST occurrence and keys on DT_SONAME, which
+    # is what ld keys on (internal_shared_dedup_key). An explicit `-lc` keeps
+    # its own position in the caller's order and it is the implicit copy that
+    # is dropped, so `libraries=["c","m"]` yields libc,libm exactly as ld.lld
+    # does rather than libm,libc.
     var shared_inputs: [[u8]] = []
     for so in extra_shared:
         shared_inputs = shared_inputs.push(so)
-    if not shared_digests.contains(file_hash_sha256(libc)):
-        shared_inputs = shared_inputs.push(file_read_bytes(libc))
+    val libc_raw = file_read_bytes(libc)
+    if not shared_keys.contains(internal_shared_dedup_key(libc, libc_raw)):
+        shared_inputs = shared_inputs.push(libc_raw)
     val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_inputs,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
     if linked.is_err():

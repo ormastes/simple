@@ -115,3 +115,13 @@ exactly `lib<name>.so`, which is the point of the fixture — so unlike the
 sibling `.so.1` fixtures it is matched by `.gitignore:23 *.so` and was added
 with `git add -f`. If it is ever regenerated, re-add it the same way or the
 DT_NEEDED-order spec loses its library.
+
+`soname_alias/libother_a64.so` (lane F1, round 3) has DIFFERENT bytes from
+`libshadowatoi_a64.so` and the SAME `DT_SONAME`, which is what separates a
+SONAME-keyed dedup from a content-keyed one: ld records one DT_NEEDED for the
+pair, a digest records two. Like its sibling it needs a bare `.so` name and so
+was added with `git add -f` (`.gitignore:23 *.so`).
+
+```
+clang --target=aarch64-linux-gnu -shared -fPIC -Wl,-soname,libshadowatoi_a64.so soname_alias/other_atoi.c -o soname_alias/libother_a64.so
+```

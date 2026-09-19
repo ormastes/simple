@@ -286,8 +286,13 @@ sentence that stood here -- "the DT_NEEDED set matches byte for byte ... nothing
 here is a silent difference" -- was false, because it never compared ORDER.
 Order is load-bearing: the loader resolves a symbol from the FIRST DT_NEEDED
 entry that defines it. This engine seeded its shared-input list with libc
-FIRST, where ld.lld emits the `-l` libraries first and libc last, so on this
-very fixture ours read `libc libm libmvec` against lld's `libm libmvec libc`.
+FIRST, where ld.lld emits the `-l` libraries first and libc last. On this very
+fixture, MEASURED: ld.lld emits `libm.so.6 libc.so.6`; ours emitted
+`libc.so.6 libm.so.6` before the fix and `libm.so.6 libc.so.6` after it. (An
+earlier draft of this line claimed lld emitted `libm libmvec libc` -- that was
+not measured and is wrong: libmvec is AS_NEEDED and unused here, so lld emits
+no entry for it. The `libmvec` in the round-1 record belongs to OUR pre-fix
+output, not to lld's.)
 Measured consequence, not a theoretical one: an object calling `atoi` linked
 with a library whose `atoi` returns 42 exits **1** under the old order (libc
 wins) and **42** under ld.lld. Fixed, and pinned by a spec that asserts the
@@ -381,3 +386,31 @@ file), not in `native_linking.spl`, and both measured against ld.lld:
 All 27 linker specs re-run individually at `f38a070708b` (the round-2 fix):
 27/27 `outcome=OK`, 0 failed — not just the two importers, because the round-2
 change altered shared-input ordering, which any spec that links could see.
+
+### Round 3 (Fable block): dedup keys on SONAME, not bytes
+
+The round-2 dedup keyed on `file_hash_sha256` while its own comment claimed
+"as ld does by SONAME" — the code and the claim disagreed, the same defect
+class as round 2's "matches byte for byte". Two DIFFERENT files can carry the
+SAME SONAME (a script member given by an absolute path plus a `-l` to a local
+build of the same library — glibc's `libc.so` names `/lib/<triple>/libc.so.6`
+absolutely, so this is the ordinary shape, not a contrived one). Measured with
+`soname_alias/libother_a64.so` (different bytes, SONAME `libshadowatoi_a64.so`):
+
+| | before | after / ld.lld |
+|---|---|---|
+| `libraries=["shadowatoi_a64","other_a64"]`, two `-L` dirs | `libshadowatoi_a64.so libshadowatoi_a64.so libc.so.6` | `libshadowatoi_a64.so libc.so.6` |
+
+`internal_shared_dedup_key` now reads DT_SONAME via `elf_parse_shared` and
+falls back to the content digest only for a library with no SONAME. That
+fallback never decides a real link — a no-SONAME library is refused further
+down — it only keeps the function total so two such inputs cannot collide on
+the empty string.
+
+**It does not make the no-SONAME gap cheap to close, so that gap stays
+recorded.** `elf_static_link` needs a name to write into DT_NEEDED and
+`ElfLinkRequest.shared` carries bytes only; supplying ld's fallback (the file
+name) still needs a field on that struct, which is lane A7's file. Keying the
+*dedup* on SONAME is independent of that.
+
+`native_linking_internal_spec` 20/21 → 21/21, both trees byte-identical.
