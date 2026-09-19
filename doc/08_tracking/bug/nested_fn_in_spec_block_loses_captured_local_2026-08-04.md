@@ -121,6 +121,46 @@ not diagnosed. The spec deliberately does not assert this example — asserting
 it would add a red, and dropping it silently would hide a real finding, so it
 is recorded here instead.
 
+> **Correction, re-measured 2026-09-19 after deployment: the paragraph above is
+> wrong and this item is CLOSED.** The spec-runner route was repaired by the
+> very same change. The "both binaries" claim could not have held — it was
+> measured against the pre-deployment binary on both sides, and the rebuilt
+> column for this row was never actually re-run.
+>
+> Re-measured against three binaries, including the rollback copy kept at
+> `bin/release/aarch64-unknown-linux-gnu/simple.stale-2026-09-19`, which is
+> exactly the pre-fix artifact:
+>
+> | shape, through `simple test` | pre-fix rollback binary | deployed (fixed) | seed with the lowering fix |
+> |---|---|---|---|
+> | recursive nested `fn` at module scope reading an enclosing `val` | FAIL — ``semantic: function `fact` not found`` | **PASS** | **PASS** |
+> | recursive nested `fn` declared inside the `it` block | FAIL — ``semantic: variable `base` not found`` | **PASS** | **PASS** |
+>
+> Both shapes also answer 240 through `run`, on both lanes. The two distinct
+> pre-fix error messages are worth keeping: the module-scope shape lost the
+> *function* and the in-`it` shape lost the *variable*, which is why the
+> original investigation read them as two different defects. They were one.
+>
+> **But the original observation was not imaginary, and chasing it found a new
+> defect.** Reproducing it inside *this file* still fails — because this file
+> already declares a nested `fn fact` inside an `it` block, and a second nested
+> `fn fact` in another scope **collides with it**. The flat `functions` map is
+> keyed by the bare name, so the second call resolves to the first one's
+> closure, whose scope is gone by then. Renaming one of them, changing nothing
+> else, makes both pass. That is filed as
+> `nested_fn_name_collision_across_scopes_2026-09-19` — a loud error, never a
+> silent wrong answer (probed specifically), and the same first-wins-on-a-bare-
+> name class that made hoisting the wrong choice for the JIT fix.
+>
+> So the honest summary is: the lane split is closed, and what was actually
+> being observed through it was a name collision that nobody had isolated.
+>
+> The lesson this cost is a re-measurement discipline, not a code change: a
+> "still fails on both binaries" row is only true if both binaries were run
+> after the fix landed. Deploying changes what `bin/simple` means mid-session,
+> and a table column written before the swap silently describes the old
+> artifact.
+
 ### Deployed 2026-09-19 09:09 KST
 
 `bin/release/aarch64-unknown-linux-gnu/simple` — the target of the `bin/simple`

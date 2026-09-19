@@ -8,13 +8,15 @@
 # against the CALLER's environment, discarding the capture -- so the block's own
 # `val`s were simply not there.
 #
-# Every example below is inside an `it` block, which is itself a lambda body, so
-# these exercise the construct under test directly rather than simulating it.
+# Most examples below sit inside an `it` block, which is itself a lambda body, so
+# they exercise the construct under test directly rather than simulating it. The
+# last one reaches a nested `fn` inside a PLAIN module-level function instead,
+# which the record had listed as a separate, still-broken route.
 #
-# Measured through the spec runner on the two binaries:
+# Measured through the spec runner, re-run 2026-09-19 after the fix was deployed:
 #
-#   deployed seed (2026-09-18 build)   3 passed, 4 failed
-#   seed rebuilt with the fix          7 passed, 0 failed
+#   pre-fix binary (the rollback copy, simple.stale-2026-09-19)   3 passed, 5 failed
+#   deployed / rebuilt seed carrying the fix                      8 passed, 0 failed
 #
 # The three that pass on the broken binary are kept on purpose as controls --
 # module var, callback and thunk. A probe of only those reports green on a broken
@@ -30,6 +32,29 @@ fn call_thunk(f: () -> i64) -> i64:
 
 fn apply_reader(f: (i64) -> i64, at: i64) -> i64:
     f(at)
+
+# The same shape inside a PLAIN module-level function body rather than a lambda.
+# The record listed this as a remaining, undiagnosed lane split: through the spec
+# runner it was said to fail on the fixed binary too. Re-measured 2026-09-19
+# after deployment, the route is repaired -- the rollback copy at
+# bin/release/.../simple.stale-2026-09-19 FAILS here with
+# `semantic: function `fact` not found` while both deployed and rebuilt seeds
+# pass.
+#
+# The inner fn is named `recursing_fact` and NOT `fact` on purpose. A second
+# nested `fn fact` in a different scope collides with the one in the `it` block
+# below -- the flat functions map is keyed by the bare name -- and the later call
+# then runs the other scope's closure and cannot see its own `base`. Renaming is
+# the workaround, not the fix; the collision is filed as
+# doc/08_tracking/bug/nested_fn_name_collision_across_scopes_2026-09-19.md and
+# has its own repro. Do not rename this back to `fact` to "match" the record.
+fn recursive_nested_reading_enclosing_local() -> i64:
+    val base = 10
+    fn recursing_fact(n: i64) -> i64:
+        if n <= 1:
+            return base
+        n * recursing_fact(n - 1)
+    recursing_fact(4)
 
 describe "a nested fn sees the scope it was declared in":
     it "reads a scalar local of the enclosing lambda":
@@ -83,3 +108,10 @@ describe "shapes that already worked stay working":
         fn thunk() -> i64:
             n * 2
         expect(call_thunk(thunk)).to_equal(8)
+
+    it "recurses inside a plain module-level function body too":
+        # NOT a control -- this one FAILS on the pre-fix binary, with a
+        # different message than the in-`it` shape above (`function fact not
+        # found` rather than `variable base not found`), which is why the two
+        # were originally read as separate defects. They were one.
+        expect(recursive_nested_reading_enclosing_local()).to_equal(240)
