@@ -1,0 +1,172 @@
+# Internal ELF linker: SHF_MERGE|SHF_STRINGS merging (ld.lld -O1) — lane C1
+#
+# `ElfLinkRequest.string_merge` (on by default, like ld.lld's -O1) splits every
+# mergeable input section into pieces, drops duplicates, and retargets the
+# relocations that point into them — clang emits `.rodata.str1.1 + <offset>`
+# section-symbol relocations for string literals, so the addend has to be
+# remapped through the piece map, not merely added.
+#
+# Oracle (test/fixtures/linker/elf, RECIPE.md): merge_a_a64.o and
+# merge_b_a64.o each hold `hi\n`, `dup\n` and one unique literal, 0x11 bytes
+# of .rodata.str1.1 apiece.
+#
+#   ld.lld-23 -static -e _start -O1 merge_a_a64.o merge_b_a64.o
+#     .rodata  AMS  size 0x19  "dup\0only-a\0only-b\0hi\0"   -> runs, exit 42
+#   ld.lld-23 -static -e _start -O0 merge_a_a64.o merge_b_a64.o
+#     .rodata  AMS  size 0x22  both copies kept              -> runs, exit 40
+#
+# The exit status is the parity proof that matters: `_start` compares
+# `a_dup()` with `b_dup()` and adds 2 only when the two objects' `dup\n`
+# literals ended up at one address, so 42 means merged and 40 means not.
+#
+# KNOWN GAP (recorded, not masked): ld.lld orders the unique pieces by the top
+# bits of an XXH3-64 hash across 32 shards, so its blob is a permutation of
+# ours (we emit first-appearance order: `hi\0dup\0only-a\0only-b\0`). Size,
+# membership and every resolved address agree; the byte ORDER does not. See
+# doc/08_tracking/bug/elf_merge_string_order_not_lld_shard_order_2026-09-19.md
+#
+# @cover src/compiler/70.backend/linker/elf/merge_sections.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC
+}
+use compiler.backend.linker.elf.merge_sections.{elf_merge_split, elf_merge_key}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_write_bytes, process_run}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < rd16(b, 0x3c):
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+fn sec_flags(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 8)
+
+fn sec_entsize(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 56)
+
+# The NUL-terminated strings of an output section, in file order.
+fn sec_strings(b: [i64], name: text) -> [text]:
+    val h = shdr_by_name(b, name)
+    val off = rd64(b, h + 24)
+    val end = off + rd64(b, h + 32)
+    var out: [text] = []
+    var i = off
+    while i < end:
+        val s = cstr(b, i)
+        out = out.push(s)
+        i = i + s.len() + 1
+    out
+
+fn sorted_strings(b: [i64], name: text) -> [text]:
+    var v = sec_strings(b, name)
+    var i: i64 = 1
+    while i < v.len():
+        val x = v[i]
+        var j = i - 1
+        while j >= 0 and v[j] > x:
+            v[j + 1] = v[j]
+            j = j - 1
+        v[j + 1] = x
+        i = i + 1
+    v
+
+fn link(merge: bool) -> [i64]:
+    val objs = [load_path("{FIX}/merge_a_a64.o"), load_path("{FIX}/merge_b_a64.o")]
+    val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [], entry: "_start",
+        target: RelocArch.AArch64, mode: ELF_LINK_STATIC_EXEC, interp: "", string_merge: merge))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn run_image(b: [i64], path: text) -> i64:
+    if b.len() == 0:
+        return -1
+    var bytes: [u8] = []
+    for x in b:
+        bytes = bytes.push(x as u8)
+    if not file_write_bytes(path, bytes):
+        return -1
+    val (_o, _e, c) = process_run("chmod", ["755", path])
+    if c != 0:
+        return -1
+    val (_o2, _e2, rc) = process_run(path, [])
+    rc
+
+describe "elf_merge_split - piece splitting":
+    it "splits NUL-terminated strings and rejects an unterminated tail":
+        expect(elf_merge_split([104, 105, 0, 100, 0], 1, true).unwrap()).to_equal([0, 3])
+        val bad = elf_merge_split([104, 105], 1, true)
+        expect(bad.is_err()).to_equal(true)
+        expect(bad.unwrap_err().contains("NUL")).to_equal(true)
+
+    it "splits fixed-entsize pieces and keys them by content, not by offset":
+        expect(elf_merge_split([1, 2, 3, 4, 1, 2, 3, 4], 4, false).unwrap()).to_equal([0, 4])
+        expect(elf_merge_key([1, 2, 0xff], 0, 3)).to_equal(elf_merge_key([9, 1, 2, 0xff], 1, 4))
+
+describe "elf_link - SHF_MERGE|SHF_STRINGS (ld.lld -O1 dedup)":
+    it "merges to ld.lld -O1's size and keeps SHF_MERGE|SHF_STRINGS with entsize 1":
+        val b = link(true)
+        expect(sec_size(b, ".rodata")).to_equal(0x19)
+        expect(sec_flags(b, ".rodata") & 0x30).to_equal(0x30)
+        expect(sec_entsize(b, ".rodata")).to_equal(1)
+
+    it "keeps every unique literal exactly once (ld.lld -O1's set, our order)":
+        expect(sorted_strings(link(true), ".rodata")).to_equal(["dup\n", "hi\n", "only-a\n", "only-b\n"])
+        expect(sec_strings(link(true), ".rodata")).to_equal(["hi\n", "dup\n", "only-a\n", "only-b\n"])
+
+    it "string_merge off keeps both copies, like ld.lld -O0":
+        val b = link(false)
+        expect(sec_size(b, ".rodata")).to_equal(0x22)
+        expect(sec_strings(b, ".rodata")).to_equal(["hi\n", "dup\n", "only-a\n", "hi\n", "dup\n", "only-b\n"])
+
+    it "section-symbol + addend relocations follow the piece into the merged blob":
+        # 42 = the two objects' `dup\n` resolved to one address (ld.lld -O1);
+        # 40 = they did not (ld.lld -O0). Same binary, both actually executed.
+        expect(run_image(link(true), "/tmp/elf_merge_strings_spec_on")).to_equal(42)
+        expect(run_image(link(false), "/tmp/elf_merge_strings_spec_off")).to_equal(40)
+
+    it "merging shrinks the image and leaves .text untouched":
+        val on = link(true)
+        val off = link(false)
+        expect(sec_size(on, ".text")).to_equal(sec_size(off, ".text"))
+        expect(sec_size(on, ".rodata") < sec_size(off, ".rodata")).to_equal(true)

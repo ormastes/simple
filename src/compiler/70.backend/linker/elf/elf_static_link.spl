@@ -37,6 +37,7 @@ use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_o
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
 use compiler.backend.linker.elf.gc_sections.{elf_gc_live, elf_gc_all_live}
+use compiler.backend.linker.elf.merge_sections.{ElfMergeSet, elf_merge_empty, elf_merge_build, elf_merge_piece_off}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
@@ -78,6 +79,8 @@ val SHT_X86_64_UNWIND: i64 = 0x70000001
 val ET_EXEC_T: i64 = 2
 val ET_DYN_T: i64 = 3
 val SHT_SYMTAB_L: i64 = 2
+val SHF_MERGE_L: i64 = 0x10
+val SHF_STRINGS_L: i64 = 0x20
 
 # ============================================================================
 # Types
@@ -91,6 +94,7 @@ struct ElfLinkRequest:
     target: RelocArch
     mode: i64             # ELF_LINK_*
     interp: text          # PT_INTERP path (dynamic modes only)
+    string_merge: bool = true   # ld.lld -O1: dedupe SHF_MERGE pieces (-O0 = false)
     gc_sections: bool = false   # ld.lld --gc-sections: drop sections unreachable from the roots
 
 struct ElfStaticInputs:
@@ -102,6 +106,7 @@ struct ElfStaticInputs:
 
 struct ElfLinkCtx:
     inputs: ElfStaticInputs
+    merged: ElfMergeSet
     res: SymResolution
     libs: [ElfSharedLib]
     target: RelocArch
@@ -177,14 +182,48 @@ fn elf_find_out(outs: [ElfOutSec], name: text) -> i64:
         i = i + 1
     -1
 
-fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInputs, text>:
+fn elf_out_names(objects: [ElfObject]) -> Result<[[text]], text>:
+    """Output section name per allocatable input section ("" when not placed)."""
+    var out: [[text]] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var row: [text] = []
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_flags & SHF_ALLOC == 0:
+                row = row.push("")
+            else:
+                val n = elf_out_name(elf_section_name(obj, si), sec.sh_type, sec.sh_flags)
+                if n.is_err():
+                    return Err("object {oi}: {n.unwrap_err()}")
+                row = row.push(n.unwrap())
+            si = si + 1
+        out = out.push(row)
+        oi = oi + 1
+    Ok(out)
+
+# reason: positional placement inputs (objects, liveness, merged-section set)
+fn elf_static_place(objects: [ElfObject], live: [[bool]], merged: ElfMergeSet) -> Result<ElfStaticInputs, text>:
     """Assign every live allocatable input section to a named output section + offset.
 
     live[oi][si] is false only for sections the gc pass dropped; with
-    gc_sections off every allocatable section is live (elf_gc_all_live)."""
+    gc_sections off every allocatable section is live (elf_gc_all_live).
+    A merged section reserves space only for the first input of its group
+    (ld.lld's MergeSyntheticSection, placed where that input would have gone);
+    the others record the same offset and contribute no bytes, so an offset
+    inside them is resolved through elf_merge_piece_off."""
     var outs: [ElfOutSec] = []
     var sec_out: [[i64]] = []
     var sec_off: [[i64]] = []
+    var grp_at: [i64] = []
+    var grp_out: [i64] = []
+    var g: i64 = 0
+    while g < merged.grp_name.len():
+        grp_at = grp_at.push(-1)
+        grp_out = grp_out.push(-1)
+        g = g + 1
     var oi: i64 = 0
     while oi < objects.len():
         val obj = objects[oi]
@@ -196,6 +235,11 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
             if sec.sh_flags & SHF_ALLOC == 0 or not live[oi][si]:
                 idxs = idxs.push(-1)
                 offs = offs.push(0)
+            else if merged.sec_grp[oi][si] >= 0 and grp_at[merged.sec_grp[oi][si]] >= 0:
+                # a later input of an already-placed merge group: no space of its own
+                val gi = merged.sec_grp[oi][si]
+                idxs = idxs.push(grp_out[gi])
+                offs = offs.push(grp_at[gi])
             else:
                 val oname = elf_out_name(elf_section_name(obj, si), sec.sh_type, sec.sh_flags)
                 if oname.is_err():
@@ -204,6 +248,11 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
                 var al = elf_section_addralign(obj, si)
                 if al < 1:
                     al = 1
+                var size = sec.sh_size
+                val gi = merged.sec_grp[oi][si]
+                if gi >= 0:
+                    al = merged.grp_align[gi]
+                    size = merged.grp_data[gi].len()
                 var k = elf_find_out(outs, name)
                 if k < 0:
                     var st = sec.sh_type
@@ -217,7 +266,16 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
                 var nal = o.align
                 if al > nal:
                     nal = al
-                outs[k] = elf_out_sec(o.name, o.sh_type, o.sh_flags, nal, at + sec.sh_size, o.seg)
+                var flags = o.sh_flags
+                var entsize = o.entsize
+                if gi >= 0:
+                    # ld.lld propagates SHF_MERGE|SHF_STRINGS and sh_entsize to the output
+                    flags = flags | (merged.grp_flags[gi] & (SHF_MERGE_L | SHF_STRINGS_L))
+                    entsize = merged.grp_entsize[gi]
+                    grp_at[gi] = at
+                    grp_out[gi] = k
+                outs[k] = ElfOutSec(name: o.name, sh_type: o.sh_type, sh_flags: flags, align: nal,
+                    size: at + size, entsize: entsize, link: o.link, info: o.info, seg: o.seg)
                 idxs = idxs.push(k)
                 offs = offs.push(at)
             si = si + 1
@@ -226,9 +284,17 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
         oi = oi + 1
     Ok(ElfStaticInputs(objects: objects, sec_out: sec_out, sec_off: sec_off, outs: outs))
 
-fn elf_static_contents(inputs: ElfStaticInputs) -> [[i64]]:
-    """Concatenate input section bytes per input-backed output section."""
+fn elf_static_contents(inputs: ElfStaticInputs, merged: ElfMergeSet) -> [[i64]]:
+    """Concatenate input section bytes per input-backed output section.
+
+    A merge group contributes its merged blob once, at the offset its first
+    input section was placed at; the group's other inputs contribute nothing."""
     var out: [[i64]] = []
+    var done: [bool] = []
+    var g: i64 = 0
+    while g < merged.grp_name.len():
+        done = done.push(false)
+        g = g + 1
     var k: i64 = 0
     while k < inputs.outs.len():
         var buf: [i64] = []
@@ -240,12 +306,19 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[i64]]:
                 while si < obj.sections.len():
                     if inputs.sec_out[oi][si] == k:
                         val sec = obj.sections[si]
-                        buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
-                        # sections[si].sh_addr is the FILE offset (elf_parser convention)
-                        var bi: i64 = 0
-                        while bi < sec.sh_size:
-                            buf = buf.push(obj.raw[sec.sh_addr + bi] as i64)
-                            bi = bi + 1
+                        val gi = merged.sec_grp[oi][si]
+                        if gi >= 0:
+                            if not done[gi]:
+                                done[gi] = true
+                                buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
+                                buf = write_bytes(buf, merged.grp_data[gi])
+                        else:
+                            buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
+                            # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                            var bi: i64 = 0
+                            while bi < sec.sh_size:
+                                buf = buf.push(obj.raw[sec.sh_addr + bi] as i64)
+                                bi = bi + 1
                     si = si + 1
                 oi = oi + 1
             buf = write_zeros(buf, inputs.outs[k].size - buf.len())
@@ -432,7 +505,10 @@ struct ElfLayout:
     base: i64
 
 fn elf_in_vaddr(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
-    """Output vaddr of input section (oi, si), or -1 when it was not placed."""
+    """Output vaddr of input section (oi, si), or -1 when it was not placed.
+
+    For a merged section this is the start of the group's blob, not of that
+    input's bytes — add an offset through elf_sec_addr, never directly."""
     if si < 0 or si >= ctx.inputs.sec_out[oi].len():
         return -1
     val k = ctx.inputs.sec_out[oi][si]
@@ -440,18 +516,65 @@ fn elf_in_vaddr(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
         return -1
     lay.plan.vaddrs[lay.in_to_plan[k]] + ctx.inputs.sec_off[oi][si]
 
+# reason: positional address lookup (context, layout, input section, offset in it)
+fn elf_sec_addr(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64, off: i64) -> Result<i64, text>:
+    """Output vaddr of byte off of input section (oi, si), through the merge map."""
+    val base = elf_in_vaddr(ctx, lay, oi, si)
+    if base < 0:
+        return Err("object {oi}: section {si} is not in the output")
+    if ctx.merged.sec_grp[oi][si] < 0:
+        return Ok(base + off)
+    Ok(base + elf_merge_piece_off(ctx.merged, oi, si, off)?)
+
+struct ElfRefDef:
+    """Defining (object, section, offset) of a reference; obj < 0 = none."""
+    obj: i64
+    sec: i64
+    off: i64
+
+fn elf_ref_def(ctx: ElfLinkCtx, r: ElfScanRef) -> ElfRefDef:
+    val none = ElfRefDef(obj: -1, sec: -1, off: 0)
+    if r.kind == SYMREF_IMPORT or r.kind == SYMREF_WEAK_ZERO or r.sym_idx == 0:
+        return none
+    val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
+    if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
+        if not ctx.res.defined.has(sym.name):
+            return none
+        val e = ctx.res.defined[sym.name]
+        if e.section_idx == SHN_ABS or e.section_idx >= SHN_LORESERVE or e.section_idx < 0:
+            return none
+        return ElfRefDef(obj: e.obj_idx, sec: e.section_idx, off: e.offset)
+    if sym.st_shndx == SHN_ABS or sym.st_shndx == SHN_UNDEF or sym.st_shndx >= SHN_LORESERVE:
+        return none
+    ElfRefDef(obj: r.oi, sec: sym.st_shndx, off: sym.st_value)
+
+fn elf_ref_merged(ctx: ElfLinkCtx, r: ElfScanRef) -> bool:
+    """True when r's symbol lands in a merged section, so elf_ref_addr already
+    folded the addend in (the caller must not add it a second time)."""
+    val d = elf_ref_def(ctx, r)
+    if d.obj < 0 or d.sec < 0 or d.sec >= ctx.merged.sec_grp[d.obj].len():
+        return false
+    ctx.merged.sec_grp[d.obj][d.sec] >= 0
+
 fn elf_entry_addr(ctx: ElfLinkCtx, lay: ElfLayout, e: SymEntry) -> Result<i64, text>:
     if e.section_idx == SHN_ABS:
         return Ok(e.offset)
     val base = elf_in_vaddr(ctx, lay, e.obj_idx, e.section_idx)
     if base < 0:
         return Err("symbol {e.name} is defined in a non-allocatable section")
-    Ok(base + e.offset)
+    elf_sec_addr(ctx, lay, e.obj_idx, e.section_idx, e.offset)
 
 fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, text>:
-    """Link-time value S of a DEFINED / ABS / WEAK_ZERO reference (imports: 0)."""
+    """Link-time value S of a DEFINED / ABS / WEAK_ZERO reference (imports: 0).
+
+    For a symbol in a merged section the addend is part of the piece lookup
+    (ld.lld's `MergeInputSection::getOffset`), so S already covers S + A and
+    elf_ref_merged tells the caller to drop A."""
     if r.kind == SYMREF_IMPORT or r.kind == SYMREF_WEAK_ZERO or r.sym_idx == 0:
         return Ok(0)
+    if elf_ref_merged(ctx, r):
+        val d = elf_ref_def(ctx, r)
+        return elf_sec_addr(ctx, lay, d.obj, d.sec, d.off + r.addend)
     val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
     if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
         if ctx.res.defined.has(sym.name):
@@ -515,6 +638,8 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
             val rtype = elf_reloc_type(r)
             if o.sh_type == SHT_NOBITS_E:
                 return Err("object {oi}: relocation type {rtype} targets a NOBITS section")
+            if ctx.merged.sec_grp[oi][tsec] >= 0:
+                return Err("object {oi}: relocation type {rtype} targets merged section {tsec}; relocations INTO a SHF_MERGE section are not modelled")
             val seed = elf_symref(ctx, oi, elf_reloc_sym(r))?
             val place = inputs.sec_off[oi][tsec] + r.r_offset
             val rclass = elf_reloc_class(ctx.target, rtype)
@@ -696,7 +821,7 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                         val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
                         if sh > 0:
                             rows = elf_sym_row(rows, sym.name, typ, sym.st_other, sh,
-                                elf_in_vaddr(ctx, lay, oi, sym.st_shndx) + sym.st_value, sym.st_size)
+                                elf_sec_addr(ctx, lay, oi, sym.st_shndx, sym.st_value)?, sym.st_size)
             else if sym.name != "":
                 if not seen.has(sym.name):
                     seen[sym.name] = true
@@ -934,9 +1059,12 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     var live = elf_gc_all_live(all)
     if req.gc_sections:
         live = elf_gc_live(all, res, req.entry)?
-    val inputs = elf_static_place(all, live)?
-    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode)
-    var contents = elf_static_contents(inputs)
+    var merged = elf_merge_empty(all)
+    if req.string_merge:
+        merged = elf_merge_build(all, live, elf_out_names(all)?)?
+    val inputs = elf_static_place(all, live, merged)?
+    val ctx = ElfLinkCtx(inputs: inputs, merged: merged, res: res, libs: libs, target: target, mode: mode)
+    var contents = elf_static_contents(inputs, merged)
     val refs = elf_collect_refs(ctx, contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
 
@@ -1025,6 +1153,8 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
         var rtype = r.rtype
         var s = elf_ref_addr(ctx, lay, r)?
         var a = r.addend
+        if elf_ref_merged(ctx, r):
+            a = 0   # the addend was folded into S by the piece lookup
         if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
             s = got_v + sc.got_idx[r.key] * 8
             if a64:
@@ -1065,7 +1195,10 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     for jr in sc.relative:
         val r = refs[jr]
         val v = elf_ref_addr(ctx, lay, r)?
-        rela_rel = elf_rela_entry(rela_rel, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + r.addend)
+        var ra = r.addend
+        if elf_ref_merged(ctx, r):
+            ra = 0
+        rela_rel = elf_rela_entry(rela_rel, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + ra)
     for js in sc.sym_abs:
         val r = refs[js]
         rela_sym = elf_rela_entry(rela_sym, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend)

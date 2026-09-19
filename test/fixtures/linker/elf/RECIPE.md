@@ -135,3 +135,27 @@ GC oracle for `elf_gc_sections_spec`:
 ld.lld-23 -static -e _start --gc-sections --print-gc-sections gc_a64.o -o gcy
 ld.lld-23 -static -e _start gc_a64.o -o gcn
 ```
+
+## Lane C1 fixtures (SHF_MERGE string merge)
+
+`merge_a_a64.o` and `merge_b_a64.o` share the literals `hi\n` and `dup\n` and
+each add one of their own, so a `-O1` link must drop two duplicates. `_start`
+compares `a_dup()` with `b_dup()` and adds 2 only when they merged to one
+address: exit 42 means merged, exit 40 means not. Same compiler as above:
+
+```
+CF="-c -O2 -ffreestanding -fno-pic -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=aarch64-linux-gnu $CF merge_a_a64.c -o merge_a_a64.o
+clang --target=aarch64-linux-gnu $CF merge_b_a64.c -o merge_b_a64.o
+```
+
+(`-fmerge-constants` is accepted by gcc but warned-and-ignored by this clang;
+clang emits `.rodata.str1.1` as `SHF_MERGE|SHF_STRINGS` regardless, which is
+what the merge path consumes.)
+
+Merge oracle for `elf_merge_strings_spec`:
+
+```
+ld.lld-23 -static -e _start -O1 merge_a_a64.o merge_b_a64.o -o mrg1   # .rodata 0x19, exit 42
+ld.lld-23 -static -e _start -O0 merge_a_a64.o merge_b_a64.o -o mrg0   # .rodata 0x22, exit 40
+```
