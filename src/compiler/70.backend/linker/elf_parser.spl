@@ -107,13 +107,13 @@ fn elf_parse_string_table(bytes: [u8], section: ElfSectionHeader) -> ElfStringTa
         val empty_data: [u8] = []
         return ElfStringTable(data: empty_data, offset: sh_offset)
 
-    var data: [u8] = []
-    var i: i64 = sh_offset
-    while i < end:
-        data = data.push(bytes[i])
-        i = i + 1
-
-    ElfStringTable(data: data, offset: sh_offset)
+    # One runtime slice, not one interpreted push per byte: a shared object's
+    # .dynstr is ~100 KB and this runs once per input file. A slice of a packed
+    # [u8] stays packed, which keeps the table at one byte per element.
+    # ElfStringTable.data is read ONLY by elf_strtab_get (below), which widens
+    # each byte with `as i64` before using it, so the element width of the
+    # slice never escapes this module.
+    ElfStringTable(data: bytes[sh_offset : end], offset: sh_offset)
 
 fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
     """Look up a NUL-terminated string at byte index in the string table.
@@ -128,7 +128,6 @@ fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
     # libc.so.6's .dynstr character by character was 60% of a dynamic link.
     # A byte >= 0x80 keeps the old per-character path, which treats each byte
     # as its own code point, so that behaviour is unchanged.
-    var raw: [u8] = []
     var ascii = true
     var i: i64 = index
     val len = strtab.data.len()
@@ -138,8 +137,10 @@ fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
             break
         if (b as i64) >= 0x80:
             ascii = false
-        raw = raw.push(b)
         i = i + 1
+    # The name is taken as one slice once its end is known, rather than rebuilt
+    # with an interpreted push per character.
+    val raw: [u8] = strtab.data[index : i]
 
     if ascii:
         return bytes_to_text(raw)
