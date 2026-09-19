@@ -133,9 +133,7 @@ argument/entry interning on the positional path.
 
 ## Next steps
 
-1. Bisect the positional path: instrument/log the call sequence from CLI
-   parse to the first `log_build_progress` call and diff against the
-   `--entry` path (which works).
+1. ~~Bisect the positional path~~ (superseded by attempt-49d evidence below).
 2. Compare the candidate's codegen of `log_build_progress` against the
    seed's JIT output for the same function (symbol addresses differ; match
    by call sequence: rt_println_value -> flush -> string interning).
@@ -148,3 +146,28 @@ argument/entry interning on the positional path.
    copy rule: only AFTER `Linked:` appears in stage2-native-build.log and
    size > 60 MB — copying at file-appearance yields 0 bytes (the wrapper
    deletes the binary on abort).
+
+## Attempt 49 (2026-09-19) — workaround REFUTED
+
+Committed e20afbca324: restructured `log_build_progress` so the early return
+is `if path != "": _log_build_progress_event(...)` with the events-file
+append in its own function — semantics identical, codegen shape changed
+specifically to dodge an inverted/impossible early-return branch.
+
+Attempt 49d (cold, after clearing two stale portable_lock files left by the
+/tmp-purge-killed attempt 49 — see below) rebuilt stage 2 with the
+restructured source and the positional smoke FAILED IDENTICALLY:
+`candidate_frontend_smoke: hello-world-positional-build failed (raw rc=132)`,
+same single progress line, same trap class. The early-return shape is NOT
+the defective construct. The trapping invariant check (`rt_string_data`
+result must be 0 after the print+flush sequence) is either genuinely in the
+restructured function still, or the trap is a downstream symptom of state
+corruption in the positional-entry driver path that runs BEFORE the first
+progress call. Next diagnostic: bisect the pure-Simple driver path between
+`native_build_single_spl_positional` entry and the first
+`log_build_progress` call, and diff register/stack pressure against the
+working `--entry` FFI path.
+
+NOTE: /tmp/stage2-candidate.exe was lost in the 2026-09-19 /tmp purge; the
+wrapper deletes the candidate on abort, so a fresh preservation requires a
+successful stage2 link first.
