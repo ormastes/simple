@@ -125,3 +125,21 @@ reported, across 7 fixtures, with a non-vacuity check), `collection_frame_rules_
 equivalent, but they are no longer reachable from either CLI, because the
 door gates them. `collection_two_array_dedup_spec`'s T3 example asserts BOTH
 facts, so the day the generator changes, the spec says so.
+
+## Pre-existing test-tree divergence stepped over (recorded per .claude/rules/vcs.md)
+
+`sh scripts/check/check-test-tree-divergence-delta.shs 7c875a81067 HEAD`:
+
+```
+base verdict: check-test-tree-divergence: FAIL — 3922 diverged vs 965
+  baselined (3066 new, 109 fixed-but-still-baselined); 32 mirror-only
+  (31 unallowlisted, 0 stale-allowlist)
+PASS — 3206 pre-existing offender(s), 0 introduced by this range
+```
+
+The red is identical at BASE and NEW; this range introduces nothing. The two
+spec files this lane adds/edits under `test/01_unit/compiler/lint/` are
+mirrored **byte-identically** to `test/unit/compiler/lint/` (verified with
+`cmp`), so they are not offenders in either direction. Offender list as saved
+by the helper: `/tmp/test_tree_divergence_preexisting.txt` (3206 entries, not
+copied into the tree — it is BASE state, not a product of this change).
