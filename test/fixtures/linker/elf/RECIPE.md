@@ -132,3 +132,22 @@ Packages used for the recorded run (sha256):
 Set `SIMPLE_X64_SYSROOT` to use another sysroot, and `SIMPLE_QEMU_X86_64` for a
 specific qemu. When either is missing the spec prints `SKIP: x64-sysroot-missing`
 or `SKIP: qemu-x86_64-missing` and asserts that reason.
+
+### Lane C2 reject/versioning fixtures
+
+Same compiler and sysroot:
+
+```
+CF="-c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables"
+clang --target=x86_64-linux-gnu --sysroot=$HOME/.cache/x64-sysroot/root $CF realpath_ver.c -o realpath_ver_x64.o
+clang --target=x86_64-linux-gnu --sysroot=$HOME/.cache/x64-sysroot/root -c -O0 -fPIE \
+  -fno-asynchronous-unwind-tables -fno-unwind-tables ifunc.c -o ifunc_x64.o
+clang --target=x86_64-linux-gnu --sysroot=$HOME/.cache/x64-sysroot/root $CF -ftls-model=initial-exec \
+  tls_ie.c -o tls_ie_x64.o
+```
+
+| object | role |
+|---|---|
+| realpath_ver_x64.o | `realpath("/", NULL)`: glibc has `realpath@GLIBC_2.2.5` (compat, returns NULL) and `realpath@@GLIBC_2.3`. Without `.gnu.version`/`.gnu.version_r` the reference binds to the library's version index 2 — GLIBC_2.2.5 on x86_64 — and the program exits 7 with no error. `elf_x64_dynamic_exec_spec` requires `realpath=/` and exit 42 |
+| ifunc_x64.o | a locally defined `STT_GNU_IFUNC` (`f`). ld.lld emits R_X86_64_IRELATIVE and the program exits 42; without one the address is the resolver's (measured rc=192), so `elf_link` rejects it by name |
+| tls_ie_x64.o | one R_X86_64_GOTTPOFF against an extern `__thread`. Kept as the shape that used to be misdiagnosed as "needs a copy relocation ... recompile with -fPIC"; the TLS classification is asserted directly in `elf_link_unsupported_spec` |

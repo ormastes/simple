@@ -159,3 +159,37 @@ Next: RELRO, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real 
 | C2 x86_64 dynamic glibc | **run passes; gate lifted** | Sysroot: Ubuntu noble amd64 `libc6`/`libc6-dev` 2.39-0ubuntu8.9 (+ libgcc-s1, linux-libc-dev, libcrypt-dev), fetched without root through a private apt state dir and `dpkg-deb -x` into `$HOME/.cache/x64-sysroot/root` (recipe and sha256s in `test/fixtures/linker/elf/RECIPE.md`). `elf_link` links `crt1.o`/`Scrt1.o` + `crti.o` + `hello_libc_x64.o` + `crtn.o` + `libc.so.6` into a dynamic ET_EXEC and a PIE. Both print `hi from libc` and exit 42 under `qemu-x86_64 -L <sysroot>`. The one engine defect was that `_GLOBAL_OFFSET_TABLE_` (an UND symbol in x86_64 `crt1.o`/`crti.o` with no relocation) was undefined; it is now linker-defined at `.got.plt` on x86_64 and `.got` on aarch64, as in ld.lld. The UnsupportedFeature gate and `elf_link_structural` are removed. `elf_x64_dynamic_exec_spec` 4/4 (red 2/4 before); without a sysroot or qemu it prints `SKIP: x64-sysroot-missing` / `SKIP: qemu-x86_64-missing` and asserts that reason. `elf_x64_dynamic_spec` 7/7 |
 
 Differences from `ld.lld-23` with the same inputs (`readelf -lSdrW`). None of them stops the run: the PLT/GOT shape, JUMP_SLOT/GLOB_DAT for `puts`/`exit`/`__libc_start_main`, and the `lea main(%rip)` relaxation match. The engine output has no `.gnu.version`/`.gnu.version_r` (no symbol versioning), no RELRO or `.relro_padding`, and no `.comment`, and leaves EI_OSABI at 0 where ld.lld sets 3/GNU. Undefined-weak `__gmon_start__` becomes a constant-0 GOT slot, where ld.lld uses a GLOB_DAT. The three input `.note.gnu.property` notes (IBT/SHSTK from crt objects) are concatenated rather than merged. ld.lld drops them because `hello_libc_x64.o` has none. No `PT_GNU_PROPERTY` is emitted, so the loader ignores them, but the section is wrong: open, `doc/08_tracking/bug/internal_elf_linker_gnu_property_notes_concatenated_2026-09-19.md`.
+
+### C2 round 2 — Fable BLOCK: the gate lift needed these three first (2026-09-19)
+
+The hello fixture avoided every symbol that carries a glibc compat version, so
+the execution proof was real but narrow. Each item below was a silently wrong
+binary with no error, and each now has a red→green spec and a mutation row in
+`check-link-mutation-gates.shs` (7 rows -> 11).
+
+| item | before | now |
+|---|---|---|
+| Symbol versioning | `shared_object` read versym only to drop hidden exports; no `.gnu.version_r`. ld.so resolves a versionless reference to the library's version index 2 = **GLIBC_2.2.5 on x86_64**, i.e. the whole compat set (memcpy, pthread_cond_*, posix_spawn…) binds to the OLD implementation. `realpath("/", NULL)` returned NULL, rc=7. aarch64 never showed it: its index 2 is GLIBC_2.17 | `.gnu.version_d` is parsed (BASE verdef excluded), each import's default version recorded, and `.gnu.version` + `.gnu.version_r` + DT_VERSYM/VERNEED/VERNEEDNUM emitted. Indices match ld.lld's on the same inputs (2=GLIBC_2.34, 3=GLIBC_2.3, 4=GLIBC_2.2.5). `realpath=/`, rc=42, exec and PIE |
+| Locally defined IFUNC | only imported type-10 was handled; a defined IFUNC fell through as a plain FUNC and its address was the resolver's (rc=192 vs ld.lld's 42). Pre-existing and arch-neutral, made reachable by the gate lift | rejected by name: `UnsupportedFeature: locally defined STT_GNU_IFUNC needs an R_*_IRELATIVE relocation …: f` |
+| Vacuous spec verdict | `expect_named_skip` printed the reason to stdout and reported `passed=4 skipped=0 PASS` with no sysroot — test_db recorded a proof that never ran | `skip_if` from `std.spec.decorators`: the verdict's `executed=` drops from 7 to 1 and each line reads `skipped (x86_64 run environment missing: …)`. Two residual runner defects filed: decorator-invoked examples print `unnamed`, and the VERDICT's `skipped=` field stays 0 (`doc/08_tracking/bug/spec_decorator_examples_unnamed_and_uncounted_2026-09-19.md`) |
+
+Also in this round:
+
+- `reloc_scan` gained `RC_TLS`. x86_64 GOTTPOFF (22) used to fall through to the
+  shared-library `else` and be reported as "needs a copy relocation or canonical
+  PLT; recompile with -fPIC". TLS relocations on both targets are now named as
+  TLS.
+- The `.note.gnu.property` mitigation moved into this lane: the notes are
+  dropped when the `FEATURE_1_AND` across all inputs is 0 (ld.lld's own result)
+  and the link is refused by name when it is not, since no `PT_GNU_PROPERTY` is
+  emitted. Real merging stays open in the bug record.
+- **Weak-undef policy, documented at the decision site** (`elf_symref`): an
+  undefined weak symbol is NEVER made dynamic here — it resolves statically to
+  0. ld.lld instead emits a `.dynsym` entry with `R_*_GLOB_DAT`, which is why
+  `__gmon_start__` is in its output and not in ours. Ours is safe *only*
+  because crt1/crti guard the call on the slot being non-zero. Any weak symbol
+  a later-loaded object is expected to supply would silently stay 0.
+- `_GLOBAL_OFFSET_TABLE_` follows ld.lld's per-target base (`.got.plt` on
+  x86_64, `.got` on aarch64).
+
+All 26 `test/01_unit/.../linker` specs green.

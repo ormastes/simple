@@ -24,13 +24,66 @@
 use compiler.backend.linker.elf.elf_static_link.{
     elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 }
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.spec.decorators.{skip_if}
 use std.io_runtime.{file_read_bytes, file_write_bytes, file_exists, env_get, shell, process_run, host_arch}
+use std.string_core.{char_from_code}
 
 val FIX: text = "test/fixtures/linker/elf"
 val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
 val SKIP_SYSROOT: text = "x64-sysroot-missing"
 val SKIP_QEMU: text = "qemu-x86_64-missing"
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 24)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+fn dynstr(b: [i64], off: i64) -> text:
+    cstr(b, sec_off(b, ".dynstr") + off)
+
+fn dyn_tag(b: [i64], tag: i64) -> i64:
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag:
+            return rd64(b, o + 8)
+        o = o + 16
+    -1
 
 fn load_path(path: text) -> [i64]:
     val raw = file_read_bytes(path)
@@ -95,19 +148,15 @@ fn skip_reason_for(root: text) -> text:
 fn skip_reason() -> text:
     skip_reason_for(sysroot())
 
-fn expect_named_skip(reason: text):
-    print "SKIP: {reason}"
-    expect(reason.starts_with(SKIP_SYSROOT) or reason.starts_with(SKIP_QEMU)).to_equal(true)
-
-fn link_hello(crt1: text, mode: i64) -> Result<[i64], text>:
+fn link_obj(crt1: text, obj: text, mode: i64) -> Result<[i64], text>:
     val objs = [load_path("{libdir()}/{crt1}"), load_path("{libdir()}/crti.o"),
-        load_path("{FIX}/hello_libc_x64.o"), load_path("{libdir()}/crtn.o")]
+        load_path("{FIX}/{obj}"), load_path("{libdir()}/crtn.o")]
     elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [file_read_bytes("{libdir()}/libc.so.6")],
         entry: "_start", target: RelocArch.X86_64, mode: mode, interp: INTERP))
 
 # Link, write, chmod and run: (exit code, stdout), or an Err naming the failing stage.
-fn link_and_run(crt1: text, mode: i64, out: text) -> Result<(i64, text), text>:
-    val linked = link_hello(crt1, mode)
+fn link_and_run(crt1: text, obj: text, mode: i64, out: text) -> Result<(i64, text), text>:
+    val linked = link_obj(crt1, obj, mode)
     if linked.is_err():
         return Err("link: {linked.unwrap_err()}")
     var bytes: [u8] = []
@@ -124,42 +173,101 @@ fn link_and_run(crt1: text, mode: i64, out: text) -> Result<(i64, text), text>:
     val run = shell(cmd)
     Ok((run.exit_code, run.stdout))
 
+fn expect_run(crt1: text, obj: text, mode: i64, out: text, want_out: text):
+    val r = link_and_run(crt1, obj, mode, out)
+    if r.is_err():
+        print "error: {r.unwrap_err()}"
+    expect(r.is_ok()).to_equal(true)
+    val (code, stdout) = r.unwrap()
+    expect(stdout.trim()).to_equal(want_out)
+    expect(code).to_equal(42)
+
+# The verdict itself must say "skipped" when the host cannot run x86_64 code —
+# printing a reason while reporting a pass would record a proof that never ran.
+val needs_x64 = skip_if(fn(): skip_reason() != "", "x86_64 run environment missing: see SIMPLE_X64_SYSROOT / SIMPLE_QEMU_X86_64 (elf_x64_dynamic_exec_spec header)")
+
 describe "elf_link - x86_64 dynamic glibc hello (execution proof)":
-    it "resolves the x86_64 run environment or names why it cannot":
-        val reason = skip_reason()
-        if reason != "":
-            expect_named_skip(reason)
-        else:
-            print "x86_64 run env: sysroot={sysroot()} qemu={qemu()}"
-            expect(sysroot_missing(sysroot())).to_equal("")
-
-    it "links a dynamic ET_EXEC that prints 'hi from libc' and exits 42":
-        val reason = skip_reason()
-        if reason != "":
-            expect_named_skip(reason)
-        else:
-            val r = link_and_run("crt1.o", ELF_LINK_DYNAMIC_EXEC, "/tmp/elf_x64_dynamic_exec_spec_exec")
-            if r.is_err():
-                print "error: {r.unwrap_err()}"
-            expect(r.is_ok()).to_equal(true)
-            val (code, stdout) = r.unwrap()
-            expect(stdout.trim()).to_equal("hi from libc")
-            expect(code).to_equal(42)
-
-    it "links a dynamic PIE that prints 'hi from libc' and exits 42":
-        val reason = skip_reason()
-        if reason != "":
-            expect_named_skip(reason)
-        else:
-            val r = link_and_run("Scrt1.o", ELF_LINK_DYNAMIC_PIE, "/tmp/elf_x64_dynamic_exec_spec_pie")
-            if r.is_err():
-                print "error: {r.unwrap_err()}"
-            expect(r.is_ok()).to_equal(true)
-            val (code, stdout) = r.unwrap()
-            expect(stdout.trim()).to_equal("hi from libc")
-            expect(code).to_equal(42)
-
-    it "names a missing sysroot instead of passing silently":
+    it "names the missing host requirement rather than passing silently":
         val reason = skip_reason_for("/nonexistent/elf_x64_dynamic_exec_spec")
         expect(reason.starts_with(SKIP_SYSROOT)).to_equal(true)
         expect(reason.contains("/nonexistent/elf_x64_dynamic_exec_spec/usr/lib/x86_64-linux-gnu/crt1.o")).to_equal(true)
+        print "run env here: reason='{skip_reason()}' sysroot={sysroot()} qemu={qemu()}"
+
+    needs_x64("links a dynamic ET_EXEC that prints 'hi from libc' and exits 42", fn():
+        print "scenario: links a dynamic ET_EXEC that prints 'hi from libc' and exits 42"
+        expect_run("crt1.o", "hello_libc_x64.o", ELF_LINK_DYNAMIC_EXEC,
+            "/tmp/elf_x64_dynamic_exec_spec_exec", "hi from libc")
+    )
+
+    needs_x64("links a dynamic PIE that prints 'hi from libc' and exits 42", fn():
+        print "scenario: links a dynamic PIE that prints 'hi from libc' and exits 42"
+        expect_run("Scrt1.o", "hello_libc_x64.o", ELF_LINK_DYNAMIC_PIE,
+            "/tmp/elf_x64_dynamic_exec_spec_pie", "hi from libc")
+    )
+
+describe "elf_link - x86_64 symbol versioning (compat-set trap)":
+    # realpath has TWO implementations in glibc: realpath@GLIBC_2.2.5 (compat,
+    # returns NULL) and realpath@@GLIBC_2.3 (the real one). A reference with no
+    # version binds to the library's version index 2 — GLIBC_2.2.5 on x86_64 —
+    # so an output without .gnu.version/.gnu.version_r runs and returns NULL
+    # (rc=7) with no error anywhere. ld.lld binds realpath[GLIBC_2.3], rc=42.
+    needs_x64("binds realpath to GLIBC_2.3, so it returns a path and exits 42", fn():
+        print "scenario: binds realpath to GLIBC_2.3, so it returns a path and exits 42"
+        expect_run("crt1.o", "realpath_ver_x64.o", ELF_LINK_DYNAMIC_EXEC,
+            "/tmp/elf_x64_dynamic_exec_spec_realpath", "realpath=/")
+    )
+
+    needs_x64("binds realpath in a PIE too", fn():
+        print "scenario: binds realpath in a PIE too"
+        expect_run("Scrt1.o", "realpath_ver_x64.o", ELF_LINK_DYNAMIC_PIE,
+            "/tmp/elf_x64_dynamic_exec_spec_realpath_pie", "realpath=/")
+    )
+
+    needs_x64("emits .gnu.version / .gnu.version_r naming every version it needs", fn():
+        print "scenario: emits .gnu.version / .gnu.version_r naming every version it needs"
+        val r = link_obj("crt1.o", "realpath_ver_x64.o", ELF_LINK_DYNAMIC_EXEC)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        # one u16 per .dynsym entry, and no import left at index 0 or 1
+        val n_dynsym = sec_size(b, ".dynsym") / 24
+        expect(sec_size(b, ".gnu.version")).to_equal(n_dynsym * 2)
+        var i: i64 = 1
+        while i < n_dynsym:
+            expect(rd16(b, sec_off(b, ".gnu.version") + i * 2) >= 2).to_equal(true)
+            i = i + 1
+        # one Elf64_Verneed for libc.so.6 with one Elf64_Vernaux per version
+        val vn = sec_off(b, ".gnu.version_r")
+        expect(rd16(b, vn)).to_equal(1)                     # vn_version
+        val cnt = rd16(b, vn + 2)
+        expect(cnt).to_equal(3)                             # 2.34, 2.3, 2.2.5
+        expect(sec_size(b, ".gnu.version_r")).to_equal(16 + cnt * 16)
+        expect(dynstr(b, rd32(b, vn + 4))).to_equal("libc.so.6")
+        expect(rd32(b, vn + 8)).to_equal(16)                # vn_aux
+        expect(rd32(b, vn + 12)).to_equal(0)                # vn_next: the only file
+        var names: [text] = []
+        var a: i64 = 0
+        while a < cnt:
+            val aux = vn + 16 + a * 16
+            names = names.push(dynstr(b, rd32(b, aux + 8)))
+            expect(rd16(b, aux + 6)).to_equal(a + 2)        # vna_other: index 2, 3, 4
+            a = a + 1
+        expect(names.contains("GLIBC_2.3")).to_equal(true)
+        expect(names.contains("GLIBC_2.34")).to_equal(true)
+        expect(names.contains("GLIBC_2.2.5")).to_equal(true)
+        # DT_VERSYM / DT_VERNEED / DT_VERNEEDNUM point at them
+        expect(dyn_tag(b, 0x6ffffff0)).to_equal(sec_addr(b, ".gnu.version"))
+        expect(dyn_tag(b, 0x6ffffffe)).to_equal(sec_addr(b, ".gnu.version_r"))
+        expect(dyn_tag(b, 0x6fffffff)).to_equal(1)
+    )
+
+    needs_x64("reads each libc export's default version out of .gnu.version_d", fn():
+        print "scenario: reads each libc export's default version out of .gnu.version_d"
+        val lib = elf_parse_shared(file_read_bytes("{libdir()}/libc.so.6"))
+        expect(lib.is_ok()).to_equal(true)
+        val l = lib.unwrap()
+        expect(l.versions["realpath"]).to_equal("GLIBC_2.3")
+        expect(l.versions["__libc_start_main"]).to_equal("GLIBC_2.34")
+        expect(l.versions["puts"]).to_equal("GLIBC_2.2.5")
+        # the BASE verdef (the file's own name) is not a version
+        expect(l.versions["exit"]).to_equal("GLIBC_2.2.5")
+    )

@@ -1,19 +1,28 @@
 # ELF shared-object reader for the internal linker — lane A7 slice 2.
 #
-# Reads only what a link against a DSO needs: DT_SONAME (for DT_NEEDED) and
-# the defined, default-version .dynsym exports (name -> st_type). Works on a
-# stripped library (no .symtab); non-default (hidden, `@` not `@@`) versions
-# are not linkable, exactly as ld.lld treats them.
+# Reads only what a link against a DSO needs: DT_SONAME (for DT_NEEDED), the
+# defined, default-version .dynsym exports (name -> st_type) and the version
+# each of those exports carries (name -> `.gnu.version_d` version, "" when the
+# library has no versions). Works on a stripped library (no .symtab);
+# non-default (hidden, `@` not `@@`) versions are not linkable, exactly as
+# ld.lld treats them.
+#
+# The version matters: a reference that names no version binds, in ld.so, to
+# version index 2 of the library, which for glibc/x86_64 is the ANCIENT
+# GLIBC_2.2.5 compat set. `realpath` is the demonstrator — the 2.2.5
+# implementation returns NULL. So the linker must record the default version
+# of every import and emit .gnu.version / .gnu.version_r for it.
 
 use compiler.backend.linker.elf_inspect.{
     ElfSectionHeader, elf_parse_header, elf_read_u16_le, elf_read_u32_le, elf_read_u64_le,
     ET_DYN, ELF64_SHDR_SIZE
 }
-use compiler.backend.linker.elf_parser.{elf_strtab_get, elf_parse_string_table}
+use compiler.backend.linker.elf_parser.{ElfStringTable, elf_strtab_get, elf_parse_string_table}
 
 val SHT_DYNSYM_SO: i64 = 11
 val SHT_DYNAMIC_SO: i64 = 6
 val SHT_GNU_VERSYM: i64 = 0x6fffffff
+val SHT_GNU_VERDEF: i64 = 0x6ffffffd
 val DT_SONAME_SO: i64 = 14
 val VERSYM_HIDDEN: i64 = 0x8000
 
@@ -21,6 +30,7 @@ struct ElfSharedLib:
     soname: text
     machine: i64
     exports: {text: i64}   # defined default-version symbol -> STT_* type
+    versions: {text: text} # export -> its default version name ("" = unversioned)
 
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
@@ -31,6 +41,25 @@ fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
 
 fn elf_so_link(bytes: [u8], shoff: i64, i: i64) -> i64:
     elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 40)
+
+fn elf_verdef_names(bytes: [u8], sec: ElfSectionHeader, strtab: ElfStringTable, count: i64) -> {i64: text}:
+    """`.gnu.version_d` version index -> version name (Elf64_Verdef chain)."""
+    var out: {i64: text} = {}
+    var off = sec.sh_addr
+    var seen: i64 = 0
+    while seen < count and off + 20 <= bytes.len():
+        val base = elf_read_u16_le(bytes, off + 2) & 1   # VER_FLG_BASE: the file's own name, not a version
+        val ndx = elf_read_u16_le(bytes, off + 4) & 0x7fff
+        val aux = elf_read_u32_le(bytes, off + 12)
+        if base == 0 and off + aux + 4 <= bytes.len():
+            out[ndx] = elf_strtab_get(strtab, elf_read_u32_le(bytes, off + aux))
+        val next = elf_read_u32_le(bytes, off + 16)
+        if next == 0:
+            seen = count
+        else:
+            off = off + next
+            seen = seen + 1
+    out
 
 fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
@@ -45,6 +74,7 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     var dynsym_i: i64 = -1
     var dynamic_i: i64 = -1
     var versym_i: i64 = -1
+    var verdef_i: i64 = -1
     var i: i64 = 0
     while i < shnum:
         val t = elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 4)
@@ -54,6 +84,8 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
             dynamic_i = i
         else if t == SHT_GNU_VERSYM:
             versym_i = i
+        else if t == SHT_GNU_VERDEF:
+            verdef_i = i
         i = i + 1
     if dynsym_i < 0:
         return Err("shared object has no .dynsym")
@@ -64,7 +96,15 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     if versym_i >= 0:
         versym_off = elf_so_shdr(bytes, shoff, versym_i).sh_addr
 
+    var verdef: {i64: text} = {}
+    if verdef_i >= 0:
+        val vsec = elf_so_shdr(bytes, shoff, verdef_i)
+        verdef = elf_verdef_names(bytes, vsec,
+            elf_parse_string_table(bytes, elf_so_shdr(bytes, shoff, elf_so_link(bytes, shoff, verdef_i))),
+            vsec.sh_info)
+
     var exports: {text: i64} = {}
+    var versions: {text: text} = {}
     val count = symsec.sh_size / 24
     var k: i64 = 1
     while k < count:
@@ -73,11 +113,17 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
         val shndx = elf_read_u16_le(bytes, e + 6)
         val bind = info >> 4
         var linkable = shndx != 0 and (bind == 1 or bind == 2)
+        var ver = ""
         if linkable and versym_off >= 0:
-            if elf_read_u16_le(bytes, versym_off + k * 2) & VERSYM_HIDDEN != 0:
+            val vs = elf_read_u16_le(bytes, versym_off + k * 2)
+            if vs & VERSYM_HIDDEN != 0:
                 linkable = false
+            else if verdef.has(vs & 0x7fff):
+                ver = verdef[vs & 0x7fff]
         if linkable:
-            exports[elf_strtab_get(strtab, elf_read_u32_le(bytes, e))] = info & 0xf
+            val name = elf_strtab_get(strtab, elf_read_u32_le(bytes, e))
+            exports[name] = info & 0xf
+            versions[name] = ver
         k = k + 1
 
     var soname = ""
@@ -95,6 +141,6 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
                 d = d + 16
     if soname == "":
         return Err("shared object has no DT_SONAME (needed for DT_NEEDED)")
-    Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports))
+    Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports, versions: versions))
 
 export ElfSharedLib, elf_parse_shared

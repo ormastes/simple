@@ -2,11 +2,13 @@
 #
 # Byte builders for the linker-created sections (design §5, mold phase
 # "synthetic sections"): .got, .plt / .got.plt (aarch64, x86_64 lazy), .dynsym, .dynstr,
-# SysV .hash + .gnu.hash, .rela.dyn / .rela.plt, .dynamic and .interp. Sizes are known
+# SysV .hash + .gnu.hash, .gnu.version + .gnu.version_r, .rela.dyn / .rela.plt,
+# .dynamic and .interp. Sizes are known
 # from the relocation scan before layout; contents are built after layout,
 # once every address is final. Pure: every function returns [i64] bytes.
 #
-# Not produced (reported, not faked): .gnu.version/_r, .eh_frame_hdr,
+# Not produced (reported, not faked): .gnu.version_d (this linker defines no
+# versions of its own), .eh_frame_hdr,
 # x86_64 IBT/CET PLT, TLS (.tdata/.tbss, TLSDESC/TPREL), RELRO.
 
 use compiler.backend.linker.reloc_engine.{
@@ -51,6 +53,9 @@ val DT_INIT_ARRAYSZ: i64 = 27
 val DT_FINI_ARRAYSZ: i64 = 28
 val DT_PREINIT_ARRAY: i64 = 32
 val DT_PREINIT_ARRAYSZ: i64 = 33
+val DT_VERSYM: i64 = 0x6ffffff0
+val DT_VERNEED: i64 = 0x6ffffffe
+val DT_VERNEEDNUM: i64 = 0x6fffffff
 val DT_GNU_HASH: i64 = 0x6ffffef5
 val DT_RELACOUNT: i64 = 0x6ffffff9
 val DT_FLAGS_1: i64 = 0x6ffffffb
@@ -62,6 +67,8 @@ val SHT_HASH_S: i64 = 5
 val SHT_DYNAMIC_S: i64 = 6
 val SHT_DYNSYM_S: i64 = 11
 val SHT_GNU_HASH_S: i64 = 0x6ffffff6
+val SHT_GNU_VERSYM_S: i64 = 0x6fffffff
+val SHT_GNU_VERNEED_S: i64 = 0x6ffffffe
 val SHF_INFO_LINK_S: i64 = 0x40
 
 val A64_PLT0_SIZE: i64 = 32
@@ -160,6 +167,56 @@ fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynS
         b = write_u64_le(b, 0)
         b = write_u64_le(b, 0)
         i = i + 1
+    b
+
+fn elf_write_u16_le(buf: [i64], v: i64) -> [i64]:
+    var b = buf.push(v & 0xff)
+    b.push((v >> 8) & 0xff)
+
+fn elf_versym_size(n_imports: i64) -> i64:
+    (n_imports + 1) * 2
+
+fn elf_build_versym(indices: [i64]) -> [i64]:
+    """`.gnu.version`: one u16 per .dynsym entry (0 = *local*, >=2 = a
+    `.gnu.version_r` index). The null symbol's entry is 0."""
+    var b = elf_write_u16_le([], 0)
+    for x in indices:
+        b = elf_write_u16_le(b, x)
+    b
+
+fn elf_verneed_size(n_files: i64, n_aux: i64) -> i64:
+    n_files * 16 + n_aux * 16
+
+# reason: positional verneed inputs (one file per row, its version names and indices)
+fn elf_build_verneed(files: [text], names: [[text]], idxs: [[i64]], dynstr: ElfDynStr) -> [i64]:
+    """`.gnu.version_r`: one Elf64_Verneed per needed file, each with one
+    Elf64_Vernaux per version that file must supply. Without this section a
+    reference binds to the library's version index 2 — on glibc/x86_64 the
+    GLIBC_2.2.5 compat implementation, which for `realpath` returns NULL."""
+    var b: [i64] = []
+    var fi: i64 = 0
+    while fi < files.len():
+        val cnt = names[fi].len()
+        var next: i64 = 0
+        if fi + 1 < files.len():
+            next = 16 + cnt * 16
+        b = elf_write_u16_le(b, 1)              # vn_version
+        b = elf_write_u16_le(b, cnt)            # vn_cnt
+        b = write_u32_le(b, dynstr.offsets[files[fi]])   # vn_file
+        b = write_u32_le(b, 16)                 # vn_aux (first vernaux follows)
+        b = write_u32_le(b, next)               # vn_next
+        var ai: i64 = 0
+        while ai < cnt:
+            var anext: i64 = 0
+            if ai + 1 < cnt:
+                anext = 16
+            b = write_u32_le(b, elf_sysv_hash(names[fi][ai]))   # vna_hash
+            b = elf_write_u16_le(b, 0)                          # vna_flags
+            b = elf_write_u16_le(b, idxs[fi][ai])               # vna_other
+            b = write_u32_le(b, dynstr.offsets[names[fi][ai]])  # vna_name
+            b = write_u32_le(b, anext)                          # vna_next
+            ai = ai + 1
+        fi = fi + 1
     b
 
 # reason: positional Elf64_Sym fields in on-disk order
@@ -411,6 +468,7 @@ fn elf_build_interp(path: text) -> [i64]:
 export ElfDynStr
 export elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64
 export elf_rela_entry, elf_sym_entry, elf_sysv_hash, elf_build_dynstr, elf_dynstr_size, elf_build_dynsym
+export elf_versym_size, elf_build_versym, elf_verneed_size, elf_build_verneed
 export elf_hash_size, elf_build_hash, elf_gnu_hash, elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash
 export elf_plt0_size, elf_plt_entry_size, elf_plt_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt
 export elf_build_plt_x64, elf_build_gotplt_x64, elf_build_dynamic, elf_build_interp
@@ -420,6 +478,8 @@ export DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB
 export DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI
 export DT_PLTREL, DT_DEBUG, DT_JMPREL, DT_INIT_ARRAY, DT_FINI_ARRAY
 export DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ
+export DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM
 export DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE
+export SHT_GNU_VERSYM_S, SHT_GNU_VERNEED_S
 export SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S
 export A64_PLT0_SIZE, A64_PLT_ENTRY_SIZE, X64_PLT0_SIZE, X64_PLT_ENTRY_SIZE, GOTPLT_RESERVED

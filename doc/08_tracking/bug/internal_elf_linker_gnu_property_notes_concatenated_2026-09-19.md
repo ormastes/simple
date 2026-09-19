@@ -35,3 +35,24 @@ missing note as 0. Emit one note plus `PT_GNU_PROPERTY` when the result is
 non-zero, and emit no section when it is 0. Until the merge exists, reject a
 link where the AND is non-zero, naming the reason, and drop the notes when it
 is zero.
+
+## Mitigated 2026-09-19 (lane C2) — the merge itself is still open
+
+`elf_property_policy` (`elf_static_link.spl`) now ANDs `FEATURE_1_AND` across
+every input, exactly as ld.lld does, and:
+
+- AND == 0 (one input without the note clears it, which is the glibc-hello
+  case): every `.note.gnu.property` input is DROPPED, so the output matches
+  ld.lld — no section at all. Verified: the linked hello has none.
+- AND != 0: the link is REFUSED by name, because no `PT_GNU_PROPERTY` is
+  emitted and a note without that header is not what the gABI asks for.
+
+So no output can claim IBT/SHSTK it was not built for. What remains open, and
+what this record stays open for, is real merging: emitting one merged note
+plus `PT_GNU_PROPERTY` for a non-zero AND, and preserving the non-AND
+properties (`X86_ISA_1_NEEDED` and friends) that dropping discards. Until then
+a tree whose inputs ALL carry the feature bits cannot be linked internally.
+
+Specs: `test/01_unit/compiler/backend/linker/elf_link_unsupported_spec.spl`
+(`elf_link - .note.gnu.property`). Mutation row
+`property_note_nonzero_and_accepted` in `check-link-mutation-gates.shs`.
