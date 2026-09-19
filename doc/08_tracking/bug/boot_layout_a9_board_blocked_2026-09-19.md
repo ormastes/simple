@@ -1,4 +1,4 @@
-# Boot layout (lane A9): internal-linker rung 3 reached, rung 4 partial (hello kernel boots, gate FAIL by design); board run blocked
+# Boot layout (lane A9): internal-linker rungs 3 and 4 reached (full kernel, real-firmware gate PASS); board run blocked
 
 Status: OPEN (P2)
 **Date:** 2026-09-19
@@ -13,7 +13,7 @@ Status: OPEN (P2)
 | 1. `ld_parse` round-trips all 6 `src/os/kernel/arch/*/linker.ld` | **PASS** | `test/01_unit/compiler/backend/linker/linker_script_spec.spl` 44/44. Before this change: 31 pass, 12 fail (PHDRS, AT, KEEP, NOLOAD, `+=`, OUTPUT_FORMAT, PROVIDE, ASSERT, round-trip) |
 | 2. Typed `BootLayoutPlan` | **PASS** | `test/01_unit/compiler/backend/linker/boot_layout_plan_spec.spl` 22/22, with values worked out by hand for x86_64 (higher half) and arm64 (MEMORY/NOLOAD). A mutation run flipped 3 expectations and all 3 went red |
 | 3. `llvm-readelf -l -S` parity: internal engine vs `ld.lld -T` | **PASS** (2026-09-19, lane B1) | See "Rung 3 evidence" |
-| 4. Real-firmware QEMU boot with the internally linked kernel | **PARTIAL.** The gate verdict is FAIL (exit 1) for BOTH the internal and the ld.lld kernel, because the hello kernel is not the kernel the gate checks. The internal kernel boots and prints the same serial log as the ld.lld one. | See "Rung 4 evidence" |
+| 4. Real-firmware QEMU boot with the internally linked kernel | **PASS** (2026-09-19, lane C3) with the REAL SimpleOS aarch64 Limine kernel: gate exit 0, 4 markers. Earlier that day it was PARTIAL with a hello kernel (lane B1). | See "Rung 4 with the full kernel" |
 | Board boot | **BLOCKED** | This host has no board access |
 
 Rung 1 is not vacuous. `ld_tokens_equivalent` compares the source token stream with the
@@ -130,11 +130,71 @@ The gate itself has NOT passed for any internally linked kernel. That needs the 
 objects linked internally, which is still open. No board run was attempted, because there is no
 board on this host.
 
-## Rung 4 with the full kernel: BLOCKED upstream (2026-09-19, lane C3)
+## Rung 4 with the full kernel: REACHED (2026-09-19, lane C3)
 
-The full kernel is the one the gate checks. Its build fails before any linker comparison can
-start: **the external `ld.lld` link fails too.** So there is no reference ELF, no internal ELF, no
-sha256 for either, and no gate verdict. Nothing was substituted and no ELF was faked.
+The gate PASSES with the full SimpleOS aarch64 Limine kernel linked by
+`elf_boot_link`. The section below records the four upstream defects that had to be
+fixed first; they are kept because they are the reason the kernel could not be
+linked by ANY linker, and because the fixes are what this claim rests on.
+
+| Kernel | Linker | Size | sha256 |
+|---|---|---|---|
+| `kernel_ext.elf` | `ld.lld --gc-sections` (the producer's own link) | 128232 | `7615ee42f03d7e5c35f90c9067ce206779ce7040671ea0fdf0558c94395c916d` |
+| `ext_O0.elf` | `ld.lld -O0 --no-relax`, no GC | 222176 | `58ca725ad2da6bbd48583390bc8585799af5329a1fa22a1c2814df17f75fb60f` |
+| `kernel_int.elf` | `elf_boot_link` (internal engine, no GC) | 204640 | `e35a777892b0e9afd79481edd6d437d1303be9e04123113975ea0ae289679719` |
+
+`ext_O0.elf` is the comparison target, because the engine has no section GC. The
+file sizes differ only in the non-loaded `.symtab`.
+
+**Parity, internal vs `ld.lld -O0 --no-relax` on the same 18 objects, script and
+defsyms:**
+
+- Program headers identical: `LOAD` at file 0x10000, VMA 0xffffffff80100000, PA
+  0x40100000, size 0x153d0, `R E`; `LOAD` at 0x26000, VMA 0xffffffff80116000, PA
+  0x40116000, size 0x3020, `RW`; both aligned 0x10000.
+- `.text`, `.rodata`, `.data`, `.bss` and `.got` identical in address, offset, size
+  and alignment.
+- Entry identical: 0xffffffff80109a14.
+- **Loaded bytes byte-identical**: `cmp` over 0x10000..0x253d0 (87056 bytes) and
+  0x26000..0x29020 (12320 bytes), i.e. every byte either `LOAD` segment covers.
+- Symbols: 492 of ld.lld's 495 defined globals match by value. The 3 that do not are
+  `_start`, `__simple_entry_start` and `spl_start` — the `--defsym` aliases, which
+  the engine resolves (the entry address is identical) but does not re-emit into
+  `.symtab`.
+
+**Gate, run once per kernel** (EDK2/AAVMF pflash -> `BOOTAA64.EFI` -> `kernel.elf`,
+no `-kernel`, no `isa-debug-exit`):
+
+```sh
+D=<dir>; OUT_DIR=$D ART_DIR=$D WORK_DIR=$D/work KERNEL_ELF=<kernel> \
+AAVMF_CODE=~/.local/share/qemu/edk2-aarch64-code.fd \
+AAVMF_VARS=~/.local/share/qemu/edk2-arm-vars.fd BOOT_TIMEOUT=90 \
+  sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+```
+
+| Kernel | Verdict |
+|---|---|
+| `kernel_int.elf` (internal) | `PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64 boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit), 91 serial line(s) captured` (exit 0) |
+| `ext_O0.elf` (ld.lld, no GC) | same verdict, 92 serial line(s) (exit 0) |
+| `kernel_ext.elf` (ld.lld --gc-sections) | same verdict, 91 serial line(s) (exit 0) |
+
+Both transcripts reach `[BOOT] Memory map:`, `[BOOT] Boot info assembled
+successfully`, `[BOOT] Handing off to memory layer`,
+`[BOOT] SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-OK` and
+`[BOOT] SIMPLEOS-AARCH64-LIMINE-KERNEL-OK`. The logs are not byte-identical: the
+firmware hands each kernel a slightly different memory map (49 vs 48 entries) because
+the two images are different sizes, so the region lines and the derived page counts
+differ. Every marker line is the same.
+
+Evidence is local only, under `build/os/c3/` (gitignored): the three ELFs, the object
+set, both serial logs and each gate verdict. The tables above are the committed record.
+Board: still blocked, no board on this host.
+
+## The four upstream defects (fixed 2026-09-19, lane C3)
+
+The full kernel is the one the gate checks. As found at `7c875a81067`, its build failed before any
+linker comparison could start: **the external `ld.lld` link failed too.** All four defects below
+are fixed in this lane's commit; this section is the measurement that located them.
 
 **Producer.** The producer is `scripts/os/build-simpleos-aarch64-limine-kernel.shs`, with entry
 `examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl` and script
@@ -188,16 +248,42 @@ kernel's relocations are 1127 `ABS64`, 680 `CALL26`, 143 `ADR_PREL_PG_HI21`, 140
 `ADD_ABS_LO12_NC`, 3 `LDST64_ABS_LO12_NC`, 3 `ADR_GOT_PAGE`, 3 `LD64_GOT_LO12_NC` and 1 `PREL32`.
 **No linker work is pending for this kernel.** What blocks it is the missing symbols.
 
-**What unblocks rung 4:**
+**What was done (all four are in this lane's commit):**
 
-1. The kernel lane restores `mmio_disable_test_mode`.
-2. The kernel lane defines the `rt_arm64_*` externs and `rt_value_u64`, `rt_value_as_u64` and
-   `rt_unwrap_or_trap` in `examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`.
-3. Because the engine has no section GC, all 23 must resolve, not just the 3 reachable ones. The
-   other option is to land section GC first.
+1. `src/os/kernel/boot/mmio.spl`: the test journal and `mmio_disable_test_mode`,
+   `mmio_test_mode_enabled`, `mmio_reset_for_test`, `mmio_invalidate_tlb` are restored against this
+   file's own `rt_mmio_*` externs. NOT the pre-merge routing through `os.kernel.boot.mmio_hardware`:
+   that module's `mmio_read*`/`mmio_write*` share their names with this one's, and the seed resolves
+   a caller's `mmio_write8` to the raw-volatile one, so `mmio_test_backend_spec` — with test mode ON
+   — wrote to physical 0x1000 and died (SIGSEGV, rc 139, reproduced 2026-09-19 under both
+   `simple run` and the test runner). That name-collision defect is separate and remains open.
+2. `freestanding_runtime.c`: the 19 remaining `rt_arm64_*` accessors as real `mrs`/`msr`/`isb`/
+   `dsb`/`dmb`/`tlbi`/`wfi`/`wfe` inline asm, transcribed from the pure-Simple twin (`cpu.spl` at
+   `eb2781abc3b`, which merge `e274cd33719` also clobbered). The twin itself cannot be linked on
+   this lane: restoring it makes cranelift emit calls to undefined `__simple_asm_H<hash>` helpers
+   (measured — `ld.lld: error: undefined symbol: __simple_asm_H09bc53621729a65a`). `daif_set`/
+   `daif_clr` read-modify-write the DAIF register, because `msr DAIFSet, #imm` needs an immediate
+   and the mask is a runtime value.
+3. `freestanding_runtime.c`: `rt_value_u64`/`rt_value_as_u64` with the twin's UINT box layout
+   (`src/runtime/simple_core/core_values.spl`: 16 bytes, word 0 = 0x55494E54, word 1 = the raw
+   bits), and `rt_unwrap_or_trap` with the hosted Option/Result semantics. None, Err and heap
+   exhaustion call a new `rt_fatal_trap`, which prints on the PL011, masks DAIF and parks in `wfi`.
+   It never returns a value, so no caller gets a fabricated one.
+4. `examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl`: `_start` now calls
+   `__simple_call_module_inits`. This was the defect that survived the link and killed the boot. A
+   freestanding link has no generated `main()` stub, which is what calls that function on a hosted
+   target (`native_project/linker.rs`), so nothing referenced it, `--gc-sections` dropped it, and
+   every module global needing a heap-boxed initializer stayed at its `.bss` zero — a NULL array,
+   not an empty one. `pmm.spl`'s `g_pmm_contiguous_bases: [u64; 256]` was NULL and the first read in
+   `_pmm_remove_containing_page` took a Data Abort (`FAR 0x8`, `ESR 0x25/0x96000007`, ELR
+   0xffffffff80105d8c) immediately after the PMM probe allocated its page. Before the fix the gate
+   reported `FAIL — aarch64 kernel never printed 'SIMPLEOS-AARCH64-LIMINE-KERNEL-OK'` with the
+   transcript stopping at `[BOOT] PMM probe: allocated pfn=262156`; the abort was identified by
+   re-running the same ESP under `qemu -d int,guest_errors`.
 
-Then rerun the steps above, and the Rung 4 gate command with `KERNEL_ELF` set to each ELF.
-Evidence is local only, in `build/os/c3/` (logs, objects, and both undefined lists).
+Section GC is still absent from the engine, so all 23 symbols had to resolve rather than the 3 that
+`--gc-sections` keeps reachable. That is why the engine links `ext_O0.elf`'s shape, not the shipped
+`--gc-sections` image.
 
 ## Why rung 3 was not reached before lane B1 (historical)
 
@@ -257,9 +343,10 @@ kernel in about 0.2 s with the Rust seed. Two limits apply:
    - Section GC (KEEP roots), so the engine can match the shipped `--gc-sections` image.
    - lld's `-O1` string-merge order.
    - A committed parity script (`scripts/check/check-boot-layout-parity.shs`) and its CI step.
-3. Done (lane B1): rung 4 with the hello kernel. Still open: rung 4 with the full kernel. It is
-   blocked upstream because the kernel does not link with ld.lld either (23 undefined symbols).
-   See "Rung 4 with the full kernel".
+3. Done (lane B1): rung 4 with the hello kernel. Done (lane C3): rung 4 with the FULL kernel —
+   gate PASS for the internally linked ELF, loaded bytes identical to `ld.lld -O0 --no-relax`.
+   See "Rung 4 with the full kernel". Still open from that run: section GC, and re-emitting
+   `--defsym` aliases into `.symtab`.
 4. Close this record with a board transcript.
 
 ## Appendix: reproducing rungs 3-4
