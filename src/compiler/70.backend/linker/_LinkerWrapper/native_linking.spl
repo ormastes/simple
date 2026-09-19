@@ -25,6 +25,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_read_nullable, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.string_core.{text_to_bytes}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
@@ -834,10 +835,13 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     val libc = "{libdir}/libc.so.6"
     if not file_exists(libc):
         return Err("internal engine: unsupported host (no {libc} found)")
-    var objects: [[i64]] = [internal_link_native_read_i64(crt.crt1), internal_link_native_read_i64(crt.crti)]
+    # ElfLinkRequest.objects is packed [u8]: file_read_bytes' blob goes in as
+    # it comes off disk. Widening it to [i64] cost one boxed 64-bit element per
+    # input byte (32 bytes each) and an interpreted push per byte.
+    var objects: [[u8]] = [file_read_bytes(crt.crt1), file_read_bytes(crt.crti)]
     for path in object_files:
-        objects = objects.push(internal_link_native_read_i64(path))
-    objects = objects.push(internal_link_native_read_i64(crt.crtn))
+        objects = objects.push(file_read_bytes(path))
+    objects = objects.push(file_read_bytes(crt.crtn))
     var archives: [[i64]] = []
     val nonshared = "{libdir}/libc_nonshared.a"
     if file_exists(nonshared):
@@ -906,9 +910,9 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
-    var bytes: [u8] = []
-    for b in linked.unwrap():
-        bytes = bytes.push(b as u8)
+    # `Array + ByteArray` repacks the image to [u8] in one runtime copy; the
+    # old per-element loop was an interpreted push per output byte.
+    val bytes = linked.unwrap() + text_to_bytes("")
     if not file_write_bytes(output, bytes):
         return Err("internal engine: could not write {output}")
     val (_co, _ce, chmod_code) = process_run("chmod", ["755", output])

@@ -18,6 +18,7 @@ use compiler.backend.linker.elf.elf_static_link.{
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_read_bytes, file_write_bytes}
+use std.string_core.{text_to_bytes}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_micros() -> i64
@@ -36,6 +37,7 @@ fn words(s: text) -> [text]:
     out
 
 fn main() -> i64:
+    val empty_bytes: [u8] = text_to_bytes("")
     val t0 = rt_time_now_micros()
     val mode_name = env("ELF_BENCH_MODE")
     var mode = ELF_LINK_STATIC_EXEC
@@ -46,16 +48,13 @@ fn main() -> i64:
     else if mode_name != "static":
         print "elf_link_bench: unknown ELF_BENCH_MODE '{mode_name}'"
         return 2
-    var objs: [[i64]] = []
+    var objs: [[u8]] = []
     for p in words(env("ELF_BENCH_OBJS")):
         val raw = file_read_bytes(p)
         if raw.len() == 0:
             print "elf_link_bench: cannot read {p}"
             return 2
-        var b: [i64] = []
-        for x in raw:
-            b = b.push(x as i64)
-        objs = objs.push(b)
+        objs = objs.push(raw)
     var shared: [[u8]] = []
     for p in words(env("ELF_BENCH_SHARED")):
         shared = shared.push(file_read_bytes(p))
@@ -67,9 +66,9 @@ fn main() -> i64:
         print "elf_link_bench: link failed: {r.unwrap_err()}"
         return 1
     val img = r.unwrap()
-    var bytes: [u8] = []
-    for x in img:
-        bytes = bytes.push(x as u8)
+    # `Array + ByteArray` repacks to packed [u8] in one runtime copy; the old
+    # per-element `bytes.push(x as u8)` loop was ~44 ms of a synth-20 run.
+    val bytes = img + empty_bytes
     if not file_write_bytes(env("ELF_BENCH_OUT"), bytes):
         print "elf_link_bench: cannot write output"
         return 2
