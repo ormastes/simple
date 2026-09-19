@@ -66,3 +66,29 @@ an input ld.lld rejects (never the reverse), the section is emitted verbatim,
 and the errors that matter for a section we split are unchanged. Closing it is
 a one-line reorder (run `elf_merge_reject` before `elf_merge_demote`) if strict
 ld.lld-compatible diagnostics are ever wanted.
+
+## 5. Stricter than ld.lld for a named symbol past the end of a merged section
+
+`elf_merge_piece_off` errors on `off > sh_size`. ld.lld errors there only for a
+**section symbol plus addend** (`Symbols.cpp` `getSymVA`, guarded by
+`if (d.isSection())`, which also returns 0 rather than an address at exactly
+`offset == size`). For a **named** `Defined` symbol there is no diagnostic at
+all: `SyntheticSections.cpp` `splitSections` pre-resolves it with
+
+```
+SectionPiece &piece = v >= ms->content().size() ? ms->pieces.back()
+                                                : ms->getSectionPiece(v);
+```
+
+so any `v >= size` — including one *past* the end — is silently anchored on
+the last piece. Measured with `.set strpast, abc+5` on a 4-byte
+`.rodata.str1.1`: `ld.lld-23 -O1` links it and the program runs (exit 42),
+while we fail with `offset 5 is outside merged section 4 (size 4)`.
+
+**Kept deliberately.** Erroring is preferred to silently anchoring an
+out-of-range label on the last piece: the address lld produces is not the one
+the input asked for, and nothing tells the user. `off == size` is accepted (§1
+of the C1 review), matching both lld paths for the legal one-past-the-end
+label; only `off > size` diverges, and only by being louder. Reversing it, if
+lld-identical behaviour is ever required, is a one-line clamp to the last
+piece in `elf_merge_piece_off`.

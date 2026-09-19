@@ -167,7 +167,10 @@ ld.lld-23 -static -e _start -O0 merge_a_a64.o merge_b_a64.o -o mrg0   # .rodata 
 multi-byte strings (`splitStrings` -> `findNull` scans entsize-sized NUL
 units), so `-O1` gives one copy and exit 42, `-O0` two copies and exit 40.
 `merge_strend_a64.o` defines a global at the very END of a merged section
-(`st_value == sh_size`), which ld.lld accepts (its bound is `offset > size`).
+(`st_value == sh_size`), which ld.lld accepts: for a named Defined symbol
+`splitSections` (SyntheticSections.cpp) anchors any `v >= size` on the last
+piece, and the `offset > size` error in `getSymVA` applies only to SECTION
+symbols plus addend.
 `merge_relin_a64.o` has `.rodata.cst8` holding `.quad target`, i.e. a
 relocation INTO a merge section, which ld.lld demotes to a regular input
 section. All three exit 42.

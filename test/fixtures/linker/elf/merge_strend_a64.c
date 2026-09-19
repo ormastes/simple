@@ -1,8 +1,9 @@
 /* End-of-merged-section symbol fixture (lane C1): `strend` is a global defined
    at the very END of a SHF_MERGE|SHF_STRINGS section (st_value == sh_size, no
-   bytes after it). ld.lld-23 -O1 links it — its bound is `offset > size`, not
-   `>=` (Symbols.cpp getSymVA) — and it must resolve exactly one past the last
-   piece. _start exits 40 + 2 = 42 only when strend - abc is 4 in the output,
+   bytes after it). ld.lld-23 -O1 links it: for a NAMED Defined symbol,
+   splitSections (SyntheticSections.cpp) anchors any v >= size on the last
+   piece; the `offset > size` error in Symbols.cpp getSymVA applies only to
+   SECTION symbols plus addend. It must resolve exactly one past the last piece. _start exits 40 + 2 = 42 only when strend - abc is 4 in the output,
    i.e. when the end-of-section offset was mapped, not rejected or clamped. */
 static long sys3(long n, long a, long b, long c) {
     register long x8 __asm__("x8") = n;
