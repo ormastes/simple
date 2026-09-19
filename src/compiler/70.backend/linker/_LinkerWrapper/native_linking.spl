@@ -299,6 +299,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         val cross_plan = hosted_c_compiler_plan(target, os, arch)
         if cross_plan.requires_cross:
             return Err("internal engine: unsupported cross target '{target}' (internal:elf links against the host glibc only)")
+        val unsupported_field = internal_unsupported_config_field(config)
+        if unsupported_field != "":
+            return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
         if trace:
             print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine"
         return internal_link_native(os, arch, config.pie, object_files, output)
@@ -510,6 +513,28 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         return Err(link_error_detail("darwin-link-tool-identity-direct", darwin_tool_error))
 
     Ok(output)
+
+# First NativeLinkConfig field the internal engine would silently ignore, or ""
+# (design D4: reject, never mask). allow_duplicate_definitions is not listed:
+# internal:elf is stricter (duplicate strong definitions are a loud error).
+fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
+    if config.libraries.len() > 0:
+        return "libraries"
+    if config.library_paths.len() > 0:
+        return "library_paths"
+    if config.runtime_path != "":
+        return "runtime_path"
+    if config.runtime_bundle != "":
+        return "runtime_bundle"
+    if config.extra_flags.len() > 0:
+        return "extra_flags"
+    if config.retained_symbols.len() > 0:
+        return "retained_symbols"
+    if config.strip_output:
+        return "strip_output"
+    if config.debug:
+        return "debug"
+    ""
 
 fn internal_link_native_read_i64(path: text) -> [i64]:
     """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
