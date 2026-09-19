@@ -369,6 +369,20 @@ fn compile_c_runtime_sources() {
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
+        // Env-gated SIGPROF PC sampler (diagnostic tooling; see the TU header).
+        // This list is NOT interpreter-only: the cc archive below is bundled
+        // WHOLESALE into this crate's staticlib/cdylib outputs, and the
+        // bootstrap stage2/stage3 link selects libsimple_native_all.a -- which
+        // embeds those objects -- as its runtime. Without this row the sampler
+        // silently vanishes from every bootstrap-produced compiler binary even
+        // though the seed-lane (tools.rs) and pure-Simple (runtime_compiler.spl)
+        // lists both carry it (measured 2026-09-19: stage2 at 12:47 had zero
+        // prof symbols and no SIMPLE_PROF_SAMPLE_FILE string; the archive
+        // member only survives the link because native_project/linker.rs
+        // forces prof_sample_force_link as a retention root). Zero-cost
+        // unless SIMPLE_PROF_SAMPLE_FILE is set; empty TU off Linux
+        // x86_64/aarch64; no symbol overlap with this crate's Rust rt_* owners.
+        "runtime_prof_sample.c",
         // Narrow Stage2 provider: runtime.c/runtime_native.c cannot be linked
         // into this Rust archive without colliding with Rust-owned rt_* APIs.
         "runtime_secure_staging.c",
