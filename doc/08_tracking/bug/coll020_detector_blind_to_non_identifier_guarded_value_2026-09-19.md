@@ -136,23 +136,29 @@ matching reported lines against the 68 known sites:
 Fix coverage is **unchanged at 10 of 68**, verified site by site — the fix
 envelope was deliberately not widened with the detector.
 
-**Why 37 and not ~68, and it is not this rule.** Only 33 of the 52 files ever
-reach the COLL rules under `bin/simple lint`; the other 19 abort first on
-unrelated defects — e.g. `test/01_unit/compiler/30.types/
-simd_capabilities_extern_backing_spec.spl` dies with `error: semantic: string
-index out of bounds: index is 7628 but length is 7628`, and the same file's
-dedup site IS found by `simple fix`, which takes a parse-only path. Within the
-41 sites in files that demonstrably reached the rules, **37 are diagnosed
-(90%)**. The 27 unreached sites are a separate pre-existing bug in the lint
-front end, not detector blindness.
+**CORRECTION to a first reading of these numbers.** The first cut of this
+section said "only 33 of 52 files reach the COLL rules" and quoted 37 of 41
+(90%). That was wrong: it treated "produced no COLL row" as "never reached the
+rules", which conflated three different things. Re-measured properly:
 
-The 4 residual misses in reachable files are both known and one of them is
-correct:
+- **14 of the 68 sites are not inside a loop at all.** The site list came from
+  a textual grep for the dedup idiom and caught recursive accumulators and
+  one-shot adds (`src/compiler/80.driver/incremental.spl:69`,
+  `src/compiler/10.frontend/aspect_registry.spl:151`). Those are not
+  quadratic and are CORRECTLY silent. The honest denominator is **54**.
+- Of those 54: **37 diagnosed, 7 blocked by a whole-file lint abort, 10
+  silent.**
+- So within files lint can actually process, it is **37 of 47 (79%)**.
 
-- `src/os/port/build_tools/simple_make.spl:322` — the guard is OUTSIDE the
-  loop (recursive accumulation). Correctly silent; it is not quadratic.
-- `src/lib/common/diagram/__init__.spl:374`, `:479`, `:485` — the guard body
-  holds a push of a DIFFERENT value alongside the dedup push
-  (`lines.push("    participant {p}")`). That is the multi-statement
-  guard-body limit already recorded above, and widening it would mean proving
-  the extra statements are not part of the idiom.
+The 10 remaining silences are two known causes: eight are the multi-statement
+guard-body limit recorded above (the body pushes something else alongside the
+dedup push, e.g. `typedefs.push(cb)`), and two are methods rather than
+top-level functions — filed as
+`coll_rules_do_not_walk_methods_2026-09-19.md`.
+
+The 7 aborts are a front-end defect, not detector blindness, and are the
+single largest remaining cause. Filed as
+`lint_semantic_string_index_out_of_bounds_aborts_whole_file_2026-09-19.md`
+and `lint_other_whole_file_aborts_2026-09-19.md`; the same files are analysed
+fine by `simple fix`, which is recorded as its own contract question in
+`lint_and_fix_disagree_on_analysable_files_2026-09-19.md`.
