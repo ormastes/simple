@@ -18,7 +18,7 @@ use std.io_runtime.{get_args}
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success, test_file_result_is_unverified}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
 use std.test_runner.test_config.{TestConfig, load_test_config}
-use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
+use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers, partition_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
 use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_summary_line}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
@@ -264,27 +264,35 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     val _t_discover_ms = (time_now_unix_micros() - _t_discover_start) / 1000
     print "  [setup] discover: {_t_discover_ms}ms ({all_files.len()} file(s))"
 
-    # Validate # @cover annotations for system tests
+    # Validate # @cover annotations for system tests. Narrow blast radius
+    # (doc/08_tracking/bug/missing_cover_annotation_aborts_the_entire_system_test_run_2026-08-04.md,
+    # preferred fix): un-annotated system specs are excluded from this run and
+    # still counted as failures -- via reconcile_discovered_vs_executed over
+    # all_files below, plus the all-excluded guard further down -- so the gate
+    # verdict and exit code are unchanged. Annotated specs in the same
+    # selection now execute instead of being discarded with them.
+    var cover_gate_missing: [text] = []
+    var files: [text] = all_files
     if not updated_options.no_cover_check:
         val _t_cover_start = time_now_unix_micros()
-        val missing_covers = validate_system_test_covers(all_files)
+        val cover_gate = partition_system_test_covers(all_files)
+        cover_gate_missing = cover_gate.missing
+        files = cover_gate.to_run
         val _t_cover_ms = (time_now_unix_micros() - _t_cover_start) / 1000
         print "  [setup] cover-check: {_t_cover_ms}ms"
-        if missing_covers.len() > 0:
+        if cover_gate_missing.len() > 0:
             print ""
             print "ERROR: System test(s) missing required # @cover annotation:"
-            for mc in missing_covers:
+            for mc in cover_gate_missing:
                 print "  {mc}"
             print ""
             print "Add at the top of each file:"
             print "  # @cover src/path/to/component.spl 80%"
             print ""
             print "Bypass: --no-cover-check"
-            print "Found {missing_covers.len()} system test(s) without # @cover."
-            return TestRunResult(files: [], total_passed: 0, total_failed: missing_covers.len(), total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+            print "Excluded from this run (counted as failures): {cover_gate_missing.len()} system test(s) without # @cover."
 
     # MEMORY DEBUG: checkpoint filtering disabled (GROUP 6)
-    var files = all_files
     # if options.resume and checkpoint_exists():
     #     val ckpt = checkpoint_load()
     #     ckpt_loaded = true
@@ -301,6 +309,24 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     if files.len() == 0:
+        if cover_gate_missing.len() > 0:
+            # Every selected spec failed the # @cover gate. Report the gate
+            # failures; an empty selection here must not read as success.
+            var gate_results: [TestFileResult] = []
+            for m in cover_gate_missing:
+                gate_results.push(TestFileResult(
+                    path: m,
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                    pending: 0,
+                    duration_ms: 0,
+                    setup_ms: 0,
+                    error: "NOT EXECUTED: missing required # @cover annotation",
+                    timed_out: false,
+                    cached: false
+                ))
+            return TestRunResult(files: gate_results, total_passed: 0, total_failed: cover_gate_missing.len(), total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
         print "No test files found in {options.path}"
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
@@ -333,7 +359,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             val daemon_results = run_tests_via_daemon(files, updated_options, daemon_config)
             for dr in daemon_results:
                 print_result(dr, updated_options.format)
-            return reconcile_discovered_vs_executed(files, summarize_test_results(daemon_results), false)
+            return reconcile_discovered_vs_executed(all_files, summarize_test_results(daemon_results), false)
         else:
             # Daemon could not start/respond (e.g. stale pidfile, light_daemon
             # IPC mismatch). Fall back to direct execution instead of failing the
@@ -356,7 +382,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             ckpt_failed: ckpt_failed,
             ckpt_skipped: ckpt_skipped
         )
-        return reconcile_discovered_vs_executed(files, parallel_result, false)
+        return reconcile_discovered_vs_executed(all_files, parallel_result, false)
 
     report_free_mem("BEFORE_TEST_LOOP")
     val mode_name = mode_to_str(updated_options.mode)
@@ -509,7 +535,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_setup_ms: total_setup_ms,
         total_cached: total_cached
     )
-    reconcile_discovered_vs_executed(files, sequential_result, stopped_early)
+    reconcile_discovered_vs_executed(all_files, sequential_result, stopped_early)
 
 fn run_tests_parallel_mode(
     files: [text],

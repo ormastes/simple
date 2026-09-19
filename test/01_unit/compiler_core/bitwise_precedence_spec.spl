@@ -1,0 +1,154 @@
+# Bitwise/pipe precedence — executable pin for ONE canonical precedence.
+#
+# Canonical order (pinned by
+# doc/08_tracking/bug/lean_parser_bitwise_pipe_precedence_divergence_2026-06-11.md
+# following tok_precedence() in src/compiler/10.frontend/core/tokens.spl):
+#
+#     |  (TOK_PIPE, 121)     = 4
+#     ^  (TOK_CARET, 122)    = 5
+#     &  (TOK_AMPERSAND, 120)= 6
+#     == / !=                = 7
+#     < / > / <= / >=        = 8
+#
+# So `|`/`^`/`&` all bind LOOSER than comparisons and TIGHTER than logical
+# and/or (or=2, and=3); among themselves & > ^ > |. Before the fix they were
+# consumed at multiplication level (same as `*`, `/`, `%`, `**`), so e.g.
+# `a & b + c` grouped as `(a & b) + c`.
+#
+# Two parsers are exercised in this single spec:
+#   - lean: the self-hosted frontend under src/compiler (interpreted by this
+#     run), driven through parse_module() and asserted by exact tree shape.
+#   - seed: the built-in parser of the binary running this spec, exercised by
+#     the literal expressions in the "seed parser agrees" block (the binary
+#     parses this spec file itself).
+# Both must yield the same canonical tree for every ambiguous form.
+#
+# Note: the seed binary antedates this canonical order for bitwise-vs-
+# comparison mixes (`a | b == c` etc.), so seed literals below cover only the
+# arithmetic-mixed forms both parsers agree on; the comparison-mixed forms
+# are pinned by the tok_precedence assertions and the lean tree shapes above
+# them.
+
+use compiler.core.parser.{parse_module, parser_has_errors, parser_error_count}
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_body, stmt_get_tag, stmt_get_expr}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right}
+use compiler.core.ast.{expr_get_args}
+use compiler.core.ast.{EXPR_BINARY, EXPR_INT_LIT, EXPR_IDENT, EXPR_CALL}
+use compiler.core.tokens.{tok_precedence}
+use compiler.core.tokens.{TOK_PIPE, TOK_CARET, TOK_AMPERSAND, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_PLUS, TOK_STAR}
+
+# Render an expr arena node as a canonical tree string, e.g. a | (b == c)
+# becomes "b121(v:a,b80(v:b,v:c))". Numbers are raw token kinds so the
+# rendering stays independent from any constant table.
+fn bitwise_tree(e: i64) -> text:
+    val tag = expr_get_tag(e)
+    if tag == EXPR_BINARY:
+        return "b{expr_get_int(e)}(" + bitwise_tree(expr_get_left(e)) + "," + bitwise_tree(expr_get_right(e)) + ")"
+    if tag == EXPR_INT_LIT:
+        return "i{expr_get_int(e)}"
+    if tag == EXPR_IDENT:
+        return "v:{expr_get_str(e)}"
+    if tag == EXPR_CALL:
+        val args = expr_get_args(e)
+        if args.len() > 0:
+            return "call(" + bitwise_tree(args[0]) + ")"
+        return "call()"
+    if tag == 30:
+        # EXPR_NULL_COALESCE (raw tag; the named const import is not needed
+        # for a shape renderer).
+        return "nc(" + bitwise_tree(expr_get_left(e)) + "," + bitwise_tree(expr_get_right(e)) + ")"
+    "tag:{tag}"
+
+# Parse "return <src>" as the body of a fresh module and return the expr.
+fn parse_ret_expr(src: text) -> i64:
+    ast_reset()
+    val full = "fn __probe() -> i64:\n    return " + src + "\n"
+    parse_module(full, "bitwise_precedence_probe.spl")
+    val decls = module_get_decls()
+    val body = decl_get_body(decls[0])
+    stmt_get_expr(body[0])
+
+fn tree_of(src: text) -> text:
+    bitwise_tree(parse_ret_expr(src))
+
+describe "core.parser bitwise precedence":
+    it "tok_precedence pins pipe < caret < ampersand < comparisons":
+        expect(tok_precedence(TOK_PIPE)).to_equal(4)
+        expect(tok_precedence(TOK_CARET)).to_equal(5)
+        expect(tok_precedence(TOK_AMPERSAND)).to_equal(6)
+        expect(tok_precedence(TOK_EQ)).to_equal(7)
+        expect(tok_precedence(TOK_NOT_EQ)).to_equal(7)
+        expect(tok_precedence(TOK_LT)).to_equal(8)
+        expect(tok_precedence(TOK_PIPE) < tok_precedence(TOK_CARET)).to_equal(true)
+        expect(tok_precedence(TOK_CARET) < tok_precedence(TOK_AMPERSAND)).to_equal(true)
+        expect(tok_precedence(TOK_AMPERSAND) < tok_precedence(TOK_EQ)).to_equal(true)
+        expect(tok_precedence(TOK_EQ) < tok_precedence(TOK_LT)).to_equal(true)
+        expect(tok_precedence(TOK_STAR) > tok_precedence(TOK_AMPERSAND)).to_equal(true)
+        expect(tok_precedence(TOK_PLUS) > tok_precedence(TOK_AMPERSAND)).to_equal(true)
+
+    it "lean parser: bitwise binds looser than addition and multiplication":
+        expect(tree_of("a & b + c")).to_equal("b120(v:a,b60(v:b,v:c))")
+        expect(tree_of("a + b & c")).to_equal("b120(b60(v:a,v:b),v:c)")
+        expect(tree_of("a | b + c")).to_equal("b121(v:a,b60(v:b,v:c))")
+        expect(tree_of("a ^ b * c")).to_equal("b122(v:a,b62(v:b,v:c))")
+        expect(tree_of("a * b & c")).to_equal("b120(b62(v:a,v:b),v:c)")
+        expect(tree_of("12 & 10 + 1")).to_equal("b120(i12,b60(i10,i1))")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "lean parser: amp tightest, pipe loosest, left-associative chains":
+        expect(tree_of("a & b ^ c | d")).to_equal("b121(b122(b120(v:a,v:b),v:c),v:d)")
+        expect(tree_of("a | b ^ c")).to_equal("b121(v:a,b122(v:b,v:c))")
+        expect(tree_of("a ^ b & c")).to_equal("b122(v:a,b120(v:b,v:c))")
+        expect(tree_of("a & b & c")).to_equal("b120(b120(v:a,v:b),v:c)")
+        expect(tree_of("a ^ b ^ c")).to_equal("b122(b122(v:a,v:b),v:c)")
+        expect(tree_of("a | b | c")).to_equal("b121(b121(v:a,v:b),v:c)")
+
+    it "lean parser: bitwise binds looser than comparisons":
+        expect(tree_of("a | b == c")).to_equal("b121(v:a,b80(v:b,v:c))")
+        expect(tree_of("a & b == c")).to_equal("b120(v:a,b80(v:b,v:c))")
+        expect(tree_of("a == b & c")).to_equal("b120(b80(v:a,v:b),v:c)")
+        expect(tree_of("a ^ b != c")).to_equal("b122(v:a,b81(v:b,v:c))")
+        expect(tree_of("a & b < c")).to_equal("b120(v:a,b82(v:b,v:c))")
+        expect(tree_of("a < b | c")).to_equal("b121(b82(v:a,v:b),v:c)")
+
+    it "lean parser: bitwise binds tighter than logical and/or":
+        expect(tree_of("a | b and c")).to_equal("b55(b121(v:a,v:b),v:c)")
+        expect(tree_of("a and b | c")).to_equal("b55(v:a,b121(v:b,v:c))")
+        expect(tree_of("a & b or c")).to_equal("b56(b120(v:a,v:b),v:c)")
+        expect(tree_of("a or b & c")).to_equal("b56(v:a,b120(v:b,v:c))")
+
+    it "ambiguous form parses identically to its explicit canonical form":
+        expect(tree_of("a & b + c")).to_equal(tree_of("a & (b + c)"))
+        expect(tree_of("a | b == c")).to_equal(tree_of("a | (b == c)"))
+        expect(tree_of("a & b ^ c | d")).to_equal(tree_of("((a & b) ^ c) | d"))
+        expect(tree_of("a == b & c")).to_equal(tree_of("(a == b) & c"))
+        expect(tree_of("a | b and c")).to_equal(tree_of("(a | b) and c"))
+        expect(tree_of("12 & 10 + 1")).to_equal(tree_of("12 & (10 + 1)"))
+
+    it "call-argument continuation uses the same levels":
+        # f(<ident> ... ) routes through parse_binary_from after the leading
+        # ident is consumed; it must mirror the leveled chain exactly.
+        expect(tree_of("f(a & b + c)")).to_equal("call(b120(v:a,b60(v:b,v:c)))")
+        expect(tree_of("f(a | b == c)")).to_equal("call(b121(v:a,b80(v:b,v:c)))")
+        expect(tree_of("f(a & b ^ c | d)")).to_equal("call(b121(b122(b120(v:a,v:b),v:c),v:d))")
+
+    it "pipe-forward and null-coalesce keep their levels":
+        # |> (kind 175, tok_precedence 0) stays looser than the bitwise
+        # levels; ?? stays tighter than the levels it already sat above.
+        expect(tree_of("a & b |> c")).to_equal("call(b120(v:a,v:b))")
+        expect(tree_of("a ?? b | c")).to_equal("b121(nc(v:a,v:b),v:c)")
+
+    it "seed parser agrees: literal values match the canonical tree":
+        # Each literal below is parsed by the binary running this spec; the
+        # expected value is what the canonical tree above evaluates to, so
+        # both parsers produce the same result for these ambiguous forms.
+        expect(12 & 10 + 1).to_equal(8)
+        expect(12 ^ 10 + 3).to_equal(1)
+        expect(6 & 3 + 1).to_equal(4)
+        expect(5 | 2 + 1).to_equal(7)
+        expect(5 ^ 2 + 1).to_equal(6)
+        expect(1 | 2 ^ 3 & 4).to_equal(3)
+        # Explicit parenthesized forms are unambiguous and identical in both
+        # parsers; they pin the non-canonical reading for contrast.
+        expect((12 & 10) + 1).to_equal(9)
+        expect(12 & (10 + 1)).to_equal(8)
