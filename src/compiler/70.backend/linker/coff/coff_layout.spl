@@ -25,11 +25,20 @@
 #
 # What is genuinely PE-SPECIFIC and belongs here rather than in a shared
 # module (`coff_assign_addresses`):
-#   * TWO independent alignments — SectionAlignment (0x1000, in memory) and
-#     FileAlignment (0x200, on disk) — where ELF has one page size and the
-#     constraint `p_offset == p_vaddr (mod page)`. PE has no such congruence,
-#     so PE cannot pack sections into permission-grouped segments at all: each
-#     output section gets its own independent RVA and its own file offset;
+#   * TWO alignments — SectionAlignment (0x1000, in memory) and FileAlignment
+#     (0x200, on disk) — where ELF has one page size and the constraint
+#     `p_offset == p_vaddr (mod page)`. They are NOT independent knobs, and the
+#     earlier wording here ("PE has no congruence rule") was too strong: the PE
+#     spec requires SectionAlignment >= FileAlignment, both powers of two, and
+#     FileAlignment in [512, 65536] — and when SectionAlignment is BELOW a
+#     4096-byte page it requires FileAlignment == SectionAlignment and RVA ==
+#     file offset for every section, because the image is then mapped as-is,
+#     which is a stricter tie than ELF's modular congruence. All of that is
+#     enforced by `coff_validate_alignments` and `coff_assign_addresses`.
+#     Freedom from congruence holds only in the SectionAlignment >= 4096 regime
+#     this capsule actually generates (0x1000 / 0x200); there, and only there,
+#     each output section gets an independent RVA and file offset, and there is
+#     nothing to pack into permission-grouped segments;
 #   * RVA vs file offset as two separate address spaces over one ImageBase,
 #     rather than ELF's single vaddr space;
 #   * `SizeOfRawData` counts only the INITIALIZED prefix of a section. Measured
@@ -57,6 +66,9 @@ use compiler.backend.linker.coff.coff_object.{
 val PE_IMAGE_BASE_EXE: i64 = 0x140000000
 val PE_SECTION_ALIGNMENT: i64 = 0x1000
 val PE_FILE_ALIGNMENT: i64 = 0x200
+val PE_PAGE_SIZE: i64 = 0x1000
+val PE_FILE_ALIGN_MIN: i64 = 512
+val PE_FILE_ALIGN_MAX: i64 = 65536
 
 # ============================================================================
 # Types
@@ -334,6 +346,34 @@ fn coff_reindex(place: CoffPlacement, sorted: [CoffOutSec]) -> CoffPlacement:
 # PE-SPECIFIC: RVA + file-offset assignment
 # ============================================================================
 
+fn coff_is_power_of_two(v: i64) -> bool:
+    v > 0 and (v & (v - 1)) == 0
+
+fn coff_validate_alignments(sec_align: i64, file_align: i64) -> Result<bool, text>:
+    """The PE/COFF optional-header alignment rules (spec § 3.4). These are NOT
+    independent knobs, and a violation produces an image the Windows loader
+    rejects, so each one is a named Err rather than something we emit anyway.
+
+      * FileAlignment is a power of two in [512, 65536];
+      * SectionAlignment is a power of two and is >= FileAlignment;
+      * if SectionAlignment is below a 4096-byte page, FileAlignment must
+        EQUAL SectionAlignment — the image is then mapped as-is, which is also
+        why `coff_assign_addresses` additionally requires RVA == file offset in
+        that mode. The "PE imposes no offset/address congruence" statement in
+        this file's header is true only for SectionAlignment >= 4096, which is
+        the regime this capsule actually generates (0x1000 / 0x200)."""
+    if not coff_is_power_of_two(file_align):
+        return Err("coff: FileAlignment 0x{file_align.to_hex()} is not a power of two")
+    if file_align < PE_FILE_ALIGN_MIN or file_align > PE_FILE_ALIGN_MAX:
+        return Err("coff: FileAlignment 0x{file_align.to_hex()} is outside the permitted range 512..65536")
+    if not coff_is_power_of_two(sec_align):
+        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is not a power of two")
+    if sec_align < file_align:
+        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is smaller than FileAlignment 0x{file_align.to_hex()}")
+    if sec_align < PE_PAGE_SIZE and sec_align != file_align:
+        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is below a 4096-byte page, so FileAlignment must equal it, not 0x{file_align.to_hex()}")
+    Ok(true)
+
 fn coff_assign_addresses(outs: [CoffOutSec], sec_align: i64, file_align: i64, header_size: i64) -> Result<[CoffOutSec], text>:
     """Give every output section an RVA and a file offset.
 
@@ -343,8 +383,9 @@ fn coff_assign_addresses(outs: [CoffOutSec], sec_align: i64, file_align: i64, he
     into permission-grouped segments. A section with no file-backed bytes gets
     `PointerToRawData` 0 and `SizeOfRawData` 0, which is how lld-link records a
     pure-`.bss` output section."""
-    if sec_align < file_align:
-        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is smaller than FileAlignment 0x{file_align.to_hex()}")
+    val av = coff_validate_alignments(sec_align, file_align)
+    if av.is_err():
+        return Err(av.unwrap_err())
     var out: [CoffOutSec] = []
     var rva = align_up(header_size, sec_align)
     var off = align_up(header_size, file_align)
@@ -356,6 +397,8 @@ fn coff_assign_addresses(outs: [CoffOutSec], sec_align: i64, file_align: i64, he
         if raw > 0:
             this_off = off
             off = off + raw
+        if sec_align < PE_PAGE_SIZE and this_off != rva:
+            return Err("coff: section {s.name} would sit at RVA 0x{rva.to_hex()} and file offset 0x{this_off.to_hex()}; below a 4096-byte page the image is mapped as-is, so the two must be equal")
         out = out.push(CoffOutSec(name: s.name, characteristics: s.characteristics,
             align: s.align, init_size: s.init_size, total_size: s.total_size,
             rva: rva, file_offset: this_off, raw_size: raw))
@@ -398,3 +441,5 @@ export coff_reserved_out_count, coff_name_index
 export coff_sort_outs, coff_reindex
 export coff_assign_addresses, coff_image_size, coff_out_find
 export PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT
+export PE_PAGE_SIZE, PE_FILE_ALIGN_MIN, PE_FILE_ALIGN_MAX
+export coff_validate_alignments, coff_is_power_of_two

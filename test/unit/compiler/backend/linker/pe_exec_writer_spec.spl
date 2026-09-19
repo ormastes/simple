@@ -15,7 +15,8 @@
 # @cover src/compiler/70.backend/linker/coff/coff_layout.spl
 
 use compiler.backend.linker.coff.coff_static_link.{coff_link_request, coff_static_link}
-use compiler.backend.linker.coff.coff_layout.{coff_out_name}
+use compiler.backend.linker.coff.coff_layout.{coff_out_name, CoffOutSec, coff_assign_addresses}
+use compiler.backend.linker.coff.pe_exec_writer.{PeImageRequest, pe_write_image}
 use std.io_runtime.{file_read_bytes}
 
 val FIX: text = "test/fixtures/linker/coff"
@@ -397,3 +398,79 @@ describe "coff_out_name - D4: every unmodelled output section is a named Err":
         expect(coff_out_name(".data", 0).unwrap()).to_equal(".data")
         expect(coff_out_name(".bss", 0).unwrap()).to_equal(".data")
         expect(coff_out_name(".xdata", 0).unwrap()).to_equal(".rdata")
+
+# ============================================================================
+# PE/COFF specification alignment constraints (section 3.4, Optional Header)
+# ============================================================================
+# The four rules below are load-bearing for a real Windows loader, and three of
+# them were unenforced: a violating image would have been written rather than
+# refused. Each is now a named Err.
+
+fn one_sec(init: i64, total: i64) -> [CoffOutSec]:
+    [CoffOutSec(name: ".text", characteristics: 0x60000020, align: 16,
+        init_size: init, total_size: total, rva: 0, file_offset: 0, raw_size: 0)]
+
+fn assign(sec_align: i64, file_align: i64, hdr: i64):
+    coff_assign_addresses(one_sec(0x40, 0x40), sec_align, file_align, hdr)
+
+describe "coff_assign_addresses - PE/COFF alignment constraints":
+    it "SectionAlignment below FileAlignment is a named Err (they are not independent)":
+        val r = assign(0x200, 0x1000, 0x1000)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("smaller than FileAlignment")).to_equal(true)
+
+    it "FileAlignment must be a power of two in 512..64K":
+        expect(assign(0x1000, 0x180, 0x1000).is_err()).to_equal(true)   # not a power of 2
+        expect(assign(0x1000, 0x100, 0x1000).is_err()).to_equal(true)   # 256, below 512
+        expect(assign(0x20000, 0x20000, 0x20000).is_err()).to_equal(true) # 128K, above 64K
+        expect(assign(0x10000, 0x10000, 0x10000).is_ok()).to_equal(true)  # 64K is the limit
+        expect(assign(0x1000, 0x200, 0x400).is_ok()).to_equal(true)
+
+    it "SectionAlignment must itself be a power of two":
+        expect(assign(0x1800, 0x200, 0x1800).is_err()).to_equal(true)
+
+    it "below a 4096-byte page, FileAlignment must EQUAL SectionAlignment":
+        # The image is then mapped as-is, so the two alignments cannot differ.
+        expect(assign(0x800, 0x200, 0x800).is_err()).to_equal(true)
+        expect(assign(0x800, 0x800, 0x800).is_ok()).to_equal(true)
+
+    it "below a page, every section's RVA must equal its file offset":
+        # Mapped as-is: a zero-fill tail makes RVA and file offset drift apart,
+        # and that image must be refused rather than written.
+        val ok_layout = coff_assign_addresses(one_sec(0x200, 0x200), 0x200, 0x200, 0x200)
+        expect(ok_layout.is_ok()).to_equal(true)
+        expect(ok_layout.unwrap()[0].rva).to_equal(ok_layout.unwrap()[0].file_offset)
+        val drift = coff_assign_addresses(
+            [CoffOutSec(name: ".text", characteristics: 0x60000020, align: 16,
+                init_size: 0x10, total_size: 0x10, rva: 0, file_offset: 0, raw_size: 0),
+             CoffOutSec(name: ".data", characteristics: 0xc0000040, align: 16,
+                init_size: 0x10, total_size: 0x900, rva: 0, file_offset: 0, raw_size: 0),
+             CoffOutSec(name: ".rdata", characteristics: 0x40000040, align: 16,
+                init_size: 0x10, total_size: 0x10, rva: 0, file_offset: 0, raw_size: 0)],
+            0x200, 0x200, 0x200)
+        expect(drift.is_err()).to_equal(true)
+        expect(drift.unwrap_err().contains("mapped as-is")).to_equal(true)
+
+    it "SizeOfRawData is rounded up to FileAlignment":
+        val r = coff_assign_addresses(one_sec(0x40, 0x40), 0x1000, 0x200, 0x400)
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()[0].raw_size).to_equal(0x200)
+        expect(r.unwrap()[0].raw_size % 0x200).to_equal(0)
+
+describe "pe_write_image - the writer re-checks what it is handed":
+    it "a SizeOfRawData that is not a FileAlignment multiple is a named Err":
+        val bad = [CoffOutSec(name: ".text", characteristics: 0x60000020, align: 16,
+            init_size: 0x40, total_size: 0x40, rva: 0x1000, file_offset: 0x400, raw_size: 0x40)]
+        val r = pe_write_image(PeImageRequest(outs: bad, contents: [[0]],
+            entry_rva: 0x1000, image_base: IMAGE_BASE, sec_align: 0x1000,
+            file_align: 0x200, timestamp: 0, header_size: 0x400))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SizeOfRawData")).to_equal(true)
+
+    it "the writer rejects an alignment pair the layout would have rejected":
+        val ok_sec = [CoffOutSec(name: ".text", characteristics: 0x60000020, align: 16,
+            init_size: 0x40, total_size: 0x40, rva: 0x1000, file_offset: 0x400, raw_size: 0x200)]
+        val r = pe_write_image(PeImageRequest(outs: ok_sec, contents: [[0]],
+            entry_rva: 0x1000, image_base: IMAGE_BASE, sec_align: 0x200,
+            file_align: 0x1000, timestamp: 0, header_size: 0x400))
+        expect(r.is_err()).to_equal(true)
