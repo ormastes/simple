@@ -388,6 +388,20 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
             if cond >= 0:
                 if is_contains_call(cond):
                     warnings.push(coll002_warning(fn_name, expr_anchor_span(cond)))
+                else:
+                    # The NEGATED filter, `if not allowed.contains(x):`. It was
+                    # silent because the condition node is a unary `not`, not
+                    # the method call, so `is_contains_call` never matched —
+                    # yet it is the same O(n) scan per iteration.
+                    #
+                    # Every COLL020 site is also a negated contains guard
+                    # (`if not seen.contains(v): seen.push(v)` IS the dedup
+                    # idiom), so reporting this one unconditionally would make
+                    # every dedup site warn twice. The guards COLL020 claims
+                    # are therefore left to it.
+                    val negated = is_not_contains_call(cond)
+                    if negated >= 0 and not is_manual_distinct_guard(s):
+                        warnings.push(coll002_warning(fn_name, expr_anchor_span(negated)))
 
         # COLL001 via val/var decl with concat
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
@@ -1069,6 +1083,45 @@ fn real_stmts(stmts: [i64]) -> [i64]:
             out.push(s)
     out
 
+# "Is this the SAME value expression", structurally. The dedup idiom tests a
+# value and then pushes it, and comparing those two by identifier NAME meant
+# the rule only ever recognised `seen.contains(x)` / `seen.push(x)` — while
+# `seen.contains(dep.path)` / `seen.push(dep.path)`, the most common real
+# shape, went unreported. Measured: 26 of 68 real dedup sites in the tree got
+# no diagnostic at all for this reason. A warning that is never emitted is the
+# expensive kind of miss; a fix that declines to apply is not.
+#
+# Conservative by construction: both sides must be of a kind this enumerates
+# and must carry no child statements or match arms, so a shape it cannot
+# compare answers "not equal" and the rule stays silent rather than firing on
+# something that is not dedup.
+fn expr_structurally_equal(a: i64, b: i64) -> bool:
+    if a < 0 or b < 0:
+        return false
+    val ta = expr_get_tag(a)
+    if ta != expr_get_tag(b):
+        return false
+    if not coll_expr_kind_known(ta):
+        return false
+    if expr_get_str(a) != expr_get_str(b):
+        return false
+    if expr_get_int(a) != expr_get_int(b):
+        return false
+    if expr_child_stmts(a).len() != 0 or expr_child_stmts(b).len() != 0:
+        return false
+    if expr_child_arms(a).len() != 0 or expr_child_arms(b).len() != 0:
+        return false
+    val ca = expr_child_exprs(a)
+    val cb = expr_child_exprs(b)
+    if ca.len() != cb.len():
+        return false
+    var i = 0
+    while i < ca.len():
+        if not expr_structurally_equal(ca[i], cb[i]):
+            return false
+        i = i + 1
+    true
+
 fn expr_equal_idents(a: i64, b: i64) -> bool:
     if a < 0 or b < 0:
         return false
@@ -1421,7 +1474,7 @@ fn push_stmt_array_name(s: i64, guarded_val: i64) -> text:
     val push_args = expr_get_args(push_expr)
     if push_args.len() != 1:
         return ""
-    if not expr_equal_idents(guarded_val, push_args[0]):
+    if not expr_structurally_equal(guarded_val, push_args[0]):
         return ""
     expr_get_str(push_recv)
 
@@ -1445,10 +1498,11 @@ fn is_manual_distinct_guard(s: i64) -> bool:
     if call_args.len() != 1:
         return false
     val guarded_val = call_args[0]
-    # The guarded value must itself be a plain identifier: `expr_equal_idents`
-    # below can only compare identifiers, so a computed key
-    # (`seen.contains(key(x))`) is not this shape.
-    if guarded_val < 0 or expr_get_tag(guarded_val) != EXPR_IDENT:
+    # The guarded value may be ANY expression the structural comparison below
+    # can read — `dep.path`, `xs[i]`, `key(x)` — not only a bare identifier.
+    # That is what the rule SEES; what it may REWRITE is unchanged, and
+    # `coll020_proof` still refuses anything but a plain identifier.
+    if guarded_val < 0:
         return false
     val if_body = real_stmts(stmt_get_body(s))
     if if_body.len() == 0:
@@ -2121,7 +2175,16 @@ fn coll020_proof(
 ) -> CollectionFixProof:
     val contains_call = is_not_contains_call(stmt_get_expr(guard))
     val receiver = expr_get_str(expr_get_left(contains_call))
-    val value = expr_get_str(expr_get_args(contains_call)[0])
+    val guarded_val = expr_get_args(contains_call)[0]
+    # The DETECTOR now reports a guard on any value expression. The FIX
+    # envelope is deliberately not widened with it: the rewrite names the
+    # value in a generated `seen_set[<v>] = true`, and for anything but a
+    # plain identifier that would have to prove the expression is pure and
+    # evaluating it twice is free. Those sites warn with no fix.
+    if guarded_val < 0 or expr_get_tag(guarded_val) != EXPR_IDENT:
+        return coll_proof_unsafe(
+            "COLL020", receiver, "guarded value is not a plain identifier")
+    val value = expr_get_str(guarded_val)
     val kept_push = guard_kept_push(guard, receiver)
     if kept_push < 0:
         return coll_proof_unsafe("COLL020", receiver, "no push onto the guarded array")

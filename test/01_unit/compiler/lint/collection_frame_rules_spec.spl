@@ -222,3 +222,60 @@ describe "COLL diagnostics carry a real source position":
         val pos = position_for("/tmp/coll015_pos.spl", src, "COLL015")
         expect(pos.0).to_equal(5)
         expect(pos.1 > 0).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# What the rules SEE, which is a different question from what the fix may
+# rewrite. Measured over the tree: 26 of 68 real dedup sites got NO diagnostic
+# at all, because both rules only matched a guard whose value was a bare
+# identifier and the negated-filter form was silent. A warning that is never
+# emitted is the expensive miss; a fix that declines to apply is not.
+# Record: doc/08_tracking/bug/
+# coll020_detector_blind_to_non_identifier_guarded_value_2026-09-19.md
+# ---------------------------------------------------------------------------
+
+fn count_of(path: text, src: text, code: text) -> i64:
+    var n = 0
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == code:
+            n = n + 1
+    n
+
+describe "the guarded value may be any expression, not just an identifier":
+    it "COLL020 sees a dedup keyed on a FIELD ACCESS":
+        step("COLL020 sees a dedup keyed on a FIELD ACCESS")
+        """`seen.contains(dep.path)` / `seen.push(dep.path)` is the single
+        most common real shape in the tree and produced nothing at all. The
+        two values are now compared structurally rather than by identifier
+        name."""
+        val field = "struct Dep:\n    path: text\n\nfn uniq(deps: [Dep]) -> [text]:\n    val seen: [text] = []\n    for dep in deps:\n        if not seen.contains(dep.path):\n            seen.push(dep.path)\n    return seen\n"
+        assert_true(has(results_for("/tmp/coll_field.spl", field), "COLL020"))
+
+    it "COLL020 sees a dedup keyed on an INDEX":
+        step("COLL020 sees a dedup keyed on an INDEX")
+        val indexed = "fn uniq(rows: [[text]]) -> [text]:\n    val seen: [text] = []\n    for r in rows:\n        if not seen.contains(r[0]):\n            seen.push(r[0])\n    return seen\n"
+        assert_true(has(results_for("/tmp/coll_index.spl", indexed), "COLL020"))
+
+    it "but a push of a DIFFERENT value is still not dedup":
+        step("but a push of a DIFFERENT value is still not dedup")
+        """Structural comparison must stay exact, or the rule starts firing
+        on loops that are not deduplicating anything."""
+        val mismatched = "struct Dep:\n    path: text\n    name: text\n\nfn uniq(deps: [Dep]) -> [text]:\n    val seen: [text] = []\n    for dep in deps:\n        if not seen.contains(dep.path):\n            seen.push(dep.name)\n    return seen\n"
+        assert_false(has(results_for("/tmp/coll_mismatch.spl", mismatched), "COLL020"))
+
+describe "the negated filter form is seen too":
+    it "COLL002 sees `if not allowed.contains(x)` with no push":
+        step("COLL002 sees `if not allowed.contains(x)` with no push")
+        """The condition node is a unary `not`, not the method call, so the
+        matcher never fired — yet it is the same O(n) scan per iteration."""
+        val negated = "fn keep(xs: [i64]) -> i64:\n    val allowed: [i64] = [1, 2, 3]\n    var n = 0\n    for x in xs:\n        if not allowed.contains(x):\n            n = n + 1\n    n\n"
+        assert_true(has(results_for("/tmp/coll_neg.spl", negated), "COLL002"))
+
+    it "a dedup guard reports ONCE, as COLL020, not twice":
+        step("a dedup guard reports ONCE, as COLL020, not twice")
+        """Every COLL020 site IS a negated contains guard, so widening
+        COLL002 to see through `not` without excluding the guards COLL020
+        already claims would make every dedup site warn twice."""
+        val dedup = "fn uniq(xs: [i64]) -> [i64]:\n    val seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n    return seen\n"
+        val codes = results_for("/tmp/coll_once.spl", dedup)
+        assert_true(has(codes, "COLL020"))
+        assert_equal(0, count_of("/tmp/coll_once.spl", dedup, "COLL002"))
