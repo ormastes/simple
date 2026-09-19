@@ -93,3 +93,30 @@ probe prints `ENUM_PAYLOAD PROBE: ALL PASS` under `bin/simple.exe run` in
 both `SIMPLE_EXECUTION_MODE=jit` and `=interpreter`. Not the original
 `interp_run_enum_single_field_payload_corrupt_2026-06-15.md` defect (closed,
 run-path only) — pure seed test-mode spawn debt.
+
+## Cross-reference 2026-09-19 (dict_class_value_identity triage)
+
+Also blocks `test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl`
+(4/4 examples FAIL, `expected <empty> to contain PASS ...`): oracle is the
+subprocess probe
+`test/01_unit/compiler/interpreter/probe_dict_class_value_identity.spl`
+spawned via `std.io_runtime.process_run("sh", ["-c", "...bin/simple run <probe>..."])`,
+same shape as the enum_single_field_payload cross-reference above. Verified on
+this lane's Windows seed (`/c/Users/ormas/dev/simple/bin/simple.exe`):
+
+- Probe standalone: `SIMPLE_EXECUTION_MODE=jit bin/simple run <probe>` prints
+  all 7 `PASS` lines + `DICT_CLASS_IDENTITY PROBE: ALL PASS`;
+  `SIMPLE_EXECUTION_MODE=interpreter` fails 6 of 7 (unchanged, tracked in
+  `interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md` —
+  interpreter dict class-value copy is deliberately unfixed seed debt).
+- The same probe spawned from a spec body under
+  `bin/simple.exe test <spec> --mode=interpreter` returns EMPTY or
+  first-line-only stdout (`out.0`, exit reported 0) — nondeterministic
+  partial pipe capture of the heavy nested `bin/simple run` child.
+  Light child spawns from the same spec body (`echo`, `bin/simple
+  --version`) capture fine, so the defect is specific to the heavy
+  nested compile-and-run child, matching
+  `nested_run_subprocess_empty_stdout_under_test_2026-07-20.md`.
+
+Pinned tree behavior is correct on the JIT engine; the spec is red purely
+from seed test-mode spawn/capture debt. Spec and probe left unmodified.
