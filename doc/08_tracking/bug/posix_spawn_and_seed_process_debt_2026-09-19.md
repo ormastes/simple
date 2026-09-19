@@ -134,3 +134,33 @@ compiling any `s[::-1]` form in-process under this seed emits
 use .reversed() to reverse` (observed directly while triaging
 `test/system/features/collections_spec.spl`, whose restored
 `arr.reversed()` example now passes 60/60). Spec left unmodified.
+
+## RESOLVED 2026-09-20: root cause was the missing interpreter-lane POSIX-path rewrite
+
+The "test mode neuters all spawns" framing above was imprecise. Exact
+mechanism (root-caused via src/compiler_rust archaeology):
+
+- The seed has TWO `rt_process_run` implementations. The SFFI/JIT lane
+  (`runtime/src/value/sffi/env_process.rs:591`) got the Windows
+  `/bin/sh`→`sh` path rewrite in 48f49e11883 (2026-08-09,
+  `resolve_command_path`, env_process.rs:46-82). The tree-walk interpreter
+  lane (`compiler/src/interpreter_extern/system.rs`) never got it and
+  called `Command::new("/bin/sh")` directly — which on Windows resolves to
+  `C:\bin\sh` (CreateProcess does not PATH-search once a separator is
+  present) → ERROR_FILE_NOT_FOUND → the `("", "", -1)` sentinel at
+  system.rs:654-658.
+- `simple test --mode=interpreter` always runs the interpreter lane
+  (driver execution.rs:716 — Cranelift JIT crash avoidance), so every
+  child spawn from an interpreted spec failed. `simple run` defaults to
+  JIT (works). Proven: `SIMPLE_EXECUTION_MODE=interpreter simple run`
+  fails identically; it was never about test mode.
+- FIX (0b28248caa3): mirrored `resolve_command_path` into system.rs and
+  wrapped all 11 `Command::new` sites (8 dynamic + 3 literal /bin/sh).
+  Rebuilt seed verified: `/bin/sh` spawn returns code=0 with output under
+  interpreter mode; env_log_modes went 0/6 → 5/6 (the 6th is the
+  scenario the spec header declares intentionally RED).
+
+Harness convention discovered: child-binary specs resolve the binary via
+env `SIMPLE_TEST_BINARY`, then `SIMPLE_BIN` (falling back empty). Suite
+runners must export both (plus `SIMPLE_BINARY`) pointing at the binary
+under test, or the child command is malformed and output is empty.
