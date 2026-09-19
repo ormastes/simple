@@ -1,12 +1,22 @@
-# Linker Script Parser - Minimal GNU ld-style linker script parser
+# Linker Script Parser - GNU ld-style linker script parser + canonical printer
 #
-# Parses ENTRY, MEMORY, and SECTIONS directives for embedded targets
-# (RISC-V, ARM Cortex-M). No file I/O — caller supplies the script text.
+# Parses the subset of GNU ld script used by the SimpleOS kernel scripts
+# (src/os/kernel/arch/*/linker.ld) and embedded targets. No file I/O —
+# caller supplies the script text. The parser is fail-closed: any directive
+# or section-body statement it does not model returns Err instead of being
+# skipped, so `ld_print(ld_parse(s))` is a lossless round-trip (checked by
+# `ld_tokens_equivalent`).
 #
 # Supported grammar:
-#   ENTRY(symbol)
-#   MEMORY { name (rwx) : ORIGIN = num, LENGTH = num ; ... }
-#   SECTIONS { .name addr? : { *(.pattern) ... } > region? ; ... }
+#   ENTRY(sym)  OUTPUT_FORMAT("bfd"[, "bfd", "bfd"])  OUTPUT_ARCH(arch)
+#   MEMORY { name (rwx) : ORIGIN = expr, LENGTH = expr ... }
+#   PHDRS { name TYPE [FILEHDR] [PHDRS] [AT(expr)] [FLAGS(expr)] ; ... }
+#   SECTIONS {
+#     sym = expr;  . = expr;  . += expr;  PROVIDE(sym = expr);  ASSERT(expr, "msg")
+#     .name [addr_expr] [(NOLOAD)] : [AT(lma)] [ALIGN(a)]
+#       { [KEEP(]*(.pat ...)[)]  sym = expr;  . = ALIGN(n);  . += n; ... }
+#       [> region] [AT> region] [:phdr ...] [= fill]
+#   }
 
 # ============================================================================
 # Token Types
@@ -25,6 +35,11 @@ enum LdTokenKind:
     GreaterThan
     Star
     Comma
+    Plus
+    Minus
+    PlusEquals
+    Less
+    String
     Eof
 
 # ============================================================================
@@ -35,47 +50,6 @@ struct LdToken:
     """A single lexical token from a linker script."""
     kind: LdTokenKind
     value: text
-
-# ============================================================================
-# Data Types
-# ============================================================================
-
-struct LdEntry:
-    """Entry point directive."""
-    symbol: text
-
-struct LdMemoryRegion:
-    """A memory region from the MEMORY block."""
-    name: text
-    attrs: text          # e.g. "rwx" or "" if omitted
-    origin: i64
-    length: i64
-
-struct LdInputPattern:
-    """An input section glob from *(...) inside a SECTIONS output section."""
-    pattern: text        # e.g. ".text", ".text*", ".rodata"
-
-struct LdOutputSection:
-    """An output section from the SECTIONS block."""
-    name: text           # e.g. ".text"
-    address: i64         # explicit address or -1 if none
-    inputs: [LdInputPattern]
-    region: text         # memory region name or "" if none
-
-struct LdScript:
-    """Complete parsed linker script."""
-    entry: text          # entry symbol or "" if not specified
-    memory: [LdMemoryRegion]
-    sections: [LdOutputSection]
-
-# ============================================================================
-# Parser State
-# ============================================================================
-
-struct LdParser:
-    """Recursive descent parser state."""
-    tokens: [LdToken]
-    pos: i64
 
 # ============================================================================
 # Tokenizer Helpers
@@ -97,7 +71,7 @@ fn _ld_is_word_start(ch: text) -> bool:
     _ld_is_alpha(ch) or ch == "." or ch == "_"
 
 fn _ld_is_word_cont(ch: text) -> bool:
-    _ld_is_alpha(ch) or _ld_is_digit(ch) or ch == "." or ch == "_" or ch == "*" or ch == "?"
+    _ld_is_alpha(ch) or _ld_is_digit(ch) or ch == "." or ch == "_" or ch == "*" or ch == "?" or ch == "$"
 
 # ============================================================================
 # Tokenizer
@@ -132,6 +106,39 @@ fn ld_tokenize(input: text) -> [LdToken]:
             i = i + 2
             while i < n and input[i:i + 1] != "\n":
                 i = i + 1
+            continue
+
+        # The /DISCARD/ pseudo output section is a single word
+        if ch == "/" and input[i:i + 9] == "/DISCARD/":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Word, value: "/DISCARD/"))
+            i = i + 9
+            continue
+
+        # Quoted string (OUTPUT_FORMAT, ASSERT message)
+        if ch == "\"":
+            var j = i + 1
+            while j < n and input[j:j + 1] != "\"":
+                j = j + 1
+            tokens = tokens.push(LdToken(kind: LdTokenKind.String, value: input[i + 1:j]))
+            i = j + 1
+            continue
+
+        # Operators
+        if ch == "+" and i + 1 < n and input[i + 1:i + 2] == "=":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.PlusEquals, value: "+="))
+            i = i + 2
+            continue
+        if ch == "+":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Plus, value: "+"))
+            i = i + 1
+            continue
+        if ch == "-":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Minus, value: "-"))
+            i = i + 1
+            continue
+        if ch == "<":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Less, value: "<"))
+            i = i + 1
             continue
 
         # Single-character tokens
@@ -290,6 +297,103 @@ fn ld_parse_number(value: text) -> i64:
     result * multiplier
 
 # ============================================================================
+# Data Types
+# ============================================================================
+
+struct LdEntry:
+    """Entry point directive."""
+    symbol: text
+
+struct LdMemoryRegion:
+    """A memory region from the MEMORY block."""
+    name: text
+    attrs: text          # e.g. "rwx" or "" if omitted
+    origin: i64
+    length: i64
+    origin_expr: text    # canonical source expression, e.g. "0x40000000"
+    length_expr: text    # canonical source expression, e.g. "128M"
+
+struct LdInputPattern:
+    """An input section spec: [KEEP(] file(.pat ...) [)] inside an output section."""
+    pattern: text        # e.g. ".text", ".text*", ".rodata" (multiple joined by " ")
+    keep: bool           # wrapped in KEEP(...) — a GC root
+
+enum LdStmtKind:
+    Input        # file(.pat ...)
+    Keep         # KEEP(file(.pat ...))
+    Assign       # sym = expr;   (sym may be "." — the location counter)
+    AddAssign    # sym += expr;
+    Provide      # PROVIDE(sym = expr);
+    ProvideHidden  # PROVIDE_HIDDEN(sym = expr);
+    Assert       # ASSERT(expr, "message")
+
+struct LdStmt:
+    """A statement inside SECTIONS or inside an output section body."""
+    kind: LdStmtKind
+    file_pattern: text   # Input/Keep: "*" or a file glob
+    patterns: [text]     # Input/Keep: section globs
+    symbol: text         # Assign/AddAssign/Provide*: left-hand side
+    expr: text           # canonical expression text
+    message: text        # Assert message
+
+struct LdPhdr:
+    """One program header from the PHDRS block."""
+    name: text
+    phdr_type: text      # e.g. "PT_LOAD"
+    filehdr: bool
+    phdrs: bool
+    at_expr: text        # "" if no AT(...)
+    flags_expr: text     # "" if no FLAGS(...)
+
+struct LdOutputSection:
+    """An output section from the SECTIONS block."""
+    name: text           # e.g. ".text", "/DISCARD/"
+    address: i64         # explicit numeric address or -1 if none / not a literal
+    inputs: [LdInputPattern]
+    region: text         # memory region name or "" if none
+    address_expr: text   # canonical VMA expression or ""
+    section_type: text   # "NOLOAD" / "COPY" / ... or ""
+    lma_expr: text       # AT(expr) or ""
+    align_expr: text     # ALIGN(expr) after the colon, or ""
+    body: [LdStmt]       # ordered body statements (inputs, KEEP, assignments)
+    lma_region: text     # AT> region or ""
+    phdrs: [text]        # :phdr placements
+    fill_expr: text      # = fill or ""
+
+enum LdCmdKind:
+    Section
+    Stmt
+
+struct LdSectionsCmd:
+    """One ordered item of the SECTIONS block."""
+    kind: LdCmdKind
+    section_index: i64   # Section: index into LdScript.sections
+    stmt: LdStmt         # Stmt: the statement
+
+struct LdScript:
+    """Complete parsed linker script."""
+    entry: text          # entry symbol or "" if not specified
+    memory: [LdMemoryRegion]
+    sections: [LdOutputSection]
+    output_format: text  # first OUTPUT_FORMAT argument or ""
+    output_formats: [text]
+    output_arch: text
+    phdrs: [LdPhdr]
+    commands: [LdSectionsCmd]
+    top_stmts: [LdStmt]  # assignments / PROVIDE / ASSERT outside SECTIONS
+    top_order: [text]    # source order of top-level directives
+
+# ============================================================================
+# Parser State
+# ============================================================================
+
+struct LdParser:
+    """Recursive descent parser state. `err` != "" once parsing has failed."""
+    tokens: [LdToken]
+    pos: i64
+    err: text
+
+# ============================================================================
 # Parser Helpers
 # ============================================================================
 
@@ -299,16 +403,32 @@ fn _ld_peek(parser: LdParser) -> LdToken:
         return parser.tokens[parser.pos]
     LdToken(kind: LdTokenKind.Eof, value: "")
 
+fn _ld_peek_at(parser: LdParser, offset: i64) -> LdToken:
+    val idx = parser.pos + offset
+    if idx < parser.tokens.len():
+        return parser.tokens[idx]
+    LdToken(kind: LdTokenKind.Eof, value: "")
+
 fn _ld_advance(parser: LdParser) -> LdParser:
     """Advance parser by one token."""
-    LdParser(tokens: parser.tokens, pos: parser.pos + 1)
+    LdParser(tokens: parser.tokens, pos: parser.pos + 1, err: parser.err)
+
+fn _ld_fail(parser: LdParser, msg: text) -> LdParser:
+    """Record the first parse error; parsing stops at the next loop check."""
+    if parser.err != "":
+        return parser
+    val tok = _ld_peek(parser)
+    LdParser(tokens: parser.tokens, pos: parser.pos, err: "{msg} (at token {parser.pos} '{tok.value}')")
+
+fn _ld_ok(parser: LdParser) -> bool:
+    parser.err == ""
 
 fn _ld_expect_kind(parser: LdParser, kind: LdTokenKind) -> (LdParser, LdToken):
-    """Consume a token of the expected kind, or return Eof token on mismatch."""
+    """Consume a token of the expected kind, or record an error on mismatch."""
     val tok = _ld_peek(parser)
     if tok.kind == kind:
         return (_ld_advance(parser), tok)
-    (parser, LdToken(kind: LdTokenKind.Eof, value: ""))
+    (_ld_fail(parser, "unexpected token"), LdToken(kind: LdTokenKind.Eof, value: ""))
 
 fn _ld_at_kind(parser: LdParser, kind: LdTokenKind) -> bool:
     """Check if current token matches the given kind."""
@@ -320,218 +440,394 @@ fn _ld_at_word(parser: LdParser, word: text) -> bool:
     val tok = _ld_peek(parser)
     tok.kind == LdTokenKind.Word and tok.value == word
 
+fn _ld_live(parser: LdParser) -> bool:
+    """Parser is error-free and not at end of input."""
+    _ld_ok(parser) and not _ld_at_kind(parser, LdTokenKind.Eof)
+
 # ============================================================================
-# ENTRY Parser
+# Expressions (kept as canonical text; evaluated by boot_layout)
+# ============================================================================
+
+fn _ld_parse_primary(parser: LdParser) -> (LdParser, text):
+    var p = parser
+    val tok = _ld_peek(p)
+    if tok.kind == LdTokenKind.Number:
+        return (_ld_advance(p), tok.value)
+    if tok.kind == LdTokenKind.Minus:
+        val (p2, inner) = _ld_parse_primary(_ld_advance(p))
+        return (p2, "-" + inner)
+    if tok.kind == LdTokenKind.LParen:
+        val (p2, inner) = ld_parse_expr(_ld_advance(p))
+        val (p3, _rp) = _ld_expect_kind(p2, LdTokenKind.RParen)
+        return (p3, "(" + inner + ")")
+    if tok.kind == LdTokenKind.Word:
+        p = _ld_advance(p)
+        if _ld_at_kind(p, LdTokenKind.LParen):
+            # Function call: NAME(arg, ...)
+            p = _ld_advance(p)
+            var args: [text] = []
+            while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RParen):
+                val (p2, arg) = ld_parse_expr(p)
+                p = p2
+                args = args.push(arg)
+                if _ld_at_kind(p, LdTokenKind.Comma):
+                    p = _ld_advance(p)
+            val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
+            return (p3, tok.value + "(" + args.join(", ") + ")")
+        return (p, tok.value)
+    (_ld_fail(p, "expected expression"), "")
+
+fn _ld_is_mul_op(tok: LdToken) -> bool:
+    tok.kind == LdTokenKind.Star
+
+fn _ld_is_add_op(tok: LdToken) -> bool:
+    tok.kind == LdTokenKind.Plus or tok.kind == LdTokenKind.Minus
+
+fn _ld_parse_term(parser: LdParser) -> (LdParser, text):
+    val (p0, acc0) = _ld_parse_primary(parser)
+    var p = p0
+    var acc = acc0
+    while _ld_ok(p) and _ld_is_mul_op(_ld_peek(p)):
+        val op = _ld_peek(p).value
+        val (p2, rhs) = _ld_parse_primary(_ld_advance(p))
+        p = p2
+        acc = acc + " " + op + " " + rhs
+    (p, acc)
+
+fn _ld_parse_sum(parser: LdParser) -> (LdParser, text):
+    val (p0, acc0) = _ld_parse_term(parser)
+    var p = p0
+    var acc = acc0
+    while _ld_ok(p) and _ld_is_add_op(_ld_peek(p)):
+        val op = _ld_peek(p).value
+        val (p2, rhs) = _ld_parse_term(_ld_advance(p))
+        p = p2
+        acc = acc + " " + op + " " + rhs
+    (p, acc)
+
+fn ld_parse_expr(parser: LdParser) -> (LdParser, text):
+    """Parse an expression (+ - * < and calls) into canonical text."""
+    val (p0, acc0) = _ld_parse_sum(parser)
+    var p = p0
+    var acc = acc0
+    while _ld_ok(p) and (_ld_at_kind(p, LdTokenKind.Less) or _ld_at_kind(p, LdTokenKind.GreaterThan)):
+        val op = _ld_peek(p).value
+        val (p2, rhs) = _ld_parse_sum(_ld_advance(p))
+        p = p2
+        acc = acc + " " + op + " " + rhs
+    (p, acc)
+
+# ============================================================================
+# ENTRY / OUTPUT_* Parsers
 # ============================================================================
 
 fn ld_parse_entry(parser: LdParser) -> (LdParser, text):
     """Parse ENTRY(symbol) — assumes 'ENTRY' word already consumed."""
     var p = parser
-    # Expect LParen
     val (p2, _lp) = _ld_expect_kind(p, LdTokenKind.LParen)
-    p = p2
-    # Expect symbol (Word)
-    val (p3, sym_tok) = _ld_expect_kind(p, LdTokenKind.Word)
-    p = p3
-    val symbol = sym_tok.value
-    # Expect RParen
-    val (p4, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
-    p = p4
-    (p, symbol)
+    val (p3, sym_tok) = _ld_expect_kind(p2, LdTokenKind.Word)
+    val (p4, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
+    (p4, sym_tok.value)
+
+fn _ld_parse_output_format(parser: LdParser) -> (LdParser, [text]):
+    """OUTPUT_FORMAT("bfd"[, "bfd", "bfd"]) — keyword already consumed."""
+    val (p0, _lp) = _ld_expect_kind(parser, LdTokenKind.LParen)
+    var p = p0
+    var names: [text] = []
+    while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RParen):
+        val (p2, s) = _ld_expect_kind(p, LdTokenKind.String)
+        p = p2
+        names = names.push(s.value)
+        if _ld_at_kind(p, LdTokenKind.Comma):
+            p = _ld_advance(p)
+    val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
+    (p3, names)
 
 # ============================================================================
 # MEMORY Parser
 # ============================================================================
 
 fn _ld_parse_one_region(parser: LdParser) -> (LdParser, LdMemoryRegion):
-    """Parse one memory region: name (attrs)? : ORIGIN = num , LENGTH = num"""
+    """Parse one memory region: name (attrs)? : ORIGIN = expr , LENGTH = expr"""
     var p = parser
-
-    # Region name
     val (p2, name_tok) = _ld_expect_kind(p, LdTokenKind.Word)
     p = p2
-    val name = name_tok.value
-
-    # Optional attributes in parens
     var attrs = ""
     if _ld_at_kind(p, LdTokenKind.LParen):
         p = _ld_advance(p)
-        # Collect attribute characters until RParen
-        while not _ld_at_kind(p, LdTokenKind.RParen) and not _ld_at_kind(p, LdTokenKind.Eof):
-            val tok = _ld_peek(p)
-            attrs = attrs + tok.value
+        while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RParen):
+            attrs = attrs + _ld_peek(p).value
             p = _ld_advance(p)
-        # Consume RParen
         val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
         p = p3
-
-    # Expect colon
     val (p4, _colon) = _ld_expect_kind(p, LdTokenKind.Colon)
     p = p4
-
-    # ORIGIN = number
-    var origin: i64 = 0
+    var origin_expr = ""
     if _ld_at_word(p, "ORIGIN"):
-        p = _ld_advance(p)
-        val (p5, _eq) = _ld_expect_kind(p, LdTokenKind.Equals)
-        p = p5
-        val (p6, origin_tok) = _ld_expect_kind(p, LdTokenKind.Number)
+        val (p5, _eq) = _ld_expect_kind(_ld_advance(p), LdTokenKind.Equals)
+        val (p6, e) = ld_parse_expr(p5)
         p = p6
-        origin = ld_parse_number(origin_tok.value)
-
-    # Expect comma
+        origin_expr = e
+    else:
+        p = _ld_fail(p, "expected ORIGIN")
     val (p7, _comma) = _ld_expect_kind(p, LdTokenKind.Comma)
     p = p7
-
-    # LENGTH = number
-    var length: i64 = 0
+    var length_expr = ""
     if _ld_at_word(p, "LENGTH"):
-        p = _ld_advance(p)
-        val (p8, _eq2) = _ld_expect_kind(p, LdTokenKind.Equals)
-        p = p8
-        val (p9, length_tok) = _ld_expect_kind(p, LdTokenKind.Number)
+        val (p8, _eq2) = _ld_expect_kind(_ld_advance(p), LdTokenKind.Equals)
+        val (p9, e) = ld_parse_expr(p8)
         p = p9
-        length = ld_parse_number(length_tok.value)
-
-    val region = LdMemoryRegion(name: name, attrs: attrs, origin: origin, length: length)
+        length_expr = e
+    else:
+        p = _ld_fail(p, "expected LENGTH")
+    val region = LdMemoryRegion(name: name_tok.value, attrs: attrs,
+        origin: ld_parse_number(origin_expr), length: ld_parse_number(length_expr),
+        origin_expr: origin_expr, length_expr: length_expr)
     (p, region)
 
 fn ld_parse_memory(parser: LdParser) -> (LdParser, [LdMemoryRegion]):
     """Parse MEMORY { ... } block — assumes 'MEMORY' word already consumed."""
-    var p = parser
+    val (p0, _lb) = _ld_expect_kind(parser, LdTokenKind.LBrace)
+    var p = p0
     var regions: [LdMemoryRegion] = []
-
-    # Expect LBrace
-    val (p2, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
-    p = p2
-
-    # Parse regions until RBrace
-    while not _ld_at_kind(p, LdTokenKind.RBrace) and not _ld_at_kind(p, LdTokenKind.Eof):
-        # Skip semicolons between regions
+    while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RBrace):
         if _ld_at_kind(p, LdTokenKind.Semicolon):
             p = _ld_advance(p)
             continue
-
         val (p3, region) = _ld_parse_one_region(p)
         p = p3
         regions = regions.push(region)
-
-    # Consume RBrace
     val (p4, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
-    p = p4
+    (p4, regions)
 
-    (p, regions)
+# ============================================================================
+# PHDRS Parser
+# ============================================================================
+
+fn ld_parse_phdrs(parser: LdParser) -> (LdParser, [LdPhdr]):
+    """Parse PHDRS { name TYPE [FILEHDR] [PHDRS] [AT(e)] [FLAGS(e)] ; ... }."""
+    val (p0, _lb) = _ld_expect_kind(parser, LdTokenKind.LBrace)
+    var p = p0
+    var out: [LdPhdr] = []
+    while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RBrace):
+        if _ld_at_kind(p, LdTokenKind.Semicolon):
+            p = _ld_advance(p)
+            continue
+        val (p2, name_tok) = _ld_expect_kind(p, LdTokenKind.Word)
+        val (p3, type_tok) = _ld_expect_kind(p2, LdTokenKind.Word)
+        p = p3
+        var filehdr = false
+        var phdrs = false
+        var at_expr = ""
+        var flags_expr = ""
+        while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.Semicolon):
+            if _ld_at_word(p, "FILEHDR"):
+                filehdr = true
+                p = _ld_advance(p)
+            else if _ld_at_word(p, "PHDRS"):
+                phdrs = true
+                p = _ld_advance(p)
+            else if _ld_at_word(p, "AT") or _ld_at_word(p, "FLAGS"):
+                val is_flags = _ld_at_word(p, "FLAGS")
+                val (p4, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+                val (p5, e) = ld_parse_expr(p4)
+                val (p6, _rp) = _ld_expect_kind(p5, LdTokenKind.RParen)
+                p = p6
+                if is_flags:
+                    flags_expr = e
+                else:
+                    at_expr = e
+            else:
+                p = _ld_fail(p, "unsupported PHDRS attribute")
+        out = out.push(LdPhdr(name: name_tok.value, phdr_type: type_tok.value,
+            filehdr: filehdr, phdrs: phdrs, at_expr: at_expr, flags_expr: flags_expr))
+    val (p7, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
+    (p7, out)
+
+# ============================================================================
+# Statements
+# ============================================================================
+
+fn _ld_stmt(kind: LdStmtKind, file_pattern: text, patterns: [text], symbol: text, expr: text, message: text) -> LdStmt:
+    LdStmt(kind: kind, file_pattern: file_pattern, patterns: patterns, symbol: symbol, expr: expr, message: message)
+
+fn _ld_parse_input_spec(parser: LdParser, keep: bool) -> (LdParser, LdStmt):
+    """Parse file(.pat .pat2 ...) where file is `*` or a file glob."""
+    var p = parser
+    val file_tok = _ld_peek(p)
+    if file_tok.kind != LdTokenKind.Star and file_tok.kind != LdTokenKind.Word:
+        return (_ld_fail(p, "expected input section spec"), _ld_stmt(LdStmtKind.Input, "", [], "", "", ""))
+    val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+    p = p2
+    var patterns: [text] = []
+    while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RParen):
+        val (p3, pat) = _ld_expect_kind(p, LdTokenKind.Word)
+        p = p3
+        patterns = patterns.push(pat.value)
+    val (p4, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
+    val kind = if keep: LdStmtKind.Keep else: LdStmtKind.Input
+    (p4, _ld_stmt(kind, file_tok.value, patterns, "", "", ""))
+
+fn _ld_parse_stmt(parser: LdParser, allow_input: bool) -> (LdParser, LdStmt):
+    """Parse one assignment / PROVIDE / ASSERT / (input spec if allowed)."""
+    var p = parser
+    val tok = _ld_peek(p)
+    val next = _ld_peek_at(p, 1)
+    if tok.kind == LdTokenKind.Word and (tok.value == "PROVIDE" or tok.value == "PROVIDE_HIDDEN"):
+        val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+        val (p3, sym) = _ld_expect_kind(p2, LdTokenKind.Word)
+        val (p4, _eq) = _ld_expect_kind(p3, LdTokenKind.Equals)
+        val (p5, e) = ld_parse_expr(p4)
+        val (p6, _rp) = _ld_expect_kind(p5, LdTokenKind.RParen)
+        val kind = if tok.value == "PROVIDE": LdStmtKind.Provide else: LdStmtKind.ProvideHidden
+        return (p6, _ld_stmt(kind, "", [], sym.value, e, ""))
+    if tok.kind == LdTokenKind.Word and tok.value == "ASSERT":
+        val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+        val (p3, e) = ld_parse_expr(p2)
+        val (p4, _comma) = _ld_expect_kind(p3, LdTokenKind.Comma)
+        val (p5, msg) = _ld_expect_kind(p4, LdTokenKind.String)
+        val (p6, _rp) = _ld_expect_kind(p5, LdTokenKind.RParen)
+        return (p6, _ld_stmt(LdStmtKind.Assert, "", [], "", e, msg.value))
+    if tok.kind == LdTokenKind.Word and (next.kind == LdTokenKind.Equals or next.kind == LdTokenKind.PlusEquals):
+        val kind = if next.kind == LdTokenKind.Equals: LdStmtKind.Assign else: LdStmtKind.AddAssign
+        val (p2, e) = ld_parse_expr(_ld_advance(_ld_advance(p)))
+        return (p2, _ld_stmt(kind, "", [], tok.value, e, ""))
+    if allow_input and tok.kind == LdTokenKind.Word and tok.value == "KEEP":
+        val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+        val (p3, st) = _ld_parse_input_spec(p2, true)
+        val (p4, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
+        return (p4, st)
+    if allow_input and (tok.kind == LdTokenKind.Star or tok.kind == LdTokenKind.Word) and next.kind == LdTokenKind.LParen:
+        return _ld_parse_input_spec(p, false)
+    (_ld_fail(p, "unsupported statement"), _ld_stmt(LdStmtKind.Input, "", [], "", "", ""))
 
 # ============================================================================
 # SECTIONS Parser
 # ============================================================================
 
-fn _ld_parse_input_patterns(parser: LdParser) -> (LdParser, [LdInputPattern]):
-    """Parse the inside of { *(.pat) *(.pat2) ... } within an output section."""
+fn _ld_is_section_type(word: text) -> bool:
+    word == "NOLOAD" or word == "COPY" or word == "INFO" or word == "OVERLAY" or word == "DSECT" or word == "READONLY"
+
+fn _ld_at_section_type(p: LdParser) -> bool:
+    _ld_at_kind(p, LdTokenKind.LParen) and _ld_peek_at(p, 1).kind == LdTokenKind.Word and _ld_is_section_type(_ld_peek_at(p, 1).value) and _ld_peek_at(p, 2).kind == LdTokenKind.RParen
+
+fn _ld_inputs_of(body: [LdStmt]) -> [LdInputPattern]:
+    var out: [LdInputPattern] = []
+    for st in body:
+        if st.kind == LdStmtKind.Input or st.kind == LdStmtKind.Keep:
+            out = out.push(LdInputPattern(pattern: st.patterns.join(" "), keep: st.kind == LdStmtKind.Keep))
+    out
+
+fn _ld_is_plain_number(expr: text) -> bool:
+    if expr == "":
+        return false
+    val toks = ld_tokenize(expr)
+    toks.len() == 2 and toks[0].kind == LdTokenKind.Number
+
+fn _ld_parse_one_section(parser: LdParser) -> (LdParser, LdOutputSection):
+    """Parse one output section (see module header for the grammar)."""
     var p = parser
-    var inputs: [LdInputPattern] = []
-
-    # Expect LBrace
-    val (p2, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
+    val (p2, name_tok) = _ld_expect_kind(p, LdTokenKind.Word)
     p = p2
-
-    while not _ld_at_kind(p, LdTokenKind.RBrace) and not _ld_at_kind(p, LdTokenKind.Eof):
-        # Skip semicolons
+    var address_expr = ""
+    var section_type = ""
+    if not _ld_at_kind(p, LdTokenKind.Colon) and not _ld_at_section_type(p):
+        val (p3, e) = ld_parse_expr(p)
+        p = p3
+        address_expr = e
+    if _ld_at_section_type(p):
+        section_type = _ld_peek_at(p, 1).value
+        p = _ld_advance(_ld_advance(_ld_advance(p)))
+    val (p4, _colon) = _ld_expect_kind(p, LdTokenKind.Colon)
+    p = p4
+    var lma_expr = ""
+    var align_expr = ""
+    while _ld_ok(p) and (_ld_at_word(p, "AT") or _ld_at_word(p, "ALIGN")):
+        val is_at = _ld_at_word(p, "AT")
+        val (p5, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+        val (p6, e) = ld_parse_expr(p5)
+        val (p7, _rp) = _ld_expect_kind(p6, LdTokenKind.RParen)
+        p = p7
+        if is_at:
+            lma_expr = e
+        else:
+            align_expr = e
+    val (p8, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
+    p = p8
+    var body: [LdStmt] = []
+    while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RBrace):
         if _ld_at_kind(p, LdTokenKind.Semicolon):
             p = _ld_advance(p)
             continue
-
-        # Expect * ( pattern ) or just skip unknown tokens
-        if _ld_at_kind(p, LdTokenKind.Star):
-            p = _ld_advance(p)
-            # Expect LParen
-            if _ld_at_kind(p, LdTokenKind.LParen):
-                p = _ld_advance(p)
-                # Collect pattern tokens until RParen
-                var pattern = ""
-                while not _ld_at_kind(p, LdTokenKind.RParen) and not _ld_at_kind(p, LdTokenKind.Eof):
-                    val tok = _ld_peek(p)
-                    pattern = pattern + tok.value
-                    p = _ld_advance(p)
-                # Consume RParen
-                val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
-                p = p3
-                inputs = inputs.push(LdInputPattern(pattern: pattern))
-        else:
-            # Skip unknown token inside section body
-            p = _ld_advance(p)
-
-    # Consume RBrace
-    val (p4, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
-    p = p4
-
-    (p, inputs)
-
-fn _ld_parse_one_section(parser: LdParser) -> (LdParser, LdOutputSection):
-    """Parse one output section: .name addr? : { *(.pat) ... } > region?"""
-    var p = parser
-
-    # Section name (e.g. ".text", ".data")
-    val (p2, name_tok) = _ld_expect_kind(p, LdTokenKind.Word)
-    p = p2
-    val name = name_tok.value
-
-    # Optional address before colon
-    var address: i64 = -1
-    if _ld_at_kind(p, LdTokenKind.Number):
-        val num_tok = _ld_peek(p)
-        address = ld_parse_number(num_tok.value)
-        p = _ld_advance(p)
-
-    # Expect colon
-    val (p3, _colon) = _ld_expect_kind(p, LdTokenKind.Colon)
-    p = p3
-
-    # Parse input patterns { *(.pat) ... }
-    val (p4, inputs) = _ld_parse_input_patterns(p)
-    p = p4
-
-    # Optional > region
+        val (p9, st) = _ld_parse_stmt(p, true)
+        p = p9
+        body = body.push(st)
+    val (p10, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
+    p = p10
     var region = ""
-    if _ld_at_kind(p, LdTokenKind.GreaterThan):
-        p = _ld_advance(p)
-        val (p5, region_tok) = _ld_expect_kind(p, LdTokenKind.Word)
-        p = p5
-        region = region_tok.value
-
-    val section = LdOutputSection(name: name, address: address, inputs: inputs, region: region)
+    var lma_region = ""
+    var phdrs: [text] = []
+    var fill_expr = ""
+    var trailing = true
+    while _ld_ok(p) and trailing:
+        if _ld_at_kind(p, LdTokenKind.GreaterThan):
+            val (p11, r) = _ld_expect_kind(_ld_advance(p), LdTokenKind.Word)
+            p = p11
+            region = r.value
+        else if _ld_at_word(p, "AT") and _ld_peek_at(p, 1).kind == LdTokenKind.GreaterThan:
+            val (p12, r) = _ld_expect_kind(_ld_advance(_ld_advance(p)), LdTokenKind.Word)
+            p = p12
+            lma_region = r.value
+        else if _ld_at_kind(p, LdTokenKind.Colon):
+            val (p13, ph) = _ld_expect_kind(_ld_advance(p), LdTokenKind.Word)
+            p = p13
+            phdrs = phdrs.push(ph.value)
+        else if _ld_at_kind(p, LdTokenKind.Equals):
+            val (p14, e) = ld_parse_expr(_ld_advance(p))
+            p = p14
+            fill_expr = e
+        else:
+            trailing = false
+    val address = if _ld_is_plain_number(address_expr): ld_parse_number(address_expr) else: -1
+    val section = LdOutputSection(name: name_tok.value, address: address, inputs: _ld_inputs_of(body),
+        region: region, address_expr: address_expr, section_type: section_type, lma_expr: lma_expr,
+        align_expr: align_expr, body: body, lma_region: lma_region, phdrs: phdrs, fill_expr: fill_expr)
     (p, section)
+
+fn _ld_at_output_section(p: LdParser) -> bool:
+    val tok = _ld_peek(p)
+    if tok.kind != LdTokenKind.Word:
+        return false
+    val next = _ld_peek_at(p, 1)
+    if next.kind == LdTokenKind.Equals or next.kind == LdTokenKind.PlusEquals:
+        return false
+    tok.value == "/DISCARD/" or (tok.value.starts_with(".") and tok.value != ".")
+
+fn _ld_parse_sections_full(parser: LdParser) -> (LdParser, [LdOutputSection], [LdSectionsCmd]):
+    val (p0, _lb) = _ld_expect_kind(parser, LdTokenKind.LBrace)
+    var p = p0
+    var sections: [LdOutputSection] = []
+    var cmds: [LdSectionsCmd] = []
+    val empty = _ld_stmt(LdStmtKind.Assign, "", [], "", "", "")
+    while _ld_live(p) and not _ld_at_kind(p, LdTokenKind.RBrace):
+        if _ld_at_kind(p, LdTokenKind.Semicolon):
+            p = _ld_advance(p)
+            continue
+        if _ld_at_output_section(p):
+            val (p3, section) = _ld_parse_one_section(p)
+            p = p3
+            cmds = cmds.push(LdSectionsCmd(kind: LdCmdKind.Section, section_index: sections.len(), stmt: empty))
+            sections = sections.push(section)
+        else:
+            val (p4, st) = _ld_parse_stmt(p, false)
+            p = p4
+            cmds = cmds.push(LdSectionsCmd(kind: LdCmdKind.Stmt, section_index: -1, stmt: st))
+    val (p5, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
+    (p5, sections, cmds)
 
 fn ld_parse_sections(parser: LdParser) -> (LdParser, [LdOutputSection]):
     """Parse SECTIONS { ... } block — assumes 'SECTIONS' word already consumed."""
-    var p = parser
-    var sections: [LdOutputSection] = []
-
-    # Expect LBrace
-    val (p2, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
-    p = p2
-
-    # Parse sections until RBrace
-    while not _ld_at_kind(p, LdTokenKind.RBrace) and not _ld_at_kind(p, LdTokenKind.Eof):
-        # Skip semicolons
-        if _ld_at_kind(p, LdTokenKind.Semicolon):
-            p = _ld_advance(p)
-            continue
-
-        # Output section names typically start with '.'
-        val tok = _ld_peek(p)
-        if tok.kind == LdTokenKind.Word and tok.value.starts_with("."):
-            val (p3, section) = _ld_parse_one_section(p)
-            p = p3
-            sections = sections.push(section)
-        else:
-            # Skip unknown directives inside SECTIONS
-            p = _ld_advance(p)
-
-    # Consume RBrace
-    val (p4, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
-    p = p4
-
+    val (p, sections, _cmds) = _ld_parse_sections_full(parser)
     (p, sections)
 
 # ============================================================================
@@ -539,39 +835,187 @@ fn ld_parse_sections(parser: LdParser) -> (LdParser, [LdOutputSection]):
 # ============================================================================
 
 fn ld_parse(input: text) -> Result<LdScript, text>:
-    """Parse a GNU ld-style linker script into an LdScript."""
-    val tokens = ld_tokenize(input)
-    var p = LdParser(tokens: tokens, pos: 0)
+    """Parse a GNU ld-style linker script into an LdScript (fail-closed)."""
+    var p = LdParser(tokens: ld_tokenize(input), pos: 0, err: "")
     var entry = ""
     var memory: [LdMemoryRegion] = []
     var sections: [LdOutputSection] = []
+    var formats: [text] = []
+    var arch = ""
+    var phdrs: [LdPhdr] = []
+    var cmds: [LdSectionsCmd] = []
+    var top_stmts: [LdStmt] = []
+    var order: [text] = []
 
-    while not _ld_at_kind(p, LdTokenKind.Eof):
+    while _ld_live(p):
         val tok = _ld_peek(p)
-
-        if tok.kind == LdTokenKind.Word and tok.value == "ENTRY":
+        if tok.kind == LdTokenKind.Semicolon:
             p = _ld_advance(p)
-            val (p2, sym) = ld_parse_entry(p)
+            continue
+        val word = if tok.kind == LdTokenKind.Word: tok.value else: ""
+        if word == "ENTRY":
+            val (p2, sym) = ld_parse_entry(_ld_advance(p))
             p = p2
             entry = sym
-
-        else if tok.kind == LdTokenKind.Word and tok.value == "MEMORY":
-            p = _ld_advance(p)
-            val (p2, regions) = ld_parse_memory(p)
+            order = order.push(word)
+        else if word == "OUTPUT_FORMAT":
+            val (p2, names) = _ld_parse_output_format(_ld_advance(p))
+            p = p2
+            formats = names
+            order = order.push(word)
+        else if word == "OUTPUT_ARCH":
+            val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
+            val (p3, a) = _ld_expect_kind(p2, LdTokenKind.Word)
+            val (p4, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
+            p = p4
+            arch = a.value
+            order = order.push(word)
+        else if word == "MEMORY":
+            val (p2, regions) = ld_parse_memory(_ld_advance(p))
             p = p2
             memory = regions
-
-        else if tok.kind == LdTokenKind.Word and tok.value == "SECTIONS":
-            p = _ld_advance(p)
-            val (p2, sects) = ld_parse_sections(p)
+            order = order.push(word)
+        else if word == "PHDRS":
+            val (p2, hdrs) = ld_parse_phdrs(_ld_advance(p))
+            p = p2
+            phdrs = hdrs
+            order = order.push(word)
+        else if word == "SECTIONS":
+            val (p2, sects, c) = _ld_parse_sections_full(_ld_advance(p))
             p = p2
             sections = sects
-
+            cmds = c
+            order = order.push(word)
         else:
-            # Skip semicolons and unknown tokens
-            p = _ld_advance(p)
+            val (p2, st) = _ld_parse_stmt(p, false)
+            p = p2
+            top_stmts = top_stmts.push(st)
+            order = order.push("STMT")
 
-    Ok(LdScript(entry: entry, memory: memory, sections: sections))
+    if not _ld_ok(p):
+        return Err("linker script parse error: {p.err}")
+    val fmt = if formats.len() > 0: formats[0] else: ""
+    Ok(LdScript(entry: entry, memory: memory, sections: sections, output_format: fmt,
+        output_formats: formats, output_arch: arch, phdrs: phdrs, commands: cmds,
+        top_stmts: top_stmts, top_order: order))
+
+# ============================================================================
+# Canonical Printer
+# ============================================================================
+
+fn _ld_print_stmt(st: LdStmt) -> text:
+    if st.kind == LdStmtKind.Input:
+        return st.file_pattern + "(" + st.patterns.join(" ") + ")"
+    if st.kind == LdStmtKind.Keep:
+        return "KEEP(" + st.file_pattern + "(" + st.patterns.join(" ") + "))"
+    if st.kind == LdStmtKind.Assign:
+        return st.symbol + " = " + st.expr + ";"
+    if st.kind == LdStmtKind.AddAssign:
+        return st.symbol + " += " + st.expr + ";"
+    if st.kind == LdStmtKind.Provide:
+        return "PROVIDE(" + st.symbol + " = " + st.expr + ");"
+    if st.kind == LdStmtKind.ProvideHidden:
+        return "PROVIDE_HIDDEN(" + st.symbol + " = " + st.expr + ");"
+    "ASSERT(" + st.expr + ", \"" + st.message + "\")"
+
+fn _ld_print_section(sec: LdOutputSection) -> [text]:
+    var header = sec.name
+    if sec.address_expr != "":
+        header = header + " " + sec.address_expr
+    if sec.section_type != "":
+        header = header + " (" + sec.section_type + ")"
+    header = header + " :"
+    if sec.lma_expr != "":
+        header = header + " AT(" + sec.lma_expr + ")"
+    if sec.align_expr != "":
+        header = header + " ALIGN(" + sec.align_expr + ")"
+    var lines: [text] = ["    " + header, "    {"]
+    for st in sec.body:
+        lines = lines.push("        " + _ld_print_stmt(st))
+    var tail = "    }"
+    if sec.region != "":
+        tail = tail + " > " + sec.region
+    if sec.lma_region != "":
+        tail = tail + " AT> " + sec.lma_region
+    for ph in sec.phdrs:
+        tail = tail + " :" + ph
+    if sec.fill_expr != "":
+        tail = tail + " = " + sec.fill_expr
+    lines = lines.push(tail)
+    lines
+
+fn ld_print(script: LdScript) -> text:
+    """Print a parsed script in canonical form. Token-equivalent (modulo `;`) to its source."""
+    var lines: [text] = []
+    var stmt_i: i64 = 0
+    for d in script.top_order:
+        if d == "ENTRY":
+            lines = lines.push("ENTRY(" + script.entry + ")")
+        else if d == "OUTPUT_FORMAT":
+            var quoted: [text] = []
+            for f in script.output_formats:
+                quoted = quoted.push("\"" + f + "\"")
+            lines = lines.push("OUTPUT_FORMAT(" + quoted.join(", ") + ")")
+        else if d == "OUTPUT_ARCH":
+            lines = lines.push("OUTPUT_ARCH(" + script.output_arch + ")")
+        else if d == "MEMORY":
+            lines = lines.push("MEMORY")
+            lines = lines.push("{")
+            for r in script.memory:
+                var line = "    " + r.name
+                if r.attrs != "":
+                    line = line + " (" + r.attrs + ")"
+                lines = lines.push(line + " : ORIGIN = " + r.origin_expr + ", LENGTH = " + r.length_expr)
+            lines = lines.push("}")
+        else if d == "PHDRS":
+            lines = lines.push("PHDRS")
+            lines = lines.push("{")
+            for h in script.phdrs:
+                var line = "    " + h.name + " " + h.phdr_type
+                if h.filehdr:
+                    line = line + " FILEHDR"
+                if h.phdrs:
+                    line = line + " PHDRS"
+                if h.at_expr != "":
+                    line = line + " AT(" + h.at_expr + ")"
+                if h.flags_expr != "":
+                    line = line + " FLAGS(" + h.flags_expr + ")"
+                lines = lines.push(line + ";")
+            lines = lines.push("}")
+        else if d == "SECTIONS":
+            lines = lines.push("SECTIONS")
+            lines = lines.push("{")
+            for c in script.commands:
+                if c.kind == LdCmdKind.Section:
+                    for l in _ld_print_section(script.sections[c.section_index]):
+                        lines = lines.push(l)
+                else:
+                    lines = lines.push("    " + _ld_print_stmt(c.stmt))
+            lines = lines.push("}")
+        else:
+            lines = lines.push(_ld_print_stmt(script.top_stmts[stmt_i]))
+            stmt_i = stmt_i + 1
+    lines.join("\n") + "\n"
+
+fn _ld_sig_tokens(input: text) -> [LdToken]:
+    var out: [LdToken] = []
+    for t in ld_tokenize(input):
+        if t.kind != LdTokenKind.Semicolon:
+            out = out.push(t)
+    out
+
+fn ld_tokens_equivalent(a: text, b: text) -> bool:
+    """True when both scripts tokenize identically, ignoring comments and `;`."""
+    val ta = _ld_sig_tokens(a)
+    val tb = _ld_sig_tokens(b)
+    if ta.len() != tb.len():
+        return false
+    var i: i64 = 0
+    while i < ta.len():
+        if ta[i].kind != tb[i].kind or ta[i].value != tb[i].value:
+            return false
+        i = i + 1
+    true
 
 # ============================================================================
 # Convenience Functions
@@ -579,7 +1023,8 @@ fn ld_parse(input: text) -> Result<LdScript, text>:
 
 fn ld_script_new() -> LdScript:
     """Create an empty linker script."""
-    LdScript(entry: "", memory: [], sections: [])
+    LdScript(entry: "", memory: [], sections: [], output_format: "", output_formats: [],
+        output_arch: "", phdrs: [], commands: [], top_stmts: [], top_order: [])
 
 fn ld_has_entry(script: LdScript) -> bool:
     """Check if the script specifies an entry point."""
@@ -613,9 +1058,10 @@ fn ld_region_count(script: LdScript) -> i64:
 
 export LdTokenKind, LdToken
 export LdEntry, LdMemoryRegion, LdInputPattern, LdOutputSection, LdScript
+export LdStmtKind, LdStmt, LdPhdr, LdCmdKind, LdSectionsCmd
 export LdParser
-export ld_tokenize, ld_parse_number
-export ld_parse_entry, ld_parse_memory, ld_parse_sections
-export ld_parse
+export ld_tokenize, ld_parse_number, ld_parse_expr
+export ld_parse_entry, ld_parse_memory, ld_parse_phdrs, ld_parse_sections
+export ld_parse, ld_print, ld_tokens_equivalent
 export ld_script_new, ld_has_entry, ld_find_region, ld_find_section
 export ld_section_count, ld_region_count
