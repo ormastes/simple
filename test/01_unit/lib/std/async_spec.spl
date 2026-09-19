@@ -38,10 +38,6 @@ var NEXT_TASK_ID = 0
 # Local Doubles
 # ============================================================================
 
-class AsyncState:
-    ready: bool
-    value: i64
-
 class Poll:
     ready: bool
     value: i64
@@ -64,18 +60,25 @@ class Poll:
         else:
             panic("Poll is pending")
 
+# Shared cells backing Future/Promise pairs: slot[0] = ready flag (0/1),
+# slot[1] = completed value. A module-level registry is the one mutable
+# channel both endpoints can observe (struct construction copies fields).
+var PROMISE_SLOTS: [[i64]] = []
+
 class Future:
-    state: AsyncState
+    slot_id: i64
 
     static fn from_value(value: i64) -> Future:
-        Future(state: AsyncState(ready: true, value: value))
+        PROMISE_SLOTS.push([1, value])
+        Future(slot_id: PROMISE_SLOTS.len() - 1)
 
     static fn pending() -> Future:
-        Future(state: AsyncState(ready: false, value: 0))
+        PROMISE_SLOTS.push([0, 0])
+        Future(slot_id: PROMISE_SLOTS.len() - 1)
 
     fn poll() -> Poll:
-        if self.state.ready:
-            Poll.ready(self.state.value)
+        if PROMISE_SLOTS[self.slot_id][0] == 1:
+            Poll.ready(PROMISE_SLOTS[self.slot_id][1])
         else:
             Poll.pending()
 
@@ -83,36 +86,36 @@ class Future:
         self.poll().is_ready()
 
     fn map(f: fn(i64) -> i64) -> Future:
-        if self.state.ready:
-            Future.from_value(f(self.state.value))
+        if PROMISE_SLOTS[self.slot_id][0] == 1:
+            Future.from_value(f(PROMISE_SLOTS[self.slot_id][1]))
         else:
             Future.pending()
 
     fn then(f: fn(i64) -> Future) -> Future:
-        if self.state.ready:
-            f(self.state.value)
+        if PROMISE_SLOTS[self.slot_id][0] == 1:
+            f(PROMISE_SLOTS[self.slot_id][1])
         else:
             Future.pending()
 
 class Promise:
-    state: AsyncState
+    slot_id: i64
 
     static fn new() -> (Future, Promise):
-        var state = AsyncState(ready: false, value: 0)
-        (Future(state: state), Promise(state: state))
+        PROMISE_SLOTS.push([0, 0])
+        val id = PROMISE_SLOTS.len() - 1
+        (Future(slot_id: id), Promise(slot_id: id))
 
     fn complete(value: i64) -> bool:
-        if self.state.ready:
+        if PROMISE_SLOTS[self.slot_id][0] == 1:
             false
         else:
-            self.state.ready = true
-            self.state.value = value
+            PROMISE_SLOTS[self.slot_id] = [1, value]
             true
 
     fn is_completed() -> bool:
-        self.state.ready
+        PROMISE_SLOTS[self.slot_id][0] == 1
 
-class TaskState:
+enum TaskState:
     Pending
     Running
     Suspended
@@ -191,14 +194,14 @@ class Executor:
         var task = self.tasks[task_index]
         task.state = TaskState.Running
 
-        match task.future.poll():
-            case Poll.Ready(_):
-                task.state = TaskState.Completed
-                self.tasks = self.tasks[0:task_index] + self.tasks[task_index + 1:]
-            case Poll.Pending:
-                task.state = TaskState.Suspended
-                self.ready_queue.push(task_id)
-                self.tasks[task_index] = task
+        val poll_result = task.future.poll()
+        if poll_result.is_ready():
+            task.state = TaskState.Completed
+            self.tasks = self.tasks[0:task_index] + self.tasks[task_index + 1:]
+        else:
+            task.state = TaskState.Suspended
+            self.ready_queue.push(task_id)
+            self.tasks[task_index] = task
 
     me shutdown():
         self.running = false
