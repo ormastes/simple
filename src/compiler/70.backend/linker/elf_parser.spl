@@ -13,7 +13,7 @@ use compiler.backend.linker.elf_inspect.{
     ET_NONE, ET_REL, ET_EXEC, ET_DYN,
     EM_X86_64, EM_AARCH64, EM_RISCV
 }
-use std.string_core.{char_from_code}
+use std.string_core.{char_from_code, bytes_to_text}
 
 # ============================================================================
 # Additional ELF Constants
@@ -123,16 +123,32 @@ fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
     if index < 0 or index >= strtab.data.len():
         return ""
 
-    var result: text = ""
+    # ASCII names (every ELF name in practice) are converted in one runtime
+    # byte copy instead of one text concatenation per character: decoding
+    # libc.so.6's .dynstr character by character was 60% of a dynamic link.
+    # A byte >= 0x80 keeps the old per-character path, which treats each byte
+    # as its own code point, so that behaviour is unchanged.
+    var raw: [u8] = []
+    var ascii = true
     var i: i64 = index
     val len = strtab.data.len()
     while i < len:
         val b = strtab.data[i]
         if b == 0:
-            return result
-        result = result + char_from_code(b as i64)
+            break
+        if (b as i64) >= 0x80:
+            ascii = false
+        raw = raw.push(b)
         i = i + 1
 
+    if ascii:
+        return bytes_to_text(raw)
+
+    var result: text = ""
+    var j: i64 = 0
+    while j < raw.len():
+        result = result + char_from_code(raw[j] as i64)
+        j = j + 1
     result
 
 # ============================================================================

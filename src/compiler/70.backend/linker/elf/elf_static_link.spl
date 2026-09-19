@@ -40,7 +40,7 @@ use compiler.backend.linker.elf_parser.{
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
-use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_width, reloc_patch_word}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
 use compiler.backend.linker.elf.gc_sections.{elf_gc_live, elf_gc_all_live}
 use compiler.backend.linker.elf.merge_sections.{ElfMergeSet, elf_merge_empty, elf_merge_build, elf_merge_piece_off}
@@ -74,7 +74,7 @@ use compiler.backend.linker.elf.elf_exec_writer.{
     ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW, ELF_RELRO_PADDING,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
 }
-use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_bytes, write_u32_le, write_u64_le}
+use compiler.backend.linker.elf_writer.{align_up, write_u32_le, write_u64_le}
 
 val ELF_STATIC_BASE: i64 = 0x400000
 val SHN_ABS: i64 = 0xfff1
@@ -392,14 +392,24 @@ fn elf_static_contents(inputs: ElfStaticInputs, merged: ElfMergeSet) -> [[i64]]:
                 while si < obj.sections.len():
                     if inputs.sec_out[oi][si] == k:
                         val sec = obj.sections[si]
+                        # inline padding and appends: write_zeros / write_bytes
+                        # would copy the whole section buffer on every input
+                        # section (lane C4), while the merge-group branch (lane
+                        # C1) still emits a group's blob exactly once
                         val gi = merged.sec_grp[oi][si]
                         if gi >= 0:
                             if not done[gi]:
                                 done[gi] = true
-                                buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
-                                buf = write_bytes(buf, merged.grp_data[gi])
+                                while buf.len() < inputs.sec_off[oi][si]:
+                                    buf = buf.push(0)
+                                val blob = merged.grp_data[gi]
+                                var mi: i64 = 0
+                                while mi < blob.len():
+                                    buf = buf.push(blob[mi])
+                                    mi = mi + 1
                         else:
-                            buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
+                            while buf.len() < inputs.sec_off[oi][si]:
+                                buf = buf.push(0)
                             # sections[si].sh_addr is the FILE offset (elf_parser convention)
                             var bi: i64 = 0
                             while bi < sec.sh_size:
@@ -407,7 +417,8 @@ fn elf_static_contents(inputs: ElfStaticInputs, merged: ElfMergeSet) -> [[i64]]:
                                 bi = bi + 1
                     si = si + 1
                 oi = oi + 1
-            buf = write_zeros(buf, inputs.outs[k].size - buf.len())
+            while buf.len() < inputs.outs[k].size:
+                buf = buf.push(0)
         out = out.push(buf)
         k = k + 1
     out
@@ -1119,7 +1130,11 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         var name_off: i64 = 0
         if rows.names[i] != "":
             name_off = strtab.offsets[rows.names[i]]
-        b = elf_sym_entry(b, name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i])
+        # elf_sym_entry on an EMPTY buffer returns just this 24-byte entry; it is
+        # appended inline, because handing it the growing table copies that table
+        # on every symbol (quadratic in symbol count under the interpreter).
+        for x in elf_sym_entry([], name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]):
+            b = b.push(x)
         i = i + 1
     Ok(ElfSymtabOut(symtab: b, strtab: strtab.data, first_global: first_global))
 
@@ -1167,10 +1182,15 @@ fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
         b = b.push(image[i])
         i = i + 1
     val sym_off = align_up(b.len(), 8)
-    b = write_zeros(b, sym_off - b.len())
-    b = write_bytes(b, st.symtab)
+    # Appends stay inline: write_zeros / write_bytes / write_u*_le take the
+    # whole image and return it, which copies it on every call.
+    while b.len() < sym_off:
+        b = b.push(0)
+    for x in st.symtab:
+        b = b.push(x & 0xff)
     val str_off = b.len()
-    b = write_bytes(b, st.strtab)
+    for x in st.strtab:
+        b = b.push(x & 0xff)
     val shstr_off = b.len()
     i = 0
     while i < old_size:
@@ -1183,7 +1203,8 @@ fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
         b = b.push(ch as i64)
     b = b.push(0)
     val new_shoff = align_up(b.len(), 8)
-    b = write_zeros(b, new_shoff - b.len())
+    while b.len() < new_shoff:
+        b = b.push(0)
     i = 0
     while i < shnum * 64:
         b = b.push(image[shoff + i])
@@ -1191,28 +1212,33 @@ fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
     val nssh = new_shoff + shstrndx * 64
     b = elf_put_le(b, nssh + 24, 8, shstr_off)
     b = elf_put_le(b, nssh + 32, 8, old_size + 16)
+    # The two new 64-byte section headers are built on their own small buffer
+    # and appended inline, for the same reason as the image body above.
     # .symtab: sh_link = .strtab (index shnum + 1), sh_info = first global
-    b = write_u32_le(b, old_size)
-    b = write_u32_le(b, SHT_SYMTAB_L)
-    b = write_u64_le(b, 0)
-    b = write_u64_le(b, 0)
-    b = write_u64_le(b, sym_off)
-    b = write_u64_le(b, st.symtab.len())
-    b = write_u32_le(b, shnum + 1)
-    b = write_u32_le(b, st.first_global)
-    b = write_u64_le(b, 8)
-    b = write_u64_le(b, 24)
+    var sh: [i64] = []
+    sh = write_u32_le(sh, old_size)
+    sh = write_u32_le(sh, SHT_SYMTAB_L)
+    sh = write_u64_le(sh, 0)
+    sh = write_u64_le(sh, 0)
+    sh = write_u64_le(sh, sym_off)
+    sh = write_u64_le(sh, st.symtab.len())
+    sh = write_u32_le(sh, shnum + 1)
+    sh = write_u32_le(sh, st.first_global)
+    sh = write_u64_le(sh, 8)
+    sh = write_u64_le(sh, 24)
     # .strtab
-    b = write_u32_le(b, old_size + 8)
-    b = write_u32_le(b, SHT_STRTAB_E)
-    b = write_u64_le(b, 0)
-    b = write_u64_le(b, 0)
-    b = write_u64_le(b, str_off)
-    b = write_u64_le(b, st.strtab.len())
-    b = write_u32_le(b, 0)
-    b = write_u32_le(b, 0)
-    b = write_u64_le(b, 1)
-    b = write_u64_le(b, 0)
+    sh = write_u32_le(sh, old_size + 8)
+    sh = write_u32_le(sh, SHT_STRTAB_E)
+    sh = write_u64_le(sh, 0)
+    sh = write_u64_le(sh, 0)
+    sh = write_u64_le(sh, str_off)
+    sh = write_u64_le(sh, st.strtab.len())
+    sh = write_u32_le(sh, 0)
+    sh = write_u32_le(sh, 0)
+    sh = write_u64_le(sh, 1)
+    sh = write_u64_le(sh, 0)
+    for x in sh:
+        b = b.push(x)
     b = elf_put_le(b, 0x28, 8, new_shoff)
     Ok(elf_put_le(b, 0x3c, 2, shnum + 2))
 
@@ -1388,40 +1414,60 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     val gotplt_v = elf_plan_addr(plan, ".got.plt")
 
     # --- relocate input sections ---
-    var j: i64 = 0
-    while j < refs.len():
-        val r = refs[j]
-        if r.rclass == RC_NONE:
+    # Section-outer, relocation-inner: each output section's buffer is taken
+    # out of `contents` once and written in place. The old shape handed the
+    # whole buffer to a patch helper and stored its return value per
+    # relocation, which copies the section every time under the interpreter and
+    # made the engine quadratic in (section bytes x relocations). The relocated
+    # value and the instruction-field merge still come from the reloc_engine
+    # oracle (reloc_apply / reloc_patch_word), never from a local formula.
+    var ck: i64 = 0
+    while ck < contents.len():
+        var buf = contents[ck]
+        var j: i64 = 0
+        while j < refs.len():
+            val r = refs[j]
+            if r.rclass == RC_NONE or r.out_sec != ck:
+                j = j + 1
+                continue
+            val p = plan.vaddrs[in_to_plan[ck]] + r.out_off
+            var rtype = r.rtype
+            var s = elf_ref_addr(ctx, lay, r)?
+            var a = r.addend
+            if elf_ref_merged(ctx, r):
+                a = 0   # the addend was folded into S by the piece lookup
+            if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
+                s = got_v + sc.got_idx[r.key] * 8
+                if a64:
+                    a = 0
+            else if r.relax:
+                buf[r.out_off - 2] = 0x8d
+                rtype = 2  # R_X86_64_PC32: lea foo(%rip)
+            else if r.rclass == RC_BRANCH and r.kind == SYMREF_IMPORT:
+                s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
+            else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
+                # ld.lld: a branch to an undefined weak symbol targets the next instruction
+                s = p + 4 - a
+            val applied = reloc_apply(target, buf, r.out_off, rtype, s, a, p)
+            if not applied.success:
+                return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
+            val width = reloc_patch_width(target, rtype)
+            if r.out_off >= 0 and r.out_off + width <= buf.len():
+                var word = applied.value
+                if width == 4:
+                    word = reloc_patch_word(target, rtype, elf_rd_le(buf, r.out_off, 4), applied.value)
+                var wi: i64 = 0
+                while wi < width:
+                    buf[r.out_off + wi] = (word >> (wi * 8)) & 0xff
+                    wi = wi + 1
             j = j + 1
-            continue
-        val k = r.out_sec
-        val p = plan.vaddrs[in_to_plan[k]] + r.out_off
-        var rtype = r.rtype
-        var s = elf_ref_addr(ctx, lay, r)?
-        var a = r.addend
-        if elf_ref_merged(ctx, r):
-            a = 0   # the addend was folded into S by the piece lookup
-        if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
-            s = got_v + sc.got_idx[r.key] * 8
-            if a64:
-                a = 0
-        else if r.relax:
-            var buf = contents[k]
-            buf[r.out_off - 2] = 0x8d
-            contents[k] = buf
-            rtype = 2  # R_X86_64_PC32: lea foo(%rip)
-        else if r.rclass == RC_BRANCH and r.kind == SYMREF_IMPORT:
-            s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
-        else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
-            # ld.lld: a branch to an undefined weak symbol targets the next instruction
-            s = p + 4 - a
-        val applied = reloc_apply(target, contents[k], r.out_off, rtype, s, a, p)
-        if not applied.success:
-            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
-        contents[k] = reloc_patch_bytes(target, contents[k], r.out_off, rtype, s, a, p)
-        j = j + 1
+        contents[ck] = buf
+        ck = ck + 1
 
     # --- synthetic contents ---
+    # Every table below is grown by inline pushes; the entry encoders are called
+    # on an EMPTY buffer so each returns only its own entry (a growing table
+    # handed to an encoder is copied on every entry under the interpreter).
     var got: [i64] = []
     var rela_rel: [i64] = []
     var rela_sym: [i64] = []
@@ -1430,13 +1476,17 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         val r = refs[sc.got_ref[gi]]
         val slot = got_v + gi * 8
         if r.kind == SYMREF_IMPORT:
-            got = write_u64_le(got, 0)
-            rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0)
+            for x in write_u64_le([], 0):
+                got = got.push(x)
+            for x in elf_rela_entry([], slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0):
+                rela_sym = rela_sym.push(x)
         else:
             val v = elf_ref_addr(ctx, lay, r)?
-            got = write_u64_le(got, v)
+            for x in write_u64_le([], v):
+                got = got.push(x)
             if pie and r.kind == SYMREF_DEFINED:
-                rela_rel = elf_rela_entry(rela_rel, slot, 0, elf_dyn_relative(target), v)
+                for x in elf_rela_entry([], slot, 0, elf_dyn_relative(target), v):
+                    rela_rel = rela_rel.push(x)
         gi = gi + 1
     for jr in sc.relative:
         val r = refs[jr]
@@ -1444,17 +1494,20 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         var ra = r.addend
         if elf_ref_merged(ctx, r):
             ra = 0
-        rela_rel = elf_rela_entry(rela_rel, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + ra)
+        for x in elf_rela_entry([], plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + ra):
+            rela_rel = rela_rel.push(x)
     for js in sc.sym_abs:
         val r = refs[js]
-        rela_sym = elf_rela_entry(rela_sym, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend)
+        for x in elf_rela_entry([], plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend):
+            rela_sym = rela_sym.push(x)
     var rela_dyn = rela_rel
     for x in rela_sym:
         rela_dyn = rela_dyn.push(x)
     var rela_plt: [i64] = []
     var pi: i64 = 0
     while pi < nplt:
-        rela_plt = elf_rela_entry(rela_plt, gotplt_v + (GOTPLT_RESERVED + pi) * 8, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0)
+        for x in elf_rela_entry([], gotplt_v + (GOTPLT_RESERVED + pi) * 8, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0):
+            rela_plt = rela_plt.push(x)
         pi = pi + 1
 
     var init_v: i64 = 0

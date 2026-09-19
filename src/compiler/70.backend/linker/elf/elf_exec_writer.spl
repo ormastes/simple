@@ -339,31 +339,50 @@ fn elf_write_image(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExecPlan,
     val shnum = plan.secs.len() + 2
     val phnum = plan.segments.len()
 
+    # The image buffer is only ever appended to by the inline loops below.
+    # Handing a multi-hundred-kilobyte buffer to write_u64_le / write_bytes /
+    # write_zeros and storing the return value copies it on every call, which
+    # is quadratic in image size (measured: 102 s for 80k such appends vs 3 ms
+    # for the same appends written inline). The per-record emitters are still
+    # the single encoding definition — they are called on an EMPTY buffer, so
+    # each returns just its own record, which is then appended byte by byte.
     var b: [i64] = []
-    b = emit_elf_header_full(b, e_type, e_machine, e_entry, ELF64_HEADER_SIZE, shoff, phnum, shnum, shnum - 1)
+    for x in emit_elf_header_full([], e_type, e_machine, e_entry, ELF64_HEADER_SIZE, shoff, phnum, shnum, shnum - 1):
+        b = b.push(x)
     for seg in plan.segments:
-        b = write_u32_le(b, seg.p_type)
-        b = write_u32_le(b, seg.p_flags)
-        b = write_u64_le(b, seg.p_offset)
-        b = write_u64_le(b, seg.p_vaddr)
-        b = write_u64_le(b, seg.p_paddr)
-        b = write_u64_le(b, seg.p_filesz)
-        b = write_u64_le(b, seg.p_memsz)
-        b = write_u64_le(b, seg.p_align)
+        var ph: [i64] = []
+        ph = write_u32_le(ph, seg.p_type)
+        ph = write_u32_le(ph, seg.p_flags)
+        ph = write_u64_le(ph, seg.p_offset)
+        ph = write_u64_le(ph, seg.p_vaddr)
+        ph = write_u64_le(ph, seg.p_paddr)
+        ph = write_u64_le(ph, seg.p_filesz)
+        ph = write_u64_le(ph, seg.p_memsz)
+        ph = write_u64_le(ph, seg.p_align)
+        for x in ph:
+            b = b.push(x)
 
     var i: i64 = 0
     while i < plan.secs.len():
         if plan.secs[i].sh_type != SHT_NOBITS_E:
-            b = write_zeros(b, plan.offsets[i] - b.len())
-            b = write_bytes(b, contents[i])
+            while b.len() < plan.offsets[i]:
+                b = b.push(0)
+            for x in contents[i]:
+                b = b.push(x & 0xff)
         i = i + 1
 
-    b = write_zeros(b, shstr_off - b.len())
-    b = write_bytes(b, shstr.data)
-    b = write_zeros(b, shoff - b.len())
+    while b.len() < shstr_off:
+        b = b.push(0)
+    for x in shstr.data:
+        b = b.push(x & 0xff)
+    while b.len() < shoff:
+        b = b.push(0)
 
     # Section header table: null, output sections, .shstrtab.
-    b = write_zeros(b, ELF64_SHDR_SIZE)
+    var z: i64 = 0
+    while z < ELF64_SHDR_SIZE:
+        b = b.push(0)
+        z = z + 1
     i = 0
     while i < plan.secs.len():
         val s = plan.secs[i]
@@ -373,12 +392,14 @@ fn elf_write_image(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExecPlan,
         val layout = ElfLayoutSection(name: s.name, sh_name_idx: strtab_find(shstr, s.name),
             sh_type: s.sh_type, sh_flags: s.sh_flags, sh_offset: plan.offsets[i], sh_size: s.size,
             sh_link: link, sh_info: s.info, sh_addralign: s.align, sh_entsize: s.entsize, data: [])
-        b = emit_section_header_at(b, layout, plan.vaddrs[i])
+        for x in emit_section_header_at([], layout, plan.vaddrs[i]):
+            b = b.push(x)
         i = i + 1
     val shstr_layout = ElfLayoutSection(name: ".shstrtab", sh_name_idx: strtab_find(shstr, ".shstrtab"),
         sh_type: SHT_STRTAB_E, sh_flags: 0, sh_offset: shstr_off, sh_size: shstr.data.len(),
         sh_link: 0, sh_info: 0, sh_addralign: 1, sh_entsize: 0, data: [])
-    b = emit_section_header_at(b, shstr_layout, 0)
+    for x in emit_section_header_at([], shstr_layout, 0):
+        b = b.push(x)
     b
 
 # ============================================================================

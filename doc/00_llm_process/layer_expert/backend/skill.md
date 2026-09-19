@@ -259,3 +259,31 @@ runtimes (`linker.rs:1642`, ~514 duplicate `rt_*` symbols at `:1649` resolved by
 archive order + `/FORCE:MULTIPLE` at `:1654-1668`). Full write-up, table and
 landmine: [runtime layer expert](../runtime/skill.md) § Session update
 2026-09-06. Tracking PR: <https://github.com/ormastes/simple/pull/403>.
+
+## Internal ELF linker: two interpreter perf traps (2026-09-19, lane C4)
+
+Both were measured on the seed interpreter (the engine is ALWAYS interpreted
+today: the JIT compiles the entry module's 394 functions and then drops the
+whole module with `[jit-fallback] unresolved external symbol 'elf_link'`).
+
+1. **Never hand a growing buffer to an append helper.**
+   `b = write_u64_le(b, v)` / `write_bytes` / `write_zeros` / `elf_sym_entry`
+   / `elf_rela_entry` COPY the whole buffer per call: 80k appends cost 102 s
+   that way vs 3.3 ms written inline as `b = b.push(x)`. Call the record
+   encoder on an EMPTY buffer and append its result inline — that keeps one
+   encoding definition and stays linear. `var r = b` is a copy too, so an
+   "in-place" helper is still O(n) per call; only the function that owns the
+   buffer can write it in O(1). Bug record:
+   `doc/08_tracking/bug/interpreter_array_param_return_reassign_copies_buffer_2026-09-19.md`.
+2. **Never rebuild a section to patch 4 bytes.** `patch_u32_le`/`patch_u64_le`
+   used to rebuild the buffer element by element per relocation (97.4% of a
+   20-object link). They write in place now, and the static driver applies
+   relocations section-outer so each section buffer leaves `contents` once.
+   `reloc_patch_width` / `reloc_patch_word` are the shared oracle for the
+   width and the AArch64 instruction-field merge — do not re-derive either.
+
+Headline numbers (`elf_link` only, aarch64 seed interpreter): synthetic
+20-object static link 38.05 s -> 0.36 s, 200-object 3.62 s, dynamic-against-libc
+0.39 s -> 0.22 s, all outputs byte-identical and still running (exit 42).
+Harness: `sh scripts/perf/bench-elf-link.shs`. Full record:
+`doc/10_metrics/compiler/linker/internal_elf_engine_perf_2026-09-19.md`.
