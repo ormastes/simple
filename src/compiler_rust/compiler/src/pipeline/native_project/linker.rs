@@ -670,6 +670,13 @@ impl NativeProjectBuilder {
             "rt_set_args",
             "rt_function_not_found",
             "rt_string_bytes",
+            // Archive-retention anchor for src/runtime/runtime_prof_sample.c:
+            // that TU is referenced by nothing (its sampler activates via an
+            // env-gated constructor), so without a forced root the lazy
+            // archive link would drop it and the PC sampler would silently
+            // vanish from produced binaries. Guarded by runtime_defined, so
+            // archives predating the TU simply skip this root.
+            "prof_sample_force_link",
         ] {
             if runtime_defined.contains(root) {
                 required.insert(root.to_string());
