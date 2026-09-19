@@ -143,3 +143,43 @@ mirrored **byte-identically** to `test/unit/compiler/lint/` (verified with
 `cmp`), so they are not offenders in either direction. Offender list as saved
 by the helper: `/tmp/test_tree_divergence_preexisting.txt` (3206 entries, not
 copied into the tree — it is BASE state, not a product of this change).
+
+## Third surface checked: `src/app/cli/query_lint.spl` (LSP/MCP diagnostics)
+
+Checked because the repo has form for exactly this (see the STUB003 "the live
+emitter is the text reimplementation, not this AST checker" note in
+`entry_and_fixes.spl`). It is **not** a third admission rule: it calls the same
+`check_collection_patterns(decl_indices)` (`query_lint.spl`, the `--- C2:
+COLL001-008` block), so the detector is still the single source of the
+findings, and it deliberately never raises a COLL to LSP-error severity
+("Query collection diagnostics are still source-pattern facts").
+
+It did, however, have its OWN position recovery — `_query_callable_line(
+locations, w.item_name)` with the column hardcoded to `1` — so every COLL
+diagnostic an editor or MCP client saw pointed at the enclosing function
+header. Changed to prefer `w.line`/`w.column` with that as the fallback, the
+same rule the CLI path uses.
+
+**That change is UNVERIFIED BY EXECUTION, and here is why.** `query_lint.spl`
+does not compile on the deployed seed, before this lane and independently of
+it:
+
+```
+$ bin/simple test test/01_unit/compiler/lint/collection_two_array_dedup_spec.spl
+error: compile failed: parse: in .../src/app/cli/query_lint.spl:
+  Unexpected token: expected identifier, found Assign
+```
+
+Reproduced against the **pristine** `HEAD` copy of the file (`git checkout --`
+first), so it is pre-existing and not introduced here. Consequences, stated
+rather than glossed:
+
+- No spec in this lane can import anything from that module, so the intended
+  example (assert the emitted JSON carries `"line":8`, not the fn header) was
+  removed rather than left failing.
+- The COLL diagnostics on the LSP/MCP surface are presumably not reachable on
+  this binary at all. That is a separate defect with a wider blast radius than
+  this lane and is NOT claimed fixed here.
+- The three-line position change is syntactically ordinary (`val x = if c: a
+  else: b`, used throughout the tree) and mirrors the verified CLI change, but
+  nobody has run it. Re-verify it when the parse failure above is fixed.
