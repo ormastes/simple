@@ -2019,6 +2019,193 @@ spl_u64 rt_arm64_mrs_sctlr_el1(void) {
     return value;
 }
 
+/* The rest of the src/os/kernel/arch/arm64/cpu.spl extern surface. The
+ * instruction text is copied from that module's pure-Simple inline-asm twin
+ * (cpu.spl before merge e274cd33719, which is also eb2781abc3b). The twin
+ * cannot be linked on this lane yet: the seed's
+ * cranelift backend lowers `asm volatile` to calls to undefined
+ * `__simple_asm_H<hash>` helpers. Operands use the raw u64 extern ABI, the
+ * same as rt_arm64_mrs_sctlr_el1 above. */
+spl_u64 rt_arm64_mrs_currentel(void) {
+    spl_u64 value;
+    __asm__ volatile("mrs %0, CurrentEL" : "=r"(value));
+    return value;
+}
+
+spl_u64 rt_arm64_mrs_mpidr_el1(void) {
+    spl_u64 value;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(value));
+    return value;
+}
+
+spl_u64 rt_arm64_mrs_ttbr0_el1(void) {
+    spl_u64 value;
+    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(value));
+    return value;
+}
+
+spl_u64 rt_arm64_mrs_ttbr1_el1(void) {
+    spl_u64 value;
+    __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(value));
+    return value;
+}
+
+void rt_arm64_msr_vbar_el1(spl_u64 value) {
+    __asm__ volatile("msr vbar_el1, %0" : : "r"(value) : "memory");
+}
+
+void rt_arm64_msr_ttbr0_el1(spl_u64 value) {
+    __asm__ volatile("msr ttbr0_el1, %0" : : "r"(value) : "memory");
+}
+
+void rt_arm64_msr_ttbr1_el1(spl_u64 value) {
+    __asm__ volatile("msr ttbr1_el1, %0" : : "r"(value) : "memory");
+}
+
+void rt_arm64_msr_tcr_el1(spl_u64 value) {
+    __asm__ volatile("msr tcr_el1, %0" : : "r"(value) : "memory");
+}
+
+void rt_arm64_msr_mair_el1(spl_u64 value) {
+    __asm__ volatile("msr mair_el1, %0" : : "r"(value) : "memory");
+}
+
+void rt_arm64_msr_sctlr_el1(spl_u64 value) {
+    __asm__ volatile("msr sctlr_el1, %0" : : "r"(value) : "memory");
+}
+
+void rt_arm64_isb(void) {
+    __asm__ volatile("isb" ::: "memory");
+}
+
+void rt_arm64_dsb(void) {
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+void rt_arm64_dmb(void) {
+    __asm__ volatile("dmb sy" ::: "memory");
+}
+
+void rt_arm64_wfi(void) {
+    __asm__ volatile("wfi" ::: "memory");
+}
+
+void rt_arm64_wfe(void) {
+    __asm__ volatile("wfe" ::: "memory");
+}
+
+void rt_arm64_tlbi_alle1(void) {
+    __asm__ volatile("tlbi alle1" ::: "memory");
+}
+
+/* The operand is already VA >> 12; cpu.spl's tlbi_vae1 wrapper shifts it. */
+void rt_arm64_tlbi_vae1(spl_u64 operand) {
+    __asm__ volatile("tlbi vae1, %0" : : "r"(operand) : "memory");
+}
+
+/* `msr DAIFSet/DAIFClr, #imm` takes its mask as an immediate, but here the
+ * mask is a runtime value. DAIFSet #m sets DAIF bits [9:6] from m[3:0], so the
+ * same effect is a read-modify-write of the DAIF register. Interrupts that are
+ * already masked cannot arrive between the read and the write. For the clear
+ * form, the caller is unmasking anyway. */
+void rt_arm64_daif_set(spl_u64 mask) {
+    spl_u64 daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    daif |= (mask & 0xFULL) << 6;
+    __asm__ volatile("msr daif, %0" : : "r"(daif) : "memory");
+}
+
+void rt_arm64_daif_clr(spl_u64 mask) {
+    spl_u64 daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    daif &= ~((mask & 0xFULL) << 6);
+    __asm__ volatile("msr daif, %0" : : "r"(daif) : "memory");
+}
+
+/* Fatal runtime trap: print the reason on the PL011 and park the core. It
+ * never returns, so a failed unwrap or an exhausted heap cannot hand garbage
+ * back to compiled code. `brk` stops an attached debugger. Without one, EL1
+ * takes the exception through the vector table (or the firmware's), so we
+ * mask everything first and fall into the wfi loop. */
+static void rt_fatal_trap(const char *reason) {
+    spl_u64 n = 0;
+    static const char prefix[] = "\r\n[TRAP] simple runtime: ";
+    static const char suffix[] = "\r\n[TRAP] core parked.\r\n";
+    uart_write_bytes(prefix, sizeof(prefix) - 1);
+    while (reason[n] != 0 && n < 256ULL) {
+        n = n + 1ULL;
+    }
+    uart_write_bytes(reason, n);
+    uart_write_bytes(suffix, sizeof(suffix) - 1);
+    __asm__ volatile("msr daifset, #0xf" ::: "memory");
+    for (;;) {
+        __asm__ volatile("wfi" ::: "memory");
+    }
+}
+
+/* Lossless u64 box. Codegen calls this before a full-width u64 crosses an
+ * erased RuntimeValue boundary, and rt_value_as_u64 on the way back
+ * (src/compiler_rust/compiler/src/mir/lower/lowering_core.rs
+ * box_u64_runtime_value / unbox_u64_runtime_value). The layout is the
+ * pure-Simple twin's (src/runtime/simple_core/core_values.spl rt_value_u64):
+ * 16 bytes, word 0 = 'UINT' kind 0x55494E54, word 1 = the raw bits, tagged
+ * HEAP. The kind's low byte (0x54) is none of this file's RT_HEAP_* object
+ * types, so rt_as_heap never mistakes the box for a string/array/enum.
+ * Hosted runtime_native.c falls back to a truncating int tag when allocation
+ * fails. Here that would hand back a wrong number, so exhaustion traps. */
+#define RT_HEAP_UINT_KIND 0x55494E54ULL
+spl_i64 rt_value_u64(spl_i64 bits) {
+    spl_u64 *box = (spl_u64 *)rt_alloc(16);
+    if (!box) {
+        rt_fatal_trap("rt_value_u64: freestanding heap exhausted");
+    }
+    box[0] = RT_HEAP_UINT_KIND;
+    box[1] = (spl_u64)bits;
+    return (spl_i64)(((spl_u64)box) | RT_VALUE_TAG_HEAP);
+}
+
+/* Mirror unbox (twin: core_values.spl rt_value_as_u64): the raw bits of a
+ * UINT box, else the inline int tag decoded. This runtime has no signed wide
+ * box, so the hosted runtime's middle arm has nothing to match here. */
+spl_i64 rt_value_as_u64(spl_i64 value) {
+    spl_u64 raw = (spl_u64)value;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        spl_u64 *box = (spl_u64 *)(raw & ~RT_VALUE_TAG_MASK);
+        if ((spl_u64)box >= 4096ULL && (box[0] & 0xFFFFFFFFULL) == RT_HEAP_UINT_KIND) {
+            return (spl_i64)box[1];
+        }
+    }
+    return value >> 3;
+}
+
+/* `.unwrap()` on Option/Result (twin: core_values.spl rt_unwrap_or_trap, and
+ * runtime_native.c / runtime objects.rs). Option (reserved enum_id 1) matches
+ * the ordinal or the name-hash discriminant. Result matches by the stable
+ * variant-name hashes. A non-enum or an unrelated enum returns unchanged.
+ * None/Err traps. */
+spl_i64 rt_unwrap_or_trap(spl_i64 value) {
+    RtEnum *e = rt_as_enum(value);
+    if (!e) {
+        return value;
+    }
+    if (e->enum_id == 1U) {
+        if (e->discriminant == 0U || e->discriminant == 4053299545U) {
+            return e->payload;
+        }
+        if (e->discriminant == 1U || e->discriminant == 2371748697U) {
+            rt_fatal_trap(".unwrap() called on None");
+        }
+        return value;
+    }
+    if (e->discriminant == 2405352012U) {
+        return e->payload;
+    }
+    if (e->discriminant == 4200179024U) {
+        rt_fatal_trap(".unwrap() called on Err");
+    }
+    return value;
+}
+
 /* ============================================================================
  * Remaining generic rt_* primitives needed to link limine_boot_aarch64.spl +
  * klog_api.spl + os.kernel.boot.mmio against this file. Ported/adapted from

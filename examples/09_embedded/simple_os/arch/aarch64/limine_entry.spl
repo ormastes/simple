@@ -32,6 +32,19 @@
 
 use os.kernel.boot.limine_boot_aarch64.{limine_aarch64_boot_main}
 
+# Run every module's generated initializer before any kernel code.
+#
+# `_init_all.o` defines `__simple_call_module_inits`, which calls each
+# `__module_init_<module>`. On a hosted target the generated `main()` stub
+# calls it (native_project/linker.rs). A freestanding link has no such stub,
+# so nothing referenced it, `--gc-sections` dropped it, and every module-level
+# global that needs a heap-boxed initializer stayed at its .bss zero — a NULL
+# array, not an empty one. Measured 2026-09-19: `pmm.spl`'s
+# `g_pmm_contiguous_bases: [u64; 256]` was NULL, and the first read in
+# `_pmm_remove_containing_page` took a Data Abort at FAR 0x8 (ESR
+# 0x96000007) right after the PMM probe allocated its page.
+extern fn __simple_call_module_inits()
+
 @noreturn
 fn _start():
     """aarch64 Limine ELF entry point (see file header for why this must be
@@ -39,4 +52,5 @@ fn _start():
     a valid stack, and no arguments — no assembly boot glue needed here,
     unlike riscv64/x86_64's `_start` (which set up their own stack/mode
     first)."""
+    __simple_call_module_inits()
     limine_aarch64_boot_main()

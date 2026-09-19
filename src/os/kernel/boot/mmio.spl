@@ -2,6 +2,21 @@
 #
 # Wraps the C runtime volatile access functions.
 # These guarantee reads/writes are not optimized away by the compiler.
+#
+# The in-memory test journal below (`mmio_reset_for_test`,
+# `mmio_test_mode_enabled`, `mmio_disable_test_mode`, `mmio_invalidate_tlb`)
+# was deleted by merge `e274cd33719` (2026-08-27) while its callers stayed:
+# `limine_boot_aarch64.spl:532`, `arch/x86_64/arch_init.spl:47,84`,
+# `arch/x86_32/topology.spl:127`, `arch/arm64/ramfb.spl:119`,
+# `memory/vmm_core.spl:336,412,533,540` and four integration specs. The
+# aarch64 Limine kernel therefore failed to link with `undefined symbol:
+# mmio_disable_test_mode` (measured 2026-09-19). It is restored here against
+# the hardware path this file already had — the pre-merge version routed
+# through `os.kernel.boot.mmio_hardware`, whose `mmio_read*`/`mmio_write*`
+# share their names with this module's, and the seed then resolves a caller's
+# `mmio_write8` to the raw-volatile one: a spec with test mode ON writes to
+# physical 0x1000 and dies (SIGSEGV, reproduced 2026-09-19). Keeping the
+# `rt_mmio_*` externs avoids that name collision entirely.
 
 extern fn rt_mmio_read_u64(addr: u64) -> u64
 extern fn rt_mmio_write_u64(addr: u64, value: u64)
@@ -11,35 +26,126 @@ extern fn rt_mmio_read_u16(addr: u64) -> u16
 extern fn rt_mmio_write_u16(addr: u64, value: u16)
 extern fn rt_mmio_read_u8(addr: u64) -> u8
 extern fn rt_mmio_write_u8(addr: u64, value: u8)
+extern fn rt_invlpg(addr: u64)
+
+var _mmio_test_mode: bool = false
+var _mmio_test_addr8: [u64] = []
+var _mmio_test_value8: [u8] = []
+var _mmio_test_addr16: [u64] = []
+var _mmio_test_value16: [u16] = []
+var _mmio_test_addr32: [u64] = []
+var _mmio_test_value32: [u32] = []
+var _mmio_test_addr64: [u64] = []
+var _mmio_test_value64: [u64] = []
+
+fn _mmio_test_find(addresses: [u64], addr: u64) -> i64:
+    # The journal is append-only, so the LAST entry for an address is the live
+    # value. Scan backwards and return on the first hit: identical semantics to
+    # a forward full scan, but O(distance-from-end) instead of O(len) per read.
+    # With per-page bitmap reads this was the difference between ~34.6M
+    # interpreter ops and well under the 10M execution limit.
+    var i: i64 = addresses.len() - 1
+    while i >= 0:
+        if addresses[i] == addr:
+            return i
+        i = i - 1
+    -1
+
+fn mmio_reset_for_test():
+    """Route every access to the in-memory journal and empty it."""
+    _mmio_test_mode = true
+    _mmio_test_addr8 = []
+    _mmio_test_value8 = []
+    _mmio_test_addr16 = []
+    _mmio_test_value16 = []
+    _mmio_test_addr32 = []
+    _mmio_test_value32 = []
+    _mmio_test_addr64 = []
+    _mmio_test_value64 = []
+
+fn mmio_test_mode_enabled() -> bool:
+    """True while accesses go to the journal instead of hardware."""
+    _mmio_test_mode
+
+fn mmio_disable_test_mode():
+    """Pin the MMIO layer to the real-hardware path.
+
+    Freestanding native builds skip module-level initializers, so the
+    `var _mmio_test_mode: bool = false` default above never executes and the
+    flag reads garbage (often non-zero = true) out of un-zeroed .bss. That
+    routes every `mmio_read*`/`mmio_write*` through the empty test journal, so
+    they return 0 — which silently breaks the ring-3 ELF-magic checks that read
+    the resident blob via `mmio_read*`. Boot entries call this once, before any
+    MMIO, to force the flag off deterministically.
+    """
+    _mmio_test_mode = false
+
+fn mmio_invalidate_tlb(addr: u64):
+    """Invalidate the TLB entry for one address. A no-op under test mode."""
+    if _mmio_test_mode:
+        return
+    rt_invlpg(addr)
 
 fn mmio_read64(addr: u64) -> u64:
     """Read 64-bit value from memory-mapped register."""
+    if _mmio_test_mode:
+        val index = _mmio_test_find(_mmio_test_addr64, addr)
+        if index < 0: return 0
+        return _mmio_test_value64[index]
     rt_mmio_read_u64(addr)
 
 fn mmio_write64(addr: u64, value: u64):
     """Write 64-bit value to memory-mapped register."""
+    if _mmio_test_mode:
+        _mmio_test_addr64 = _mmio_test_addr64.push(addr)
+        _mmio_test_value64 = _mmio_test_value64.push(value)
+        return
     rt_mmio_write_u64(addr, value)
 
 fn mmio_read32(addr: u64) -> u32:
     """Read 32-bit value from memory-mapped register."""
+    if _mmio_test_mode:
+        val index = _mmio_test_find(_mmio_test_addr32, addr)
+        if index < 0: return 0
+        return _mmio_test_value32[index]
     rt_mmio_read_u32(addr)
 
 fn mmio_write32(addr: u64, value: u32):
     """Write 32-bit value to memory-mapped register."""
+    if _mmio_test_mode:
+        _mmio_test_addr32 = _mmio_test_addr32.push(addr)
+        _mmio_test_value32 = _mmio_test_value32.push(value)
+        return
     rt_mmio_write_u32(addr, value)
 
 fn mmio_read16(addr: u64) -> u16:
     """Read 16-bit value from memory-mapped register."""
+    if _mmio_test_mode:
+        val index = _mmio_test_find(_mmio_test_addr16, addr)
+        if index < 0: return 0
+        return _mmio_test_value16[index]
     rt_mmio_read_u16(addr)
 
 fn mmio_write16(addr: u64, value: u16):
     """Write 16-bit value to memory-mapped register."""
+    if _mmio_test_mode:
+        _mmio_test_addr16 = _mmio_test_addr16.push(addr)
+        _mmio_test_value16 = _mmio_test_value16.push(value)
+        return
     rt_mmio_write_u16(addr, value)
 
 fn mmio_read8(addr: u64) -> u8:
     """Read 8-bit value from memory-mapped register."""
+    if _mmio_test_mode:
+        val index = _mmio_test_find(_mmio_test_addr8, addr)
+        if index < 0: return 0u8
+        return _mmio_test_value8[index]
     rt_mmio_read_u8(addr)
 
 fn mmio_write8(addr: u64, value: u8):
     """Write 8-bit value to memory-mapped register."""
+    if _mmio_test_mode:
+        _mmio_test_addr8 = _mmio_test_addr8.push(addr)
+        _mmio_test_value8 = _mmio_test_value8.push(value)
+        return
     rt_mmio_write_u8(addr, value)
