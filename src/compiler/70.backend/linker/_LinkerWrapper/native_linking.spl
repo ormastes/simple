@@ -561,9 +561,10 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
     """Fold one external-path arg list into the plan, or name the first entry
     the internal engine cannot express.
 
-    Every `-l`/`-u`/`--as-needed` list on the internal route is folded through
-    here -- native_link_std_lib_args, native_all_gnu_support_args and
-    config.libraries -- and both callers of the route reach it through
+    Every arg list on the internal route is folded through here --
+    native_runtime_archive_link_args, native_link_std_lib_args,
+    native_all_gnu_support_args and config.libraries -- and both callers of
+    the route (the only two callers of internal_link_native) reach it through
     `internal_link_plan` (`link_native_unix`'s internal arm and
     `link_engine_external.link_request_internal`). So the tables cannot drift
     apart or be dropped independently; dropping the std-lib list silently is
@@ -572,10 +573,40 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
     var libraries = plan.libraries
     var as_needed = plan.as_needed
     var roots = plan.roots
+    var archives = plan.archives
+    var lib_dirs = plan.lib_dirs
+    var runpath = plan.runpath
     var region_as_needed = false
     var i: i64 = 0
     while i < args.len():
         val tok = args[i]
+        if tok == "-L":
+            # First occurrence wins, which is ld's effective search order; a
+            # repeated -L would change nothing and only slow resolution.
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-L' with no directory after it")
+            if not lib_dirs.contains(args[i + 1]):
+                lib_dirs = lib_dirs.push(args[i + 1])
+            i = i + 2
+            continue
+        if tok == "-rpath":
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-rpath' with no directory after it")
+            runpath = args[i + 1]
+            i = i + 2
+            continue
+        if not tok.starts_with("-"):
+            # A bare path is an archive input. The external arm repeats
+            # archives[0] after the pair (native_runtime_archive_link_args'
+            # rescan_core_pair) because ld resolves archives in command order;
+            # this engine's archive fixpoint iterates to closure over all
+            # archives at once, so the repeat is SUBSUMED, not dropped -- and
+            # re-reading a 373 MB archive would cost real time. Deduped here
+            # for that reason, which is a deliberate, stated divergence.
+            if not archives.contains(tok):
+                archives = archives.push(tok)
+            i = i + 1
+            continue
         if tok == "--as-needed":
             region_as_needed = true
             i = i + 1
@@ -605,25 +636,39 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
             i = i + 1
             continue
         return Err("internal engine: unsupported {origin} entry '{tok}' (internal:elf honours only '-u <sym>', '-l<name>', '--as-needed' and '--no-as-needed')")
-    Ok(InternalLinkPlan(archives: plan.archives, libraries: libraries,
-        as_needed: as_needed, roots: roots, lib_dirs: plan.lib_dirs,
-        runpath: plan.runpath))
+    Ok(InternalLinkPlan(archives: archives, libraries: libraries,
+        as_needed: as_needed, roots: roots, lib_dirs: lib_dirs,
+        runpath: runpath))
 
 pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
         os: text) -> Result<InternalLinkPlan, text>:
-    """Assemble the internal engine's inputs exactly as link_native_unix's
-    external arm assembles its argv: resolve the runtime bundle to archives,
-    arm the native_all support table on the SAME support-input set (objects +
-    runtime archives), and append the caller's own libraries/library paths.
+    """Assemble the internal engine's inputs by folding the SAME arg lists
+    link_native_unix's external arm hands to ld -- not by reimplementing what
+    they contain.
 
-    Every entry of the table is either translated or named in an Err -- this is
-    the route that used to pass libraries=[] and no roots."""
+    That distinction is the point. Four separate "matches the external path"
+    claims on this route turned out to be false because the internal branch
+    re-derived a subset by hand; the worst was the runtime provider, where the
+    external arm emits `-L <dir> -lsimple_compiler` (and lld then fails with
+    "unable to find library -lsimple_compiler") while this route found zero
+    archives and linked successfully. The three producers below are the exact
+    functions the external arm calls, in its order; anything in their output
+    that internal:elf cannot express is a named Err from
+    internal_absorb_link_args, never a drop.
+
+    One deliberate divergence, stated in internal_absorb_link_args: the
+    external arm's repeat of archives[0] is subsumed by the archive fixpoint."""
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
-    var archives: [text] = []
+    var lib_dirs: [text] = []
+    for dir in config.library_paths:
+        lib_dirs = lib_dirs.push(dir)
+    var plan = InternalLinkPlan(archives: [], libraries: [], as_needed: [],
+        roots: [], lib_dirs: lib_dirs, runpath: "")
+    var runtime_archives: [text] = []
     if runtime_dir != "" and runtime_dir != "none":
-        archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+        runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
         val selection_error = native_runtime_provider_selection_error_for(
             runtime_dir, config.runtime_bundle,
             file_exists(runtime_dir + "/libsimple_compiler.a"),
@@ -631,21 +676,18 @@ pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
             file_exists(runtime_dir + "/libsimple_native_all.a"))
         if selection_error != "":
             return Err("internal engine: {selection_error}")
+        # Produces the archive paths, the rescan repeat, and either
+        # `-rpath <dir>` or the `-L <dir> -lsimple_compiler` fallback that
+        # makes an empty runtime directory a hard error rather than a silent
+        # zero-archive success.
+        plan = internal_absorb_link_args(
+            plan,
+            native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, false, true, true),
+            "runtime provider arguments")?
     var support_inputs = object_files
-    for archive in archives:
+    for archive in plan.archives:
         support_inputs = support_inputs.push(archive)
-    var lib_dirs: [text] = []
-    for dir in config.library_paths:
-        lib_dirs = lib_dirs.push(dir)
-    # `-rpath <runtime_dir>`: the external arm emits it next to the runtime
-    # archives (native_runtime_archive_link_args, emit_rpath=true on non-
-    # Windows). It becomes DT_RUNPATH. Dropping it was the third silent drop
-    # on this route.
-    var runpath = ""
-    if archives.len() > 0:
-        runpath = runtime_dir
-    var plan = InternalLinkPlan(archives: archives, libraries: [], as_needed: [],
-        roots: [], lib_dirs: lib_dirs, runpath: runpath)
     # Order mirrors link_native_unix's argv: std libs, then the native_all
     # support table, then the caller's own libraries.
     plan = internal_absorb_link_args(plan, native_link_std_lib_args(os, "ld"),
@@ -817,8 +859,14 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
     # Dedupe on BASENAME, not on the path: `-lc` resolves through
     # /usr/lib/<triple>/libc.so, whose GROUP script names /lib/<triple>/
     # libc.so.6 -- a different string for the same usr-merged file the CRT
-    # probe already loaded. Two distinct libraries never share a basename in
-    # one link (it is the SONAME), so this is exactly the right key.
+    # probe already loaded, which a path key would load twice.
+    #
+    # Honest limit: a basename is not the SONAME, it is only usually equal to
+    # it. Two DIFFERENT libraries with the same file name reached through two
+    # search directories would collapse to the first. Making this exact means
+    # keying on the parsed DT_SONAME, which needs the file parsed before the
+    # dedupe decision; if that case ever appears, that is the fix, not a
+    # wider heuristic.
     var seen_shared: [text] = [internal_shared_dedupe_key(libc)]
     var lib_i: i64 = 0
     while lib_i < libraries.len():

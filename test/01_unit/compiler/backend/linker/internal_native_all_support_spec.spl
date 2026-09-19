@@ -49,7 +49,19 @@ use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_gnu_support_args}
 use compiler.backend.linker._LinkerWrapper.native_linking.{internal_link_plan, internal_resolve_library, internal_absorb_link_args, InternalLinkPlan, InternalResolvedLib}
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.linker_wrapper.{link_to_native}
 use std.io_runtime.{file_read_bytes, shell}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
+
+fn with_internal_linker(block: fn()):
+    val previous = rt_env_get("SIMPLE_LINKER") ?? ""
+    rt_env_set("SIMPLE_LINKER", "internal")
+    block()
+    rt_env_set("SIMPLE_LINKER", previous)
 
 val FIX: text = "test/fixtures/linker/elf"
 
@@ -329,3 +341,31 @@ describe "internal ELF route - as-needed ANDs across occurrences of one name":
         val plan = planned.unwrap()
         expect(plan.as_needed[plan.libraries.index_of("m")]).to_equal(true)
         expect(plan.as_needed[plan.libraries.index_of("c")]).to_equal(false)
+
+describe "internal ELF route - the runtime provider is demanded, not skipped":
+    it "errors by name when the runtime directory has no provider at all":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The external arm emits `-L <dir> -lsimple_compiler` and lld fails 'unable to find library -lsimple_compiler'; finding 0 archives and linking anyway is a silent success where the real linker refuses")
+        val empty_dir = "{SANDBOX}/runtime_empty"
+        shell("mkdir -p '{empty_dir}' && rm -f '{empty_dir}'/*")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = empty_dir
+        with_internal_linker(fn():
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{SANDBOX}/runtime_empty_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("simple_compiler")
+        )
+
+    it "links when that same directory carries the provider the external arm names":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("With libsimple_compiler.a present the auto bundle selects it as an archive input and no -lsimple_compiler is emitted, so the link proceeds")
+        val filled_dir = "{SANDBOX}/runtime_filled"
+        shell("mkdir -p '{filled_dir}' && rm -f '{filled_dir}'/*.a && ar rc '{filled_dir}/libsimple_compiler.a'")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = filled_dir
+        with_internal_linker(fn():
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{SANDBOX}/runtime_filled_out", cfg)
+            expect(result.is_ok()).to_equal(true)
+        )

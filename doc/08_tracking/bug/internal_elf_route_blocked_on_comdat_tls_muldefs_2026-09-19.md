@@ -100,3 +100,24 @@ changes no existing receipt hash.
   — the route/roots evidence.
 * `test/01_unit/compiler/bootstrap/stage3_linker_knob_spec.spl` — the knob
   evidence.
+
+## Non-blocking gap: `-lgcc_s` linker scripts that use `-l` for their members
+
+Found by review, 2026-09-19. gcc ships `libgcc_s.so` as a linker script whose
+body is `GROUP ( libgcc_s.so.1 -lgcc )`. `ld.lld` resolves the `-lgcc` member
+through its own `-L` search path. `internal_linker_script_target`
+(`native_linking.spl`) only resolves members that name a FILE — absolute, or
+relative to the script's own directory — so it finds `libgcc_s.so.1`, which is
+the member that matters, but if that member were absent it would refuse with
+"naming no readable ELF member" where lld would still succeed via `-lgcc`.
+
+Impact today: none of the eight libraries in the native_all table is affected;
+this bites only a `-lgcc_s` that reaches the internal route.
+
+The proper fix is to make the script follower recursive — a `-l<name>` inside a
+GROUP re-enters `internal_resolve_library` with the same search directories.
+
+**Possibly moot:** lane T1 is removing the GCC dependency in favour of
+LLVM/compiler-rt. If that lands, `-lgcc_s` disappears from every table and this
+gap has no caller. Recorded anyway, because "another lane may delete the
+caller" is not the same as "this is correct".

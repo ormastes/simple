@@ -284,6 +284,13 @@ Traps worth knowing:
   `libraries`/`library_paths`/`runtime_path`/`runtime_bundle` left the list
   when `internal_link_plan` started honouring them; `extra_flags`,
   `retained_symbols`, `strip_output`, `debug` stay.
+- `internal_link_plan` FOLDS the external arm's own arg lists
+  (`native_runtime_archive_link_args`, `native_link_std_lib_args`,
+  `native_all_gnu_support_args`, `config.libraries`) through one translator.
+  Do not re-derive what they contain: four separate "matches the external
+  path" claims on this route were false because it did, the worst being an
+  empty runtime directory linking successfully while the external arm emits
+  `-L <dir> -lsimple_compiler` and lld fails "unable to find library".
 - BOTH entry points must go through `internal_link_plan`: `link_native_unix`'s
   internal arm AND `link_engine_external.link_request_internal`. Calling
   `internal_link_native` with its defaults drops every support table on that
