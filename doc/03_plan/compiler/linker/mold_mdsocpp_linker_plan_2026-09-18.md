@@ -192,8 +192,13 @@ what the seed's presence suggests:
 | F1 `runtime_path: "none"` | **pass** | The bootstrap stage link's own `NativeLinkConfig` carries `runtime_path: "none"`, the documented sentinel for "the LLVM pipeline supplies the runtime objects directly". Rejecting it was a false reject with nothing to honour, and it stopped the internal route at the one call site that links the compiler. A real `runtime_path` still rejects by name |
 | F1 full self-host link | **NOT achieved — blocked, stated as such** | See the ranked gap list below. No partial result is reported as a success |
 
-`native_linking_internal_spec` 5/13 → 13/13 (both trees byte-identical). All 27
-linker specs re-run individually: 27/27 `outcome=OK`, 0 failed.
+`native_linking_internal_spec` 5/14 → 14/14 (both trees byte-identical; the
+last two examples were added later in the lane, hence the 13/13 and 14/14
+figures below — the numbers are chronological). All 27
+linker specs re-run individually at `9782b90b0b3`: 27/27 `outcome=OK`, 0
+failed. The only two that import the changed file
+(`native_linking_internal_spec`, `link_engine_external_spec`) were re-run at
+the lane tip; the other 25 do not import it.
 
 ### Ranked gaps for a full self-host internal link
 
@@ -203,9 +208,20 @@ linker specs re-run individually: 27/27 `outcome=OK`, 0 failed.
    field — so a retained symbol living in an otherwise-unneeded archive member
    would be dropped by the fixpoint. Needs an `elf_static_link.spl` change
    (lane A7's file), not a `native_linking.spl` one.
-2. **TLS.** The deployed `simple` has `FLAGS BIND_NOW STATIC_TLS`; TLS
+2. **No `--allow-multiple-definition` mode.** The real stage config sets
+   `allow_duplicate_definitions: not stage4_requested` = `true`, and the
+   external path honours it by passing `--allow-multiple-definition`
+   (`native_linking.spl:140,145,1462`). The compiler corpus genuinely carries
+   duplicates — one native-build run on this host warned about `shell` x4,
+   `process_wait` x3, `process_run_with_limits` x3, `env_vars` x2,
+   `file_read_text_at` x2, `rotr32` x2, `sha256_process_block` x2. The
+   internal engine has no such mode and treats a duplicate strong definition
+   as a loud error, which is exactly why lane B3 left this field off the
+   reject list — so the real link fails on the first duplicate. Loud is
+   correct; it is still a blocker, and it is not currently rejected by name.
+3. **TLS.** The deployed `simple` has `FLAGS BIND_NOW STATIC_TLS`; TLS
    relocations are a named `UnsupportedFeature` in the engine (plan §11).
-3. **Interpreted-engine cost at real scale.** Measured on this host: the
+4. **Interpreted-engine cost at real scale.** Measured on this host: the
    per-byte `[i64]` widening `internal_link_native_read_i64` performs runs
    100 MB in 9.2 s at 1.28 GB RSS under the JIT. The stage-3 link's inputs are
    411 MB of archives (`libsimple_native_all.a` 390 MB,
@@ -214,10 +230,10 @@ linker specs re-run individually: 27/27 `outcome=OK`, 0 failed.
    fixpoint or relocation work — and the engine body runs interpreted, not
    JIT-compiled. Plan §11 already names "running the engine natively instead
    of in the interpreter" as required work; this is the measurement for it.
-4. **RELRO, symbol versions, section GC, `-O1` string merge** — already named
+5. **RELRO, symbol versions, section GC, `-O1` string merge** — already named
    in §11/§12 as next work; the compiler's own link needs at least RELRO
    (`BIND_NOW` is set on the shipped binary).
-5. **The stage-link inputs are not fully retained on this host.** The stage-3
+6. **The stage-link inputs are not fully retained on this host.** The stage-3
    directory keeps the three archives but not the generated entry object, and
    no archive defines `main` (`nm --defined-only` over all three finds none),
    so the real stage link cannot be reconstructed from retained artifacts — it
