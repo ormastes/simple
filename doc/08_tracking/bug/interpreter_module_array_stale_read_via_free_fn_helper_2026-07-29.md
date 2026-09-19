@@ -1,6 +1,66 @@
 # Bug: instance method reads a stale module-level array through a free-function helper (interpreter)
 
 - **Date:** 2026-07-29
+- **Status:** RESOLVED (2026-09-18) — no longer reproduces on either engine or either
+  spec route; now covered by two specs. See "Resolution 2026-09-18" below.
+- **Severity (as filed):** CRITICAL — silently wrong results, no error, on the default test engine
+- **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics audit)
+
+## Resolution 2026-09-18
+
+Re-measured on a seed built from `origin/main` on 2026-09-18. The check was run
+deliberately across every axis this record warns can disagree, because the record
+itself notes that "other variants during isolation reproduced on `run` and not
+`test` or vice versa, so ... it is easy to get a false negative by testing only
+one engine":
+
+| axis | free-function helper | inline read (control) |
+|---|---|---|
+| `bin/simple run` (JIT default) | **true** | true |
+| `SIMPLE_EXECUTION_MODE=interpret` | **true** | true |
+| `bin/simple test` (spec route) | **true** | true |
+
+`true` is the correct answer in every cell — the mutation written by `mark()` is
+visible through the free-function hop. The defect this record describes is gone.
+
+The date matters: the host's deployed seed was found on 2026-09-18 to be 12 days
+stale and miscompiling the default lane, and was redeployed
+(`seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`). Every measurement in
+this closure is against the new binary.
+
+### Two specs added, and why each one
+
+The record's own strongest finding was that the real implementation had **zero**
+behavioural coverage — `test/01_unit/lib/nogc_async_mut/async_spec.spl` defines a
+local stub `class CancellationToken` with a different field layout and no
+registry, and `async_host_spec.spl` only string-matches source text. Closing this
+without fixing that would leave the same hole that let the defect live.
+
+- `test/01_unit/interpreter/module_array_read_through_free_fn_spec.spl` pins the
+  language shape: a class method mutates a module-level array, and a free function
+  reads it back. Three examples, including a sibling-untouched case.
+- `test/01_unit/lib/nogc_async_mut/cancellation_token_spec.spl` pins the real
+  `std.async.cancellation` type — `token_new`, `cancel`, `is_cancelled`, `child`
+  — with six examples covering parent-to-child propagation, the absence of
+  child-to-parent propagation, and sibling independence. This is the first
+  behavioural coverage the only real cancellation implementation in the tree has
+  ever had.
+
+### The workaround in `cancellation.spl` stays
+
+`src/lib/nogc_async_mut/async/cancellation.spl` still does its registry reads
+inline in the method that owns `self`, as the "Known-good workaround" section
+below prescribes. It is not reverted. It works, reverting it would be a
+shape-only change to live stdlib code with nothing to gain, and the constraint is
+now pinned by the first spec above — so an innocent-looking refactor that
+reintroduces the free-function hop is guarded rather than merely discouraged.
+
+---
+
+## Original record, retained
+
+
+- **Date:** 2026-07-29
 - **Status:** open (worked around in `src/lib/nogc_async_mut/async/cancellation.spl`; root
   cause is in the interpreter, not fixable from pure Simple stdlib code)
 - **Severity:** CRITICAL — silently wrong results, no error, on the default test engine

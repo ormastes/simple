@@ -148,3 +148,7 @@ Not attempted this session (out of the silent-wrong-result scope of this lane).
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: affected file is a Perl script (scripts/check/lib/portable-hardlink-lock.pl), not .spl/.shs, and the audit itself spans 910 files across 388 commits. No change made.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked (deployed-binary/hardware)** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

@@ -163,3 +163,7 @@ The fixture's log also carries `unsupported MIR type kind [infer-arm]:
 HirTypeKind::Infer((0, 0))`, which is not in the 2026-08-07 record. Possibly
 pre-existing and merely unlogged; flagged, not investigated.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
