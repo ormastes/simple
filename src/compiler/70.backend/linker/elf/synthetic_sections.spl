@@ -1,13 +1,13 @@
 # Synthetic sections for the internal ELF linker — lane A7 slice 2.
 #
 # Byte builders for the linker-created sections (design §5, mold phase
-# "synthetic sections"): .got, .plt / .got.plt (aarch64), .dynsym, .dynstr,
-# SysV .hash, .rela.dyn / .rela.plt, .dynamic and .interp. Sizes are known
+# "synthetic sections"): .got, .plt / .got.plt (aarch64, x86_64 lazy), .dynsym, .dynstr,
+# SysV .hash + .gnu.hash, .rela.dyn / .rela.plt, .dynamic and .interp. Sizes are known
 # from the relocation scan before layout; contents are built after layout,
 # once every address is final. Pure: every function returns [i64] bytes.
 #
-# Not produced (reported, not faked): .gnu.hash, .gnu.version/_r, .eh_frame_hdr,
-# x86_64 .plt, TLS (.tdata/.tbss, TLSDESC/TPREL), RELRO.
+# Not produced (reported, not faked): .gnu.version/_r, .eh_frame_hdr,
+# x86_64 IBT/CET PLT, TLS (.tdata/.tbss, TLSDESC/TPREL), RELRO.
 
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_patch_bytes,
@@ -51,6 +51,7 @@ val DT_INIT_ARRAYSZ: i64 = 27
 val DT_FINI_ARRAYSZ: i64 = 28
 val DT_PREINIT_ARRAY: i64 = 32
 val DT_PREINIT_ARRAYSZ: i64 = 33
+val DT_GNU_HASH: i64 = 0x6ffffef5
 val DT_RELACOUNT: i64 = 0x6ffffff9
 val DT_FLAGS_1: i64 = 0x6ffffffb
 val DF_1_PIE: i64 = 0x08000000
@@ -60,10 +61,13 @@ val SHT_RELA_S: i64 = 4
 val SHT_HASH_S: i64 = 5
 val SHT_DYNAMIC_S: i64 = 6
 val SHT_DYNSYM_S: i64 = 11
+val SHT_GNU_HASH_S: i64 = 0x6ffffff6
 val SHF_INFO_LINK_S: i64 = 0x40
 
 val A64_PLT0_SIZE: i64 = 32
 val A64_PLT_ENTRY_SIZE: i64 = 16
+val X64_PLT0_SIZE: i64 = 16
+val X64_PLT_ENTRY_SIZE: i64 = 16
 val GOTPLT_RESERVED: i64 = 3
 
 # ============================================================================
@@ -158,6 +162,17 @@ fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynS
         i = i + 1
     b
 
+# reason: positional Elf64_Sym fields in on-disk order
+fn elf_sym_entry(buf: [i64], name_off: i64, info: i64, other: i64, shndx: i64, value: i64, size: i64) -> [i64]:
+    """One Elf64_Sym (24 bytes) for .symtab."""
+    var b = write_u32_le(buf, name_off)
+    b = b.push(info)
+    b = b.push(other)
+    b = b.push(shndx & 0xff)
+    b = b.push((shndx >> 8) & 0xff)
+    b = write_u64_le(b, value)
+    write_u64_le(b, size)
+
 fn elf_hash_size(nsyms: i64) -> i64:
     (2 + nsyms + nsyms) * 4
 
@@ -185,10 +200,90 @@ fn elf_build_hash(imports: [text]) -> [i64]:
         b = write_u32_le(b, x)
     b
 
-fn elf_plt_size_a64(n: i64) -> i64:
-    if n == 0:
-        return 0
-    A64_PLT0_SIZE + n * A64_PLT_ENTRY_SIZE
+fn elf_gnu_hash(name: text) -> i64:
+    """GNU (DJB) hash: h = h * 33 + c, truncated to u32."""
+    var h: i64 = 5381
+    for ch in name.bytes():
+        h = (h * 33 + (ch as i64)) & 0xffffffff
+    h
+
+fn elf_gnu_hash_nbuckets(n: i64) -> i64:
+    # ld.lld: max(symbols / 4, 1)
+    if n / 4 > 1:
+        return n / 4
+    1
+
+fn elf_gnu_hash_maskwords(n: i64) -> i64:
+    """ld.lld: NextPowerOf2(n * 12 bits / 64) — the next power of two strictly above."""
+    val x = (n * 12) / 64
+    var p: i64 = 1
+    while p <= x:
+        p = p * 2
+    p
+
+fn elf_gnu_hash_size(n: i64) -> i64:
+    16 + elf_gnu_hash_maskwords(n) * 8 + elf_gnu_hash_nbuckets(n) * 4 + n * 4
+
+fn elf_gnu_hash_sort(names: [text]) -> [text]:
+    """Stable order by bucket: .gnu.hash requires each bucket's symbols to be
+    contiguous at the tail of .dynsym, in bucket order."""
+    val nb = elf_gnu_hash_nbuckets(names.len())
+    var out: [text] = []
+    var b: i64 = 0
+    while b < nb:
+        for n in names:
+            if elf_gnu_hash(n) % nb == b:
+                out = out.push(n)
+        b = b + 1
+    out
+
+fn elf_build_gnu_hash(names: [text], symoffset: i64) -> [i64]:
+    """.gnu.hash over the hashed .dynsym tail names (already elf_gnu_hash_sort-ed),
+    which starts at .dynsym index symoffset. Layout ld.lld writes: header
+    [nbuckets, symoffset, maskwords, shift2=26], 64-bit bloom words, buckets
+    (first .dynsym index per bucket, 0 = empty), chain values (hash & ~1, bit 0
+    set on a bucket's last symbol)."""
+    val n = names.len()
+    val nb = elf_gnu_hash_nbuckets(n)
+    val mw = elf_gnu_hash_maskwords(n)
+    var bloom: [i64] = []
+    var i: i64 = 0
+    while i < mw:
+        bloom = bloom.push(0)
+        i = i + 1
+    var buckets: [i64] = []
+    i = 0
+    while i < nb:
+        buckets = buckets.push(0)
+        i = i + 1
+    var hashes: [i64] = []
+    for s in names:
+        hashes = hashes.push(elf_gnu_hash(s))
+    var chain: [i64] = []
+    i = 0
+    while i < n:
+        val h = hashes[i]
+        val w = (h / 64) % mw
+        bloom[w] = bloom[w] | (1 << (h % 64)) | (1 << ((h >> 26) % 64))
+        val bk = h % nb
+        if buckets[bk] == 0:
+            buckets[bk] = symoffset + i
+        var v = h & 0xfffffffe
+        if i + 1 == n or hashes[i + 1] % nb != bk:
+            v = v | 1
+        chain = chain.push(v)
+        i = i + 1
+    var b = write_u32_le([], nb)
+    b = write_u32_le(b, symoffset)
+    b = write_u32_le(b, mw)
+    b = write_u32_le(b, 26)
+    for x in bloom:
+        b = write_u64_le(b, x)
+    for x in buckets:
+        b = write_u32_le(b, x)
+    for x in chain:
+        b = write_u32_le(b, x)
+    b
 
 fn elf_gotplt_size(n: i64) -> i64:
     if n == 0:
@@ -234,6 +329,66 @@ fn elf_build_gotplt(n: i64, plt0_addr: i64) -> [i64]:
         i = i + 1
     b
 
+fn elf_plt0_size(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            A64_PLT0_SIZE
+        case _:
+            X64_PLT0_SIZE
+
+fn elf_plt_entry_size(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            A64_PLT_ENTRY_SIZE
+        case _:
+            X64_PLT_ENTRY_SIZE
+
+fn elf_plt_size(target: RelocArch, n: i64) -> i64:
+    if n == 0:
+        return 0
+    elf_plt0_size(target) + n * elf_plt_entry_size(target)
+
+fn elf_x64_rip32(buf: [i64], disp: i64) -> [i64]:
+    write_u32_le(buf, disp & 0xffffffff)
+
+fn elf_build_plt_x64(plt_addr: i64, gotplt_addr: i64, n: i64) -> [i64]:
+    """ld.lld's x86_64 lazy PLT (no IBT): PLT0 = pushq GOTPLT+8(%rip);
+    jmpq *GOTPLT+16(%rip); nopl 0(%rax). PLTn = jmpq *slot(%rip); pushq $n;
+    jmp PLT0 — 16 bytes each, slot n = .got.plt[3 + n]."""
+    if n == 0:
+        return []
+    var b = [0xff, 0x35]
+    b = elf_x64_rip32(b, gotplt_addr + 8 - (plt_addr + 6))
+    b = b.push(0xff)
+    b = b.push(0x25)
+    b = elf_x64_rip32(b, gotplt_addr + 16 - (plt_addr + 12))
+    b = write_u32_le(b, 0x00401f0f)
+    var i: i64 = 0
+    while i < n:
+        val e = plt_addr + X64_PLT0_SIZE + i * X64_PLT_ENTRY_SIZE
+        b = b.push(0xff)
+        b = b.push(0x25)
+        b = elf_x64_rip32(b, gotplt_addr + (GOTPLT_RESERVED + i) * 8 - (e + 6))
+        b = b.push(0x68)
+        b = write_u32_le(b, i)
+        b = b.push(0xe9)
+        b = elf_x64_rip32(b, plt_addr - (e + 16))
+        i = i + 1
+    b
+
+fn elf_build_gotplt_x64(n: i64, plt_addr: i64, dynamic_addr: i64) -> [i64]:
+    """x86_64 .got.plt: [0] = _DYNAMIC, [1]/[2] for ld.so, then one word per
+    PLT entry initialised to that entry's `pushq` (PLTn + 6) for lazy binding."""
+    if n == 0:
+        return []
+    var b = write_u64_le([], dynamic_addr)
+    b = write_zeros(b, 16)
+    var i: i64 = 0
+    while i < n:
+        b = write_u64_le(b, plt_addr + X64_PLT0_SIZE + i * X64_PLT_ENTRY_SIZE + 6)
+        i = i + 1
+    b
+
 fn elf_build_dynamic(tags: [[i64]]) -> [i64]:
     """tags = [[d_tag, d_val], ...]; DT_NULL is appended."""
     var b: [i64] = []
@@ -255,15 +410,16 @@ fn elf_build_interp(path: text) -> [i64]:
 
 export ElfDynStr
 export elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64
-export elf_rela_entry, elf_sysv_hash, elf_build_dynstr, elf_dynstr_size, elf_build_dynsym
-export elf_hash_size, elf_build_hash, elf_plt_size_a64, elf_gotplt_size
-export elf_build_plt_a64, elf_build_gotplt, elf_build_dynamic, elf_build_interp
+export elf_rela_entry, elf_sym_entry, elf_sysv_hash, elf_build_dynstr, elf_dynstr_size, elf_build_dynsym
+export elf_hash_size, elf_build_hash, elf_gnu_hash, elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash
+export elf_plt0_size, elf_plt_entry_size, elf_plt_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt
+export elf_build_plt_x64, elf_build_gotplt_x64, elf_build_dynamic, elf_build_interp
 export R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 export R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE
 export DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB
 export DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI
 export DT_PLTREL, DT_DEBUG, DT_JMPREL, DT_INIT_ARRAY, DT_FINI_ARRAY
 export DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ
-export DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE
-export SHT_RELA_S, SHT_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S
-export A64_PLT0_SIZE, A64_PLT_ENTRY_SIZE, GOTPLT_RESERVED
+export DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE
+export SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S
+export A64_PLT0_SIZE, A64_PLT_ENTRY_SIZE, X64_PLT0_SIZE, X64_PLT_ENTRY_SIZE, GOTPLT_RESERVED

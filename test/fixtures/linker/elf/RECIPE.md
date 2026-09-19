@@ -67,3 +67,25 @@ clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -f
 together with the HOST glibc startup objects and `libc.so.6` from
 `/usr/lib/aarch64-linux-gnu` (not vendored here), so those specs need an aarch64
 Linux host with glibc. It prints `hi from libc` and exits 42.
+
+## Lane B2 fixtures (.gnu.hash oracle, x86_64 dynamic)
+
+Same compiler + `ld.lld` from the same install, run from this directory. The
+shared objects carry a `.1` suffix because the repo `.gitignore` drops `*.so`:
+
+```
+PIC="-c -O1 -ffreestanding -fPIC -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=aarch64-linux-gnu $PIC gnu_hash_syms.c -o gnu_hash_syms_a64.o
+ld.lld -shared --soname libgnuhash.so --hash-style=both -o libgnuhash_a64.so.1 gnu_hash_syms_a64.o
+ld.lld -shared --soname libadd_x64.so --hash-style=both -o libadd_x64.so.1 pic_lib_x64.o
+```
+
+| file | role |
+|---|---|
+| libgnuhash_a64.so.1 | `.gnu.hash` oracle: 11 exports -> 2 buckets, 4 bloom words, symoffset 1 (`llvm-readelf --gnu-hash-table`); `elf_gnu_hash_spec` rebuilds it byte for byte from its `.dynsym` names |
+| libadd_x64.so.1 | x86_64 DSO exporting add_val / msg / base / scratch (soname `libadd_x64.so`); `elf_x64_dynamic_spec` links `pic_start_x64.o` against it: add_val via PLT32 -> PLT1 + R_X86_64_JUMP_SLOT, msg via REX_GOTPCRELX (kept as `mov`, import) -> .got + R_X86_64_GLOB_DAT |
+
+The x86_64 dynamic outputs are compared with
+`ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
+(`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
+executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
