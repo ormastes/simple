@@ -2990,6 +2990,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
     *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
   esac
+  # Opt-in self-hosted link for Stage 3.  `SIMPLE_STAGE3_LINKER=internal` sets
+  # SIMPLE_LINKER=internal for the Stage 3 child only, routing its final link
+  # through the pure-Simple internal ELF engine instead of ld.lld/mold.  Owned
+  # and validated by bootstrap_stage3_linker_env
+  # (scripts/check/lib/bootstrap-stage3/authority.shs); computed once and
+  # word-split into BOTH the args hash and the transcribed invocation, so the
+  # knob is recorded in the Stage 3 provenance receipt when on.  Unset keeps
+  # the args hash byte-identical -- Stage 2's env is deliberately untouched.
+  stage3_linker_env=$(bootstrap_stage3_linker_env) || exit 1
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -3013,7 +3022,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
-      ${stage3_mc_env} \
+      ${stage3_mc_env} ${stage3_linker_env} \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_COMPILER_PHASE_PROFILE=1" \
       "SIMPLE_COMPILER_PHASE_PROFILE_FILE=${stage3_phase_profile}" \
@@ -3578,7 +3587,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
-    ${stage3_mc_env} \
+    ${stage3_mc_env} ${stage3_linker_env} \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_COMPILER_PHASE_PROFILE=1 \
     SIMPLE_COMPILER_PHASE_PROFILE_FILE="${stage3_phase_profile}" \
