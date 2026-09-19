@@ -335,16 +335,30 @@ fn func_import_binding_lookup(caller: text, name: text) -> text:
             return fib_owners[i]
     ""
 
-fn func_resolve_for_caller(caller: text, name: text) -> i64:
+fn func_resolve_for_caller_depth(caller: text, name: text, depth: i64) -> i64:
+    if depth > 8: return -1
     val own = func_table_lookup_owned(caller, name)
     if own >= 0:
         return own
     val imported_owner = func_import_binding_lookup(caller, name)
-    if imported_owner != "":
-        return func_table_lookup_owned(imported_owner, name)
+    if imported_owner != "" and imported_owner != caller:
+        val did = func_table_lookup_owned(imported_owner, name)
+        if did >= 0:
+            return did
+        # Re-export chain: the imported module (typically a facade that did
+        # `export use owner.{name}`) does not define the name itself, but it
+        # registered its own import binding when it loaded the real owner.
+        # Follow that chain. Returning -1 here would let the call evaluator's
+        # legacy flat-table fallback silently dispatch to an unrelated
+        # same-named fn (last-write-wins) — the env_get hijack behind
+        # doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md
+        return func_resolve_for_caller_depth(imported_owner, name, depth + 1)
     # No caller route is safer than silently selecting an unrelated module's
     # last-write-wins entry.  The call evaluator may apply its legacy fallback.
     -1
+
+fn func_resolve_for_caller(caller: text, name: text) -> i64:
+    func_resolve_for_caller_depth(caller, name, 0)
 
 fn func_table_remove(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
