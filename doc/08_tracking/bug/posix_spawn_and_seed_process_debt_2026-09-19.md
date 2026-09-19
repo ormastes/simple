@@ -52,3 +52,31 @@ repairs — restored in 1c3a87982e3) and aff29a24dfe (llm_runtime vllm
 support — restored in 0ea76a026ac) plus doc_coverage oracles. Other repairs
 from those commits may still be missing; when a spec pins behavior that
 used to pass, diff against those commits first.
+
+## Addendum 2026-09-19 (shard3 sweep): seed test-mode neuters ALL child spawns
+
+Reproduced while triaging the ~100-file `*_log_modes_spec` cluster
+(`test/02_integration/app/env_log_modes_spec.spl` et al.):
+
+- `rt_process_run("/bin/sh", ["-c", "echo probe_out"])` returns
+  `(code=-1, out="", err="")` when executed under
+  `bin/simple.exe test <spec> --mode=interpreter`.
+- The IDENTICAL probe under `bin/simple.exe run probe.spl` returns
+  `(code=0, out="probe_out\n")`.
+- A nested `$(pwd)`-based `bin/simple run src/app/env/main.spl --help`
+  also works under `run` (code=0, ~700 chars of help) but returns -1
+  under `test`.
+
+Conclusion: the seed's test-mode harness fails/neuters every
+`rt_process_run` child spawn on Windows with the -1 sentinel, independent
+of what is being spawned. This is the single root cause behind the
+~100 `*_log_modes_spec` failures and a large share of the scv_*/editor_*
+integration FAILs that shell out to the CLI — they are all one ledger
+class, not per-spec bugs.
+
+Not fixable in the suite-fix lane: the failing binary is the shared Rust
+seed at `/c/Users/ormas/dev/simple/bin/simple.exe` (other lanes' build
+output; must not be rebuilt/replaced here), and the project direction is
+to replace the seed with the pure-Simple binary rather than patch the
+seed runtime. Fix direction: pure-Simple test runner must wire
+rt_process_run through in test mode (parity with run mode).
