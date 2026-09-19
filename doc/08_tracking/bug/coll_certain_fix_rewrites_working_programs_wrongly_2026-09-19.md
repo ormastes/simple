@@ -99,9 +99,10 @@ rewrite provably equivalent, and that was checked by execution, not argued:
 original prints `1`, rewritten prints `1`, and the user's `seen_set`,
 `seen_set[99] = true` and `seen_set.len()` are untouched.
 
-Still fixed, and each A/B-checked where it has a driver: `coll020.spl`,
-`coll020_two_array.spl`, `coll002_fixable.spl`, `whileidx.spl`
-(`while`-with-index, `[1, 2]` before and after).
+Still fixed, and every one A/B-checked by execution with a driver added:
+`coll020` `[3,1,2]` -> `[3,1,2]`, `coll020_two_array` `[3,1,2]` -> `[3,1,2]`,
+`coll002_fixable` `[1,5,2]` -> `[1,5,2]`, `whileidx` (`while`-with-index)
+`[1,2]` -> `[1,2]`.
 
 ## One spec expectation narrowed, deliberately
 
