@@ -1,0 +1,137 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# The internal ELF route must carry the native_all support table.
+#
+# `native_all_gnu_support_args` (native_all_support.spl) is the transitive
+# hosted-link dependency set the Rust seed aggregate archive needs:
+#
+#   -u rt_vulkan_provider_is_available -lstdc++ -lsqlite3 -lz -lzstd
+#   -ltinfo -lffi -lxml2 -lncurses
+#
+# The external argv path applies it (native_linking.spl, the
+# `native_all_gnu_support_args` loop in link_native_unix). The
+# SIMPLE_LINKER=internal branch did not: it called internal_link_native with
+# no libraries and no roots, so every `-l` was dropped and the `-u` root was
+# lost. `rt_vulkan_provider_is_available` is DEFINED in exactly one member of
+# libsimple_native_all.a and REFERENCED by no other member, so without a
+# forced-undefined root the archive fixpoint never extracts that member --
+# a silent drop, which design D4 ("reject, never mask") forbids.
+#
+# Two halves are pinned here:
+#   1. the engine grows a `roots` field -- an ld/lld `-u <sym>`: seed the
+#      archive-closure undefined set, and refuse a root nothing defines;
+#   2. the wrapper translates the table into (libraries, roots) and REFUSES,
+#      by name, any table entry it cannot honour (the macOS table's `-L` and
+#      `-framework` entries are the live example).
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/archive_closure.spl
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl
+
+use std.spec.step
+use std.spec.*
+
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{internal_support_plan}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn start_obj() -> ElfObject:
+    elf_parse_object(load_fixture("start_a64.o")).unwrap()
+
+fn closure_names(roots: [text]) -> [text]:
+    val r = elf_archive_closure([start_obj()], [load_fixture("libchain_a64.a")], roots)
+    var names: [text] = []
+    if r.is_ok():
+        for m in r.unwrap().members:
+            names = names.push(m.name)
+    names
+
+describe "internal ELF engine - ElfLinkRequest.roots is an ld -u":
+    it "without a root the unreferenced archive member stays out":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Baseline: unused_a64.o defines unused_fn, which nothing references, so the fixpoint never takes it")
+        val names = closure_names([])
+        expect(names.len()).to_equal(2)
+        expect(names.contains("unused_a64.o")).to_equal(false)
+
+    it "a root forces the member that defines it out of the archive":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("roots=[unused_fn] seeds the undefined set, exactly as -u rt_vulkan_provider_is_available must for libsimple_native_all.a")
+        val names = closure_names(["unused_fn"])
+        expect(names.contains("unused_a64.o")).to_equal(true)
+        expect(names.len()).to_equal(3)
+
+    it "elf_link threads roots through to the archive fixpoint":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The request field is wired, not just the closure helper: a static link with the root succeeds")
+        val linked = elf_link(ElfLinkRequest(
+            objects: [load_fixture("start_a64.o")],
+            archives: [load_fixture("libchain_a64.a")],
+            shared: [],
+            entry: "_start",
+            target: RelocArch.AArch64,
+            mode: ELF_LINK_STATIC_EXEC,
+            interp: "",
+            roots: ["unused_fn"]))
+        expect(linked.is_ok()).to_equal(true)
+
+    it "refuses a root nothing defines instead of dropping it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("A -u symbol no input defines is a named error, never a silently ignored root (design D4)")
+        val linked = elf_link(ElfLinkRequest(
+            objects: [load_fixture("start_a64.o")],
+            archives: [load_fixture("libchain_a64.a")],
+            shared: [],
+            entry: "_start",
+            target: RelocArch.AArch64,
+            mode: ELF_LINK_STATIC_EXEC,
+            interp: "",
+            roots: ["no_such_symbol_anywhere"]))
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("root symbol not defined")
+        expect(linked.unwrap_err()).to_contain("no_such_symbol_anywhere")
+
+describe "internal ELF route - native_all support table translation":
+    it "splits the Linux table into libraries and roots":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("-l<name> -> libraries, -u <sym> -> roots; nothing in the table is dropped")
+        val plan = internal_support_plan(
+            ["build/obj/main.o", "build/runtime/libsimple_native_all.a"], "linux", "")
+        expect(plan.is_ok()).to_equal(true)
+        val p = plan.unwrap()
+        expect(p.roots).to_equal(["rt_vulkan_provider_is_available"])
+        expect(p.libraries).to_equal(
+            ["stdc++", "sqlite3", "z", "zstd", "tinfo", "ffi", "xml2", "ncurses"])
+
+    it "adds nothing when the aggregate archive is not an input":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The table is keyed on libsimple_native_all.a being present, exactly like the external path")
+        val plan = internal_support_plan(["build/obj/main.o"], "linux", "")
+        expect(plan.is_ok()).to_equal(true)
+        expect(plan.unwrap().libraries.len()).to_equal(0)
+        expect(plan.unwrap().roots.len()).to_equal(0)
+
+    it "refuses by name a table entry the internal engine cannot honour":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The macOS table carries -L and -framework; internal:elf honours neither, so it is a named Err, not a silent drop")
+        val plan = internal_support_plan(
+            ["build/obj/main.o", "build/runtime/libsimple_native_all.a"], "macos", "/opt/homebrew")
+        expect(plan.is_err()).to_equal(true)
+        expect(plan.unwrap_err()).to_contain("internal engine:")
+        expect(plan.unwrap_err()).to_contain("support-table")

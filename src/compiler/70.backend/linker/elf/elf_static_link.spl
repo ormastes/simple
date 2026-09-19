@@ -110,6 +110,13 @@ struct ElfLinkRequest:
     interp: text          # PT_INTERP path (dynamic modes only)
     string_merge: bool = true   # ld.lld -O1: dedupe SHF_MERGE pieces (-O0 = false)
     gc_sections: bool = false   # ld.lld --gc-sections: drop sections unreachable from the roots
+    # ld/lld `-u <sym>`: forced-undefined symbols. Each one seeds the archive
+    # fixpoint's undefined set (so the member defining it is extracted even
+    # when no input references it) and is a --gc-sections liveness root. A
+    # root that nothing ends up defining is an error, never a silent drop:
+    # the native_all support table's -u rt_vulkan_provider_is_available is the
+    # only thing that keeps its defining member of libsimple_native_all.a.
+    roots: [text] = []
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -1263,7 +1270,7 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         libs = libs.push(l)
         i = i + 1
 
-    val closure = elf_archive_closure(roots, req.archives)?
+    val closure = elf_archive_closure(roots, req.archives, req.roots)?
     var all = roots
     for m in closure.members:
         if m.obj.header.e_machine != machine:
@@ -1289,6 +1296,19 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         return Err("undefined symbol: " + elf_static_join(undef))
     if not res.defined.has(req.entry):
         return Err("entry symbol not defined: {req.entry}")
+    # A forced-undefined root (-u) that no input, archive member or shared
+    # library defines is refused rather than ignored: the caller asked for a
+    # symbol to be kept and this link cannot honour that.
+    # A shared-library export does NOT satisfy a root: this linker emits a
+    # dynamic symbol only for a real reference from an input object, so
+    # "kept" would be a claim it cannot honour.
+    var missing_roots: [text] = []
+    for root in req.roots:
+        if root == "" or res.defined.has(root):
+            continue
+        missing_roots = missing_roots.push(root)
+    if missing_roots.len() > 0:
+        return Err("root symbol not defined: " + elf_static_join(missing_roots))
     val ifuncs = elf_local_ifunc(all)
     if ifuncs.len() > 0:
         return Err("UnsupportedFeature: locally defined STT_GNU_IFUNC needs an R_*_IRELATIVE relocation, which this linker does not emit: " + elf_static_join(ifuncs))
@@ -1296,7 +1316,7 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     elf_property_policy(all)?
     var live = elf_gc_all_live(all)
     if req.gc_sections:
-        live = elf_gc_live(all, res, req.entry)?
+        live = elf_gc_live(all, res, req.entry, req.roots)?
     var merged = elf_merge_empty(all)
     if req.string_merge:
         merged = elf_merge_build(all, live, elf_out_names(all)?)?

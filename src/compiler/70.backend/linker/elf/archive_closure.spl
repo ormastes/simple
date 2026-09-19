@@ -82,8 +82,16 @@ fn elf_archive_members(archives: [[i64]]) -> Result<[ElfArchiveMember], text>:
         ai = ai + 1
     Ok(out)
 
-fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosureResult, text>:
-    """Extract archive members until no still-undefined strong symbol can be resolved."""
+fn elf_archive_closure(roots: [ElfObject], archives: [[i64]],
+        undef_seeds: [text] = []) -> Result<ElfClosureResult, text>:
+    """Extract archive members until no still-undefined strong symbol can be resolved.
+
+    `undef_seeds` are ld/lld `-u <sym>` forced-undefined roots: names treated as
+    referenced from the start, so the member that defines one is extracted even
+    though no input object refers to it. The native_all support table's
+    `-u rt_vulkan_provider_is_available` is exactly this case -- that symbol is
+    defined in one member of libsimple_native_all.a and referenced by no other,
+    so without the seed the fixpoint drops the member."""
     val members = elf_archive_members(archives)?
     var taken: [bool] = []
     for _m in members:
@@ -104,6 +112,11 @@ fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosu
             undef = elf_closure_add_strong_undefs(undef, defined, obj)
         for sm in selected:
             undef = elf_closure_add_strong_undefs(undef, defined, sm.obj)
+        # Forced-undefined roots (-u) count as references until something
+        # defines them, so they drive extraction on every pass.
+        for seed in undef_seeds:
+            if seed != "" and not defined.has(seed):
+                undef[seed] = true
         if undef.len() == 0:
             break
 
