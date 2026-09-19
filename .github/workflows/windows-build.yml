@@ -5,7 +5,27 @@ on:
     paths:
       - 'src/compiler_rust/**'
       - 'src/compiler/70.backend/**'
+      - 'src/lib/common/linker/**'
       - 'src/lib/nogc_sync_mut/ffi/llvm.spl'
+      - 'test/01_unit/compiler/backend/linker/**'
+      - 'test/01_unit/lib/common/linker/**'
+      - 'test/fixtures/linker/**'
+      - 'scripts/check/check-linker-specs-portable.shs'
+      - '.github/workflows/windows-build.yml'
+  # The linker specs are the reason this workflow needs a PR trigger: a
+  # `push:`-only workflow never appears as a check on a pull request, so a
+  # Windows-only linker regression could be merged without the job ever being
+  # consulted. Same path filter as `push:`.
+  pull_request:
+    paths:
+      - 'src/compiler_rust/**'
+      - 'src/compiler/70.backend/**'
+      - 'src/lib/common/linker/**'
+      - 'src/lib/nogc_sync_mut/ffi/llvm.spl'
+      - 'test/01_unit/compiler/backend/linker/**'
+      - 'test/01_unit/lib/common/linker/**'
+      - 'test/fixtures/linker/**'
+      - 'scripts/check/check-linker-specs-portable.shs'
       - '.github/workflows/windows-build.yml'
   workflow_dispatch:
 
@@ -120,6 +140,37 @@ jobs:
           fi
           echo "Seed binary size: $(wc -c < "$SEED") bytes"
           "$SEED" --version
+
+      # Windows check for the pure-Simple mold-like linker.
+      #
+      # Before this step, no Windows job in this repo executed a single Simple
+      # spec: windows-tests.yml's Windows jobs print "Native Windows binary not
+      # yet available" and exit 0, and this workflow only ever called
+      # `native-build`. Every linker fix was therefore proven on Linux alone,
+      # and a Windows-only regression (path separator, text-mode read
+      # corrupting fixture bytes, CRLF in a linker script) could land green.
+      #
+      # It runs BEFORE Stage 2 on purpose: a linker regression should surface
+      # in ~20s rather than behind a multi-minute self-compile, and it must not
+      # be masked by an unrelated Stage 2 failure.
+      #
+      # The guard is fail-closed by construction -- it hardcodes the 19
+      # host-independent spec paths, names the 8 host-dependent exclusions with
+      # reasons, and ERRORs (exit 2) rather than passing if fewer than 19
+      # `SPEC FILE VERDICT:` lines come back. `--selftest` runs first and is
+      # fatal. See the script header for the full contract.
+      #
+      # No `bin/simple` here: that is an untracked symlink made by
+      # scripts/setup/setup.shs and never exists in a CI checkout, so the seed
+      # built above is passed explicitly.
+      - name: Linker specs (Windows)
+        shell: bash
+        timeout-minutes: 15
+        env:
+          SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
+        run: |
+          sh scripts/check/check-linker-specs-portable.shs \
+            --binary "src/compiler_rust/target/${{ matrix.rust-target }}/bootstrap/simple.exe"
 
       # Stage 2: compile Simple compiler from source using the seed
       - name: Stage 2 compile
