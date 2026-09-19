@@ -112,3 +112,12 @@ the condition — and a fix for one should cover the other.
   on the push, so a handoff or suppression between the two rules is the
   likely cause, but it was not traced. Whoever fixes COLL020's matcher must
   re-check that interaction rather than assume one change covers both.
+
+## The trap a fixer will hit first
+
+Do not fix the negated-filter blindness by simply looking for a `contains`
+call anywhere in the condition. **Every COLL020 site is a negated filter** —
+`if not X.contains(v): X.push(v)` is the dedup idiom itself — so a naive
+widening makes COLL002 fire on all of them and every dedup site reports
+twice, once as O(n^2)-per-iteration and once as a manual dedup loop. A fix
+must exclude the guards COLL020 already claims.
