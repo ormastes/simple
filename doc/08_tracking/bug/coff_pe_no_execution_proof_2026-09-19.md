@@ -104,3 +104,28 @@ the whole section-relative family. Measured, that is false for
 synthesized `.reloc` COUNTS toward the total (`0x0003` for a 2-section image,
 `0x0004` when a base relocation adds `.reloc`). Goldens: `secidx_x64.lld.exe`
 and `secidx2_x64.lld.exe`. Only SECREL/SECREL7 remain Errs, matching lld.
+
+## 6. The SizeOfHeaders reservation heuristic has a measured boundary
+
+`coff_reserved_out_count` reproduces lld's "size the headers over the sections
+created, before empty ones are removed, always including `.reloc`" rule, and it
+is byte-exact on all seven goldens. It is a reverse-engineered heuristic, not a
+spec rule, and `disc_x64.obj` is the one measured input where it disagrees:
+lld reserves `0x400`, we reserve `0x200` (our name-based count gives
+`{.text, .data} + .reloc` = 3 → 504 → 512).
+
+Why lld reserves a fourth entry there is not established. The obvious theory —
+that lld bins `.bss` separately from `.data` because their masked
+Characteristics differ in the CNT bits — is contradicted by `chain_x64`, which
+has the same `.data`/`.bss` shape and reserves only `0x200`. The distinguishing
+input is the hand-set `IMAGE_SCN_MEM_DISCARDABLE` bit, and the mechanism has
+not been traced to lld's source.
+
+Scope: reachable only by hand-patching a section header. No compiler emits a
+DISCARDABLE section carrying an ADDR64, and every compiler-produced fixture in
+this tree is byte-exact. The consequence is a valid PE with a smaller header
+than lld would write, not a malformed one — section contents, the section
+table, and the (empty) base-relocation directory all match. `disc_x64`'s spec
+therefore asserts the base-relocation and Characteristics behaviour it exists
+to pin, and deliberately does NOT assert byte-identity, rather than pinning a
+number that is not understood.

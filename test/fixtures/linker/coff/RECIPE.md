@@ -184,3 +184,25 @@ pre-removal count.
 There are SEVEN goldens in total and the engine is byte-identical to all of
 them: `hello_x64`, `secrel_x64`, `chain_x64`, `absuse_x64`, `wrdata_x64`,
 `secidx_x64` and `secidx2_x64`.
+
+## DISCARDABLE section (`disc_x64`)
+
+```
+clang -c --target=x86_64-windows-msvc disc_x64.s -o disc_x64.obj
+printf '\302' | dd of=disc_x64.obj bs=1 seek=99  count=1 conv=notrunc   # .data
+printf '\302' | dd of=disc_x64.obj bs=1 seek=139 count=1 conv=notrunc   # .bss
+lld-link /entry:disc_entry /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:disc_x64.lld.exe disc_x64.obj
+```
+
+Sets IMAGE_SCN_MEM_DISCARDABLE (0x02000000) on `.data` and on `.bss` (they
+merge, so both must carry the flag). lld skips DISCARDABLE sections when
+collecting base relocations — the loader drops them, so there is nothing to
+rebase — giving 2 sections and an EMPTY base-relocation table where a naive
+scan emits a whole `.reloc`.
+
+This is the ONE fixture whose spec does not assert byte-identity: lld reserves
+`SizeOfHeaders` `0x400` here and we reserve `0x200`, for reasons not traced to
+lld's source. Scope and reasoning: § 6 of
+`doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md`. The seven
+compiler-produced goldens remain byte-identical.

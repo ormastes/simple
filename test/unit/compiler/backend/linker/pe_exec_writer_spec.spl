@@ -621,3 +621,29 @@ describe "coff_static_link - SECTION against an absolute symbol":
             ["absuse2_x64.obj", "absdef_x64.obj"], [], [], "ab_entry"))
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err().contains("SECREL")).to_equal(true)
+
+describe "coff_static_link - DISCARDABLE sections get no base relocations":
+    it "an ADDR64 in an IMAGE_SCN_MEM_DISCARDABLE section produces no .reloc":
+        # lld skips DISCARDABLE sections when collecting base relocations: the
+        # loader drops the section, so there is nothing to rebase. Emitting the
+        # entry adds a whole .reloc section (3 sections / 2048 B against lld's
+        # 2 / 1536 B of content). COFF_OUT_CHAR_MASK preserves 0x02000000, so
+        # the condition has to be checked rather than inherited.
+        val r = coff_static_link(coff_link_request(
+            [load("disc_x64.obj")], ["disc_x64.obj"], [], [], "disc_entry"))
+        if r.is_err():
+            print "disc link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val ours = r.unwrap()
+        val gold = load("disc_x64.lld.exe")
+        expect(sec_count(ours)).to_equal(2)
+        expect(data_dir(ours, 5, 0)).to_equal(0)
+        expect(data_dir(ours, 5, 1)).to_equal(0)
+        # The .data section keeps the DISCARDABLE bit lld gives it.
+        expect(sec_field(ours, 1, 4)).to_equal(0xc2000040)
+        expect(sec_field(ours, 1, 4)).to_equal(sec_field(gold, 1, 4))
+        # NOT asserted: full byte-identity. This hand-patched object is the one
+        # measured case where the SizeOfHeaders reservation differs (ours
+        # 0x200, lld 0x400) — see § 6 of
+        # doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md. The
+        # base-relocation behaviour this example exists to pin is identical.

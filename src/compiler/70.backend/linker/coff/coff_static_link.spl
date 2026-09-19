@@ -31,7 +31,7 @@ use compiler.backend.linker.coff.coff_object.{
 use compiler.backend.linker.coff.coff_layout.{
     CoffOutSec, CoffPlacement, coff_place_inputs, coff_sort_outs, coff_reindex,
     coff_assign_addresses, coff_out_find, coff_reserved_out_count, coff_drop_empty_outs,
-    coff_reloc_section_characteristics,
+    coff_reloc_section_characteristics, coff_out_is_discardable,
     PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT,
 }
 use compiler.backend.linker.coff.pe_exec_writer.{
@@ -327,7 +327,8 @@ fn coff_emits_base_relocs(objects: [CoffObject], place: CoffPlacement, res: SymR
         val obj = objects[oi]
         var si: i64 = 0
         while si < obj.sections.len():
-            if place.sec_out[oi][si] >= 0:
+            val pk = place.sec_out[oi][si]
+            if pk >= 0 and not coff_out_is_discardable(place.outs[pk]):
                 for r in obj.sections[si].relocs:
                     if coff_reloc_needs_base_reloc(r.rtype):
                         if r.sym_index >= obj.symbols.len():
@@ -373,10 +374,12 @@ fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymR
                     if t.is_absolute and coff_reloc_is_section_relative(r.rtype):
                         # lld-link: "SECREL relocation cannot be applied to
                         # absolute symbols" (rc=1). An absolute symbol is in no
-                        # section, so there is no section base to subtract and
-                        # no section index to name; we used to link SECREL as
-                        # `value - 0`, i.e. silently emit the raw constant.
-                        return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()}: {coff_reloc_type_name(r.rtype)} cannot be applied to absolute symbol {obj.symbols[r.sym_index].name}")
+                        # section, so there is no section base to subtract; we
+                        # used to link SECREL as `value - 0`, i.e. silently
+                        # emit the raw constant. SECREL7 is NOT covered here:
+                        # lld calls it `unsupported relocation type 0xc` for
+                        # every target, so it is named by the oracle instead.
+                        return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()}: {coff_reloc_type_name(r.rtype)} relocation cannot be applied to absolute symbol {obj.symbols[r.sym_index].name}")
                     val field_off = member_off + r.vaddr
                     val p = image_base + place.outs[k].rva + field_off
                     var sec_idx = t.sec_index
@@ -389,7 +392,14 @@ fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymR
                     if not ar.success:
                         return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()} -> {obj.symbols[r.sym_index].name}: {ar.error}")
                     bufs[k] = coff_reloc_patch_bytes(bufs[k], field_off, coff_reloc_width(r.rtype), ar.value)
-                    if coff_reloc_needs_base_reloc(r.rtype) and not t.is_absolute:
+                    # Three conditions, identical to coff_emits_base_relocs so
+                    # the pre-scan and this loop cannot disagree about whether
+                    # a `.reloc` exists: the type must hold an absolute VA, the
+                    # target must live in the image, and the SECTION the field
+                    # sits in must survive load — lld skips DISCARDABLE
+                    # sections when collecting base relocations, since nothing
+                    # is there to rebase once the loader drops them.
+                    if coff_reloc_needs_base_reloc(r.rtype) and not t.is_absolute and not coff_out_is_discardable(place.outs[k]):
                         brs = brs.push(PeBaseReloc(rva: place.outs[k].rva + field_off, kind: IMAGE_REL_BASED_DIR64))
             si = si + 1
         oi = oi + 1
