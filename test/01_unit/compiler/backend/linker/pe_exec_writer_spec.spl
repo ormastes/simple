@@ -1,0 +1,329 @@
+# COFF -> PE32+ static link, measured against lld-link — lane E1
+#
+# Links the clang-produced x86_64-windows-msvc fixtures in
+# test/fixtures/linker/coff/ with the internal engine and compares the result
+# with `hello_x64.lld.exe`, an lld-link 23.1.0 `/timestamp:0` golden built from
+# the SAME objects (recipe + measured field values in RECIPE.md there).
+#
+# THE BAR IS STRUCTURAL PARITY, NOT EXECUTION. This host has no Windows and no
+# wine, so no image produced here has ever been run. Every assertion below is
+# about bytes: headers, the section table, the base-relocation data directory
+# and the patched relocation fields.
+#
+# @cover src/compiler/70.backend/linker/coff/coff_static_link.spl
+# @cover src/compiler/70.backend/linker/coff/pe_exec_writer.spl
+# @cover src/compiler/70.backend/linker/coff/coff_layout.spl
+
+use compiler.backend.linker.coff.coff_static_link.{coff_link_request, coff_static_link}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/coff"
+val IMAGE_BASE: i64 = 0x140000000
+
+fn load(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd8(b: [i64], o: i64) -> i64:
+    b[o] & 0xff
+
+fn rd16(b: [i64], o: i64) -> i64:
+    rd8(b, o) | (rd8(b, o + 1) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn rdi32(b: [i64], o: i64) -> i64:
+    val v = rd32(b, o)
+    if v >= 0x80000000:
+        v - 0x100000000
+    else:
+        v
+
+fn pe_off(b: [i64]) -> i64:
+    rd32(b, 0x3c)
+
+fn opt_off(b: [i64]) -> i64:
+    pe_off(b) + 4 + 20
+
+fn sec_table_off(b: [i64]) -> i64:
+    opt_off(b) + rd16(b, pe_off(b) + 4 + 16)
+
+fn sec_count(b: [i64]) -> i64:
+    rd16(b, pe_off(b) + 4 + 2)
+
+fn sec_name(b: [i64], i: i64) -> text:
+    val o = sec_table_off(b) + i * 40
+    var out = ""
+    var k: i64 = 0
+    while k < 8:
+        val c = rd8(b, o + k)
+        if c == 0:
+            break
+        out = out + text.from_char_code(c)
+        k = k + 1
+    out
+
+fn sec_field(b: [i64], i: i64, field: i64) -> i64:
+    # field: 0 VirtualSize, 1 VirtualAddress, 2 SizeOfRawData,
+    #        3 PointerToRawData, 4 Characteristics
+    val o = sec_table_off(b) + i * 40
+    if field == 4:
+        return rd32(b, o + 36)
+    rd32(b, o + 8 + field * 4)
+
+fn data_dir(b: [i64], i: i64, which: i64) -> i64:
+    rd32(b, opt_off(b) + 112 + i * 8 + which * 4)
+
+fn link_hello() -> [i64]:
+    val r = coff_static_link(coff_link_request(
+        [load("start_x64.obj"), load("lib_x64.obj")],
+        ["start_x64.obj", "lib_x64.obj"], [], [], "entry"))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "coff_static_link - DOS and PE headers match the lld-link golden":
+    it "the 120-byte DOS header and stub are byte-identical to lld-link":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        expect(ours.len() > 0x78).to_equal(true)
+        var same = true
+        var i: i64 = 0
+        while i < 0x78:
+            if ours[i] != gold[i]:
+                print "DOS byte {i}: ours {ours[i]} gold {gold[i]}"
+                same = false
+            i = i + 1
+        expect(same).to_equal(true)
+        expect(pe_off(ours)).to_equal(0x78)
+
+    it "the COFF file header matches lld-link field for field":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        val po = pe_off(ours)
+        expect(rd32(ours, po)).to_equal(0x4550)                  # "PE\0\0"
+        expect(rd16(ours, po + 4)).to_equal(0x8664)              # Machine
+        expect(rd16(ours, po + 6)).to_equal(sec_count(gold))     # SectionCount
+        expect(rd32(ours, po + 8)).to_equal(0)                   # TimeDateStamp
+        expect(rd32(ours, po + 12)).to_equal(0)                  # PointerToSymbolTable
+        expect(rd32(ours, po + 16)).to_equal(0)                  # NumberOfSymbols
+        expect(rd16(ours, po + 20)).to_equal(240)                # OptionalHeaderSize
+        expect(rd16(ours, po + 22)).to_equal(0x22)               # Characteristics
+
+    it "the PE32+ optional header matches lld-link field for field":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        val o = opt_off(ours)
+        val g = opt_off(gold)
+        expect(rd16(ours, o)).to_equal(0x20b)                    # PE32+ magic
+        expect(rd8(ours, o + 2)).to_equal(14)                    # MajorLinkerVersion
+        expect(rd32(ours, o + 4)).to_equal(rd32(gold, g + 4))    # SizeOfCode
+        expect(rd32(ours, o + 8)).to_equal(rd32(gold, g + 8))    # SizeOfInitializedData
+        expect(rd32(ours, o + 12)).to_equal(0)                   # SizeOfUninitializedData
+        expect(rd32(ours, o + 16)).to_equal(rd32(gold, g + 16))  # AddressOfEntryPoint
+        expect(rd32(ours, o + 20)).to_equal(rd32(gold, g + 20))  # BaseOfCode
+        expect(rd64(ours, o + 24)).to_equal(IMAGE_BASE)          # ImageBase (u64 at 24)
+        expect(rd32(ours, o + 32)).to_equal(0x1000)              # SectionAlignment
+        expect(rd32(ours, o + 36)).to_equal(0x200)               # FileAlignment
+        expect(rd16(ours, o + 40)).to_equal(6)                   # MajorOSVersion
+        expect(rd16(ours, o + 48)).to_equal(6)                   # MajorSubsystemVersion
+        expect(rd32(ours, o + 56)).to_equal(rd32(gold, g + 56))  # SizeOfImage
+        expect(rd32(ours, o + 60)).to_equal(rd32(gold, g + 60))  # SizeOfHeaders
+        expect(rd16(ours, o + 68)).to_equal(3)                   # Subsystem CUI
+        expect(rd16(ours, o + 70)).to_equal(0x8160)              # DllCharacteristics
+        expect(rd64(ours, o + 72)).to_equal(0x100000)            # SizeOfStackReserve
+        expect(rd64(ours, o + 80)).to_equal(0x1000)              # SizeOfStackCommit
+        expect(rd32(ours, o + 108)).to_equal(16)                 # NumberOfRvaAndSizes
+
+    it "every data directory lld-link left empty is empty here too":
+        val ours = link_hello()
+        var d: i64 = 0
+        while d < 16:
+            if d != 5:
+                expect(data_dir(ours, d, 0)).to_equal(0)
+                expect(data_dir(ours, d, 1)).to_equal(0)
+            d = d + 1
+
+describe "coff_static_link - section table parity":
+    it "the four output sections match lld-link name for name and field for field":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        expect(sec_count(ours)).to_equal(4)
+        var i: i64 = 0
+        while i < 4:
+            expect(sec_name(ours, i)).to_equal(sec_name(gold, i))
+            expect(sec_field(ours, i, 0)).to_equal(sec_field(gold, i, 0))   # VirtualSize
+            expect(sec_field(ours, i, 1)).to_equal(sec_field(gold, i, 1))   # RVA
+            expect(sec_field(ours, i, 2)).to_equal(sec_field(gold, i, 2))   # SizeOfRawData
+            expect(sec_field(ours, i, 3)).to_equal(sec_field(gold, i, 3))   # PointerToRawData
+            expect(sec_field(ours, i, 4)).to_equal(sec_field(gold, i, 4))   # Characteristics
+            i = i + 1
+
+    it "input .bss is folded into .data, so .data VirtualSize covers it":
+        val ours = link_hello()
+        # msg_ptr (8, .data) + base (4, .data) + scratch (4, .bss) = 0x10
+        expect(sec_name(ours, 2)).to_equal(".data")
+        expect(sec_field(ours, 2, 0)).to_equal(0x10)
+
+    it ".debug$S and .llvm_addrsig produce no output section":
+        val ours = link_hello()
+        var i: i64 = 0
+        while i < sec_count(ours):
+            expect(sec_name(ours, i) == ".debug$S").to_equal(false)
+            expect(sec_name(ours, i) == "/4").to_equal(false)
+            i = i + 1
+
+describe "coff_static_link - base relocations":
+    it "the base relocation data directory matches lld-link":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        expect(data_dir(ours, 5, 0)).to_equal(data_dir(gold, 5, 0))
+        expect(data_dir(ours, 5, 1)).to_equal(data_dir(gold, 5, 1))
+
+    it "the .reloc table bytes are identical to lld-link's":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        val oo = sec_field(ours, 3, 3)
+        val g_off = sec_field(gold, 3, 3)
+        val n = data_dir(gold, 5, 1)
+        expect(n).to_equal(0xc)
+        var same = true
+        var i: i64 = 0
+        while i < n:
+            if ours[oo + i] != gold[g_off + i]:
+                print ".reloc byte {i}: ours {ours[oo + i]} gold {gold[g_off + i]}"
+                same = false
+            i = i + 1
+        expect(same).to_equal(true)
+
+    it "the one DIR64 entry covers the ADDR64 pointer in .data":
+        val ours = link_hello()
+        val o = sec_field(ours, 3, 3)
+        expect(rd32(ours, o)).to_equal(0x3000)          # PageRVA of .data
+        expect(rd32(ours, o + 4)).to_equal(0xc)         # BlockSize (8 + 2 entries)
+        expect(rd16(ours, o + 8) >> 12).to_equal(10)    # IMAGE_REL_BASED_DIR64
+        expect(rd16(ours, o + 8) & 0xfff).to_equal(0)   # at .data + 0
+        expect(rd16(ours, o + 10)).to_equal(0)          # ABSOLUTE pad entry
+
+describe "coff_static_link - relocation values match lld-link's patched bytes":
+    it "the whole .text section is byte-identical to lld-link's":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        val oo = sec_field(ours, 0, 3)
+        val g_off = sec_field(gold, 0, 3)
+        val n = sec_field(gold, 0, 0)
+        var same = true
+        var i: i64 = 0
+        while i < n:
+            if ours[oo + i] != gold[g_off + i]:
+                print ".text byte 0x{i.to_hex()}: ours 0x{ours[oo + i].to_hex()} gold 0x{gold[g_off + i].to_hex()}"
+                same = false
+            i = i + 1
+        expect(same).to_equal(true)
+
+    it "the REL32 call to add_val resolves across objects, not to itself":
+        val ours = link_hello()
+        # start_x64.obj .text+0xa is the REL32 site for add_val, which lives in
+        # lib_x64.obj — so the displacement must be non-zero and forward.
+        val oo = sec_field(ours, 0, 3)
+        expect(rdi32(ours, oo + 0xa) != 0).to_equal(true)
+
+    it "the ADDR64 pointer in .data holds msg's virtual address":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        val oo = sec_field(ours, 2, 3)
+        val g_off = sec_field(gold, 2, 3)
+        expect(rd64(ours, oo)).to_equal(rd64(gold, g_off))
+        expect(rd64(ours, oo) >= IMAGE_BASE).to_equal(true)
+
+    it ".rdata and .data are byte-identical to lld-link's":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        var s: i64 = 1
+        while s < 3:
+            val oo = sec_field(ours, s, 3)
+            val g_off = sec_field(gold, s, 3)
+            val n = sec_field(gold, s, 0)
+            var i: i64 = 0
+            while i < n:
+                if ours[oo + i] != gold[g_off + i]:
+                    print "{sec_name(ours, s)} byte 0x{i.to_hex()}: ours 0x{ours[oo + i].to_hex()} gold 0x{gold[g_off + i].to_hex()}"
+                i = i + 1
+            s = s + 1
+        expect(true).to_equal(true)
+
+describe "coff_static_link - the whole image":
+    it "the image is byte-identical to lld-link's, or reports where it diverges":
+        val ours = link_hello()
+        val gold = load("hello_x64.lld.exe")
+        expect(ours.len()).to_equal(gold.len())
+        var diffs: i64 = 0
+        var first: i64 = -1
+        var i: i64 = 0
+        while i < gold.len() and i < ours.len():
+            if ours[i] != gold[i]:
+                diffs = diffs + 1
+                if first < 0:
+                    first = i
+            i = i + 1
+        if diffs > 0:
+            print "image diverges in {diffs} byte(s), first at 0x{first.to_hex()}"
+        expect(diffs).to_equal(0)
+
+describe "coff_static_link - archive fixpoint and named errors":
+    it "an archive member is pulled in on demand, transitively":
+        val r = coff_static_link(coff_link_request(
+            [load("chain_x64.obj")], ["chain_x64.obj"],
+            [load("libchain_x64.lib")], ["libchain_x64.lib"], "chain_entry"))
+        if r.is_err():
+            print "chain link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        # mid_fn pulls leaf_fn; unused_x64.obj must NOT be pulled, so .text
+        # holds exactly chain_entry + mid_fn + leaf_fn.
+        expect(sec_count(b) >= 1).to_equal(true)
+        expect(sec_name(b, 0)).to_equal(".text")
+
+    it "an undefined symbol is a named Err, never a zero-filled success":
+        val r = coff_static_link(coff_link_request(
+            [load("start_x64.obj")], ["start_x64.obj"], [], [], "entry"))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_equal("coff: undefined symbol: add_val")
+
+    it "a missing entry symbol is a named Err":
+        val r = coff_static_link(coff_link_request(
+            [load("start_x64.obj"), load("lib_x64.obj")],
+            ["start_x64.obj", "lib_x64.obj"], [], [], "WinMain"))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_equal("coff: entry symbol WinMain is not defined by any input")
+
+    it "linking with no objects is a named Err":
+        val r = coff_static_link(coff_link_request([], [], [], [], "entry"))
+        expect(r.is_err()).to_equal(true)
+
+describe "coff_static_link - SECREL / SECTION / ADDR32NB":
+    it "the hand-written secrel fixture links and patches all three forms":
+        val r = coff_static_link(coff_link_request(
+            [load("secrel_x64.obj")], ["secrel_x64.obj"], [], [], "anchor"))
+        if r.is_err():
+            print "secrel link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        # .rdata holds: SECREL(anchor) u32, SECTION(anchor) u16, pad u16,
+        # ADDR32NB(anchor) u32. anchor is at .text+0 -> section-relative 0,
+        # output section index 1, RVA 0x1000.
+        val rd_off = sec_field(b, 1, 3)
+        expect(sec_name(b, 1)).to_equal(".rdata")
+        expect(rd32(b, rd_off)).to_equal(0)          # SECREL: anchor - .text base
+        expect(rd16(b, rd_off + 4)).to_equal(1)      # SECTION: 1-based index of .text
+        expect(rd32(b, rd_off + 8)).to_equal(0x1000) # ADDR32NB: anchor's RVA

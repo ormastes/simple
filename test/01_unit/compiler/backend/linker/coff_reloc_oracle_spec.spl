@@ -22,6 +22,11 @@ use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
     IMAGE_REL_AMD64_PAIR, IMAGE_REL_AMD64_SSPAN32,
 }
 
+use compiler.backend.linker.reloc_engine.{
+    coff_reloc_addend, coff_reloc_apply, coff_reloc_patch_bytes,
+    read_i32_le, read_u32_le,
+}
+
 val BASE: i64 = 0x140000000
 
 # ctx(sec_va, sec_index) — the output section the *target symbol* lands in.
@@ -100,3 +105,45 @@ describe "coff_reloc_compute - every unmodelled type is a named Err":
     it "an unknown type code is rejected by its numeric name, never defaulted":
         expect(ok(0x7f, BASE, 0, BASE)).to_equal(false)
         expect(err(0x7f, BASE, 0, BASE)).to_equal("IMAGE_REL_AMD64_UNKNOWN_127")
+
+# ============================================================================
+# Encoder layer (reloc_engine): the addend is READ OUT of the field
+# ============================================================================
+
+describe "coff_reloc_addend - the implicit addend read":
+    it "a REL32 field is read back SIGN-EXTENDED, not as an unsigned u32":
+        # This is the trap: a displacement of -4 is stored as fc ff ff ff. Read
+        # as unsigned it is 4294967292, which shifts the relocation by 2^32.
+        val bytes = [0xfc, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00]
+        expect(coff_reloc_addend(bytes, 0, IMAGE_REL_AMD64_REL32)).to_equal(-4)
+        expect(read_i32_le(bytes, 0)).to_equal(-4)
+        expect(read_u32_le(bytes, 0) & 0xffffffff).to_equal(4294967292)
+
+    it "an ADDR64 field is read back as a full 64-bit value":
+        val bytes = [0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]
+        expect(coff_reloc_addend(bytes, 0, IMAGE_REL_AMD64_ADDR64)).to_equal(0x100000010)
+
+    it "SECTION and ABSOLUTE take no addend from the field":
+        val bytes = [0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00]
+        expect(coff_reloc_addend(bytes, 0, IMAGE_REL_AMD64_SECTION)).to_equal(0)
+        expect(coff_reloc_addend(bytes, 0, IMAGE_REL_AMD64_ABSOLUTE)).to_equal(0)
+
+describe "coff_reloc_apply - encoder rejections":
+    it "a field that would run past the end of the section is a named Err":
+        val bytes = [0x00, 0x00, 0x00, 0x00, 0x00]
+        val r = coff_reloc_apply(bytes, 2, IMAGE_REL_AMD64_ADDR64, BASE, BASE, BASE, BASE, 1)
+        expect(r.success).to_equal(false)
+
+    it "an unmodelled type carries the oracle's type name into the error":
+        val bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        val r = coff_reloc_apply(bytes, 0, IMAGE_REL_AMD64_ADDR32, BASE, BASE, BASE, BASE, 1)
+        expect(r.success).to_equal(false)
+        expect(r.error.contains("IMAGE_REL_AMD64_ADDR32")).to_equal(true)
+
+    it "a width-0 ABSOLUTE relocation succeeds and writes nothing":
+        val bytes = [0x11, 0x22, 0x33, 0x44]
+        val r = coff_reloc_apply(bytes, 0, IMAGE_REL_AMD64_ABSOLUTE, BASE, BASE, BASE, BASE, 1)
+        expect(r.success).to_equal(true)
+        val out = coff_reloc_patch_bytes(bytes, 0, 0, r.value)
+        expect(out[0]).to_equal(0x11)
+        expect(out[3]).to_equal(0x44)

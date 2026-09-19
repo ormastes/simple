@@ -1,0 +1,372 @@
+# PE32+ executable image writer (lane E1).
+#
+# Serializes a `CoffOutSec` layout into a PE32+ EXE: DOS header + stub, the
+# `PE\0\0` signature, the COFF file header, the optional header with its 16
+# data directories, the section table, and the section bodies at their
+# assigned file offsets. Also synthesizes the `.reloc` base-relocation table.
+#
+# No file I/O — returns raw `[i64]` bytes, exactly like `elf_exec_writer`.
+#
+# Byte-level primitives (`write_u16_le`, `write_u32_le`, `write_u64_le`,
+# `write_zeros`, `write_bytes`, `align_up`) are the SHARED `_ElfWriter`
+# encoding helpers reached through the `elf_writer` facade; this file defines
+# no copy of them. All address and offset decisions were made in
+# `coff_layout.spl` — this writer only stores fields.
+#
+# Every constant below is the measured lld-link 23.1.0 default for a
+# `/subsystem:console /nodefaultlib /timestamp:0` EXE, recorded in
+# `test/fixtures/linker/coff/RECIPE.md`. Reproducing them is what makes the
+# deterministic prefix of the image byte-comparable with the oracle.
+#
+# NOT modelled, each a named Err in `coff_static_link` rather than a silent
+# omission (design D4): imports/IAT, exports, TLS, exception (.pdata/.xdata)
+# tables, resources, load config, CFG, debug directories and PDB, delay
+# imports, and any subsystem other than console.
+
+use compiler.backend.linker.elf_writer.{
+    align_up, write_zeros, write_fill, write_bytes, write_u16_le, write_u32_le, write_u64_le,
+}
+use compiler.backend.linker.coff.coff_layout.{
+    CoffOutSec, PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT,
+}
+use compiler.backend.linker.coff.coff_object.{
+    IMAGE_FILE_MACHINE_AMD64_C, IMAGE_SCN_CNT_CODE_C,
+    IMAGE_SCN_CNT_INITIALIZED_DATA_C,
+}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val PE_DOS_HEADER_SIZE: i64 = 120       # e_lfanew == 0x78
+val PE_SIGNATURE_SIZE: i64 = 4
+val PE_COFF_HEADER_SIZE: i64 = 20
+val PE_OPTIONAL_HEADER_SIZE_64: i64 = 240   # 112 standard + 16 * 8 data dirs
+val PE_SECTION_TABLE_ENTRY_SIZE: i64 = 40
+val PE_DATA_DIRECTORY_COUNT: i64 = 16
+
+val PE_MAGIC_PE32_PLUS: i64 = 0x20b
+val PE_FILE_EXECUTABLE_IMAGE: i64 = 0x0002
+val PE_FILE_LARGE_ADDRESS_AWARE: i64 = 0x0020
+val PE_SUBSYSTEM_CONSOLE_C: i64 = 3
+
+# HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
+val PE_DLL_CHARACTERISTICS: i64 = 0x8160
+
+val PE_LINKER_VERSION_MAJOR: i64 = 14
+val PE_LINKER_VERSION_MINOR: i64 = 0
+val PE_OS_VERSION_MAJOR: i64 = 6
+val PE_SUBSYSTEM_VERSION_MAJOR: i64 = 6
+val PE_STACK_RESERVE: i64 = 0x100000
+val PE_STACK_COMMIT: i64 = 0x1000
+val PE_HEAP_RESERVE: i64 = 0x100000
+val PE_HEAP_COMMIT: i64 = 0x1000
+
+val PE_DIR_BASERELOC: i64 = 5           # data directory index of .reloc
+
+val IMAGE_REL_BASED_ABSOLUTE: i64 = 0
+val IMAGE_REL_BASED_DIR64: i64 = 10
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct PeImageRequest:
+    outs: [CoffOutSec]      # addressed, in output order
+    contents: [[i64]]        # file-backed bytes per output section (same order)
+    entry_rva: i64
+    image_base: i64
+    sec_align: i64
+    file_align: i64
+    timestamp: i64
+
+struct PeBaseReloc:
+    rva: i64                # image-relative address of the field
+    kind: i64               # IMAGE_REL_BASED_*
+
+# ============================================================================
+# DOS header + stub
+# ============================================================================
+
+fn pe_dos_stub() -> [i64]:
+    """The canonical 120-byte MS-DOS header and stub that lld-link and
+    link.exe both emit, byte for byte (verified against
+    test/fixtures/linker/coff/hello_x64.lld.exe bytes 0..0x78). The stub is a
+    fixed 16-bit program that prints "This program cannot be run in DOS mode."
+    — it is a constant, not something a linker computes."""
+    var b: [i64] = []
+    b = write_u16_le(b, 0x5a4d)     # e_magic "MZ"
+    b = write_u16_le(b, 0x0078)     # e_cblp
+    b = write_u16_le(b, 0x0001)     # e_cp
+    b = write_u16_le(b, 0x0000)     # e_crlc
+    b = write_u16_le(b, 0x0004)     # e_cparhdr
+    b = write_u16_le(b, 0x0000)     # e_minalloc
+    b = write_u16_le(b, 0x0000)     # e_maxalloc
+    b = write_u16_le(b, 0x0000)     # e_ss
+    b = write_u16_le(b, 0x0000)     # e_sp
+    b = write_u16_le(b, 0x0000)     # e_csum
+    b = write_u16_le(b, 0x0000)     # e_ip
+    b = write_u16_le(b, 0x0000)     # e_cs
+    b = write_u16_le(b, 0x0040)     # e_lfarlc
+    b = write_u16_le(b, 0x0000)     # e_ovno
+    b = write_zeros(b, 8)           # e_res[4]
+    b = write_u16_le(b, 0x0000)     # e_oemid
+    b = write_u16_le(b, 0x0000)     # e_oeminfo
+    b = write_zeros(b, 20)          # e_res2[10]
+    b = write_u32_le(b, PE_DOS_HEADER_SIZE)   # e_lfanew
+    # 16-bit stub: push cs / pop ds / mov dx,msg / mov ah,9 / int 21h /
+    #              mov ax,4c01h / int 21h
+    val code = [0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd,
+                0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21]
+    b = write_bytes(b, code)
+    val msg = "This program cannot be run in DOS mode.$"
+    var i: i64 = 0
+    while i < msg.len():
+        b = b.push(msg[i..i + 1].char_code_at(0) ?? 0)
+        i = i + 1
+    b = write_zeros(b, PE_DOS_HEADER_SIZE - b.len())
+    b
+
+# ============================================================================
+# .reloc synthesis
+# ============================================================================
+
+fn pe_reloc_sorted(relocs: [PeBaseReloc]) -> [PeBaseReloc]:
+    """Insertion sort by RVA. The loader requires ascending page blocks."""
+    var out: [PeBaseReloc] = []
+    for r in relocs:
+        var at = out.len()
+        var i: i64 = 0
+        while i < out.len():
+            if r.rva < out[i].rva:
+                at = i
+                break
+            i = i + 1
+        var next: [PeBaseReloc] = []
+        var k: i64 = 0
+        while k < out.len():
+            if k == at:
+                next = next.push(r)
+            next = next.push(out[k])
+            k = k + 1
+        if at >= out.len():
+            next = next.push(r)
+        out = next
+    out
+
+fn pe_build_reloc_section(relocs: [PeBaseReloc], sec_align: i64) -> [i64]:
+    """Encode base relocations as per-4-KiB-page blocks:
+    `PageRVA u32, BlockSize u32, entries u16...` where each entry is
+    `(type << 12) | (rva & 0xfff)`. BlockSize counts the 8-byte header. An odd
+    entry count is padded with an IMAGE_REL_BASED_ABSOLUTE(0) entry, which is
+    why lld-link's 1-relocation golden has a 12-byte table, not 10."""
+    var out: [i64] = []
+    if relocs.len() == 0:
+        return out
+    val sorted = pe_reloc_sorted(relocs)
+    val page = 0x1000
+    var i: i64 = 0
+    while i < sorted.len():
+        val page_rva = (sorted[i].rva / page) * page
+        var entries: [i64] = []
+        while i < sorted.len() and (sorted[i].rva / page) * page == page_rva:
+            entries = entries.push((sorted[i].kind << 12) | (sorted[i].rva & 0xfff))
+            i = i + 1
+        if entries.len() % 2 != 0:
+            entries = entries.push((IMAGE_REL_BASED_ABSOLUTE << 12) | 0)
+        out = write_u32_le(out, page_rva)
+        out = write_u32_le(out, 8 + entries.len() * 2)
+        for e in entries:
+            out = write_u16_le(out, e)
+    out
+
+# ============================================================================
+# Header sizing
+# ============================================================================
+
+fn pe_headers_size(section_count: i64) -> i64:
+    PE_DOS_HEADER_SIZE + PE_SIGNATURE_SIZE + PE_COFF_HEADER_SIZE
+        + PE_OPTIONAL_HEADER_SIZE_64 + section_count * PE_SECTION_TABLE_ENTRY_SIZE
+
+fn pe_size_of_headers(section_count: i64, file_align: i64) -> i64:
+    align_up(pe_headers_size(section_count), file_align)
+
+fn pe_size_of_code(outs: [CoffOutSec]) -> i64:
+    var n: i64 = 0
+    for s in outs:
+        if (s.characteristics & IMAGE_SCN_CNT_CODE_C) != 0:
+            n = n + s.raw_size
+    n
+
+fn pe_size_of_initialized_data(outs: [CoffOutSec]) -> i64:
+    """Measured against lld-link: the sum of SizeOfRawData over sections
+    flagged CNT_INITIALIZED_DATA. A section with no file bytes contributes 0
+    (`big.exe` probe: a pure-.bss `.data` gives SizeOfInitializedData 0)."""
+    var n: i64 = 0
+    for s in outs:
+        if (s.characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA_C) != 0:
+            n = n + s.raw_size
+    n
+
+fn pe_base_of_code(outs: [CoffOutSec]) -> i64:
+    for s in outs:
+        if (s.characteristics & IMAGE_SCN_CNT_CODE_C) != 0:
+            return s.rva
+    0
+
+fn pe_pad_byte(characteristics: i64) -> i64:
+    """The byte a section's padding is filled with. lld-link fills code
+    alignment gaps and the tail up to SizeOfRawData with 0xcc (`int3`) so
+    execution falling into padding traps; data sections get zero. Byte-identical
+    parity with the oracle depends on reproducing this."""
+    if (characteristics & IMAGE_SCN_CNT_CODE_C) != 0:
+        return 0xcc
+    0
+
+fn pe_section_name_bytes(name: text) -> [i64]:
+    """The 8-byte section name field, NUL padded. A name longer than 8 bytes
+    needs a `/N` string-table reference, which an image (as opposed to an
+    object) has no string table for — so it is rejected by the caller."""
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < name.len() and i < 8:
+        b = b.push(name[i..i + 1].char_code_at(0) ?? 0)
+        i = i + 1
+    write_zeros(b, 8 - b.len())
+
+# ============================================================================
+# Image serialization
+# ============================================================================
+
+fn pe_write_image(req: PeImageRequest) -> Result<[i64], text>:
+    """Serialize an addressed layout into a PE32+ EXE image."""
+    if req.outs.len() != req.contents.len():
+        return Err("pe: {req.outs.len()} output sections but {req.contents.len()} content buffers")
+    if req.outs.len() == 0:
+        return Err("pe: refusing to write an image with no sections")
+    for s in req.outs:
+        if s.name.len() > 8:
+            return Err("pe: section name {s.name} exceeds the 8-byte image section-name field")
+
+    val nsec = req.outs.len()
+    val size_of_headers = pe_size_of_headers(nsec, req.file_align)
+
+    # Base relocation data directory, if a .reloc section is present.
+    var basereloc_rva: i64 = 0
+    var basereloc_size: i64 = 0
+    var k: i64 = 0
+    while k < nsec:
+        if req.outs[k].name == ".reloc":
+            basereloc_rva = req.outs[k].rva
+            basereloc_size = req.outs[k].total_size
+        k = k + 1
+
+    var last_end: i64 = 0
+    for s in req.outs:
+        if s.rva + s.total_size > last_end:
+            last_end = s.rva + s.total_size
+    val size_of_image = align_up(last_end, req.sec_align)
+
+    var b = pe_dos_stub()
+    b = write_bytes(b, [0x50, 0x45, 0x00, 0x00])   # "PE\0\0"
+
+    # COFF file header. A linked image carries no symbol table: lld-link
+    # writes PointerToSymbolTable 0 / NumberOfSymbols 0 and so do we.
+    b = write_u16_le(b, IMAGE_FILE_MACHINE_AMD64_C)
+    b = write_u16_le(b, nsec)
+    b = write_u32_le(b, req.timestamp)
+    b = write_u32_le(b, 0)                          # PointerToSymbolTable
+    b = write_u32_le(b, 0)                          # NumberOfSymbols
+    b = write_u16_le(b, PE_OPTIONAL_HEADER_SIZE_64)
+    b = write_u16_le(b, PE_FILE_EXECUTABLE_IMAGE | PE_FILE_LARGE_ADDRESS_AWARE)
+
+    # Optional header (PE32+), 112 bytes then 16 data directories.
+    b = write_u16_le(b, PE_MAGIC_PE32_PLUS)
+    b = b.push(PE_LINKER_VERSION_MAJOR)
+    b = b.push(PE_LINKER_VERSION_MINOR)
+    b = write_u32_le(b, pe_size_of_code(req.outs))
+    b = write_u32_le(b, pe_size_of_initialized_data(req.outs))
+    b = write_u32_le(b, 0)                          # SizeOfUninitializedData
+    b = write_u32_le(b, req.entry_rva)
+    b = write_u32_le(b, pe_base_of_code(req.outs))
+    # PE32+ has NO BaseOfData field: ImageBase is a u64 directly at optional
+    # header offset 24, immediately after BaseOfCode. (PE32 has BaseOfData
+    # there and a u32 ImageBase; writing the PE32 shape into a PE32+ header
+    # shifts every later field by 4 and is a classic parity failure.)
+    b = write_u64_le(b, req.image_base)
+    b = write_u32_le(b, req.sec_align)
+    b = write_u32_le(b, req.file_align)
+    b = write_u16_le(b, PE_OS_VERSION_MAJOR)
+    b = write_u16_le(b, 0)                          # MinorOperatingSystemVersion
+    b = write_u16_le(b, 0)                          # MajorImageVersion
+    b = write_u16_le(b, 0)                          # MinorImageVersion
+    b = write_u16_le(b, PE_SUBSYSTEM_VERSION_MAJOR)
+    b = write_u16_le(b, 0)                          # MinorSubsystemVersion
+    b = write_u32_le(b, 0)                          # Win32VersionValue
+    b = write_u32_le(b, size_of_image)
+    b = write_u32_le(b, size_of_headers)
+    b = write_u32_le(b, 0)                          # CheckSum (lld leaves 0)
+    b = write_u16_le(b, PE_SUBSYSTEM_CONSOLE_C)
+    b = write_u16_le(b, PE_DLL_CHARACTERISTICS)
+    b = write_u64_le(b, PE_STACK_RESERVE)
+    b = write_u64_le(b, PE_STACK_COMMIT)
+    b = write_u64_le(b, PE_HEAP_RESERVE)
+    b = write_u64_le(b, PE_HEAP_COMMIT)
+    b = write_u32_le(b, 0)                          # LoaderFlags
+    b = write_u32_le(b, PE_DATA_DIRECTORY_COUNT)
+
+    var d: i64 = 0
+    while d < PE_DATA_DIRECTORY_COUNT:
+        if d == PE_DIR_BASERELOC:
+            b = write_u32_le(b, basereloc_rva)
+            b = write_u32_le(b, basereloc_size)
+        else:
+            b = write_u32_le(b, 0)
+            b = write_u32_le(b, 0)
+        d = d + 1
+
+    val after_opt = PE_DOS_HEADER_SIZE + PE_SIGNATURE_SIZE + PE_COFF_HEADER_SIZE + PE_OPTIONAL_HEADER_SIZE_64
+    if b.len() != after_opt:
+        return Err("pe: optional header encoded {b.len() - PE_DOS_HEADER_SIZE - PE_SIGNATURE_SIZE - PE_COFF_HEADER_SIZE} bytes, expected {PE_OPTIONAL_HEADER_SIZE_64}")
+
+    # Section table.
+    for s in req.outs:
+        b = write_bytes(b, pe_section_name_bytes(s.name))
+        b = write_u32_le(b, s.total_size)           # VirtualSize
+        b = write_u32_le(b, s.rva)                  # VirtualAddress
+        b = write_u32_le(b, s.raw_size)             # SizeOfRawData
+        b = write_u32_le(b, s.file_offset)          # PointerToRawData
+        b = write_u32_le(b, 0)                      # PointerToRelocations
+        b = write_u32_le(b, 0)                      # PointerToLinenumbers
+        b = write_u16_le(b, 0)                      # NumberOfRelocations
+        b = write_u16_le(b, 0)                      # NumberOfLinenumbers
+        b = write_u32_le(b, s.characteristics)
+
+    b = write_zeros(b, size_of_headers - b.len())
+
+    # Section bodies, each at its assigned file offset, zero padded to
+    # SizeOfRawData.
+    var i: i64 = 0
+    while i < nsec:
+        val s = req.outs[i]
+        if s.raw_size > 0:
+            if s.file_offset < b.len():
+                return Err("pe: section {s.name} file offset 0x{s.file_offset.to_hex()} overlaps already-written bytes")
+            b = write_zeros(b, s.file_offset - b.len())
+            if req.contents[i].len() > s.raw_size:
+                return Err("pe: section {s.name} has {req.contents[i].len()} bytes of content but SizeOfRawData is {s.raw_size}")
+            b = write_bytes(b, req.contents[i])
+            b = write_fill(b, s.file_offset + s.raw_size - b.len(), pe_pad_byte(s.characteristics))
+        i = i + 1
+
+    Ok(b)
+
+export PeImageRequest, PeBaseReloc
+export pe_write_image, pe_dos_stub, pe_build_reloc_section, pe_reloc_sorted
+export pe_headers_size, pe_size_of_headers, pe_size_of_code, pe_pad_byte
+export pe_size_of_initialized_data, pe_base_of_code, pe_section_name_bytes
+export PE_DOS_HEADER_SIZE, PE_SIGNATURE_SIZE, PE_COFF_HEADER_SIZE
+export PE_OPTIONAL_HEADER_SIZE_64, PE_SECTION_TABLE_ENTRY_SIZE, PE_DATA_DIRECTORY_COUNT
+export PE_MAGIC_PE32_PLUS, PE_SUBSYSTEM_CONSOLE_C, PE_DLL_CHARACTERISTICS
+export PE_DIR_BASERELOC, IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64
+export PE_STACK_RESERVE, PE_STACK_COMMIT, PE_HEAP_RESERVE, PE_HEAP_COMMIT
