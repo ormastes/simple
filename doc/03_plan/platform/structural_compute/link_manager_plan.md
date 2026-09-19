@@ -24,6 +24,13 @@ Spatial layout is **not** a profile here. Native ELF/Mach-O/PE stays on
 established native linkers (mold does not emit SMF); the GPU linker is
 SMF-first.
 
+> **Superseded by (2026-09-18):** the "stays on established native linkers"
+> statement above is superseded for ELF after mold-MDSOC++ linker plan gate
+> G2, and for Mach-O/PE after gate G4 — see
+> `doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md` and
+> `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` §10 row 1.
+> Until those gates land, this statement remains true.
+
 ## Owned paths
 
 ```text
