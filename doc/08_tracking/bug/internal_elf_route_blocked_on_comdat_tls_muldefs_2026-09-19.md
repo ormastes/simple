@@ -39,6 +39,47 @@ These are all *refusals*, not silent wrong output, which is the correct
 failure mode: a Stage 3 link with `SIMPLE_STAGE3_LINKER=internal` on today's
 engine stops with a named engine error rather than emitting a bad binary.
 
+## The knob cannot complete a RESUME flow yet (separate, real gap)
+
+`bootstrap_stage3_manifest_verify_transcripts`
+(`scripts/check/lib/bootstrap-stage3/manifest-verify.shs:665-701`) recomputes
+the expected Stage 3 args hash from a **fixed, hand-written env list**. That
+list has no `SIMPLE_LINKER` — and, pre-existing and unrelated to this lane, no
+`stage3_mc_env` (`SIMPLE_SAFETY_PROFILE`/`SIMPLE_ASSURANCE_WARNING_PHASE`) and
+no `stage3_cold_init_env` (`SIMPLE_SCV_INVENTORY_COLD_INIT`) either. So a
+knob-ON Stage 3 records a hash the verifier cannot reproduce, the comparison
+at :701 fails, and the resume rebuild dies at
+`scripts/bootstrap/resume-stage3-from-admitted.sh:915` under `set -eu`.
+
+It **fails closed**, which is the correct direction: a knob-ON build is never
+admitted against a knob-OFF expectation. But it means `SIMPLE_STAGE3_LINKER=
+internal` can produce a Stage 3 candidate and cannot yet carry it through the
+resume/admission flow.
+
+**In scope for the next lane**, and it is the cheapest of the four items here:
+the fix is to make that list derive the three opt-in fragments the same way
+the bootstrap scripts do (`bootstrap_stage3_linker_env` and the two existing
+`case` blocks) instead of hard-coding the knob-off vector. Fixing it for
+`SIMPLE_LINKER` alone would leave the two pre-existing omissions in place, so
+the three should move together.
+
+## Deliberate divergences from ld.lld on `-u` (keep, but know about them)
+
+`elf_static_link.spl` (the root check after symbol resolution) is STRICTER
+than lld in two ways. Both are intentional:
+
+1. **A root nothing defines.** `ld.lld -u foo` with no definition exits 0 —
+   it adds an unreferenced `Undefined` and `reportUndefinedSymbol` skips it.
+   This engine returns `Err("root symbol not defined: foo")`.
+2. **A root exported only by a shared library.** lld exits 0. This engine
+   still Errs, because it emits a dynamic symbol only for a real reference
+   from an input object, so "kept" would be a claim it cannot honour.
+
+Rationale: on this route a `-u` exists to retain an archive member. Silently
+accepting a root that retained nothing is the failure mode the route already
+had. If a future caller needs lld's laxer behaviour, that should be an
+explicit request field, not a change of default.
+
 ## What is needed
 
 1. COMDAT group dedup (`SHT_GROUP`) in the engine, and the matching removal of

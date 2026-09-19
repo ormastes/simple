@@ -284,10 +284,29 @@ Traps worth knowing:
   `libraries`/`library_paths`/`runtime_path`/`runtime_bundle` left the list
   when `internal_link_plan` started honouring them; `extra_flags`,
   `retained_symbols`, `strip_output`, `debug` stay.
+- `-l` resolution mirrors ld EXACTLY: `lib<name>.so`, then `lib<name>.a`,
+  then error. Never guess a versioned file — a longest/lexical heuristic picks
+  `libssl.so.1.1` over `libssl.so.3`, and the resulting DT_NEEDED still looks
+  right because that name comes from the DSO's own SONAME. On a usr-merged
+  glibc, `libc.so`/`libm.so` are GROUP linker SCRIPTS (follow them, with
+  absolute member paths), and `libpthread.a`/`libdl.a` are empty stub ARCHIVES
+  with no `.so` at all — route those to the archive fixpoint, not the DSO list.
+  Dedupe shared objects on BASENAME: `-lc` resolves to `/lib/<triple>/libc.so.6`
+  while the CRT probe found `/usr/lib/<triple>/libc.so.6` — same file, two paths.
+- `native_link_std_lib_args` and `-rpath <runtime_dir>` were the other two
+  silent drops on the internal route. `-rpath` is now `ElfLinkRequest.runpath`
+  -> DT_RUNPATH (dynamic modes only; a runpath on a static link is an Err),
+  and `--as-needed` is `shared_as_needed`, a per-library flag that withholds
+  DT_NEEDED until an import actually binds. Default false everywhere =
+  `--no-as-needed` = the pre-existing behaviour.
 - `ld.lld` has no built-in library search path, so `-l` resolution uses
   `crt.lib_dirs` (crt dir + gcc lib dirs) — the same set the external direct-ld
   arm emits as `-L`. `libstdc++` lives in the gcc dir, not in
   `/usr/lib/<triple>`.
+- The knob cannot complete a RESUME yet: `manifest-verify.shs:665-701`
+  rebuilds the Stage 3 hash from a hard-coded env list with no `SIMPLE_LINKER`
+  (nor `stage3_mc_env`/`cold_init_env`), so a knob-ON resume dies at
+  `resume-stage3-from-admitted.sh:915`. Fails closed; fix all three together.
 - Still blocked on COMDAT dedup, TLS and multiple-definition handling once the
   373 MB aggregate archive is actually fed in:
   `doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md`.

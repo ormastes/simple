@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, list_dir}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_read, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, list_dir}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -314,7 +314,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         if trace:
             print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine ({plan.archives.len()} archive(s), {plan.libraries.len()} library(ies), {plan.roots.len()} root(s))"
         return internal_link_native(os, arch, config.pie, object_files, output,
-            plan.archives, plan.libraries, plan.roots, plan.lib_dirs)
+            plan.archives, plan.libraries, plan.roots, plan.lib_dirs,
+            plan.as_needed, plan.runpath)
 
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
@@ -549,9 +550,51 @@ struct InternalLinkPlan:
     """Everything the internal ELF engine needs beyond the object files, in the
     same shape the external argv path builds it."""
     archives: [text]    # static archives: the selected runtime bundle
-    libraries: [text]   # `-l` names: the native_all table, then config.libraries
+    libraries: [text]   # `-l` names: std libs, the native_all table, config.libraries
+    as_needed: [bool]   # parallel to libraries: inside an `--as-needed` region?
     roots: [text]       # `-u` symbols from the native_all table
     lib_dirs: [text]    # extra search dirs: config.library_paths (`-L`)
+    runpath: text       # `-rpath <runtime_dir>` -> DT_RUNPATH
+
+pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
+        origin: text) -> Result<InternalLinkPlan, text>:
+    """Fold one external-path arg list into the plan, or name the first entry
+    the internal engine cannot express.
+
+    This is the single place a `-l`/`-u`/`--as-needed` list is translated, so
+    the native_all table and native_link_std_lib_args cannot drift apart or be
+    dropped independently -- dropping the std-lib list silently is the same
+    defect class this route already had for the native_all table."""
+    var libraries = plan.libraries
+    var as_needed = plan.as_needed
+    var roots = plan.roots
+    var region_as_needed = false
+    var i: i64 = 0
+    while i < args.len():
+        val tok = args[i]
+        if tok == "--as-needed":
+            region_as_needed = true
+            i = i + 1
+            continue
+        if tok == "--no-as-needed":
+            region_as_needed = false
+            i = i + 1
+            continue
+        if tok == "-u":
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-u' with no symbol after it")
+            roots = roots.push(args[i + 1])
+            i = i + 2
+            continue
+        if tok.starts_with("-l") and tok.len() > 2:
+            libraries = libraries.push(tok.substring(2, tok.len()))
+            as_needed = as_needed.push(region_as_needed)
+            i = i + 1
+            continue
+        return Err("internal engine: unsupported {origin} entry '{tok}' (internal:elf honours only '-u <sym>', '-l<name>', '--as-needed' and '--no-as-needed')")
+    Ok(InternalLinkPlan(archives: plan.archives, libraries: libraries,
+        as_needed: as_needed, roots: roots, lib_dirs: plan.lib_dirs,
+        runpath: plan.runpath))
 
 pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
         os: text) -> Result<InternalLinkPlan, text>:
@@ -578,16 +621,34 @@ pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
     var support_inputs = object_files
     for archive in archives:
         support_inputs = support_inputs.push(archive)
-    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-    val support = internal_support_plan(support_inputs, os, brew_prefix)?
-    var libraries = support.libraries
-    for lib in config.libraries:
-        libraries = libraries.push(lib)
     var lib_dirs: [text] = []
     for dir in config.library_paths:
         lib_dirs = lib_dirs.push(dir)
-    Ok(InternalLinkPlan(archives: archives, libraries: libraries,
-        roots: support.roots, lib_dirs: lib_dirs))
+    # `-rpath <runtime_dir>`: the external arm emits it next to the runtime
+    # archives (native_runtime_archive_link_args, emit_rpath=true on non-
+    # Windows). It becomes DT_RUNPATH. Dropping it was the third silent drop
+    # on this route.
+    var runpath = ""
+    if archives.len() > 0:
+        runpath = runtime_dir
+    var plan = InternalLinkPlan(archives: archives, libraries: [], as_needed: [],
+        roots: [], lib_dirs: lib_dirs, runpath: runpath)
+    # Order mirrors link_native_unix's argv: std libs, then the native_all
+    # support table, then the caller's own libraries.
+    plan = internal_absorb_link_args(plan, native_link_std_lib_args(os, "ld"),
+        "standard-library table")?
+    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    plan = internal_absorb_link_args(
+        plan, native_all_gnu_support_args(support_inputs, os, brew_prefix),
+        "native_all support table")?
+    var libraries = plan.libraries
+    var as_needed = plan.as_needed
+    for lib in config.libraries:
+        libraries = libraries.push(lib)
+        as_needed = as_needed.push(false)
+    Ok(InternalLinkPlan(archives: plan.archives, libraries: libraries,
+        as_needed: as_needed, roots: plan.roots, lib_dirs: plan.lib_dirs,
+        runpath: plan.runpath))
 
 fn internal_file_is_elf(path: text) -> bool:
     val head = file_read_bytes(path)
@@ -595,38 +656,73 @@ fn internal_file_is_elf(path: text) -> bool:
         return false
     head[0] as i64 == 127 and head[1] as i64 == 69 and head[2] as i64 == 76 and head[3] as i64 == 70
 
-pub fn internal_resolve_shared_library(name: text, dirs: [text]) -> Result<text, text>:
-    """Resolve an `-l<name>` to one shared-object FILE, or say why it cannot be.
+fn internal_shared_dedupe_key(path: text) -> text:
+    """Final path component: the file name a shared object's SONAME carries."""
+    val parts = path.replace("\\", "/").split("/")
+    parts[parts.len() - 1]
 
-    internal:elf consumes shared-object bytes, not a linker command line, so a
-    `-l` that cannot be turned into a readable ET_DYN file must be a named
-    error. Two refusals are called out separately because they need different
-    fixes: a GNU linker script (glibc ships `libc.so`/`libm.so` as text GROUP
-    scripts) is a feature this engine does not implement, while nothing found
-    at all is a missing development package or a missing `-L`."""
+fn internal_linker_script_target(path: text, dir: text) -> text:
+    """First existing file named by a GNU linker script's GROUP/INPUT list.
+
+    glibc ships `libc.so`, `libm.so` and friends as TEXT scripts like
+    `GROUP ( libc.so.6 libc_nonshared.a AS_NEEDED ( ld-linux-x86-64.so.2 ) )`.
+    `ld` follows them, so `-lm` resolving to a script is normal, not an error.
+    Only the first ELF member is taken: the engine already supplies
+    `libc_nonshared.a` itself and the AS_NEEDED loader entry is not a link
+    input. Returns "" when nothing in the script resolves, which the caller
+    turns into a named error."""
+    var text_form = file_read(path)
+    for separator in ["(", ")", ",", "\n", "\t", "\r"]:
+        text_form = text_form.replace(separator, " ")
+    # Members may be absolute (glibc writes `GROUP ( /lib/<triple>/libc.so.6
+    # /usr/lib/<triple>/libc_nonshared.a AS_NEEDED ( /lib/ld-linux-*.so.* ) )`)
+    # or bare names resolved against the script's own directory. Directives
+    # such as OUTPUT_FORMAT(elf64-...) name no file, so the existence + ELF
+    # magic test is what filters them; no keyword list is needed.
+    for token in text_form.split(" "):
+        if token == "":
+            continue
+        var candidate = "{dir}/{token}"
+        if token.starts_with("/"):
+            candidate = token
+        if file_exists(candidate) and internal_file_is_elf(candidate):
+            return candidate
+    ""
+
+struct InternalResolvedLib:
+    path: text
+    is_archive: bool   # `lib<name>.a` -- an input for the archive fixpoint, not a DSO
+
+pub fn internal_resolve_library(name: text, dirs: [text]) -> Result<InternalResolvedLib, text>:
+    """Resolve an `-l<name>` the way `ld` does, or say why it cannot be.
+
+    `ld` searches each `-L` directory for `lib<name>.so` then `lib<name>.a`
+    and ERRORS when neither exists -- it never guesses a versioned file. An
+    earlier version of this function did guess, picking the longest/lexically
+    greatest `lib<name>.so.*`, which selects `libssl.so.1.1` over
+    `libssl.so.3`: a silent wrong answer whose DT_NEEDED still looked right
+    because that name comes from the DSO's own SONAME. That is a mask, and
+    design D4 forbids it. The unversioned name is a development-package
+    symlink or a GROUP script; if it is absent, so is ld's answer."""
     for dir in dirs:
         if dir == "":
             continue
         val plain = "{dir}/lib{name}.so"
         if file_exists(plain):
             if internal_file_is_elf(plain):
-                return Ok(plain)
-            return Err("internal engine: '{plain}' is a GNU linker script, not an ELF shared object (internal:elf does not follow linker scripts)")
-        # No `lib<name>.so` development symlink (common on a host with only the
-        # runtime package installed): fall back to the highest soname version,
-        # which is what the symlink would have pointed at.
-        var best = ""
-        for entry in list_dir(dir):
-            if not entry.starts_with("lib{name}.so."):
-                continue
-            val candidate = "{dir}/{entry}"
-            if not file_exists(candidate) or not internal_file_is_elf(candidate):
-                continue
-            if best == "" or entry.len() > best.len() or (entry.len() == best.len() and entry > best):
-                best = entry
-        if best != "":
-            return Ok("{dir}/{best}")
-    Err("internal engine: cannot resolve '-l{name}' to a shared object under {dirs.len()} search directory(ies) (internal:elf needs a readable lib{name}.so)")
+                return Ok(InternalResolvedLib(path: plain, is_archive: false))
+            val followed = internal_linker_script_target(plain, dir)
+            if followed != "":
+                return Ok(InternalResolvedLib(path: followed, is_archive: false))
+            return Err("internal engine: '{plain}' is a GNU linker script naming no readable ELF member in '{dir}'")
+        # `ld` takes lib<name>.a when no lib<name>.so exists. On a usr-merged
+        # glibc `libpthread`/`libdl` are EXACTLY this: empty stub archives left
+        # behind after both were folded into libc. They are real inputs, so
+        # they go to the archive fixpoint rather than the shared-object list.
+        val static_lib = "{dir}/lib{name}.a"
+        if file_exists(static_lib):
+            return Ok(InternalResolvedLib(path: static_lib, is_archive: true))
+    Err("internal engine: cannot resolve '-l{name}': no lib{name}.so or lib{name}.a in any of the {dirs.len()} search directory(ies) (same search rule as ld; install the development package or add a -L)")
 
 fn internal_link_native_read_i64(path: text) -> [i64]:
     """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
@@ -640,7 +736,7 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
 
 fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text,
         extra_archives: [text] = [], libraries: [text] = [], roots: [text] = [],
-        extra_lib_dirs: [text] = []) -> Result:
+        extra_lib_dirs: [text] = [], as_needed: [bool] = [], runpath: text = "") -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -697,12 +793,36 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
         search_dirs = search_dirs.push(dir)
     if not search_dirs.contains(libdir):
         search_dirs = search_dirs.push(libdir)
+    # libc is loaded explicitly (it is the one library the engine always needs
+    # and the one whose path the CRT probe already established), so a `-lc`
+    # that resolves back to it must NOT be loaded twice -- a second copy would
+    # duplicate every DT_NEEDED and every export. Dedupe on the resolved path.
     var shared_objects: [[u8]] = [file_read_bytes(libc)]
-    for name in libraries:
-        val resolved = internal_resolve_shared_library(name, search_dirs)
+    var shared_as_needed: [bool] = [false]
+    # Dedupe on BASENAME, not on the path: `-lc` resolves through
+    # /usr/lib/<triple>/libc.so, whose GROUP script names /lib/<triple>/
+    # libc.so.6 -- a different string for the same usr-merged file the CRT
+    # probe already loaded. Two distinct libraries never share a basename in
+    # one link (it is the SONAME), so this is exactly the right key.
+    var seen_shared: [text] = [internal_shared_dedupe_key(libc)]
+    var lib_i: i64 = 0
+    while lib_i < libraries.len():
+        val name = libraries[lib_i]
+        val want_as_needed = lib_i < as_needed.len() and as_needed[lib_i]
+        lib_i = lib_i + 1
+        val resolved = internal_resolve_library(name, search_dirs)
         if resolved.is_err():
             return Err(resolved.unwrap_err())
-        shared_objects = shared_objects.push(file_read_bytes(resolved.unwrap()))
+        val path = resolved.unwrap().path
+        if resolved.unwrap().is_archive:
+            archives = archives.push(internal_link_native_read_i64(path))
+            continue
+        val key = internal_shared_dedupe_key(path)
+        if seen_shared.contains(key):
+            continue
+        seen_shared = seen_shared.push(key)
+        shared_objects = shared_objects.push(file_read_bytes(path))
+        shared_as_needed = shared_as_needed.push(want_as_needed)
     var target_arch = RelocArch.X86_64
     if norm_arch == "aarch64":
         target_arch = RelocArch.AArch64
@@ -711,7 +831,7 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
         mode = ELF_LINK_DYNAMIC_PIE
     val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_objects,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
-        roots: roots))
+        roots: roots, runpath: runpath, shared_as_needed: shared_as_needed))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []

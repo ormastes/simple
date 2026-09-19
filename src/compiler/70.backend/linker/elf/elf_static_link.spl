@@ -64,6 +64,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
     DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE,
+    DT_RUNPATH,
     DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM,
     SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
     SHT_GNU_VERSYM_S, SHT_GNU_VERNEED_S,
@@ -116,7 +117,22 @@ struct ElfLinkRequest:
     # root that nothing ends up defining is an error, never a silent drop:
     # the native_all support table's -u rt_vulkan_provider_is_available is the
     # only thing that keeps its defining member of libsimple_native_all.a.
+    #
+    # Two deliberate divergences from ld.lld, both STRICTER (see elf_link):
+    #   * lld exits 0 for a `-u` symbol nothing defines; this Errs.
+    #   * lld exits 0 when only a shared library exports it; this Errs, because
+    #     this linker emits a dynamic symbol only for a real reference from an
+    #     input object, so "kept" would be a claim it cannot honour.
     roots: [text] = []
+    # ld `-rpath <dir>` -> DT_RUNPATH. Dynamic modes only: a static image has
+    # no .dynamic to carry it, so a runpath on a static link is an error
+    # rather than a silent drop.
+    runpath: text = ""
+    # ld `--as-needed`, per entry of `shared` (shorter/empty = false, i.e.
+    # `--no-as-needed`, which is the behaviour every caller had before this
+    # existed). A true entry gets DT_NEEDED only when at least one import
+    # actually binds to it.
+    shared_as_needed: [bool] = []
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -132,6 +148,8 @@ struct ElfLinkCtx:
     libs: [ElfSharedLib]
     target: RelocArch
     mode: i64
+    runpath: text = ""
+    libs_as_needed: [bool] = []   # parallel to libs; see ElfLinkRequest.shared_as_needed
 
 # ============================================================================
 # Target
@@ -916,8 +934,33 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
     var t: [[i64]] = []
     val dynamic = elf_mode_dynamic(ctx.mode)
     if dynamic:
-        for l in ctx.libs:
-            t = t.push([DT_NEEDED, dynstr.offsets[l.soname]])
+        # ld `--as-needed`: a library flagged as-needed earns its DT_NEEDED
+        # only when at least one import actually binds to it. Binding follows
+        # elf_lib_export's rule -- FIRST library in command-line order that
+        # exports the name -- so the two can never disagree about which
+        # library an import came from. A lib with no flag (the default, and
+        # every pre-existing caller) is `--no-as-needed` and always recorded.
+        var li: i64 = 0
+        while li < ctx.libs.len():
+            val as_needed = li < ctx.libs_as_needed.len() and ctx.libs_as_needed[li]
+            var used = not as_needed
+            if as_needed:
+                for name in sc.imports:
+                    if used:
+                        continue
+                    var owner: i64 = -1
+                    var lj: i64 = 0
+                    while lj < ctx.libs.len():
+                        if owner < 0 and ctx.libs[lj].exports.has(name):
+                            owner = lj
+                        lj = lj + 1
+                    if owner == li:
+                        used = true
+            if used:
+                t = t.push([DT_NEEDED, dynstr.offsets[ctx.libs[li].soname]])
+            li = li + 1
+        if ctx.runpath != "":
+            t = t.push([DT_RUNPATH, dynstr.offsets[ctx.runpath]])
         t = t.push([DT_DEBUG, 0])
         if elf_has_def(ctx, "_init"):
             t = t.push([DT_INIT, a.init])
@@ -1243,6 +1286,8 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         return Err("shared objects given to a static link")
     if dynamic and req.interp == "":
         return Err("dynamic link needs an interpreter path (PT_INTERP)")
+    if not dynamic and req.runpath != "":
+        return Err("runpath given to a static link (no .dynamic to carry DT_RUNPATH)")
 
     var roots: [ElfObject] = []
     var i: i64 = 0
@@ -1321,7 +1366,16 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     if req.string_merge:
         merged = elf_merge_build(all, live, elf_out_names(all)?)?
     val inputs = elf_static_place(all, live, merged)?
-    val ctx = ElfLinkCtx(inputs: inputs, merged: merged, res: res, libs: libs, target: target, mode: mode)
+    var libs_as_needed: [bool] = []
+    var an_i: i64 = 0
+    while an_i < libs.len():
+        if an_i < req.shared_as_needed.len():
+            libs_as_needed = libs_as_needed.push(req.shared_as_needed[an_i])
+        else:
+            libs_as_needed = libs_as_needed.push(false)
+        an_i = an_i + 1
+    val ctx = ElfLinkCtx(inputs: inputs, merged: merged, res: res, libs: libs, target: target, mode: mode,
+        runpath: req.runpath, libs_as_needed: libs_as_needed)
     var contents = elf_static_contents(inputs, merged)
     val refs = elf_collect_refs(ctx, contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
@@ -1342,6 +1396,8 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     var strnames: [text] = []
     for l in libs:
         strnames = strnames.push(l.soname)
+    if ctx.runpath != "":
+        strnames = strnames.push(ctx.runpath)
     for n in sc.imports:
         strnames = strnames.push(n)
     for vn in ver.names:

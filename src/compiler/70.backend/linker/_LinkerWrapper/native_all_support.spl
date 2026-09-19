@@ -84,50 +84,6 @@ fn native_all_gnu_support_args(inputs: [text], os: text, macos_prefix: text) -> 
         ]
     []
 
-# ---------------------------------------------------------------------------
-# Internal ELF engine translation of the table above.
-#
-# The external argv path hands `native_all_gnu_support_args` straight to
-# ld.lld/mold. The internal engine (elf_static_link.elf_link) takes no argv:
-# it takes shared objects and an ElfLinkRequest. This splits the table into
-# the two things the engine can express --
-#
-#   `-l<name>`   -> a library to resolve and load as a shared object
-#   `-u <sym>`   -> an ElfLinkRequest root (forced undefined)
-#
-# -- and REFUSES, by name, anything else. Design D4, "reject, never mask":
-# the internal branch used to pass libraries=[] and no roots, which dropped
-# the whole table silently. The macOS/mingw/freebsd arms carry `-L<dir>`,
-# `-framework <name>` and Windows import libs, none of which internal:elf
-# models, so an internal link against those targets must fail loudly (it
-# already refuses non-Linux targets earlier, and this is the second fence).
-struct InternalSupportPlan:
-    libraries: [text]   # `-lfoo` -> "foo", in table order
-    roots: [text]       # `-u sym` -> "sym", in table order
-
-pub fn internal_support_plan(inputs: [text], os: text,
-        macos_prefix: text) -> Result<InternalSupportPlan, text>:
-    """Split native_all_gnu_support_args into (libraries, roots) for the
-    internal ELF engine, or name the first entry that cannot be honoured."""
-    val table = native_all_gnu_support_args(inputs, os, macos_prefix)
-    var libraries: [text] = []
-    var roots: [text] = []
-    var i: i64 = 0
-    while i < table.len():
-        val tok = table[i]
-        if tok == "-u":
-            if i + 1 >= table.len():
-                return Err("internal engine: support-table '-u' with no symbol after it")
-            roots = roots.push(table[i + 1])
-            i = i + 2
-            continue
-        if tok.starts_with("-l") and tok.len() > 2:
-            libraries = libraries.push(tok.substring(2, tok.len()))
-            i = i + 1
-            continue
-        return Err("internal engine: unsupported support-table entry '{tok}' for os '{os}' (internal:elf honours only '-u <sym>' and '-l<name>')")
-    Ok(InternalSupportPlan(libraries: libraries, roots: roots))
-
 fn native_all_msvc_support_libraries(inputs: [text]) -> [text]:
     if not native_all_input_present(inputs):
         return []
