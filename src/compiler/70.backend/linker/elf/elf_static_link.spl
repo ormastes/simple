@@ -64,7 +64,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
     DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE,
-    DT_RUNPATH,
+    DT_RUNPATH, DT_BIND_NOW, DF_1_NOW,
     DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM,
     SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
     SHT_GNU_VERSYM_S, SHT_GNU_VERNEED_S,
@@ -128,6 +128,10 @@ struct ElfLinkRequest:
     # no .dynamic to carry it, so a runpath on a static link is an error
     # rather than a silent drop.
     runpath: text = ""
+    # ld `-z now` -> DT_BIND_NOW + DF_1_NOW: the dynamic loader resolves every
+    # relocation at load time instead of lazily through the PLT. Dynamic modes
+    # only -- a static image has no .dynamic to carry it.
+    bind_now: bool = false
     # ld `--as-needed`, per entry of `shared` (shorter/empty = false, i.e.
     # `--no-as-needed`, which is the behaviour every caller had before this
     # existed). A true entry gets DT_NEEDED only when at least one import
@@ -150,6 +154,7 @@ struct ElfLinkCtx:
     mode: i64
     runpath: text = ""
     libs_as_needed: [bool] = []   # parallel to libs; see ElfLinkRequest.shared_as_needed
+    bind_now: bool = false
 
 # ============================================================================
 # Target
@@ -997,8 +1002,17 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
         t = t.push([DT_PLTRELSZ, sc.plt_names.len() * 24])
         t = t.push([DT_PLTGOT, a.gotplt])
         t = t.push([DT_PLTREL, DT_RELA])
+    if dynamic and ctx.bind_now:
+        # Both spellings, exactly as ld.lld emits them for `-z now`: the
+        # historical DT_BIND_NOW and the DF_1_NOW bit that modern loaders read.
+        t = t.push([DT_BIND_NOW, 0])
+    var flags1: i64 = 0
     if elf_mode_pie(ctx.mode):
-        t = t.push([DT_FLAGS_1, DF_1_PIE])
+        flags1 = flags1 | DF_1_PIE
+    if dynamic and ctx.bind_now:
+        flags1 = flags1 | DF_1_NOW
+    if flags1 != 0:
+        t = t.push([DT_FLAGS_1, flags1])
     t
 
 fn elf_plan_addr(plan: ElfExecPlan, name: text) -> i64:
@@ -1288,6 +1302,8 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
         return Err("dynamic link needs an interpreter path (PT_INTERP)")
     if not dynamic and req.runpath != "":
         return Err("runpath given to a static link (no .dynamic to carry DT_RUNPATH)")
+    if not dynamic and req.bind_now:
+        return Err("bind_now (-z now) given to a static link (no .dynamic to carry DT_BIND_NOW)")
 
     var roots: [ElfObject] = []
     var i: i64 = 0
@@ -1375,7 +1391,7 @@ fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
             libs_as_needed = libs_as_needed.push(false)
         an_i = an_i + 1
     val ctx = ElfLinkCtx(inputs: inputs, merged: merged, res: res, libs: libs, target: target, mode: mode,
-        runpath: req.runpath, libs_as_needed: libs_as_needed)
+        runpath: req.runpath, libs_as_needed: libs_as_needed, bind_now: req.bind_now)
     var contents = elf_static_contents(inputs, merged)
     val refs = elf_collect_refs(ctx, contents)?
     val sc = elf_reloc_scan(refs, target, mode)?

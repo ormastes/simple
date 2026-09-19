@@ -301,11 +301,23 @@ Traps worth knowing:
 - `-l` search order is crt.lib_dirs then config.library_paths, matching the
   external arm's `-L` order. ld takes the first directory with a match, so
   reversing them can select a different file for the same `-l`.
-- `-l` resolution mirrors ld EXACTLY: `lib<name>.so`, then `lib<name>.a`,
+- `native_direct_platform_flags` is folded too, and is the one producer whose
+  absence was visible in the SHIPPED BINARY (no DT_BIND_NOW, no section GC).
+  `--gc-sections` -> `gc_sections`, `-z now` -> `bind_now` (DT_BIND_NOW +
+  DF_1_NOW), `-z relro` is the existing PT_GNU_RELRO path. Three flags the
+  engine cannot produce (`--eh-frame-hdr`, `--build-id`, `--hash-style=gnu`)
+  are SUBTRACTED from the one shared list via
+  `INTERNAL_ELF_UNPRODUCIBLE_FLAGS`, never given the internal route a list of
+  its own -- a separate list would silently withhold every future flag,
+  whereas subtraction means a new flag still arrives and is refused by name.
+- `-l` resolution follows ld's search rule (`lib<name>.so`, then `lib<name>.a`,
+  then error) with ONE stated limit: a GROUP linker script resolves to its
+  first readable ELF member, and a `-l<name>` member inside a script is not
+  re-resolved (the `-lgcc_s` gap in the tracking record). Details: `lib<name>.so`, then `lib<name>.a`,
   then error. Never guess a versioned file — a longest/lexical heuristic picks
   `libssl.so.1.1` over `libssl.so.3`, and the resulting DT_NEEDED still looks
   right because that name comes from the DSO's own SONAME. On a usr-merged
-  glibc, `libc.so`/`libm.so` are GROUP linker SCRIPTS (follow them, with
+  glibc, `libc.so`/`libm.so` are GROUP linker SCRIPTS (followed, with
   absolute member paths), and `libpthread.a`/`libdl.a` are empty stub ARCHIVES
   with no `.so` at all — route those to the archive fixpoint, not the DSO list.
   Dedupe shared objects on BASENAME: `-lc` resolves to `/lib/<triple>/libc.so.6`

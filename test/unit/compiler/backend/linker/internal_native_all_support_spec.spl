@@ -47,7 +47,8 @@ use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_L
 use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_gnu_support_args}
-use compiler.backend.linker._LinkerWrapper.native_linking.{internal_link_plan, internal_resolve_library, internal_absorb_link_args, InternalLinkPlan, InternalResolvedLib}
+use compiler.backend.linker._LinkerWrapper.native_linking.{native_direct_platform_flags}
+use compiler.backend.linker._LinkerWrapper.native_linking.{internal_link_plan, internal_resolve_library, internal_absorb_link_args, internal_link_native, InternalLinkPlan, InternalResolvedLib}
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 use compiler.backend.linker.linker_wrapper.{link_to_native}
 use std.io_runtime.{file_read_bytes, shell}
@@ -357,9 +358,9 @@ describe "internal ELF route - the runtime provider is demanded, not skipped":
             expect(result.unwrap_err()).to_contain("simple_compiler")
         )
 
-    it "links when that same directory carries the provider the external arm names":
+    it "gets past the provider check when that directory carries the provider":
         # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
-        step("With libsimple_compiler.a present the auto bundle selects it as an archive input and no -lsimple_compiler is emitted, so the link proceeds")
+        step("With libsimple_compiler.a present the auto bundle selects it as an archive input and no -lsimple_compiler is emitted, so resolution moves on")
         val filled_dir = "{SANDBOX}/runtime_filled"
         shell("mkdir -p '{filled_dir}' && rm -f '{filled_dir}'/*.a && ar rc '{filled_dir}/libsimple_compiler.a'")
         var cfg = NativeLinkConfig.default()
@@ -367,5 +368,49 @@ describe "internal ELF route - the runtime provider is demanded, not skipped":
         with_internal_linker(fn():
             val result = link_to_native([HELLO_A64_OBJ],
                 "{SANDBOX}/runtime_filled_out", cfg)
-            expect(result.is_ok()).to_equal(true)
+            # It stops LATER, and loudly: the platform producer's
+            # `--gc-sections` is now honoured, and elf_gc_reject refuses to
+            # garbage-collect an input carrying .eh_frame because it does not
+            # model per-FDE liveness. That is a named engine refusal, which is
+            # the correct D4 outcome -- the point of this row is that the
+            # runtime provider is no longer what fails.
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err().contains("simple_compiler")).to_equal(false)
+            expect(result.unwrap_err()).to_contain("gc_sections")
         )
+
+describe "internal ELF route - the hardening flags reach the output binary":
+    it "-z now becomes DT_BIND_NOW and DF_1_NOW":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("native_direct_platform_flags asks for `-z now`; dropping it shipped a binary with lazy binding where the external route hardens it")
+        val out = "{SANDBOX}/bind_now_out"
+        val linked = internal_link_native("linux", "aarch64", true,
+            [HELLO_A64_OBJ], out, [], [], [], [], [], "", false, true)
+        expect(linked.is_ok()).to_equal(true)
+        val dyn = shell("readelf -d '{out}'")
+        expect(dyn.stdout).to_contain("BIND_NOW")
+        expect(dyn.stdout).to_contain("NOW")
+        val run = shell("'{out}'")
+        expect(run.exit_code).to_equal(42)
+
+    it "--gc-sections reaches the request instead of being dropped":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The other half of the same producer. Engine-side GC behaviour is pinned by elf_gc_sections_spec; what was missing here was the flag ever arriving")
+        val folded = internal_absorb_link_args(
+            empty_plan(),
+            native_direct_platform_flags("linux", "internal", false),
+            "direct platform flags")
+        expect(folded.is_ok()).to_equal(true)
+        expect(folded.unwrap().gc_sections).to_equal(true)
+        expect(folded.unwrap().bind_now).to_equal(true)
+
+    it "refuses a flag the producer grows that the engine cannot honour":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Drift probe: a NEW flag added to the shared producer must be refused by name, not linked clean -- that is what makes folding the producer meaningful")
+        val folded = internal_absorb_link_args(
+            empty_plan(),
+            native_direct_platform_flags("linux", "internal", false).push("--g1probe-flag"),
+            "direct platform flags")
+        expect(folded.is_err()).to_equal(true)
+        expect(folded.unwrap_err()).to_contain("--g1probe-flag")
+        expect(folded.unwrap_err()).to_contain("refused rather than ignored")

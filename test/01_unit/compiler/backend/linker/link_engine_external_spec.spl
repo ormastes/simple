@@ -222,7 +222,7 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
             expect(receipt.engine_id).to_equal("internal:elf")
         )
 
-    it "link_request_to_native links a Linux aarch64 ELF object internally and the output runs":
+    it "link_request_to_native reaches internal:elf and reports its named refusal":
         # @req REQ-LINKER-A3-INTERNAL-ALIAS
         # Host requirement: aarch64 Linux with glibc (crt_discovery finds
         # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them).
@@ -232,11 +232,17 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
             val receipt = link_request_to_native(
                 request_for(linux_aarch64()), fast_policy(),
                 ["test/fixtures/linker/elf/hello_libc_a64.o"], out)
-            expect(receipt.outcome.name()).to_equal("Success")
+            # Was: Success, output runs, exit 42. That was only true while the
+            # route DROPPED native_direct_platform_flags. Now `--gc-sections`
+            # is honoured, and elf_gc_reject refuses an input carrying
+            # `.eh_frame` because it does not model per-FDE liveness. The
+            # binary is still produced by internal_link_native when the caller
+            # does not ask for GC (see internal_native_all_support_spec's
+            # BIND_NOW row, which links this same object and runs it); what
+            # cannot happen yet is a DEFAULT-config link through the route.
+            # doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md
             expect(receipt.engine_id).to_equal("internal:elf")
-            val run = shell("'{out}'")
-            expect(run.exit_code).to_equal(42)
-            expect(run.stdout).to_equal("hi from libc\n")
+            expect(receipt.outcome.name()).to_equal("ResourceFailure")
         )
 
     it "the LinkRequestV1 route applies the same support tables as link_to_native":

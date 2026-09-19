@@ -121,3 +121,35 @@ GROUP re-enters `internal_resolve_library` with the same search directories.
 LLVM/compiler-rt. If that lands, `-lgcc_s` disappears from every table and this
 gap has no caller. Recorded anyway, because "another lane may delete the
 caller" is not the same as "this is correct".
+
+## Flags the engine cannot produce (folded producer, 2026-09-19)
+
+`native_direct_platform_flags` is now folded into `internal_link_plan` — it was
+the last producer that was not, and the only one whose absence was visible in
+the shipped binary: same inputs gave the external route `FLAGS BIND_NOW` and
+section GC, and the internal route neither.
+
+Honoured: `--gc-sections` -> `ElfLinkRequest.gc_sections`, `-z now` ->
+`bind_now` (DT_BIND_NOW + DF_1_NOW), `-z relro` -> the existing PT_GNU_RELRO
+emission (`elf_exec_writer.spl`, lane C1).
+
+Three are SUBTRACTED from the shared list by `INTERNAL_ELF_UNPRODUCIBLE_FLAGS`
+because the engine genuinely cannot produce them, and claiming otherwise would
+be the masking this route keeps being caught doing:
+
+| flag | gap |
+|---|---|
+| `--eh-frame-hdr` | no `.eh_frame_hdr` / PT_GNU_EH_FRAME |
+| `--build-id` | no `.note.gnu.build-id` |
+| `--hash-style=gnu` | engine emits BOTH `.hash` and `.gnu.hash` |
+
+Subtraction, not a separate internal flag list: a flag ADDED to the shared list
+still reaches the internal route and is refused by name if unsupported. A
+private list would silently withhold every future flag — the same defect.
+
+Consequence worth stating: with `--gc-sections` now honoured, an internal link
+of any input carrying `.eh_frame` stops at the engine's own
+`elf_gc_reject` ("gc_sections does not model per-FDE .eh_frame liveness").
+That is a loud, named refusal rather than a wrong binary, but it means the
+internal route cannot link ordinary compiler output until per-FDE liveness
+lands. Add it to the engine work alongside COMDAT/TLS.

@@ -315,7 +315,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
             print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine ({plan.archives.len()} archive(s), {plan.libraries.len()} library(ies), {plan.roots.len()} root(s))"
         return internal_link_native(os, arch, config.pie, object_files, output,
             plan.archives, plan.libraries, plan.roots, plan.lib_dirs,
-            plan.as_needed, plan.runpath)
+            plan.as_needed, plan.runpath, plan.gc_sections, plan.bind_now)
 
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
@@ -555,6 +555,8 @@ struct InternalLinkPlan:
     roots: [text]       # `-u` symbols from the native_all table
     lib_dirs: [text]    # extra search dirs: config.library_paths (`-L`)
     runpath: text       # `-rpath <runtime_dir>` -> DT_RUNPATH
+    gc_sections: bool = false   # `--gc-sections`
+    bind_now: bool = false      # `-z now` -> DT_BIND_NOW + DF_1_NOW
 
 pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
         origin: text) -> Result<InternalLinkPlan, text>:
@@ -576,6 +578,8 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
     var archives = plan.archives
     var lib_dirs = plan.lib_dirs
     var runpath = plan.runpath
+    var gc_sections = plan.gc_sections
+    var bind_now = plan.bind_now
     var region_as_needed = false
     var i: i64 = 0
     while i < args.len():
@@ -587,6 +591,24 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
                 return Err("internal engine: {origin} '-L' with no directory after it")
             if not lib_dirs.contains(args[i + 1]):
                 lib_dirs = lib_dirs.push(args[i + 1])
+            i = i + 2
+            continue
+        if tok == "--gc-sections":
+            gc_sections = true
+            i = i + 1
+            continue
+        if tok == "-z":
+            # `-z relro` is already how this engine lays out an image: the
+            # PT_GNU_RELRO segment is emitted whenever an input carries the
+            # `.relro_padding` section (elf_exec_writer.spl, lane C1), so the
+            # flag asks for behaviour that is on. `-z now` sets DT_BIND_NOW.
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-z' with no keyword after it")
+            val keyword = args[i + 1]
+            if keyword == "now":
+                bind_now = true
+            elif keyword != "relro":
+                return Err("internal engine: unsupported {origin} entry '-z {keyword}' (internal:elf implements only '-z now' and '-z relro')")
             i = i + 2
             continue
         if tok == "-rpath":
@@ -635,10 +657,10 @@ pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
                 as_needed = as_needed.push(region_as_needed)
             i = i + 1
             continue
-        return Err("internal engine: unsupported {origin} entry '{tok}' (internal:elf honours only '-u <sym>', '-l<name>', '--as-needed' and '--no-as-needed')")
+        return Err("internal engine: unsupported {origin} entry '{tok}' (internal:elf honours '-u <sym>', '-l<name>', '-L <dir>', '-rpath <dir>', '-z now', '-z relro', '--gc-sections', '--as-needed', '--no-as-needed' and bare archive paths; everything else is refused rather than ignored)")
     Ok(InternalLinkPlan(archives: archives, libraries: libraries,
         as_needed: as_needed, roots: roots, lib_dirs: lib_dirs,
-        runpath: runpath))
+        runpath: runpath, gc_sections: gc_sections, bind_now: bind_now))
 
 pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
         os: text) -> Result<InternalLinkPlan, text>:
@@ -666,6 +688,15 @@ pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
         lib_dirs = lib_dirs.push(dir)
     var plan = InternalLinkPlan(archives: [], libraries: [], as_needed: [],
         roots: [], lib_dirs: lib_dirs, runpath: "")
+    # The hardening/optimisation flags the external direct-ld arm passes. This
+    # producer was the LAST one still unfolded, and unlike the others its
+    # absence was visible in the shipped binary: the internal route emitted no
+    # DT_BIND_NOW and ran no section GC while the external route hardened the
+    # same inputs. `--icf=all` is keyed on the resolved linker being mold/lld,
+    # so the internal engine does not receive it.
+    plan = internal_absorb_link_args(
+        plan, native_direct_platform_flags(os, "internal", config.strip_output),
+        "direct platform flags")?
     var runtime_archives: [text] = []
     if runtime_dir != "" and runtime_dir != "none":
         runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
@@ -711,7 +742,10 @@ fn internal_file_is_elf(path: text) -> bool:
     head[0] as i64 == 127 and head[1] as i64 == 69 and head[2] as i64 == 76 and head[3] as i64 == 70
 
 fn internal_shared_dedupe_key(path: text) -> text:
-    """Final path component: the file name a shared object's SONAME carries."""
+    """Final path component of a shared object's path.
+
+    NOT the SONAME -- see the dedupe site's own note. It is only usually equal
+    to it, and this function must not be described as if it reads one."""
     val parts = path.replace("\\", "/").split("/")
     parts[parts.len() - 1]
 
@@ -757,7 +791,14 @@ pub fn internal_resolve_library(name: text, dirs: [text]) -> Result<InternalReso
     `libssl.so.3`: a silent wrong answer whose DT_NEEDED still looked right
     because that name comes from the DSO's own SONAME. That is a mask, and
     design D4 forbids it. The unversioned name is a development-package
-    symlink or a GROUP script; if it is absent, so is ld's answer."""
+    symlink or a GROUP script; if it is absent, so is ld's answer.
+
+    ONE stated limit on the script case: a GROUP body is resolved to its first
+    readable ELF member, and a `-l<name>` MEMBER inside a script is not
+    re-resolved against the search path the way lld does it (gcc's
+    `libgcc_s.so` is `GROUP ( libgcc_s.so.1 -lgcc )`). Recorded in
+    doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md;
+    no library in any table this route folds is affected today."""
     for dir in dirs:
         if dir == "":
             continue
@@ -790,7 +831,8 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
 
 fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text,
         extra_archives: [text] = [], libraries: [text] = [], roots: [text] = [],
-        extra_lib_dirs: [text] = [], as_needed: [bool] = [], runpath: text = "") -> Result:
+        extra_lib_dirs: [text] = [], as_needed: [bool] = [], runpath: text = "",
+        gc_sections: bool = false, bind_now: bool = false) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -900,7 +942,8 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
         mode = ELF_LINK_DYNAMIC_PIE
     val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_objects,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
-        roots: roots, runpath: runpath, shared_as_needed: shared_as_needed))
+        roots: roots, runpath: runpath, shared_as_needed: shared_as_needed,
+        gc_sections: gc_sections, bind_now: bind_now))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []
@@ -1415,6 +1458,29 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
     # Explicit, not a bare tail expression — see native_runtime_provider_selection_error_for.
     return ""
 
+# Flags the linux/freebsd line below asks for that internal:elf CANNOT
+# produce. Each one is a real engine gap with a record, not a preference:
+#   --eh-frame-hdr   no .eh_frame_hdr / PT_GNU_EH_FRAME
+#                    (elf_exec_writer.spl: "Not produced: PT_TLS, PT_GNU_EH_FRAME")
+#   --build-id       no .note.gnu.build-id
+#   --hash-style=gnu the engine emits BOTH .hash and .gnu.hash; gnu-only is
+#                    a different output, so claiming it would be a lie
+# doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md
+#
+# They are SUBTRACTED from the one shared list rather than the internal route
+# getting a hand-written list of its own. That matters: a flag added to the
+# shared list below still reaches the internal route, where
+# internal_absorb_link_args refuses it by name if the engine cannot honour it.
+# A separate list would silently withhold every future flag instead.
+val INTERNAL_ELF_UNPRODUCIBLE_FLAGS: [text] = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu"]
+
+fn native_flags_without(flags: [text], excluded: [text]) -> [text]:
+    var kept: [text] = []
+    for flag in flags:
+        if not excluded.contains(flag):
+            kept = kept.push(flag)
+    kept
+
 pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
         var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
@@ -1422,6 +1488,8 @@ pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: b
         if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
         elif linker_type == "gold": flags.push("--icf=safe")
         if strip_output: flags.push("--strip-all")
+        if linker_type == "internal":
+            return native_flags_without(flags, INTERNAL_ELF_UNPRODUCIBLE_FLAGS)
         return flags
     if os == "macos" or os == "darwin":
         var flags = ["-dead_strip"]
