@@ -1,7 +1,7 @@
 # BUG: two nested `fn`s with the same name in different scopes collide, and the second call runs the first one's closure
 
 - **id:** nested_fn_name_collision_across_scopes_2026-09-19
-- **status:** OPEN, isolated with a 20-line repro, not yet fixed
+- **status:** FIXED 2026-09-19 (in source; not yet deployed to `bin/simple`)
 - **severity:** P2 — a LOUD error, never a silent wrong answer (established below, and it is the reason this is P2 and not P1)
 - **found:** 2026-09-19, while re-measuring a supposedly-open item in
   `nested_fn_in_spec_block_loses_captured_local_2026-08-04`
@@ -109,26 +109,57 @@ emptiness check, and it is exactly right for the single-definition case. On a
 collision the two are *different* `Arc`s, so the check correctly declines and
 dispatch falls through to the flat map — which holds the other scope's closure.
 
-## Candidate fix, not yet attempted
+## The fix
 
-In the same dispatch ladder: when the environment holds a `Value::Function`
-binding for the name and the flat-map entry is a **different** `Arc`, prefer the
-environment binding anyway. A lexically visible nested `fn` should shadow a stale
-flat-map entry left by an unrelated scope; the flat map is a recursion aid, not a
-namespace.
+In the same dispatch ladder, the condition that prefers the environment binding
+over the flat map was widened from pointer identity to **any** function binding
+visible in the current scope:
 
-Two things to check before believing that:
+```rust
+// was: Arc::ptr_eq(env_def, flat_def)
+let env_fn_binding_shadows_flat = matches!(env.get(name), Some(Value::Function { .. }));
+```
 
-- it must not break recursion — inside a converted body the letrec binding puts
-  the fn under its own name in the captured env, so an env-first rule finds the
-  right one;
-- it must not shadow a genuine module-level function — the condition requires the
-  env binding to *be* a `Value::Function`, so a same-named local non-function
-  value does not trigger it.
+Pointer identity was the right instinct for the original defect — `CowEnv` is a
+copy-on-write overlay, so no "does the captured env look non-empty" heuristic
+can substitute for it — but it was too narrow. It declines in exactly the case
+where two *different* nested `fn`s share a name, because then the two `Arc`s
+differ by construction.
 
-The real repair is a scope-qualified key for the flat map, which is a larger
-change and should be weighed against just removing the double registration now
-that the env binding carries recursion.
+The wider rule is not a special case; it is what lexical scoping already means.
+An inner binding shadows an outer one, and the flat `functions` map is an outer
+scope plus a recursion aid, not a namespace entitled to outrank the block you
+are standing in. That is also why it needs no "is this a nested fn" test: a
+local `fn` shadowing a module-level function of the same name is the same rule
+and is pinned as its own example.
+
+Recursion is unaffected: the letrec binding puts the function under its own name
+in the captured env, so the lookup inside the body finds itself rather than a
+same-named stranger.
+
+Not done, and deliberately: a scope-qualified key for the flat map. That is the
+deeper repair, and the better version of it is probably to drop the double
+registration entirely now that the env binding carries recursion. Neither is
+needed to close this, and both are much larger changes to the hottest path in
+the interpreter.
+
+## Evidence
+
+| check | before | after |
+|---|---|---|
+| `nested_fn_name_collision_spec.spl` (new) | 4 passed, **2 failed** | **6 passed, 0 failed** |
+| the record's own `collide` repro | 1 of 2 | **2 of 2** |
+| the record's own `silent` repro (both bodies resolve) | 1 of 2 | **2 of 2** |
+| the record's `nocollide` control (renamed) | 2 of 2 | 2 of 2 |
+| `nested_fn_in_lambda_capture_spec.spl` | 8 of 8 | 8 of 8 |
+| every other spec in `test/01_unit/interpreter/` | — | **identical**, file by file |
+| `check-nested-fn-jit-lowering.shs` | PASS | PASS |
+| `cargo test -p simple-compiler` | 19 failed | 19 failed, **byte-identical name list** |
+
+The per-file spec comparison matters more than the totals here: this change
+alters dispatch *priority*, so the risk was never a compile error but a quiet
+behaviour shift somewhere unrelated. Seven of the eight interpreter specs are
+identical before and after, and the eighth is the one this fix is for.
 
 ## Related
 
@@ -141,3 +172,46 @@ that the env binding carries recursion.
   first-wins-on-a-bare-name class, one layer up. It is also why hoisting nested
   fns to module scope was rejected when fixing the JIT lowering: the hoist would
   have created exactly this collision at a layer where it *could* be silent.
+
+## Deployed 2026-09-19 15:40 KST
+
+`bin/release/aarch64-unknown-linux-gnu/simple` — the target of the `bin/simple`
+symlink — now carries this fix.
+
+| | before | after |
+|---|---|---|
+| sha256 | `350328bab5142ff443505ceb…` | `cb7944151f8b62b397c55b0b…` |
+| size | 51,607,912 B | 51,624,896 B |
+| built | 2026-09-19 09:09 | 2026-09-19 15:30 |
+
+This binary carries **four** changes: the original nested-fn capture fix (already
+deployed at 09:09), the JIT lowering, the AOT compilability arm, and this
+collision fix. The first three are on `main`; **this one was still an open PR at
+deploy time** (#1131), so for a window the shared binary is ahead of `main` by
+exactly this commit. That is stated rather than glossed because the same gap the
+other direction — source fixed, binary stale — is what
+`seed_jit_optional_unwrap_returns_enum_box_2026-09-18` cost days to.
+
+Verified through the deployed symlink after the swap, not against the build
+directory:
+
+- `check-deployed-binary-optional-unwrap.shs` — `PASS — 6 row(s) checked,
+  default and interpret lanes agree`. This is the guard that exists precisely to
+  catch a bad deploy, and it was run **before** the swap as well.
+- `check-nested-fn-jit-lowering.shs` — `PASS — 4 shape(s) checked`.
+- `nested_fn_name_collision_spec.spl` 6/6, `nested_fn_in_lambda_capture_spec.spl`
+  8/8, `optional_unwrap_payload_spec.spl` 11/11,
+  `mutate_through_index_shapes_spec.spl` 7/7.
+
+Pre-swap regression evidence: every spec in `test/01_unit/interpreter/` compared
+file by file between the old and new binary (identical except the one this fix
+is for), plus eight specs sampled from `test/01_unit/lib` and
+`test/01_unit/compiler` (all identical, including one that fails on both and
+stays failing).
+
+Method: staged beside the target, `chmod 0711`, `mv -f` so the rename is atomic
+and processes already running the old inode are untouched — they pick the new
+binary up on their next start. Rollback is a single `mv` back from
+`simple.stale-2026-09-19-1540` (gitignored via `.gitignore:108 bin/release/`).
+The morning rollback copy `simple.stale-2026-09-19` was left in place rather
+than overwritten, so both steps are reversible independently.
