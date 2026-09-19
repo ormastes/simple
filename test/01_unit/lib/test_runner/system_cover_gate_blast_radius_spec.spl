@@ -1,0 +1,103 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.test_runner.test_runner_files.{partition_system_test_covers, validate_system_test_covers}
+
+# Pins the "narrow the blast radius" # @cover gate semantics fixed in
+# doc/08_tracking/bug/cover_gate_fails_every_system_test_without_running_one_2026-08-04.md
+# (with its siblings missing_cover_annotation_aborts_the_entire_system_test_run_2026-08-04.md
+# and system_cover_gate_reports_791_legacy_feature_specs_as_failures_2026-08-04.md):
+# one un-annotated system spec is excluded from the run and still counted as a
+# gate failure, but it no longer suppresses execution of every annotated spec
+# in the same selection.
+
+fn fixture_root() -> text:
+    "/tmp/simple-cover-gate-partition"
+
+fn annotated_body() -> text:
+    "# @cover src/lib/nogc_sync_mut/test_runner/test_runner_files.spl 80%\ndescribe \"annotated probe\":\n    it \"passes\":\n        expect(true).to_equal(true)\n"
+
+fn unannotated_body() -> text:
+    "describe \"unannotated probe\":\n    it \"passes\":\n        expect(true).to_equal(true)\n"
+
+fn app_annotated_path() -> text:
+    "{fixture_root()}/03_system/app/demo/annotated_spec.spl"
+
+fn app_unannotated_path() -> text:
+    "{fixture_root()}/03_system/app/demo/unannotated_spec.spl"
+
+fn helper_path() -> text:
+    "{fixture_root()}/03_system/app/demo/helpers/helper_spec.spl"
+
+fn legacy_annotated_path() -> text:
+    "{fixture_root()}/03_system/feature/language/annotated_spec.spl"
+
+fn legacy_unannotated_path() -> text:
+    "{fixture_root()}/03_system/feature/language/unannotated_spec.spl"
+
+fn unit_plain_path() -> text:
+    "{fixture_root()}/01_unit/demo/plain_spec.spl"
+
+fn ensure_fixtures():
+    expect(dir_create_all("{fixture_root()}/03_system/app/demo/helpers")).to_be(true)
+    expect(dir_create_all("{fixture_root()}/03_system/feature/language")).to_be(true)
+    expect(dir_create_all("{fixture_root()}/01_unit/demo")).to_be(true)
+    expect(file_write(app_annotated_path(), annotated_body())).to_be(true)
+    expect(file_write(app_unannotated_path(), unannotated_body())).to_be(true)
+    expect(file_write(helper_path(), unannotated_body())).to_be(true)
+    expect(file_write(legacy_annotated_path(), annotated_body())).to_be(true)
+    expect(file_write(legacy_unannotated_path(), unannotated_body())).to_be(true)
+    expect(file_write(unit_plain_path(), unannotated_body())).to_be(true)
+
+describe "system # @cover gate blast radius":
+    it "excludes only the un-annotated system spec and still runs the annotated one beside it":
+        ensure_fixtures()
+        val annotated = app_annotated_path()
+        val unannotated = app_unannotated_path()
+        val plain = unit_plain_path()
+        val split = partition_system_test_covers([annotated, unannotated, plain])
+        expect(split.missing.len()).to_equal(1)
+        expect(split.missing[0]).to_equal(unannotated)
+        expect(split.to_run.len()).to_equal(2)
+        expect(split.to_run[0]).to_equal(annotated)
+        expect(split.to_run[1]).to_equal(plain)
+
+    it "counts legacy feature specs as gate failures without blocking annotated legacy specs":
+        ensure_fixtures()
+        val legacy_missing = legacy_unannotated_path()
+        val legacy_ok = legacy_annotated_path()
+        val split = partition_system_test_covers([legacy_missing, legacy_ok])
+        expect(split.missing.len()).to_equal(1)
+        expect(split.missing[0]).to_equal(legacy_missing)
+        expect(split.to_run.len()).to_equal(1)
+        expect(split.to_run[0]).to_equal(legacy_ok)
+        # the gate reaches the legacy tree through its /03_system/ segment
+        expect(validate_system_test_covers([legacy_missing, legacy_ok]).len()).to_equal(1)
+
+    it "keeps helpers and non-system specs outside the gate":
+        ensure_fixtures()
+        val helper = helper_path()
+        val plain = unit_plain_path()
+        val split = partition_system_test_covers([helper, plain])
+        expect(split.missing.len()).to_equal(0)
+        expect(split.to_run.len()).to_equal(2)
+        expect(split.to_run[0]).to_equal(helper)
+        expect(split.to_run[1]).to_equal(plain)
+
+    it "agrees with the gate predicate so the runner's failure fold is exact":
+        ensure_fixtures()
+        val all: [text] = [
+            app_annotated_path(),
+            app_unannotated_path(),
+            legacy_annotated_path(),
+            legacy_unannotated_path(),
+            helper_path(),
+            unit_plain_path(),
+        ]
+        val split = partition_system_test_covers(all)
+        val missing = validate_system_test_covers(all)
+        expect(split.missing.len()).to_equal(missing.len())
+        expect(split.missing.len()).to_equal(2)
+        # every discovered file is either executed or counted as a gate
+        # failure exactly once -- none silently dropped, none double-counted
+        expect(split.to_run.len() + split.missing.len()).to_equal(all.len())
