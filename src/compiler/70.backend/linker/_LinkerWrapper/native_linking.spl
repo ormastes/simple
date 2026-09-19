@@ -632,10 +632,21 @@ fn internal_ld_script_members_mode(script: text, want_as_needed: bool) -> [text]
 
 fn internal_library_search_dirs(library_paths: [text], libdir: text) -> [text]:
     """`library_paths` first (caller order, like -L), then the host crt libdir
-    the CRT objects were found in. No other implicit directory: an implicit
-    /usr/lib fallback would let a link succeed against a library the external
-    linker would not have chosen, which is the kind of quiet divergence this
-    engine exists to avoid."""
+    the CRT objects were found in.
+
+    That trailing crt libdir is an IMPLICIT DEFAULT and it is NOT what ld.lld
+    does. Measured on this host: `ld.lld-23 ... -lc` with no `-L` fails with
+    `error: unable to find library -lc`, while this engine links. Only GNU
+    ld.bfd carries a built-in default search path, so on this point the engine
+    follows ld.bfd, not lld. Deliberate and useful -- the crt objects and libc
+    come from that directory anyway, so a caller that supplied no `-L` would
+    otherwise have to restate the host's triple-specific libdir -- but stated
+    here rather than described as plain ld parity.
+
+    No OTHER implicit directory: a `/usr/lib` fallback on top of this would
+    let a link succeed against a library neither external linker would have
+    chosen, which is the kind of quiet divergence this engine exists to
+    avoid."""
     var dirs: [text] = []
     for d in library_paths:
         if d != "":
@@ -658,11 +669,22 @@ fn internal_shared_dedup_key(path: text, raw: [u8]) -> text:
     and ld records ONE DT_NEEDED for them while a digest records two.
     Measured on this host before the fix.
 
-    The digest is kept only as the fallback for a library with no SONAME at
-    all. Those are already refused further down (elf_static_link needs a
-    SONAME to write DT_NEEDED), so the fallback never decides a real link; it
-    exists so this function is total and a no-SONAME input cannot collide
-    with an unrelated one on the empty string."""
+    The digest is kept only as the fallback for a library with no usable
+    SONAME. Those are already refused further down (elf_static_link needs a
+    SONAME to write DT_NEEDED), so the fallback never decides a real link.
+
+    Two sub-cases, and they are not the same:
+      * no DT_SONAME at all -- MEASURED: ld.lld records the FILE NAME
+        (`DT_NEEDED libemptyson_f1.so`), so it links where we refuse. Recorded
+        gap; closing it needs a name alongside the bytes in
+        `ElfLinkRequest.shared` (lane A7's file).
+      * DT_SONAME present but the empty string -- reported to make ld.lld emit
+        `DT_NEEDED ""` and de-duplicate two such libraries ON that empty
+        string. NOT verified here: GNU ld refuses to write one ("SONAME must
+        not be empty string; ignored"), so producing the input needs a
+        hand-built ELF. If that is right, this fallback diverges from lld for
+        that sub-case too -- it keys them apart by content where lld merges
+        them -- and the divergence is recorded rather than claimed fixed."""
     val parsed = elf_parse_shared(raw)
     if parsed.is_ok():
         val soname = parsed.unwrap().soname
@@ -821,7 +843,9 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     if file_exists(nonshared):
         archives = archives.push(internal_link_native_read_i64(nonshared))
     # Library SEARCH names (NativeLinkConfig.libraries / library_paths), lane
-    # F1. Resolved like ld -- caller -L order, then the crt libdir -- and then
+    # F1. Resolved in caller -L order, then the crt libdir -- that trailing
+    # default is an ld.bfd-style implicit search directory that ld.lld does
+    # NOT have (see internal_library_search_dirs) -- and then
     # classified by what the file actually IS, not by its extension: ar magic
     # goes to the archive fixpoint, ET_DYN to the shared-input set. An input
     # that is neither is a named error, never a silently dropped -l.

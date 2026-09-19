@@ -216,7 +216,7 @@ what the seed's presence suggests:
 
 | Lane | Result | Evidence |
 |---|---|---|
-| F1 library search | **pass** | `NativeLinkConfig.libraries`/`library_paths` were lane B3 rejects and are now honoured: ld's order (caller `-L` entries, then the host crt libdir; `lib<name>.so` before `lib<name>.a`), a `lib<name>.so` that is a GNU ld script followed to its `GROUP()` members (required on glibc — `/usr/lib/aarch64-linux-gnu/libm.so` is a script, not ELF), inputs classified by ar/ELF magic rather than extension. `libraries=["m"]` links `hello_libm_a64.o` and the binary prints `sqrt=42`, exit 42 |
+| F1 library search | **pass** | `NativeLinkConfig.libraries`/`library_paths` were lane B3 rejects and are now honoured: caller `-L` entries in order, then the host crt libdir, `lib<name>.so` before `lib<name>.a`. That trailing crt libdir is an IMPLICIT DEFAULT that ld.lld does not have -- measured, `ld.lld-23 ... -lc` with no `-L` fails `unable to find library -lc` while this engine links -- so on that one point the engine follows ld.bfd, not lld. Deliberate and kept; named here because "ld's order" overclaimed it, a `lib<name>.so` that is a GNU ld script followed to its `GROUP()` members (required on glibc — `/usr/lib/aarch64-linux-gnu/libm.so` is a script, not ELF), inputs classified by ar/ELF magic rather than extension. `libraries=["m"]` links `hello_libm_a64.o` and the binary prints `sqrt=42`, exit 42 |
 | F1 DT_NEEDED parity | **pass, and it caught a real defect** | The first `GROUP()` parser also returned the `AS_NEEDED()` member, because the keyword and its `(` are separated by whitespace in glibc's script. Result was an extra `DT_NEEDED libmvec.so.1` that `ld.lld` does not emit — found by diffing `readelf -dW` against an external link, not by reading the code. Fixed and pinned by a parity spec |
 | F1 `runtime_path: "none"` | **pass** | The bootstrap stage link's own `NativeLinkConfig` carries `runtime_path: "none"`, the documented sentinel for "the LLVM pipeline supplies the runtime objects directly". Rejecting it was a false reject with nothing to honour, and it stopped the internal route at the one call site that links the compiler. A real `runtime_path` still rejects by name |
 | F1 full self-host link | **NOT achieved — blocked, stated as such** | See the ranked gap list below. No partial result is reported as a success |
@@ -372,10 +372,20 @@ examples, both trees byte-identical):
 Still gaps, both located in `elf_static_link.spl` / `ElfLinkRequest` (lane A7's
 file), not in `native_linking.spl`, and both measured against ld.lld:
 
-1. **`.so` with no DT_SONAME.** ld.lld records the file name; this engine
-   answers `internal engine: shared object 0: shared object has no DT_SONAME
-   (needed for DT_NEEDED)`. `ElfLinkRequest.shared` carries bytes only — no
-   file name — so the fallback cannot be supplied from the wrapper.
+1. **`.so` with no usable DT_SONAME.** Two sub-cases; this entry previously
+   collapsed them into one.
+   * **No DT_SONAME at all** — MEASURED: ld.lld records the FILE NAME
+     (`DT_NEEDED libemptyson_f1.so`); this engine answers `internal engine:
+     shared object 0: shared object has no DT_SONAME (needed for DT_NEEDED)`.
+     `ElfLinkRequest.shared` carries bytes only — no file name — so the
+     fallback cannot be supplied from the wrapper (lane A7's file).
+   * **DT_SONAME present but the empty string** — reported to make ld.lld emit
+     `DT_NEEDED ""` and de-duplicate two such libraries ON that empty string.
+     NOT verified here: GNU ld refuses to write one ("SONAME must not be empty
+     string; ignored"), so producing the input needs a hand-built ELF. If that
+     is right, our content-digest fallback diverges for this sub-case too — it
+     keys such libraries apart where lld merges them. Recorded, not claimed
+     fixed.
 2. **AS_NEEDED member whose symbol IS used.** ld.lld keeps the library
    (measured: `DT_NEEDED libneeded_f1.so`); this engine cannot, because it
    emits one DT_NEEDED per shared input unconditionally. Real as-needed needs
