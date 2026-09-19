@@ -15,6 +15,7 @@
 # @cover src/compiler/70.backend/linker/coff/coff_layout.spl
 
 use compiler.backend.linker.coff.coff_static_link.{coff_link_request, coff_static_link}
+use compiler.backend.linker.coff.coff_layout.{coff_out_name}
 use std.io_runtime.{file_read_bytes}
 
 val FIX: text = "test/fixtures/linker/coff"
@@ -327,3 +328,72 @@ describe "coff_static_link - SECREL / SECTION / ADDR32NB":
         expect(rd32(b, rd_off)).to_equal(0)          # SECREL: anchor - .text base
         expect(rd16(b, rd_off + 4)).to_equal(1)      # SECTION: 1-based index of .text
         expect(rd32(b, rd_off + 8)).to_equal(0x1000) # ADDR32NB: anchor's RVA
+
+describe "coff_static_link - the archive and secrel links also match their goldens":
+    it "the archive-chain image is byte-identical to lld-link's":
+        val r = coff_static_link(coff_link_request(
+            [load("chain_x64.obj")], ["chain_x64.obj"],
+            [load("libchain_x64.lib")], ["libchain_x64.lib"], "chain_entry"))
+        if r.is_err():
+            print "chain link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val ours = r.unwrap()
+        val gold = load("chain_x64.lld.exe")
+        # This also checks that the demand-driven fixpoint selects the SAME
+        # members in the SAME order as lld-link's lazy resolution: a different
+        # order would move mid_fn/leaf_fn and change every REL32 displacement.
+        expect(ours.len()).to_equal(gold.len())
+        var diffs: i64 = 0
+        var first: i64 = -1
+        var i: i64 = 0
+        while i < gold.len() and i < ours.len():
+            if ours[i] != gold[i]:
+                diffs = diffs + 1
+                if first < 0:
+                    first = i
+            i = i + 1
+        if diffs > 0:
+            print "chain image diverges in {diffs} byte(s), first at 0x{first.to_hex()}"
+        expect(diffs).to_equal(0)
+
+    it "the SECREL / SECTION / ADDR32NB image is byte-identical to lld-link's":
+        val r = coff_static_link(coff_link_request(
+            [load("secrel_x64.obj")], ["secrel_x64.obj"], [], [], "anchor"))
+        if r.is_err():
+            print "secrel link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val ours = r.unwrap()
+        val gold = load("secrel_x64.lld.exe")
+        expect(ours.len()).to_equal(gold.len())
+        var diffs: i64 = 0
+        var first: i64 = -1
+        var i: i64 = 0
+        while i < gold.len() and i < ours.len():
+            if ours[i] != gold[i]:
+                diffs = diffs + 1
+                if first < 0:
+                    first = i
+            i = i + 1
+        if diffs > 0:
+            print "secrel image diverges in {diffs} byte(s), first at 0x{first.to_hex()}"
+        expect(diffs).to_equal(0)
+
+describe "coff_out_name - D4: every unmodelled output section is a named Err":
+    it "imports, exports, delay imports and CFG are rejected, never merged into .rdata":
+        expect(coff_out_name(".idata$2", 0).is_err()).to_equal(true)
+        expect(coff_out_name(".edata", 0).is_err()).to_equal(true)
+        expect(coff_out_name(".didat$2", 0).is_err()).to_equal(true)
+        expect(coff_out_name(".00cfg", 0).is_err()).to_equal(true)
+        expect(coff_out_name(".gfids", 0).is_err()).to_equal(true)
+
+    it "an unrecognised name is rejected rather than laid out with guessed flags":
+        # A writable .CRT$XCU merged as read-only .rdata would link and be wrong.
+        expect(coff_out_name(".CRT$XCU", 0).is_err()).to_equal(true)
+        expect(coff_out_name(".sxdata", 0).is_err()).to_equal(true)
+
+    it "the modelled set is exactly .text / .rdata / .data / .bss / .xdata":
+        expect(coff_out_name(".text$mn", 0).unwrap()).to_equal(".text")
+        expect(coff_out_name(".rdata", 0).unwrap()).to_equal(".rdata")
+        expect(coff_out_name(".data", 0).unwrap()).to_equal(".data")
+        expect(coff_out_name(".bss", 0).unwrap()).to_equal(".data")
+        expect(coff_out_name(".xdata", 0).unwrap()).to_equal(".rdata")

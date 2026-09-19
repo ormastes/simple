@@ -93,17 +93,34 @@ fn coff_strip_grouped(name: text) -> text:
     name
 
 fn coff_out_name(name: text, characteristics: i64) -> Result<text, text>:
-    """lld-link's default output-section merge map, which parity depends on:
-    `.bss` folds into `.data`, and the read-only metadata sections fold into
-    `.rdata`. Anything not in the map keeps its own name."""
+    """lld-link's default output-section merge map, restricted to what this
+    capsule actually models: `.text`, `.rdata`, `.data`, and `.bss` folding
+    into `.data` (which is why the golden's `.data` is `0xC0000040`, i.e.
+    CNT_INITIALIZED even though a `.bss` contributed to it). `.xdata` folds
+    into `.rdata` because it needs no data directory of its own.
+
+    EVERY other name is a named Err, including names that lld-link would merge
+    happily. Merging `.idata` into `.rdata` without building an import
+    directory, or laying out an unrecognised name with guessed Characteristics
+    (a writable `.CRT$XCU` placed read-only), is exactly the silent success
+    design rule D4 forbids: the image would link and be wrong. Widening this
+    map means implementing the corresponding directory, not adding a row."""
     val base = coff_strip_grouped(name)
+    if base == ".text" or base == ".rdata" or base == ".data":
+        return Ok(base)
     if base == ".bss":
         return Ok(".data")
-    if base == ".xdata" or base == ".edata" or base == ".didat" or base == ".00cfg":
+    if base == ".xdata":
         return Ok(".rdata")
     if base == ".idata":
-        return Ok(".rdata")
-    if base == ".tls" or base == ".tls$":
+        return Err("section {name}: imports need an import directory and an IAT that are not modelled")
+    if base == ".edata":
+        return Err("section {name}: exports need an export directory that is not modelled")
+    if base == ".didat":
+        return Err("section {name}: delay imports need a delay-import directory that is not modelled")
+    if base == ".00cfg" or base == ".gfids":
+        return Err("section {name}: control-flow guard needs a load-config directory that is not modelled")
+    if base == ".tls":
         return Err("section {name}: thread-local storage is not modelled")
     if base == ".pdata":
         return Err("section {name}: exception (.pdata) tables need a data directory that is not modelled")
@@ -111,11 +128,13 @@ fn coff_out_name(name: text, characteristics: i64) -> Result<text, text>:
         return Err("section {name}: resources need a data directory that is not modelled")
     if base == ".reloc":
         return Err("section {name}: an input .reloc section cannot be relinked; base relocations are synthesized")
-    Ok(base)
+    Err("section {name}: unmodelled output section; only .text, .rdata, .data, .bss and .xdata are laid out")
 
 fn coff_out_characteristics(name: text) -> i64:
     """Output section Characteristics, exactly the values lld-link writes
-    (alignment and all LNK_* bits are dropped from the output)."""
+    (alignment and all LNK_* bits are dropped from the output). Total over the
+    names `coff_out_name` can return, so the trailing row is `.rdata`, not a
+    guess for an arbitrary name."""
     if name == ".text":
         return IMAGE_SCN_CNT_CODE_C | IMAGE_SCN_MEM_EXECUTE_C | IMAGE_SCN_MEM_READ_C
     if name == ".data":
@@ -224,6 +243,51 @@ fn coff_place_inputs(objects: [CoffObject]) -> Result<CoffPlacement, text>:
 
     Ok(CoffPlacement(outs: outs, sec_out: sec_out, sec_off: sec_off))
 
+fn coff_reserved_out_count(objects: [CoffObject]) -> Result<i64, text>:
+    """How many section-table entries `SizeOfHeaders` must reserve room for.
+
+    PE-SPECIFIC, and a measured lld-link behaviour rather than a spec rule:
+    lld computes `SizeOfHeaders` over the output sections it has CREATED, and
+    only later removes the ones that turned out empty — and it always creates a
+    `.reloc`, even when no base relocation ends up in it. So the reservation is
+    `distinct output names over every kept input section (regardless of size)
+    + 1 for .reloc`, which can exceed the final SectionCount.
+
+    Measured across four lld-link 23.1.0 images (all `/timestamp:0`):
+
+    | image | reserved | headers | SizeOfHeaders | final SectionCount |
+    |---|---|---|---|---|
+    | hello_x64  | 4 (.text .rdata .data .reloc) | 544 | 0x400 | 4 |
+    | secrel_x64 | 4 (.text .rdata .data .reloc) | 544 | 0x400 | 2 |
+    | chain_x64  | 3 (.text .data .reloc)        | 504 | 0x200 | 1 |
+    | big (probe)| 3 (.text .data .reloc)        | 504 | 0x200 | 2 |
+
+    `secrel_x64` is the case that proves the rule: two final sections but a
+    1024-byte header, because its empty `.data`/`.bss` and its empty `.reloc`
+    were counted before being dropped. Computing `SizeOfHeaders` from the FINAL
+    count gives 0x200 there and every section's file offset then differs from
+    the oracle by 0x200. Reproducing this is what makes the engine a drop-in
+    for lld-link rather than merely a valid-PE writer."""
+    var names: [text] = []
+    for obj in objects:
+        for sec in obj.sections:
+            if not sec.keep:
+                continue
+            val oname = coff_out_name(sec.name, sec.characteristics)
+            if oname.is_err():
+                return Err("coff: {obj.origin}: {oname.unwrap_err()}")
+            if coff_name_index(names, oname.unwrap()) < 0:
+                names = names.push(oname.unwrap())
+    Ok(names.len() + 1)
+
+fn coff_name_index(names: [text], name: text) -> i64:
+    var i: i64 = 0
+    while i < names.len():
+        if names[i] == name:
+            return i
+        i = i + 1
+    -1
+
 fn coff_sort_outs(outs: [CoffOutSec]) -> [CoffOutSec]:
     """Stable insertion sort by coff_out_rank. Callers must re-point
     placement indices through coff_reindex after sorting."""
@@ -330,6 +394,7 @@ fn coff_out_find(outs: [CoffOutSec], name: text) -> i64:
 export CoffOutSec, CoffPlacement
 export coff_out_name, coff_out_characteristics, coff_out_rank, coff_strip_grouped
 export coff_place_inputs, coff_grow_out, coff_member_offset, coff_find_out
+export coff_reserved_out_count, coff_name_index
 export coff_sort_outs, coff_reindex
 export coff_assign_addresses, coff_image_size, coff_out_find
 export PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT

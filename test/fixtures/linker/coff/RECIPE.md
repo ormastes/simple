@@ -24,7 +24,19 @@ clang -c --target=x86_64-windows-msvc secrel_x64.s -o secrel_x64.obj
 llvm-ar rcs libchain_x64.lib mid_x64.obj leaf_x64.obj unused_x64.obj
 lld-link /entry:entry /subsystem:console /nodefaultlib /timestamp:0 \
          /out:hello_x64.lld.exe start_x64.obj lib_x64.obj
+lld-link /entry:anchor /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:secrel_x64.lld.exe secrel_x64.obj
+lld-link /entry:chain_entry /subsystem:console /nodefaultlib /timestamp:0 \
+         /out:chain_x64.lld.exe chain_x64.obj libchain_x64.lib
 ```
+
+There are THREE goldens, and the internal engine is byte-identical to all
+three: `hello_x64.lld.exe` (3072 B, 4 sections), `secrel_x64.lld.exe` (2048 B,
+2 sections) and `chain_x64.lld.exe` (1024 B, 1 section, archive fixpoint —
+`lld-link` accepts the `llvm-ar` GNU-format `.lib` directly). The chain golden
+also pins member SELECTION and ORDER: a fixpoint that pulled `unused_x64.obj`,
+or placed `mid_fn`/`leaf_fn` in a different order, would change every REL32
+displacement and diverge.
 
 `/timestamp:0` is what makes the golden reproducible — lld-link's default
 `TimeDateStamp` is `time()`. `/Brepro` is deliberately NOT used: it would add a
@@ -91,3 +103,22 @@ There is **no wine and no Windows host on this machine**, so none of these
 images has ever been executed. Every claim in the COFF/PE specs is structural
 (headers, section table, data directories, base relocations, patched bytes) and
 measured against `lld-link` as the oracle. Runnability on Windows is unproven.
+
+## SizeOfHeaders is reserved from the PRE-removal section count
+
+`secrel_x64.lld.exe` has **2** sections but `SizeOfHeaders` `0x400`, while
+`chain_x64.lld.exe` has 1 section and `0x200`. Deriving `SizeOfHeaders` from
+the final `SectionCount` gives `0x200` for secrel and then every section's
+`PointerToRawData` is off by `0x200`. lld-link sizes the headers over the
+output sections it has *created* — always including a `.reloc`, even when it
+ends up empty — and removes the empty ones afterwards:
+
+| image | reserved (pre-removal) | headers | SizeOfHeaders | final SectionCount |
+|---|---|---|---|---|
+| hello_x64 | 4 (.text .rdata .data .reloc) | 544 | `0x400` | 4 |
+| secrel_x64 | 4 (.text .rdata .data .reloc) | 544 | `0x400` | 2 |
+| chain_x64 | 3 (.text .data .reloc) | 504 | `0x200` | 1 |
+| a pure-`.bss` probe | 3 (.text .data .reloc) | 504 | `0x200` | 2 |
+
+`coff_layout.coff_reserved_out_count` reproduces this, which is what makes the
+engine a drop-in for lld-link rather than only a valid-PE writer.

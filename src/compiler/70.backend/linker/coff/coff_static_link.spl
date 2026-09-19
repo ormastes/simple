@@ -30,7 +30,7 @@ use compiler.backend.linker.coff.coff_object.{
 }
 use compiler.backend.linker.coff.coff_layout.{
     CoffOutSec, CoffPlacement, coff_place_inputs, coff_sort_outs, coff_reindex,
-    coff_assign_addresses, coff_out_find,
+    coff_assign_addresses, coff_out_find, coff_reserved_out_count,
     PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT,
 }
 use compiler.backend.linker.coff.pe_exec_writer.{
@@ -41,10 +41,10 @@ use compiler.backend.linker.sym_resolver.{
     SymBinding, SymEntry, SymResolution, sym_resolution_new, sym_add_entries,
 }
 use compiler.backend.linker.reloc_engine.{
-    coff_reloc_apply, coff_reloc_addend, coff_reloc_patch_bytes,
+    coff_reloc_apply, coff_reloc_patch_bytes,
 }
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
-    coff_reloc_compute, coff_reloc_needs_base_reloc, coff_reloc_type_name,
+    coff_reloc_needs_base_reloc, coff_reloc_width,
 }
 use compiler.backend.linker.archive_parser.{ArMember, ar_parse, ar_check_magic}
 use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_fill}
@@ -335,9 +335,7 @@ fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymR
                         image_base, t.sec_va, t.sec_index)
                     if not ar.success:
                         return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()} -> {obj.symbols[r.sym_index].name}: {ar.error}")
-                    val a = coff_reloc_addend(bufs[k], field_off, r.rtype)
-                    val cv = coff_reloc_compute(r.rtype, t.va, a, p, image_base, t.sec_va, t.sec_index)
-                    bufs[k] = coff_reloc_patch_bytes(bufs[k], field_off, cv.width, ar.value)
+                    bufs[k] = coff_reloc_patch_bytes(bufs[k], field_off, coff_reloc_width(r.rtype), ar.value)
                     if coff_reloc_needs_base_reloc(r.rtype):
                         brs = brs.push(PeBaseReloc(rva: place.outs[k].rva + field_off, kind: IMAGE_REL_BASED_DIR64))
             si = si + 1
@@ -386,11 +384,16 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
         return Err(placed.unwrap_err())
     var place = coff_reindex(placed.unwrap(), coff_sort_outs(placed.unwrap().outs))
 
-    # Pass 1: address the input-backed sections so relocation values (and
-    # therefore the base-relocation list) can be computed. `.reloc` is ranked
-    # last, so appending it in pass 2 cannot move any of these.
-    val hdr1 = pe_size_of_headers(place.outs.len(), PE_FILE_ALIGNMENT)
-    val a1 = coff_assign_addresses(place.outs, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, hdr1)
+    # SizeOfHeaders is reserved from the PRE-removal section count, exactly as
+    # lld-link does it (see coff_reserved_out_count for the measurement), so it
+    # is known before any address is assigned and does not change when `.reloc`
+    # is appended below. That is what lets relocations be applied ONCE: every
+    # RVA and file offset here is final.
+    val reserved = coff_reserved_out_count(objects)
+    if reserved.is_err():
+        return Err(reserved.unwrap_err())
+    val header_size = pe_size_of_headers(reserved.unwrap(), PE_FILE_ALIGNMENT)
+    val a1 = coff_assign_addresses(place.outs, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, header_size)
     if a1.is_err():
         return Err(a1.unwrap_err())
     place = CoffPlacement(outs: a1.unwrap(), sec_out: place.sec_out, sec_off: place.sec_off)
@@ -411,35 +414,16 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
             rva: 0, file_offset: 0, raw_size: 0))
         bufs = bufs.push(reloc_bytes)
 
-    # Pass 2: re-address with the final section count, because SizeOfHeaders
-    # depends on it (one more 40-byte section-table entry can cross a
-    # FileAlignment boundary and move every section's file offset).
-    val hdr2 = pe_size_of_headers(outs.len(), PE_FILE_ALIGNMENT)
-    val a2 = coff_assign_addresses(outs, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, hdr2)
+    # Re-address including `.reloc`. Nothing before it moves: the header size is
+    # fixed above and `.reloc` is ranked last, so the already-patched bytes stay
+    # valid and L8 does not run twice.
+    if outs.len() > reserved.unwrap():
+        return Err("coff: {outs.len()} output sections exceed the {reserved.unwrap()} entries reserved in SizeOfHeaders")
+    val a2 = coff_assign_addresses(outs, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, header_size)
     if a2.is_err():
         return Err(a2.unwrap_err())
     val final_outs = a2.unwrap()
-
-    # Relocation values are absolute, so if pass 2 moved anything the patched
-    # bytes are stale. Re-run L8 against the final addresses rather than
-    # shipping bytes computed over the pass-1 map.
-    var final_bufs = bufs
-    if hdr2 != hdr1 or final_outs[0].rva != place.outs[0].rva:
-        var input_outs: [CoffOutSec] = []
-        var k: i64 = 0
-        while k < place.outs.len():
-            input_outs = input_outs.push(final_outs[k])
-            k = k + 1
-        val place2 = CoffPlacement(outs: input_outs, sec_out: place.sec_out, sec_off: place.sec_off)
-        val c2 = coff_section_contents(objects, place2)
-        val p2 = coff_apply_relocations(objects, place2, res, req.image_base, c2)
-        if p2.is_err():
-            return Err(p2.unwrap_err())
-        val pt2 = p2.unwrap()
-        final_bufs = pt2.contents
-        val rb2 = pe_build_reloc_section(pt2.base_relocs, PE_SECTION_ALIGNMENT)
-        if rb2.len() > 0:
-            final_bufs = final_bufs.push(rb2)
+    val final_bufs = bufs
 
     val ent = coff_target_of(objects, place, req.image_base, res.defined[req.entry])
     if ent.is_err():
@@ -453,6 +437,7 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
         sec_align: PE_SECTION_ALIGNMENT,
         file_align: PE_FILE_ALIGNMENT,
         timestamp: req.timestamp,
+        header_size: header_size,
     ))
 
 # ============================================================================
@@ -462,18 +447,26 @@ fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
 #   object; truncated header / section table / section data / symbol / relocs;
 #   IMAGE_SCN_LNK_COMDAT; IMAGE_SYM_CLASS_WEAK_EXTERNAL; COMMON definitions;
 #   malformed long section name; out-of-range section number.
-# From coff_layout.spl (place):    .tls, .pdata, .rsrc, an input .reloc;
-#   SectionAlignment < FileAlignment; a section needing more alignment than
-#   SectionAlignment.
+# From coff_layout.spl (place):    the output-section map is a CLOSED set —
+#   only .text, .rdata, .data, .bss and .xdata are laid out. .idata, .edata,
+#   .didat, .00cfg, .gfids, .tls, .pdata, .rsrc, an input .reloc and ANY
+#   unrecognised name are named Errs, deliberately including names lld-link
+#   would merge into .rdata: merging .idata without building an import
+#   directory, or laying out a writable .CRT$XCU with guessed read-only
+#   Characteristics, links successfully and produces a wrong image, which is
+#   the silent success D4 exists to forbid. Also: SectionAlignment <
+#   FileAlignment; a section needing more alignment than SectionAlignment.
 # From smf_reloc_formulas.spl:     IMAGE_REL_AMD64_ADDR32, SECREL7, TOKEN,
 #   SREL32, PAIR, SSPAN32, UNKNOWN_<n>; every width overflow (REL32 family
 #   signed-32, ADDR32NB and SECREL unsigned-32, SECTION unsigned-16).
 # From this file:                  no inputs; no /entry; entry not defined;
+#   more output sections than SizeOfHeaders reserved room for;
 #   undefined symbol; duplicate symbol (via sym_resolver); a .lib without ar
 #   magic; a relocation on a zero-fill section; a relocation symbol index past
 #   the symbol table; a definition in a section that was not laid out.
 # From pe_exec_writer.spl:         section/content count mismatch; zero
-#   sections; a section name over 8 bytes; optional-header size drift;
+#   sections; a section name over 8 bytes; a SizeOfHeaders that cannot hold the
+#   section table or is not FileAlignment-aligned; optional-header size drift;
 #   overlapping file offsets; content longer than SizeOfRawData.
 #
 # Not modelled at all, and therefore not reachable rather than wrong: imports
