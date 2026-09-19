@@ -1,0 +1,269 @@
+# Synthetic sections for the internal ELF linker — lane A7 slice 2.
+#
+# Byte builders for the linker-created sections (design §5, mold phase
+# "synthetic sections"): .got, .plt / .got.plt (aarch64), .dynsym, .dynstr,
+# SysV .hash, .rela.dyn / .rela.plt, .dynamic and .interp. Sizes are known
+# from the relocation scan before layout; contents are built after layout,
+# once every address is final. Pure: every function returns [i64] bytes.
+#
+# Not produced (reported, not faked): .gnu.hash, .gnu.version/_r, .eh_frame_hdr,
+# x86_64 .plt, TLS (.tdata/.tbss, TLSDESC/TPREL), RELRO.
+
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, reloc_patch_bytes,
+    R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_ADD_ABS_LO12_NC
+}
+use compiler.backend.linker.elf_writer.{write_u32_le, write_u64_le, write_zeros}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Dynamic relocation types (applied by ld.so, never by this linker).
+val R_AARCH64_GLOB_DAT: i64 = 1025
+val R_AARCH64_JUMP_SLOT: i64 = 1026
+val R_AARCH64_RELATIVE: i64 = 1027
+val R_X86_64_GLOB_DAT: i64 = 6
+val R_X86_64_JUMP_SLOT: i64 = 7
+val R_X86_64_RELATIVE: i64 = 8
+
+# Dynamic tags.
+val DT_NULL: i64 = 0
+val DT_NEEDED: i64 = 1
+val DT_PLTRELSZ: i64 = 2
+val DT_PLTGOT: i64 = 3
+val DT_HASH: i64 = 4
+val DT_STRTAB: i64 = 5
+val DT_SYMTAB: i64 = 6
+val DT_RELA: i64 = 7
+val DT_RELASZ: i64 = 8
+val DT_RELAENT: i64 = 9
+val DT_STRSZ: i64 = 10
+val DT_SYMENT: i64 = 11
+val DT_INIT: i64 = 12
+val DT_FINI: i64 = 13
+val DT_PLTREL: i64 = 20
+val DT_DEBUG: i64 = 21
+val DT_JMPREL: i64 = 23
+val DT_INIT_ARRAY: i64 = 25
+val DT_FINI_ARRAY: i64 = 26
+val DT_INIT_ARRAYSZ: i64 = 27
+val DT_FINI_ARRAYSZ: i64 = 28
+val DT_PREINIT_ARRAY: i64 = 32
+val DT_PREINIT_ARRAYSZ: i64 = 33
+val DT_RELACOUNT: i64 = 0x6ffffff9
+val DT_FLAGS_1: i64 = 0x6ffffffb
+val DF_1_PIE: i64 = 0x08000000
+
+# Section types / flags of synthetic sections.
+val SHT_RELA_S: i64 = 4
+val SHT_HASH_S: i64 = 5
+val SHT_DYNAMIC_S: i64 = 6
+val SHT_DYNSYM_S: i64 = 11
+val SHF_INFO_LINK_S: i64 = 0x40
+
+val A64_PLT0_SIZE: i64 = 32
+val A64_PLT_ENTRY_SIZE: i64 = 16
+val GOTPLT_RESERVED: i64 = 3
+
+# ============================================================================
+# Dynamic relocation type by target
+# ============================================================================
+
+fn elf_dyn_relative(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            R_AARCH64_RELATIVE
+        case _:
+            R_X86_64_RELATIVE
+
+fn elf_dyn_glob_dat(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            R_AARCH64_GLOB_DAT
+        case _:
+            R_X86_64_GLOB_DAT
+
+fn elf_dyn_jump_slot(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            R_AARCH64_JUMP_SLOT
+        case _:
+            R_X86_64_JUMP_SLOT
+
+fn elf_dyn_abs64(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            257
+        case _:
+            1
+
+# ============================================================================
+# Builders
+# ============================================================================
+
+fn elf_rela_entry(buf: [i64], r_offset: i64, sym: i64, rtype: i64, addend: i64) -> [i64]:
+    var b = write_u64_le(buf, r_offset)
+    b = write_u64_le(b, (sym << 32) | rtype)
+    write_u64_le(b, addend)
+
+fn elf_sysv_hash(name: text) -> i64:
+    var h: i64 = 0
+    for ch in name.bytes():
+        h = ((h << 4) + (ch as i64)) & 0xffffffff
+        val g = h & 0xf0000000
+        if g != 0:
+            h = h ^ (g >> 24)
+        h = h & 0x0fffffff
+    h
+
+struct ElfDynStr:
+    data: [i64]
+    offsets: {text: i64}
+
+fn elf_build_dynstr(names: [text]) -> ElfDynStr:
+    """NUL-led string table; each distinct name stored once."""
+    var data: [i64] = [0]
+    var offsets: {text: i64} = {}
+    for n in names:
+        if not offsets.has(n):
+            offsets[n] = data.len()
+            for ch in n.bytes():
+                data = data.push(ch as i64)
+            data = data.push(0)
+    ElfDynStr(data: data, offsets: offsets)
+
+fn elf_dynstr_size(names: [text]) -> i64:
+    elf_build_dynstr(names).data.len()
+
+# reason: positional dynsym inputs (imports, binding flags, types, string table)
+fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynStr) -> [i64]:
+    """Null symbol + one undefined global/weak entry per import."""
+    var b = write_zeros([], 24)
+    var i: i64 = 0
+    while i < imports.len():
+        var bind: i64 = 1
+        if weak[i]:
+            bind = 2
+        var typ = types[i]
+        if typ == 10:
+            typ = 2  # STT_GNU_IFUNC is imported as a plain STT_FUNC
+        b = write_u32_le(b, dynstr.offsets[imports[i]])
+        b = b.push((bind << 4) | typ)
+        b = b.push(0)
+        b = b.push(0)
+        b = b.push(0)
+        b = write_u64_le(b, 0)
+        b = write_u64_le(b, 0)
+        i = i + 1
+    b
+
+fn elf_hash_size(nsyms: i64) -> i64:
+    (2 + nsyms + nsyms) * 4
+
+fn elf_build_hash(imports: [text]) -> [i64]:
+    """SysV .hash over [null] + imports: nbucket = nchain = symbol count."""
+    val n = imports.len() + 1
+    var bucket: [i64] = []
+    var chain: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        bucket = bucket.push(0)
+        chain = chain.push(0)
+        i = i + 1
+    i = 1
+    while i < n:
+        val h = elf_sysv_hash(imports[i - 1]) % n
+        chain[i] = bucket[h]
+        bucket[h] = i
+        i = i + 1
+    var b = write_u32_le([], n)
+    b = write_u32_le(b, n)
+    for x in bucket:
+        b = write_u32_le(b, x)
+    for x in chain:
+        b = write_u32_le(b, x)
+    b
+
+fn elf_plt_size_a64(n: i64) -> i64:
+    if n == 0:
+        return 0
+    A64_PLT0_SIZE + n * A64_PLT_ENTRY_SIZE
+
+fn elf_gotplt_size(n: i64) -> i64:
+    if n == 0:
+        return 0
+    (GOTPLT_RESERVED + n) * 8
+
+fn elf_a64_adrp_ldr_add(buf: [i64], at: i64, pc: i64, slot: i64) -> [i64]:
+    """adrp x16, slot ; ldr x17, [x16, :lo12:slot] ; add x16, x16, :lo12:slot ; br x17"""
+    var b = write_u32_le(buf, 0x90000010)
+    b = write_u32_le(b, 0xf9400211)
+    b = write_u32_le(b, 0x91000210)
+    b = write_u32_le(b, 0xd61f0220)
+    b = reloc_patch_bytes(RelocArch.AArch64, b, at, R_AARCH64_ADR_PREL_PG_HI21, slot, 0, pc)
+    b = reloc_patch_bytes(RelocArch.AArch64, b, at + 4, R_AARCH64_LDST64_ABS_LO12_NC, slot, 0, pc + 4)
+    reloc_patch_bytes(RelocArch.AArch64, b, at + 8, R_AARCH64_ADD_ABS_LO12_NC, slot, 0, pc + 8)
+
+fn elf_build_plt_a64(plt_addr: i64, gotplt_addr: i64, n: i64) -> [i64]:
+    """ld.lld's aarch64 PLT: PLT0 (stp x16,x30 + lazy-resolver jump through
+    .got.plt[2], 3 nops) followed by one 16-byte stub per .got.plt slot."""
+    if n == 0:
+        return []
+    var b = write_u32_le([], 0xa9bf7bf0)
+    b = elf_a64_adrp_ldr_add(b, 4, plt_addr + 4, gotplt_addr + 16)
+    b = write_u32_le(b, 0xd503201f)
+    b = write_u32_le(b, 0xd503201f)
+    b = write_u32_le(b, 0xd503201f)
+    var i: i64 = 0
+    while i < n:
+        val at = A64_PLT0_SIZE + i * A64_PLT_ENTRY_SIZE
+        b = elf_a64_adrp_ldr_add(b, at, plt_addr + at, gotplt_addr + (GOTPLT_RESERVED + i) * 8)
+        i = i + 1
+    b
+
+fn elf_build_gotplt(n: i64, plt0_addr: i64) -> [i64]:
+    """3 reserved zero words (ld.so fills [1]/[2]) + one word per PLT entry,
+    initialised to PLT0 for lazy binding (ld.lld's aarch64 layout)."""
+    if n == 0:
+        return []
+    var b = write_zeros([], GOTPLT_RESERVED * 8)
+    var i: i64 = 0
+    while i < n:
+        b = write_u64_le(b, plt0_addr)
+        i = i + 1
+    b
+
+fn elf_build_dynamic(tags: [[i64]]) -> [i64]:
+    """tags = [[d_tag, d_val], ...]; DT_NULL is appended."""
+    var b: [i64] = []
+    for t in tags:
+        b = write_u64_le(b, t[0])
+        b = write_u64_le(b, t[1])
+    b = write_u64_le(b, DT_NULL)
+    write_u64_le(b, 0)
+
+fn elf_build_interp(path: text) -> [i64]:
+    var b: [i64] = []
+    for ch in path.bytes():
+        b = b.push(ch as i64)
+    b.push(0)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfDynStr
+export elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64
+export elf_rela_entry, elf_sysv_hash, elf_build_dynstr, elf_dynstr_size, elf_build_dynsym
+export elf_hash_size, elf_build_hash, elf_plt_size_a64, elf_gotplt_size
+export elf_build_plt_a64, elf_build_gotplt, elf_build_dynamic, elf_build_interp
+export R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
+export R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE
+export DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB
+export DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI
+export DT_PLTREL, DT_DEBUG, DT_JMPREL, DT_INIT_ARRAY, DT_FINI_ARRAY
+export DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ
+export DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE
+export SHT_RELA_S, SHT_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S
+export A64_PLT0_SIZE, A64_PLT_ENTRY_SIZE, GOTPLT_RESERVED

@@ -1,0 +1,215 @@
+# Relocation scan — lane A7 slice 2 (design §5, mold phase "scan relocations").
+#
+# One pass over every relocation that lands in an allocatable output section,
+# BEFORE layout, deciding what synthetic state each one needs:
+#   - a .got slot (GOT-indirect relocs that are not relaxed),
+#   - a .plt entry (branches to a shared-library function; aarch64 only),
+#   - a dynamic relocation (R_*_RELATIVE for absolute words in a PIE,
+#     R_*_GLOB_DAT for GOT slots of imports, symbolic ABS64 for data words
+#     that point into a shared library),
+# or a named error when the output cannot represent it (copy relocations,
+# canonical PLTs, text relocations, TLS, absolute narrow relocs in a PIE,
+# RELATIVE relocs in a static PIE that has no self-relocating startup).
+#
+# The driver (elf_static_link) resolves each relocation's symbol into an
+# ElfScanRef first; this file only classifies and allocates.
+
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+# ============================================================================
+# Link modes
+# ============================================================================
+
+val ELF_LINK_STATIC_EXEC: i64 = 0    # ET_EXEC, no .dynamic (slice 1)
+val ELF_LINK_STATIC_PIE: i64 = 1     # ET_DYN, no PT_INTERP, no dynamic relocations allowed
+val ELF_LINK_DYNAMIC_EXEC: i64 = 2   # ET_EXEC + PT_INTERP + DT_NEEDED
+val ELF_LINK_DYNAMIC_PIE: i64 = 3    # ET_DYN + PT_INTERP + DT_NEEDED
+
+fn elf_mode_pie(mode: i64) -> bool:
+    mode == ELF_LINK_STATIC_PIE or mode == ELF_LINK_DYNAMIC_PIE
+
+fn elf_mode_dynamic(mode: i64) -> bool:
+    mode == ELF_LINK_DYNAMIC_EXEC or mode == ELF_LINK_DYNAMIC_PIE
+
+# ============================================================================
+# Symbol reference kinds
+# ============================================================================
+
+val SYMREF_DEFINED: i64 = 0    # defined by an input object; address known after layout
+val SYMREF_IMPORT: i64 = 1     # defined by a shared library; bound by ld.so
+val SYMREF_WEAK_ZERO: i64 = 2  # undefined weak with no definition anywhere: value 0
+val SYMREF_ABS: i64 = 3        # SHN_ABS or no symbol: a position-independent constant
+
+# ============================================================================
+# Relocation classes
+# ============================================================================
+
+val RC_NONE: i64 = 0
+val RC_ABS64: i64 = 1        # 64-bit absolute word
+val RC_ABS_NARROW: i64 = 2   # absolute value truncated to < 64 bits (not PIC)
+val RC_PCREL: i64 = 3        # PC-/page-relative (incl. the :lo12: half of ADRP pairs)
+val RC_BRANCH: i64 = 4       # call/jump that may go through a PLT
+val RC_GOT: i64 = 5          # GOT-indirect, not relaxable
+val RC_GOT_RELAX: i64 = 6    # x86_64 GOTPCRELX / REX_GOTPCRELX
+
+fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
+    match target:
+        case X86_64:
+            if rtype == 0:
+                return RC_NONE
+            if rtype == 1:
+                return RC_ABS64
+            if rtype == 10 or rtype == 11:
+                return RC_ABS_NARROW
+            if rtype == 4:
+                return RC_BRANCH
+            if rtype == 9:
+                return RC_GOT
+            if rtype == 41 or rtype == 42:
+                return RC_GOT_RELAX
+            RC_PCREL
+        case _:
+            if rtype == 0:
+                return RC_NONE
+            if rtype == 257:
+                return RC_ABS64
+            if rtype == 258:
+                return RC_ABS_NARROW
+            if rtype == 282 or rtype == 283:
+                return RC_BRANCH
+            if rtype == 311 or rtype == 312:
+                return RC_GOT
+            RC_PCREL
+
+fn elf_x86_can_relax(bytes: [i64], place: i64) -> bool:
+    """`mov foo@GOTPCREL(%rip), %reg` (opcode 0x8b two bytes before the
+    displacement) can become `lea foo(%rip), %reg` — the only GOTPCRELX
+    form relaxed here (ld.lld also rewrites call/jmp/test/binop forms)."""
+    place >= 2 and bytes[place - 2] == 0x8b
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ElfScanRef:
+    """One relocation after symbol resolution, before layout."""
+    oi: i64            # input object index
+    sym_idx: i64       # symbol index in that object (0 = none)
+    out_sec: i64       # input-backed output section index
+    out_off: i64       # byte offset of the relocated field in that output section
+    writable: bool     # output section is SHF_WRITE
+    rtype: i64
+    rclass: i64
+    kind: i64          # SYMREF_*
+    key: text          # GOT/PLT identity (global name, or "oi#idx" for locals)
+    name: text
+    stype: i64         # STT_* (imports: from the shared library)
+    weak: bool         # the referencing symbol is STB_WEAK
+    addend: i64
+    relax: bool        # x86_64 GOTPCRELX relaxed to lea (no GOT slot)
+
+struct ElfScan:
+    got_keys: [text]
+    got_ref: [i64]         # per slot: index of the first ElfScanRef that uses it
+    got_idx: {text: i64}
+    plt_names: [text]      # PLT entry order (== .rela.plt order)
+    plt_idx: {text: i64}
+    imports: [text]        # .dynsym order (index + 1)
+    import_idx: {text: i64}
+    import_weak: [bool]
+    import_type: [i64]
+    sym_abs: [i64]         # refs needing a symbolic ABS64 dynamic relocation
+    relative: [i64]        # refs needing R_*_RELATIVE (absolute word in a PIE)
+
+fn elf_reloc_what(r: ElfScanRef) -> text:
+    "relocation type {r.rtype} against '{r.name}'"
+
+# ============================================================================
+# Scan
+# ============================================================================
+
+fn elf_target_is_a64(target: RelocArch) -> bool:
+    match target:
+        case AArch64:
+            true
+        case _:
+            false
+
+fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<ElfScan, text>:
+    val pie = elf_mode_pie(mode)
+    val a64 = elf_target_is_a64(target)
+    var got_keys: [text] = []
+    var got_ref: [i64] = []
+    var got_idx: {text: i64} = {}
+    var plt_names: [text] = []
+    var plt_idx: {text: i64} = {}
+    var imports: [text] = []
+    var import_idx: {text: i64} = {}
+    var import_weak: [bool] = []
+    var import_type: [i64] = []
+    var sym_abs: [i64] = []
+    var relative: [i64] = []
+    var j: i64 = 0
+    while j < refs.len():
+        val r = refs[j]
+        val c = r.rclass
+        if c == RC_NONE:
+            j = j + 1
+            continue
+        if r.kind == SYMREF_IMPORT:
+            if not import_idx.has(r.name):
+                imports = imports.push(r.name)
+                import_idx[r.name] = imports.len()
+                import_weak = import_weak.push(r.weak)
+                import_type = import_type.push(r.stype)
+            else if not r.weak:
+                import_weak[import_idx[r.name] - 1] = false
+            if c == RC_BRANCH:
+                if not a64:
+                    return Err("UnsupportedFeature: PLT entries for x86_64 are not implemented ({elf_reloc_what(r)})")
+                if not plt_idx.has(r.name):
+                    plt_idx[r.name] = plt_names.len()
+                    plt_names = plt_names.push(r.name)
+            else if c == RC_GOT or c == RC_GOT_RELAX:
+                if not got_idx.has(r.key):
+                    got_idx[r.key] = got_keys.len()
+                    got_keys = got_keys.push(r.key)
+                    got_ref = got_ref.push(j)
+            else if c == RC_ABS64:
+                if not r.writable:
+                    return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
+                sym_abs = sym_abs.push(j)
+            else:
+                return Err("UnsupportedFeature: {elf_reloc_what(r)} (a shared-library symbol) needs a copy relocation or canonical PLT; recompile with -fPIC")
+        else:
+            if c == RC_GOT or (c == RC_GOT_RELAX and not r.relax):
+                if a64 and r.addend != 0:
+                    return Err("{elf_reloc_what(r)}: GOT relocation with non-zero addend {r.addend} is unsupported")
+                if r.kind == SYMREF_DEFINED and mode == ELF_LINK_STATIC_PIE:
+                    return Err("{elf_reloc_what(r)}: GOT slot needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply; compile with -fPIE or link without -pie")
+                if not got_idx.has(r.key):
+                    got_idx[r.key] = got_keys.len()
+                    got_keys = got_keys.push(r.key)
+                    got_ref = got_ref.push(j)
+            else if c == RC_ABS64 and pie and r.kind == SYMREF_DEFINED:
+                if mode == ELF_LINK_STATIC_PIE:
+                    return Err("{elf_reloc_what(r)}: absolute address needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply")
+                if not r.writable:
+                    return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
+                relative = relative.push(j)
+            else if c == RC_ABS_NARROW and pie and r.kind == SYMREF_DEFINED:
+                return Err("{elf_reloc_what(r)} cannot be used in a position-independent output; recompile with -fPIC")
+        j = j + 1
+    Ok(ElfScan(got_keys: got_keys, got_ref: got_ref, got_idx: got_idx, plt_names: plt_names, plt_idx: plt_idx,
+        imports: imports, import_idx: import_idx, import_weak: import_weak, import_type: import_type,
+        sym_abs: sym_abs, relative: relative))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfScanRef, ElfScan
+export elf_reloc_scan, elf_reloc_class, elf_target_is_a64, elf_x86_can_relax, elf_mode_pie, elf_mode_dynamic
+export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
+export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX

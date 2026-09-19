@@ -8,11 +8,16 @@
 # reached only through the `linker_wrapper` facade, exactly like every other
 # external caller of `link_to_native`.
 #
-# `SIMPLE_LINKER=internal` is the one behaviour this file adds: `mold.spl`'s
-# `find_linker_path` (A3-owned) now rejects that alias by name before ever
-# treating it as a resolvable path, and `classify_link_error` below turns
-# that rejection into `LinkOutcomeV1.UnsupportedFeature` instead of a generic
-# failure.
+# `SIMPLE_LINKER=internal` selects the internal ELF engine (`internal:elf`,
+# lane A7 `elf/elf_static_link.elf_link`) in `link_request_to_native`, the
+# only place that holds both the inputs and the config. Supported subset:
+# Linux ELF, target arch == host arch, aarch64 (dynamic PIE / exec against
+# the host glibc found by crt_discovery). Anything else is a receipt with
+# `LinkOutcomeV1.UnsupportedFeature` naming the reason -- never a silent
+# fallback to an external linker. `mold.find_linker_path` still rejects the
+# alias by name (it is not a PATH), and `classify_link_error` turns that
+# rejection into `UnsupportedFeature` for callers that bypass this adapter.
+# Default behaviour (override unset) is unchanged.
 
 use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
 use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1, KPF_ABI_VERSION_V1, KPF_SCHEMA_HEADER_V1_SIZE}
@@ -33,7 +38,13 @@ use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native, na
 # which engine a SUCCESSFUL link actually used -- this is new reporting
 # logic that lives in this file, not a modification of anything owned by
 # another lane.
-use compiler.backend.linker.mold.{find_linker_path, linker_type_for_path, LinkerType}
+use compiler.backend.linker.mold.{find_linker_path, linker_type_for_path, LinkerType, requested_linker_override}
+
+# Internal engine (lane A7): ELF link driver + host CRT/libc discovery.
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.crt_discovery.{find_crt_files, path_dirname}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_write_bytes, shell}
 
 # ============================================================================
 # A3-local target vocabulary
@@ -234,11 +245,11 @@ fn base_receipt(req: LinkRequestV1, policy: LinkExecutionPolicyV1, engine_id: te
 pub fn classify_link_error(message: text) -> LinkOutcomeV1:
     """Map a `link_to_native` Err payload to a LinkOutcomeV1.
 
-    The `internal engine not available until G2` text is `mold.spl`'s
+    The `internal engine is not a linker path` text is `mold.spl`'s
     `find_linker_path` message verbatim (propagated through
     `link_error_detail("requested-linker-unresolved", ...)` in
     `native_linking.link_native_unix`) -- keep the two in sync."""
-    if message.contains("internal engine not available until G2"):
+    if message.contains("internal engine is not a linker path"):
         return LinkOutcomeV1.UnsupportedFeature
     if message.contains("No object files") or message.contains("Cannot mix SMF"):
         return LinkOutcomeV1.InputError
@@ -246,7 +257,7 @@ pub fn classify_link_error(message: text) -> LinkOutcomeV1:
 
 fn engine_id_for_outcome(outcome: LinkOutcomeV1) -> text:
     match outcome:
-        case UnsupportedFeature: "internal"
+        case UnsupportedFeature: "internal:elf"
         case _("every other failure outcome never resolved an engine at all"): "none"
 
 fn resolve_engine_id_for_success() -> text:
@@ -276,6 +287,104 @@ fn resolve_engine_id_for_success() -> text:
     "cc"
 
 # ============================================================================
+# Internal engine (SIMPLE_LINKER=internal)
+# ============================================================================
+
+val INTERNAL_ELF_ENGINE_ID: text = "internal:elf"
+
+fn internal_unsupported_reason(target: LinkTargetV1) -> text:
+    """Empty when the internal ELF engine supports `target` on this host, else why not."""
+    if target.object_format != LINK_OBJECT_FORMAT_ELF:
+        return "internal:elf links ELF only (object_format {target.object_format})"
+    if target.os != LINK_OS_LINUX:
+        return "internal:elf links Linux targets only (os {target.os})"
+    var arch = ""
+    if target.arch == LINK_ARCH_X86_64:
+        arch = "x86_64"
+    elif target.arch == LINK_ARCH_AARCH64:
+        arch = "aarch64"
+    if arch == "":
+        return "internal:elf supports x86_64 and aarch64 only (arch {target.arch})"
+    if arch != host_arch():
+        return "internal:elf links against the host glibc; target {arch} != host {host_arch()}"
+    ""
+
+fn internal_read_i64(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn classify_internal_error(message: text) -> LinkOutcomeV1:
+    """Map an `elf_link` Err payload to a LinkOutcomeV1."""
+    if message.contains("UnsupportedFeature") or message.contains("unsupported") or message.contains("slice 1"):
+        return LinkOutcomeV1.UnsupportedFeature
+    if message.contains("undefined symbol") or message.contains("duplicate symbol") or message.contains("entry symbol") or message.contains("not a relocatable") or message.contains("e_machine") or message.contains("cannot be read"):
+        return LinkOutcomeV1.InputError
+    LinkOutcomeV1.ResourceFailure
+
+fn internal_link_bytes(target: LinkTargetV1, pie: bool, object_files: [text]) -> Result<[i64], text>:
+    """Host-glibc dynamic link of object_files with the internal ELF engine."""
+    for path in object_files:
+        if not file_exists(path):
+            return Err("input {path} cannot be read")
+    val crt = find_crt_files(pie, false)
+    if crt.crt1 == "" or crt.crti == "" or crt.crtn == "":
+        return Err("UnsupportedFeature: internal:elf found no host crt1/crti/crtn objects")
+    if crt.dynamic_linker == "":
+        return Err("UnsupportedFeature: internal:elf found no host dynamic linker")
+    val libdir = path_dirname(crt.crt1)
+    val libc = "{libdir}/libc.so.6"
+    if not file_exists(libc):
+        return Err("UnsupportedFeature: internal:elf found no {libc}")
+    var objects: [[i64]] = [internal_read_i64(crt.crt1), internal_read_i64(crt.crti)]
+    for path in object_files:
+        objects = objects.push(internal_read_i64(path))
+    objects = objects.push(internal_read_i64(crt.crtn))
+    var archives: [[i64]] = []
+    val nonshared = "{libdir}/libc_nonshared.a"
+    if file_exists(nonshared):
+        archives = archives.push(internal_read_i64(nonshared))
+    var arch = RelocArch.X86_64
+    if target.arch == LINK_ARCH_AARCH64:
+        arch = RelocArch.AArch64
+    var mode = ELF_LINK_DYNAMIC_EXEC
+    if pie:
+        mode = ELF_LINK_DYNAMIC_PIE
+    elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [file_read_bytes(libc)],
+        entry: "_start", target: arch, mode: mode, interp: crt.dynamic_linker))
+
+fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
+        object_files: [text], output: text) -> LinkReceiptV1:
+    """SIMPLE_LINKER=internal: link with internal:elf or return a named
+    UnsupportedFeature receipt. Never falls back to an external linker."""
+    val reason = internal_unsupported_reason(req.target)
+    if reason != "":
+        debug("link-engine-external", "UnsupportedFeature: {reason}")
+        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
+    val config = link_request_to_native_config(req, policy)
+    val linked = internal_link_bytes(req.target, config.pie, object_files)
+    if linked.is_err():
+        val message = linked.unwrap_err()
+        val outcome = classify_internal_error(message)
+        debug("link-engine-external", "internal:elf failed ({outcome.name()}): {message}")
+        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, outcome, LinkAccountingClassV1.NotCertified)
+    var bytes: [u8] = []
+    for b in linked.unwrap():
+        bytes = bytes.push(b as u8)
+    if not file_write_bytes(output, bytes):
+        debug("link-engine-external", "internal:elf could not write {output}")
+        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.ResourceFailure, LinkAccountingClassV1.NotCertified)
+    val marked = shell("chmod +x '{output}'")
+    if marked.exit_code != 0:
+        debug("link-engine-external", "internal:elf could not mark {output} executable")
+        return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.ResourceFailure, LinkAccountingClassV1.NotCertified)
+    base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.Success, LinkAccountingClassV1.NotCertified)
+
+# ============================================================================
 # Entry point
 # ============================================================================
 
@@ -296,6 +405,9 @@ pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
     if policy_status != "":
         debug("link-engine-external", "policy rejected: {policy_status}")
         return base_receipt(req, policy, "none", LinkOutcomeV1.InputError, LinkAccountingClassV1.NotCertified)
+
+    if requested_linker_override().lower() == "internal":
+        return link_request_internal(req, policy, object_files, output)
 
     val config = link_request_to_native_config(req, policy)
     val link_result = link_to_native(object_files, output, config)

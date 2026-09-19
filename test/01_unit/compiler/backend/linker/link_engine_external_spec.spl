@@ -3,7 +3,7 @@
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # link_engine_external — LinkRequestV1/LinkExecutionPolicyV1 -> NativeLinkConfig
-# projection, and the SIMPLE_LINKER=internal rejection path.
+# projection, and the SIMPLE_LINKER=internal engine selection (internal:elf).
 #
 # Lane A3, doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md
 # row A3. RC1 = zero behaviour change: argv builders in
@@ -25,6 +25,7 @@ use std.common.linker.link_receipt_v1.*
 use compiler.backend.linker.link_engine_external.*
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 use compiler.backend.linker.mold.{find_linker_path}
+use std.io_runtime.{shell}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
@@ -180,7 +181,7 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
         with_env("SIMPLE_LINKER", "internal", fn():
             val result = find_linker_path()
             expect(result.is_err()).to_be(true)
-            expect(result.unwrap_err()).to_equal("internal engine not available until G2")
+            expect(result.unwrap_err()).to_equal("internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf")
         )
 
     it "SIMPLE_LINKER unset still resolves normally (override behaviour unchanged)":
@@ -191,7 +192,7 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
             # Either a real linker is found, or the historical "no linker
             # found" error -- never the internal-engine message.
             if result.is_err():
-                expect(result.unwrap_err()).not.to_equal("internal engine not available until G2")
+                expect(result.unwrap_err()).not.to_equal("internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf")
         )
 
     it "an unresolvable non-internal override is still a plain lookup error":
@@ -206,19 +207,48 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
     it "classify_link_error maps the propagated internal-engine message to UnsupportedFeature":
         # @req REQ-LINKER-A3-INTERNAL-ALIAS
         step("The exact link_native_unix propagation text still classifies")
-        val propagated = "requested-linker-unresolved: internal engine not available until G2"
+        val propagated = "requested-linker-unresolved: internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf"
         expect(classify_link_error(propagated).name()).to_equal("UnsupportedFeature")
 
-    it "link_request_to_native reports UnsupportedFeature end to end for SIMPLE_LINKER=internal":
+    it "link_request_to_native reports UnsupportedFeature as internal:elf for a non-ELF target":
         # @req REQ-LINKER-A3-INTERNAL-ALIAS
-        step("End-to-end: internal override -> UnsupportedFeature receipt")
+        step("End-to-end: internal override + Mach-O target -> named UnsupportedFeature receipt")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val receipt = link_request_to_native(
+                request_for(macos_aarch64()), fast_policy(),
+                ["test/fixtures/linker/elf/hello_libc_a64.o"],
+                "/tmp/link_engine_external_spec_output")
+            expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+            expect(receipt.engine_id).to_equal("internal:elf")
+        )
+
+    it "link_request_to_native links a Linux aarch64 ELF object internally and the output runs":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        # Host requirement: aarch64 Linux with glibc (crt_discovery finds
+        # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them).
+        step("End-to-end: internal override -> internal:elf dynamic PIE that prints and exits 42")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            val out = "/tmp/link_engine_external_spec_internal_hello"
+            val receipt = link_request_to_native(
+                request_for(linux_aarch64()), fast_policy(),
+                ["test/fixtures/linker/elf/hello_libc_a64.o"], out)
+            expect(receipt.outcome.name()).to_equal("Success")
+            expect(receipt.engine_id).to_equal("internal:elf")
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("hi from libc\n")
+        )
+
+    it "link_request_to_native reports a missing input as InputError from internal:elf":
+        # @req REQ-LINKER-A3-INTERNAL-ALIAS
+        step("End-to-end: internal override + unreadable object -> InputError, never an external fallback")
         with_env("SIMPLE_LINKER", "internal", fn():
             val receipt = link_request_to_native(
                 request_for(linux_aarch64()), fast_policy(),
                 ["/tmp/link_engine_external_spec_nonexistent.o"],
                 "/tmp/link_engine_external_spec_output")
-            expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
-            expect(receipt.engine_id).to_equal("internal")
+            expect(receipt.outcome.name()).to_equal("InputError")
+            expect(receipt.engine_id).to_equal("internal:elf")
         )
 
 # ============================================================================
