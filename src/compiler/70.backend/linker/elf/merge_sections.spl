@@ -10,13 +10,14 @@
 # merged blob per (output section, sh_flags, sh_entsize, and sh_addralign for
 # SHF_STRINGS), placed at the position of the first input section it replaces.
 #
-# Not merged, exactly like ld.lld (InputFiles.cpp `shouldMerge`): sh_size 0 and
-# sh_entsize 0 sections are kept as ordinary sections. Rejected by name rather
-# than silently mishandled:
-#   - sh_size not a multiple of sh_entsize (ld.lld errors too)
-#   - a writable SHF_MERGE section (ld.lld errors too)
-#   - SHF_STRINGS with sh_entsize != 1: multi-byte character strings are not
-#     split here
+# Kept whole (unmerged) rather than split, which is always safe and is what
+# ld.lld does for anything it declines to merge: sh_size 0 and sh_entsize 0
+# (InputFiles.cpp `shouldMerge`), SHF_STRINGS with sh_entsize != 1 (wide
+# literals), and any section a relocation points INTO (elf_merge_demote).
+#
+# Errors, exactly and only where ld.lld errors too:
+#   - sh_size not a multiple of sh_entsize
+#   - a writable SHF_MERGE section
 #   - a SHF_STRINGS section whose last byte is not NUL (unterminated piece)
 #
 # Known divergence from ld.lld, recorded rather than papered over: ld.lld
@@ -41,6 +42,7 @@ struct ElfMergeSet:
     sec_grp: [[i64]]      # [obj][sec] -> group index, -1 = not merged
     sec_row: [[i64]]      # [obj][sec] -> row in starts/outs, -1 = not merged
     starts: [[i64]]       # row -> piece offsets inside the input section
+    row_size: [i64]       # row -> size of that input section (bounds check)
     outs: [[i64]]         # row -> piece offsets inside the merged blob
     grp_name: [text]      # group -> output section name
     grp_flags: [i64]
@@ -59,7 +61,7 @@ fn elf_merge_empty(objects: [ElfObject]) -> ElfMergeSet:
             row = row.push(-1)
             si = si + 1
         g = g.push(row)
-    ElfMergeSet(sec_grp: g, sec_row: g, starts: [], outs: [], grp_name: [], grp_flags: [],
+    ElfMergeSet(sec_grp: g, sec_row: g, starts: [], row_size: [], outs: [], grp_name: [], grp_flags: [],
         grp_entsize: [], grp_align: [], grp_type: [], grp_data: [])
 
 fn elf_merge_candidate(obj: ElfObject, si: i64) -> bool:
@@ -69,7 +71,12 @@ fn elf_merge_candidate(obj: ElfObject, si: i64) -> bool:
         sec.sh_size > 0 and elf_section_entsize(obj, si) > 0
 
 fn elf_merge_reject(obj: ElfObject, si: i64, oi: i64) -> text:
-    """"" when section (oi, si) can be merged as modelled, else the reason."""
+    """"" when section (oi, si) can be merged as modelled, else the reason.
+
+    Only the two cases ld.lld itself errors on are errors here; everything we
+    do not model is demoted to an ordinary unmerged section instead
+    (elf_merge_demote), which is what ld.lld does for anything it declines to
+    merge."""
     val sec = obj.sections[si]
     val name = elf_section_name(obj, si)
     val entsize = elf_section_entsize(obj, si)
@@ -77,9 +84,22 @@ fn elf_merge_reject(obj: ElfObject, si: i64, oi: i64) -> text:
         return "object {oi}: SHF_MERGE section {name} size {sec.sh_size} is not a multiple of sh_entsize {entsize}"
     if sec.sh_flags & SHF_WRITE_M != 0:
         return "object {oi}: writable SHF_MERGE section {name} is unsupported"
-    if sec.sh_flags & SHF_STRINGS_M != 0 and entsize != 1:
-        return "object {oi}: SHF_MERGE|SHF_STRINGS section {name} has sh_entsize {entsize}; only 1-byte character strings are modelled"
     ""
+
+fn elf_merge_demote(obj: ElfObject, si: i64, reloc_target: bool) -> bool:
+    """True when a mergeable section is kept whole (unmerged) rather than split.
+
+    Two cases, both of which ld.lld links without complaint:
+      - SHF_STRINGS with sh_entsize != 1 (wide character literals, e.g.
+        `.rodata.str4.4` from L"..."): splitting needs multi-byte NUL scanning
+      - a section a relocation points INTO (e.g. `.rodata.cst8` holding
+        `.quad target`): ld.lld demotes such a section to a regular input
+        section, since a piece's bytes are not relocatable once shared
+    Keeping the section whole is always safe: it just forgoes the dedup."""
+    val sec = obj.sections[si]
+    if reloc_target:
+        return true
+    sec.sh_flags & SHF_STRINGS_M != 0 and elf_section_entsize(obj, si) != 1
 
 fn elf_merge_bytes(obj: ElfObject, si: i64) -> [i64]:
     """Raw contents of input section si (sh_addr is the file offset here)."""
@@ -137,17 +157,36 @@ fn elf_merge_find_group(set: ElfMergeSet, name: text, flags: i64, entsize: i64, 
         g = g + 1
     -1
 
+fn elf_merge_reloc_targets(objects: [ElfObject]) -> [[bool]]:
+    """[obj][sec] -> true when some relocation points INTO that section."""
+    var out: [[bool]] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var row: [bool] = []
+        var si: i64 = 0
+        while si < obj.sections.len():
+            row = row.push(false)
+            si = si + 1
+        for r in obj.relocations:
+            if r.target_section_idx >= 0 and r.target_section_idx < row.len():
+                row[r.target_section_idx] = true
+        out = out.push(row)
+        oi = oi + 1
+    out
+
 # reason: positional inputs (objects, liveness, and the output-section namer)
 fn elf_merge_build(objects: [ElfObject], live: [[bool]], out_names: [[text]]) -> Result<ElfMergeSet, text>:
     """Merge every mergeable live section; out_names[oi][si] is its output section."""
     var set = elf_merge_empty(objects)
     var keys: [{text: i64}] = []
+    val targets = elf_merge_reloc_targets(objects)
     var oi: i64 = 0
     while oi < objects.len():
         val obj = objects[oi]
         var si: i64 = 0
         while si < obj.sections.len():
-            if live[oi][si] and elf_merge_candidate(obj, si):
+            if live[oi][si] and elf_merge_candidate(obj, si) and not elf_merge_demote(obj, si, targets[oi][si]):
                 val reject = elf_merge_reject(obj, si, oi)
                 if reject != "":
                     return Err(reject)
@@ -207,6 +246,7 @@ fn elf_merge_build(objects: [ElfObject], live: [[bool]], out_names: [[text]]) ->
                 set.grp_data[g] = blob
                 keys[g] = seen
                 set.starts = set.starts.push(starts)
+                set.row_size = set.row_size.push(sec.sh_size)
                 set.outs = set.outs.push(outs)
                 set.sec_grp[oi][si] = g
                 set.sec_row[oi][si] = set.starts.len() - 1
@@ -221,8 +261,8 @@ fn elf_merge_piece_off(set: ElfMergeSet, oi: i64, si: i64, off: i64) -> Result<i
     if row < 0:
         return Err("internal: section {si} of object {oi} was not merged")
     val starts = set.starts[row]
-    if starts.len() == 0 or off < 0:
-        return Err("object {oi}: offset {off} is outside merged section {si}")
+    if starts.len() == 0 or off < 0 or off >= set.row_size[row]:
+        return Err("object {oi}: offset {off} is outside merged section {si} (size {set.row_size[row]})")
     var i = starts.len() - 1
     while i > 0 and starts[i] > off:
         i = i - 1

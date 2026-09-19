@@ -217,6 +217,7 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]], merged: ElfMergeSet) -
     var outs: [ElfOutSec] = []
     var sec_out: [[i64]] = []
     var sec_off: [[i64]] = []
+    var ent_seen: [bool] = []
     var grp_at: [i64] = []
     var grp_out: [i64] = []
     var g: i64 = 0
@@ -260,20 +261,30 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]], merged: ElfMergeSet) -
                         st = SHT_PROGBITS_E
                     outs = outs.push(elf_out_sec(name, st, sec.sh_flags & (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR),
                         1, 0, elf_seg_of(sec.sh_flags)))
+                    ent_seen = ent_seen.push(false)
                     k = outs.len() - 1
                 val o = outs[k]
                 val at = align_up(o.size, al)
                 var nal = o.align
                 if al > nal:
                     nal = al
-                var flags = o.sh_flags
-                var entsize = o.entsize
+                # ld.lld commitSection ORs the input flags into the output section, so
+                # SHF_MERGE|SHF_STRINGS shows up even when the section is not merged
+                var flags = o.sh_flags | (sec.sh_flags & (SHF_MERGE_L | SHF_STRINGS_L))
+                # ld.lld OutputSections.cpp commitSection: the output sh_entsize is the
+                # inputs' common entsize and 0 as soon as two of them disagree
+                var ent_in = elf_section_entsize(obj, si)
                 if gi >= 0:
-                    # ld.lld propagates SHF_MERGE|SHF_STRINGS and sh_entsize to the output
-                    flags = flags | (merged.grp_flags[gi] & (SHF_MERGE_L | SHF_STRINGS_L))
-                    entsize = merged.grp_entsize[gi]
+                    ent_in = merged.grp_entsize[gi]
                     grp_at[gi] = at
                     grp_out[gi] = k
+                var entsize = ent_in
+                if ent_seen[k]:
+                    if o.entsize != ent_in:
+                        entsize = 0
+                    else:
+                        entsize = o.entsize
+                ent_seen[k] = true
                 outs[k] = ElfOutSec(name: o.name, sh_type: o.sh_type, sh_flags: flags, align: nal,
                     size: at + size, entsize: entsize, link: o.link, info: o.info, seg: o.seg)
                 idxs = idxs.push(k)
@@ -639,7 +650,9 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
             if o.sh_type == SHT_NOBITS_E:
                 return Err("object {oi}: relocation type {rtype} targets a NOBITS section")
             if ctx.merged.sec_grp[oi][tsec] >= 0:
-                return Err("object {oi}: relocation type {rtype} targets merged section {tsec}; relocations INTO a SHF_MERGE section are not modelled")
+                # elf_merge_demote keeps every relocation target unmerged, so this
+                # is an internal invariant, not an input the linker rejects
+                return Err("internal: object {oi} relocation type {rtype} targets merged section {tsec}")
             val seed = elf_symref(ctx, oi, elf_reloc_sym(r))?
             val place = inputs.sec_off[oi][tsec] + r.r_offset
             val rclass = elf_reloc_class(ctx.target, rtype)
