@@ -1,0 +1,165 @@
+# Internal ELF linker: x86_64 dynamic glibc execution proof — lane C2
+#
+# Links an x86_64 glibc sysroot's startup objects (crt1.o / Scrt1.o, crti.o,
+# crtn.o) plus test/fixtures/linker/elf/hello_libc_x64.o (puts + exit, recipe
+# in RECIPE.md) against that sysroot's libc.so.6 with the DEFAULT elf_link into
+# a dynamic ET_EXEC and a dynamic PIE, then runs both. Each must print
+# "hi from libc" and exit 42 — the same bar the aarch64 dynamic outputs meet.
+#
+# Host requirement (named, never a silent pass):
+#   - an x86_64 glibc sysroot: $SIMPLE_X64_SYSROOT, default
+#     $HOME/.cache/x64-sysroot/root (Ubuntu libc6 + libc6-dev amd64 .debs
+#     extracted with dpkg-deb -x; recipe in RECIPE.md). Missing ->
+#     "x64-sysroot-missing".
+#   - a way to run x86_64 code: the host itself when it is x86_64, else
+#     qemu-x86_64 ($SIMPLE_QEMU_X86_64, PATH, or $HOME/.local/bin). Missing ->
+#     "qemu-x86_64-missing".
+# When a requirement is missing every scenario prints "SKIP: <reason>" and
+# asserts that the reason is one of the two named ones.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+# @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_write_bytes, file_exists, env_get, shell, process_run, host_arch}
+
+val FIX: text = "test/fixtures/linker/elf"
+val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
+val SKIP_SYSROOT: text = "x64-sysroot-missing"
+val SKIP_QEMU: text = "qemu-x86_64-missing"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn home() -> text:
+    env_get("HOME") ?? ""
+
+fn sysroot() -> text:
+    val env = env_get("SIMPLE_X64_SYSROOT") ?? ""
+    if env != "":
+        return env
+    home() + "/.cache/x64-sysroot/root"
+
+fn libdir_of(root: text) -> text:
+    root + "/usr/lib/x86_64-linux-gnu"
+
+fn libdir() -> text:
+    libdir_of(sysroot())
+
+fn sysroot_missing(root: text) -> text:
+    """First required file absent under root, or ""."""
+    val lib = libdir_of(root)
+    val need = [lib + "/crt1.o", lib + "/Scrt1.o", lib + "/crti.o", lib + "/crtn.o",
+        lib + "/libc.so.6", root + INTERP]
+    for p in need:
+        if not file_exists(p):
+            return p
+    ""
+
+fn host_is_x64() -> bool:
+    val a = host_arch()
+    a == "x86_64" or a == "amd64"
+
+fn qemu() -> text:
+    """qemu-x86_64 to run the output with, or "" when none is found."""
+    val env = env_get("SIMPLE_QEMU_X86_64") ?? ""
+    if env != "":
+        return env
+    val found = shell("command -v qemu-x86_64")
+    if found.exit_code == 0 and found.stdout.trim() != "":
+        return found.stdout.trim()
+    val local = home() + "/.local/bin/qemu-x86_64"
+    if file_exists(local):
+        return local
+    ""
+
+fn skip_reason_for(root: text) -> text:
+    """"" when the run environment is complete, else the named reason."""
+    val miss = sysroot_missing(root)
+    if miss != "":
+        return "{SKIP_SYSROOT}: {miss} (set SIMPLE_X64_SYSROOT)"
+    if not host_is_x64() and qemu() == "":
+        return "{SKIP_QEMU}: not on PATH, SIMPLE_QEMU_X86_64 or $HOME/.local/bin"
+    ""
+
+fn skip_reason() -> text:
+    skip_reason_for(sysroot())
+
+fn expect_named_skip(reason: text):
+    print "SKIP: {reason}"
+    expect(reason.starts_with(SKIP_SYSROOT) or reason.starts_with(SKIP_QEMU)).to_equal(true)
+
+fn link_hello(crt1: text, mode: i64) -> Result<[i64], text>:
+    val objs = [load_path("{libdir()}/{crt1}"), load_path("{libdir()}/crti.o"),
+        load_path("{FIX}/hello_libc_x64.o"), load_path("{libdir()}/crtn.o")]
+    elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [file_read_bytes("{libdir()}/libc.so.6")],
+        entry: "_start", target: RelocArch.X86_64, mode: mode, interp: INTERP))
+
+# Link, write, chmod and run: (exit code, stdout), or an Err naming the failing stage.
+fn link_and_run(crt1: text, mode: i64, out: text) -> Result<(i64, text), text>:
+    val linked = link_hello(crt1, mode)
+    if linked.is_err():
+        return Err("link: {linked.unwrap_err()}")
+    var bytes: [u8] = []
+    for b in linked.unwrap():
+        bytes = bytes.push(b as u8)
+    if not file_write_bytes(out, bytes):
+        return Err("write: {out}")
+    val (_co, _ce, chmod_code) = process_run("chmod", ["755", out])
+    if chmod_code != 0:
+        return Err("chmod: {out}")
+    var cmd = "'{out}'"
+    if not host_is_x64():
+        cmd = "'{qemu()}' -L '{sysroot()}' '{out}'"
+    val run = shell(cmd)
+    Ok((run.exit_code, run.stdout))
+
+describe "elf_link - x86_64 dynamic glibc hello (execution proof)":
+    it "resolves the x86_64 run environment or names why it cannot":
+        val reason = skip_reason()
+        if reason != "":
+            expect_named_skip(reason)
+        else:
+            print "x86_64 run env: sysroot={sysroot()} qemu={qemu()}"
+            expect(sysroot_missing(sysroot())).to_equal("")
+
+    it "links a dynamic ET_EXEC that prints 'hi from libc' and exits 42":
+        val reason = skip_reason()
+        if reason != "":
+            expect_named_skip(reason)
+        else:
+            val r = link_and_run("crt1.o", ELF_LINK_DYNAMIC_EXEC, "/tmp/elf_x64_dynamic_exec_spec_exec")
+            if r.is_err():
+                print "error: {r.unwrap_err()}"
+            expect(r.is_ok()).to_equal(true)
+            val (code, stdout) = r.unwrap()
+            expect(stdout.trim()).to_equal("hi from libc")
+            expect(code).to_equal(42)
+
+    it "links a dynamic PIE that prints 'hi from libc' and exits 42":
+        val reason = skip_reason()
+        if reason != "":
+            expect_named_skip(reason)
+        else:
+            val r = link_and_run("Scrt1.o", ELF_LINK_DYNAMIC_PIE, "/tmp/elf_x64_dynamic_exec_spec_pie")
+            if r.is_err():
+                print "error: {r.unwrap_err()}"
+            expect(r.is_ok()).to_equal(true)
+            val (code, stdout) = r.unwrap()
+            expect(stdout.trim()).to_equal("hi from libc")
+            expect(code).to_equal(42)
+
+    it "names a missing sysroot instead of passing silently":
+        val reason = skip_reason_for("/nonexistent/elf_x64_dynamic_exec_spec")
+        expect(reason.starts_with(SKIP_SYSROOT)).to_equal(true)
+        expect(reason.contains("/nonexistent/elf_x64_dynamic_exec_spec/usr/lib/x86_64-linux-gnu/crt1.o")).to_equal(true)

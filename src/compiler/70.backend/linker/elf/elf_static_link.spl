@@ -19,8 +19,8 @@
 # -> build synthetic contents -> write.
 #
 # Limits (reported as errors, never silently degraded):
-#   - targets: x86_64 and aarch64; x86_64 dynamic outputs only via
-#     elf_link_structural (structural parity with ld.lld, never executed here)
+#   - targets: x86_64 and aarch64 (dynamic glibc exec + PIE run on both:
+#     aarch64 natively, x86_64 under qemu-x86_64 -L <glibc sysroot>)
 #   - no TLS, no COMMON, no copy relocations / canonical PLTs, no text relocs,
 #     no section GC, no COMDAT dedup, no symbol versioning
 #     (unversioned references bind to the library's default version)
@@ -330,10 +330,17 @@ fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:
 # ============================================================================
 
 fn elf_is_synth(name: text) -> bool:
-    name == "_DYNAMIC" or name == "__ehdr_start" or name == "__executable_start" or
+    name == "_DYNAMIC" or name == "_GLOBAL_OFFSET_TABLE_" or name == "__ehdr_start" or name == "__executable_start" or
         name == "__init_array_start" or name == "__init_array_end" or
         name == "__fini_array_start" or name == "__fini_array_end" or
         name == "__preinit_array_start" or name == "__preinit_array_end"
+
+fn elf_got_base(plan: ElfExecPlan) -> i64:
+    """Plan index of the section _GLOBAL_OFFSET_TABLE_ points at, or -1."""
+    val gp = elf_exec_find(plan, ".got.plt")
+    if gp >= 0:
+        return gp
+    elf_exec_find(plan, ".got")
 
 fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>:
     if name == "__ehdr_start" or name == "__executable_start":
@@ -343,6 +350,12 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>
         if d < 0:
             return Err("undefined symbol: _DYNAMIC (output has no .dynamic)")
         return Ok(plan.vaddrs[d])
+    if name == "_GLOBAL_OFFSET_TABLE_":
+        # ld.lld (x86_64 and aarch64): the start of .got.plt, else .got
+        val g = elf_got_base(plan)
+        if g < 0:
+            return Err("undefined symbol: _GLOBAL_OFFSET_TABLE_ (output has no .got.plt or .got)")
+        return Ok(plan.vaddrs[g])
     var sec = ".init_array"
     if name.starts_with("__fini_array"):
         sec = ".fini_array"
@@ -628,6 +641,11 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
     if name == "__ehdr_start" or name == "__executable_start":
         return 1
     var sec = ".init_array"
+    if name == "_GLOBAL_OFFSET_TABLE_":
+        val g = elf_got_base(plan)
+        if g < 0:
+            return -1
+        return g + 1
     if name == "_DYNAMIC":
         sec = ".dynamic"
     else if name.starts_with("__fini_array"):
@@ -839,23 +857,11 @@ fn elf_static_link(objects: [[i64]], archives: [[i64]], entry: text, target: Rel
 
 fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     """Link per req.mode; Err on any link error (never a partial image)."""
-    elf_link_mode(req, false)
-
-fn elf_link_structural(req: ElfLinkRequest) -> Result<[i64], text>:
-    """elf_link that also admits x86_64 dynamic outputs. Those are validated only
-    structurally against ld.lld (readelf -l -S -d -r, PLT disassembly): the build
-    host has no x86_64 ld.so to execute them, so elf_link keeps them behind a
-    named UnsupportedFeature. For specs and parity tooling, not production links."""
-    elf_link_mode(req, true)
-
-fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
     val dynamic = elf_mode_dynamic(mode)
     val pie = elf_mode_pie(mode)
-    if dynamic and not elf_target_is_a64(target) and not structural:
-        return Err("UnsupportedFeature: x86_64 dynamic linking has no execution proof on this build host (no x86_64 glibc / ld-linux-x86-64.so.2); it is validated structurally against ld.lld only (elf_link_structural)")
     if not dynamic and req.shared.len() > 0:
         return Err("shared objects given to a static link")
     if dynamic and req.interp == "":
@@ -1107,6 +1113,6 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
 # ============================================================================
 
 export ElfStaticInputs, ElfLinkRequest
-export elf_static_link, elf_link, elf_link_structural
+export elf_static_link, elf_link
 export ELF_STATIC_BASE
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE

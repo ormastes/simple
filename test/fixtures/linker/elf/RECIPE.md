@@ -87,5 +87,48 @@ ld.lld -shared --soname libadd_x64.so --hash-style=both -o libadd_x64.so.1 pic_l
 
 The x86_64 dynamic outputs are compared with
 `ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
-(`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
-executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
+(`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). The execution
+proof for x86_64 dynamic linking is the glibc hello below (lane C2).
+
+## Lane C2 fixture (x86_64 dynamic glibc execution proof)
+
+`hello_libc_x64.o` is the x86_64 build of `hello_libc.c` (R_X86_64_PC32
+`.L.str`, PLT32 `puts`, PLT32 `exit`; `main` in `.text.unlikely.`). It needs
+x86_64 glibc headers, taken from the sysroot described next:
+
+```
+clang --target=x86_64-linux-gnu --sysroot=$HOME/.cache/x64-sysroot/root \
+  -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libc.c -o hello_libc_x64.o
+```
+
+`elf_x64_dynamic_exec_spec` links it with the sysroot's `crt1.o`/`Scrt1.o`,
+`crti.o`, `crtn.o` and `libc.so.6` into a dynamic ET_EXEC and PIE and runs both
+with `qemu-x86_64 -L <sysroot>` (or natively on an x86_64 host): each prints
+`hi from libc` and exits 42. The sysroot is NOT vendored. It is built without
+root from Ubuntu noble amd64 packages, using a private apt state directory
+(the host needs no amd64 foreign architecture):
+
+```
+S=$HOME/.cache/x64-sysroot
+mkdir -p $S/apt/lists/partial $S/apt/cache/archives/partial $S/debs && touch $S/apt/status
+printf 'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main\ndeb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main\n' > $S/apt/sources.list
+A="-o Dir::Etc::SourceList=$S/apt/sources.list -o Dir::Etc::SourceParts=/dev/null -o Dir::State::Lists=$S/apt/lists -o Dir::Cache=$S/apt/cache -o Dir::State::Status=$S/apt/status -o APT::Architecture=amd64 -o APT::Architectures=amd64"
+apt-get $A update
+cd $S/debs && apt-get $A download libc6 libc6-dev libgcc-s1 linux-libc-dev libcrypt-dev
+for d in *.deb; do dpkg-deb -x $d $S/root; done
+cd $S/root && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64
+```
+
+Packages used for the recorded run (sha256):
+
+| package | sha256 |
+|---|---|
+| libc6_2.39-0ubuntu8.9_amd64.deb | ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be |
+| libc6-dev_2.39-0ubuntu8.9_amd64.deb | e13d5fcc1b2a86f75bca8e0026a8e39f24fe97ca86e92be79991f8697eb1306f |
+| libcrypt-dev_1%3a4.4.36-4build1_amd64.deb | 2edff420ef80b4a3f3751e65c33423ef30e563122a58b759e4854ea8d84ba1b1 |
+| libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb | aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd |
+| linux-libc-dev_6.8.0-139.139_amd64.deb | f8292b3414cac372ec28ba484a45e3f18b3ac5fc7872ca82661835286f1c5865 |
+
+Set `SIMPLE_X64_SYSROOT` to use another sysroot, and `SIMPLE_QEMU_X86_64` for a
+specific qemu. When either is missing the spec prints `SKIP: x64-sysroot-missing`
+or `SKIP: qemu-x86_64-missing` and asserts that reason.
