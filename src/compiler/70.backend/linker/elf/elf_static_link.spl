@@ -335,14 +335,20 @@ fn elf_is_synth(name: text) -> bool:
         name == "__fini_array_start" or name == "__fini_array_end" or
         name == "__preinit_array_start" or name == "__preinit_array_end"
 
-fn elf_got_base(plan: ElfExecPlan) -> i64:
-    """Plan index of the section _GLOBAL_OFFSET_TABLE_ points at, or -1."""
+fn elf_got_base(plan: ElfExecPlan, target: RelocArch) -> i64:
+    """Plan index of the section _GLOBAL_OFFSET_TABLE_ points at, or -1.
+    ld.lld: .got.plt on x86_64 (gotBaseSymInGotPlt), .got on aarch64."""
+    if elf_target_is_a64(target):
+        val g = elf_exec_find(plan, ".got")
+        if g >= 0:
+            return g
+        return elf_exec_find(plan, ".got.plt")
     val gp = elf_exec_find(plan, ".got.plt")
     if gp >= 0:
         return gp
     elf_exec_find(plan, ".got")
 
-fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>:
+fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text, target: RelocArch) -> Result<i64, text>:
     if name == "__ehdr_start" or name == "__executable_start":
         return Ok(base)
     if name == "_DYNAMIC":
@@ -352,7 +358,7 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>
         return Ok(plan.vaddrs[d])
     if name == "_GLOBAL_OFFSET_TABLE_":
         # ld.lld (x86_64 and aarch64): the start of .got.plt, else .got
-        val g = elf_got_base(plan)
+        val g = elf_got_base(plan, target)
         if g < 0:
             return Err("undefined symbol: _GLOBAL_OFFSET_TABLE_ (output has no .got.plt or .got)")
         return Ok(plan.vaddrs[g])
@@ -441,7 +447,7 @@ fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, t
     if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
         if ctx.res.defined.has(sym.name):
             return elf_entry_addr(ctx, lay, ctx.res.defined[sym.name])
-        return elf_synth_addr(lay.plan, lay.base, sym.name)
+        return elf_synth_addr(lay.plan, lay.base, sym.name, ctx.target)
     if sym.st_shndx == SHN_ABS:
         return Ok(sym.st_value)
     if sym.st_shndx == SHN_UNDEF:
@@ -636,13 +642,13 @@ fn elf_sym_hidden(sym: ElfSymbol) -> bool:
 fn elf_is_definer(ctx: ElfLinkCtx, oi: i64, sym: ElfSymbol) -> bool:
     sym.st_shndx != SHN_UNDEF and ctx.res.defined.has(sym.name) and ctx.res.defined[sym.name].obj_idx == oi
 
-fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
+fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
     """Header index of the section a linker-defined symbol points into, or -1."""
     if name == "__ehdr_start" or name == "__executable_start":
         return 1
     var sec = ".init_array"
     if name == "_GLOBAL_OFFSET_TABLE_":
-        val g = elf_got_base(plan)
+        val g = elf_got_base(plan, target)
         if g < 0:
             return -1
         return g + 1
@@ -708,9 +714,9 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         oi = oi + 1
     for n in order:
         if elf_is_synth(n) and not ctx.res.defined.has(n):
-            val sh = elf_synth_shndx(lay.plan, n)
+            val sh = elf_synth_shndx(lay.plan, n, ctx.target)
             if sh > 0:
-                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n)?, 0)
+                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
                 demoted[n] = true
     # ld.lld defines _DYNAMIC (hidden) whenever there is a .dynamic, referenced or not
     val dyn = elf_exec_find(lay.plan, ".dynamic")
