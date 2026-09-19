@@ -980,20 +980,6 @@ struct ElfSymtabOut:
     strtab: [i64]
     first_global: i64
 
-struct ElfSymRows:
-    """Parallel Elf64_Sym columns, in output order."""
-    names: [text]
-    info: [i64]
-    other: [i64]
-    shndx: [i64]
-    value: [i64]
-    size: [i64]
-
-# reason: positional Elf64_Sym columns
-fn elf_sym_row(rows: ElfSymRows, name: text, info: i64, other: i64, shndx: i64, value: i64, size: i64) -> ElfSymRows:
-    ElfSymRows(names: rows.names.push(name), info: rows.info.push(info), other: rows.other.push(other),
-        shndx: rows.shndx.push(shndx), value: rows.value.push(value), size: rows.size.push(size))
-
 fn elf_out_shndx(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
     """Output section header index holding input section (oi, si), or -1."""
     if si < 0 or si >= ctx.inputs.sec_out[oi].len():
@@ -1038,7 +1024,19 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
     then referenced linker-defined symbols (LOCAL, hidden), then every other
     global in first-reference order (imports and unresolved weak refs as UND)."""
     val objs = ctx.inputs.objects
-    var rows = ElfSymRows(names: [""], info: [0], other: [0], shndx: [0], value: [0], size: [0])
+    # Six parallel Elf64_Sym columns, appended INLINE. They used to be a struct
+    # threaded through a `rows = <helper>(rows, ...)` call: the helper read each
+    # column out of the struct and pushed to it, and a push to an array the
+    # struct still holds copies the whole column, so every symbol copied all
+    # six columns — quadratic in symbol count (lane C5). See
+    # doc/10_metrics/compiler/linker/internal_elf_engine_memory_and_algorithms_2026-09-19.md
+    # for the before/after sample shares this was measured at.
+    var r_names: [text] = [""]
+    var r_info: [i64] = [0]
+    var r_other: [i64] = [0]
+    var r_shndx: [i64] = [0]
+    var r_value: [i64] = [0]
+    var r_size: [i64] = [0]
     var order: [text] = []
     var seen: {text: bool} = {}
     var all_weak: {text: bool} = {}
@@ -1055,12 +1053,21 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
             if bind == STB_LOCAL:
                 if typ != STT_SECTION and sym.name != "":
                     if sym.st_shndx == SHN_ABS:
-                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, SHN_ABS, sym.st_value, sym.st_size)
+                        r_names = r_names.push(sym.name)
+                        r_info = r_info.push(typ)
+                        r_other = r_other.push(sym.st_other)
+                        r_shndx = r_shndx.push(SHN_ABS)
+                        r_value = r_value.push(sym.st_value)
+                        r_size = r_size.push(sym.st_size)
                     else if sym.st_shndx != SHN_UNDEF and sym.st_shndx < SHN_LORESERVE:
                         val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
                         if sh > 0:
-                            rows = elf_sym_row(rows, sym.name, typ, sym.st_other, sh,
-                                elf_sec_addr(ctx, lay, oi, sym.st_shndx, sym.st_value)?, sym.st_size)
+                            r_names = r_names.push(sym.name)
+                            r_info = r_info.push(typ)
+                            r_other = r_other.push(sym.st_other)
+                            r_shndx = r_shndx.push(sh)
+                            r_value = r_value.push(elf_sec_addr(ctx, lay, oi, sym.st_shndx, sym.st_value)?)
+                            r_size = r_size.push(sym.st_size)
             else if sym.name != "":
                 if not seen.has(sym.name):
                     seen[sym.name] = true
@@ -1077,20 +1084,35 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                         var shn = sh
                         if sym.st_shndx == SHN_ABS:
                             shn = SHN_ABS
-                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn, v, sym.st_size)
+                        r_names = r_names.push(sym.name)
+                        r_info = r_info.push(typ)
+                        r_other = r_other.push(sym.st_other)
+                        r_shndx = r_shndx.push(shn)
+                        r_value = r_value.push(v)
+                        r_size = r_size.push(sym.st_size)
             si = si + 1
         oi = oi + 1
     for n in order:
         if elf_is_synth(n) and not ctx.res.defined.has(n):
             val sh = elf_synth_shndx(lay.plan, n, ctx.target)
             if sh > 0:
-                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
+                r_names = r_names.push(n)
+                r_info = r_info.push(0)
+                r_other = r_other.push(2)
+                r_shndx = r_shndx.push(sh)
+                r_value = r_value.push(elf_synth_addr(lay.plan, lay.base, n, ctx.target)?)
+                r_size = r_size.push(0)
                 demoted[n] = true
     # ld.lld defines _DYNAMIC (hidden) whenever there is a .dynamic, referenced or not
     val dyn = elf_exec_find(lay.plan, ".dynamic")
     if dyn >= 0 and not demoted.has("_DYNAMIC") and not ctx.res.defined.has("_DYNAMIC"):
-        rows = elf_sym_row(rows, "_DYNAMIC", 0, 2, dyn + 1, lay.plan.vaddrs[dyn], 0)
-    val first_global = rows.names.len()
+        r_names = r_names.push("_DYNAMIC")
+        r_info = r_info.push(0)
+        r_other = r_other.push(2)
+        r_shndx = r_shndx.push(dyn + 1)
+        r_value = r_value.push(lay.plan.vaddrs[dyn])
+        r_size = r_size.push(0)
+    val first_global = r_names.len()
     for n in order:
         if demoted.has(n) or elf_is_synth(n):
             continue
@@ -1105,7 +1127,12 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 sh = elf_out_shndx(ctx, lay, e.obj_idx, e.section_idx)
             if sh > 0:
                 val info = (elf_symbol_binding(def_sym) << 4) | elf_symbol_type(def_sym)
-                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh, elf_entry_addr(ctx, lay, e)?, def_sym.st_size)
+                r_names = r_names.push(n)
+                r_info = r_info.push(info)
+                r_other = r_other.push(def_sym.st_other)
+                r_shndx = r_shndx.push(sh)
+                r_value = r_value.push(elf_entry_addr(ctx, lay, e)?)
+                r_size = r_size.push(def_sym.st_size)
         else:
             var bind = STB_GLOBAL
             if all_weak[n]:
@@ -1115,18 +1142,23 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 typ = 2  # STT_GNU_IFUNC is referenced as a plain STT_FUNC
             if typ < 0:
                 typ = ref_type[n]
-            rows = elf_sym_row(rows, n, (bind << 4) | typ, 0, SHN_UNDEF, 0, 0)
-    val strtab = elf_build_dynstr(rows.names)
+            r_names = r_names.push(n)
+            r_info = r_info.push((bind << 4) | typ)
+            r_other = r_other.push(0)
+            r_shndx = r_shndx.push(SHN_UNDEF)
+            r_value = r_value.push(0)
+            r_size = r_size.push(0)
+    val strtab = elf_build_dynstr(r_names)
     var b: [i64] = []
     var i: i64 = 0
-    while i < rows.names.len():
+    while i < r_names.len():
         var name_off: i64 = 0
-        if rows.names[i] != "":
-            name_off = strtab.offsets[rows.names[i]]
+        if r_names[i] != "":
+            name_off = strtab.offsets[r_names[i]]
         # elf_sym_entry on an EMPTY buffer returns just this 24-byte entry; it is
         # appended inline, because handing it the growing table copies that table
         # on every symbol (quadratic in symbol count under the interpreter).
-        for x in elf_sym_entry([], name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]):
+        for x in elf_sym_entry([], name_off, r_info[i], r_other[i], r_shndx[i], r_value[i], r_size[i]):
             b = b.push(x)
         i = i + 1
     Ok(ElfSymtabOut(symtab: b, strtab: strtab.data, first_global: first_global))
@@ -1139,14 +1171,6 @@ fn elf_rd_le(b: [i64], o: i64, n: i64) -> i64:
         v = (v << 8) | ((b[o + i] as i64) & 0xff)
         i = i - 1
     v
-
-fn elf_put_le(b: [i64], o: i64, n: i64, v: i64) -> [i64]:
-    var out = b
-    var i: i64 = 0
-    while i < n:
-        out[o + i] = (v >> (i * 8)) & 0xff
-        i = i + 1
-    out
 
 fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
     """Append non-allocated .symtab + .strtab to a written image.
@@ -1204,8 +1228,15 @@ fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
         b = b.push(image[shoff + i])
         i = i + 1
     val nssh = new_shoff + shstrndx * 64
-    b = elf_put_le(b, nssh + 24, 8, shstr_off)
-    b = elf_put_le(b, nssh + 32, 8, old_size + 16)
+    # Header fields are patched INLINE. They used to go through a helper that
+    # took the image and returned it; `var out = b` inside makes the array
+    # non-unique, so the first index-assign copied the WHOLE image — one full
+    # copy of a 698 KB output per patched field (lane C5).
+    var pi: i64 = 0
+    while pi < 8:
+        b[nssh + 24 + pi] = (shstr_off >> (pi * 8)) & 0xff
+        b[nssh + 32 + pi] = ((old_size + 16) >> (pi * 8)) & 0xff
+        pi = pi + 1
     # The two new 64-byte section headers are built on their own small buffer
     # and appended inline, for the same reason as the image body above.
     # .symtab: sh_link = .strtab (index shnum + 1), sh_info = first global
@@ -1233,8 +1264,13 @@ fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
     sh = write_u64_le(sh, 0)
     for x in sh:
         b = b.push(x)
-    b = elf_put_le(b, 0x28, 8, new_shoff)
-    Ok(elf_put_le(b, 0x3c, 2, shnum + 2))
+    pi = 0
+    while pi < 8:
+        b[0x28 + pi] = (new_shoff >> (pi * 8)) & 0xff
+        pi = pi + 1
+    b[0x3c] = (shnum + 2) & 0xff
+    b[0x3d] = ((shnum + 2) >> 8) & 0xff
+    Ok(b)
 
 # ============================================================================
 # Entry points
