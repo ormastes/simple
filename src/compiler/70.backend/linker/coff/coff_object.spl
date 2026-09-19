@@ -1,0 +1,367 @@
+# COFF object reader (lane E1) — parses a Windows x86_64 .obj into the
+# section/symbol model the internal linker resolves over.
+#
+# This is NOT `pe_parser.spl`/`pe_inspect.spl`: those read a linked PE *image*
+# and start at the MZ/PE signature (`parse_pe_header_summary` fails without
+# one). A COFF object file has no DOS header, no PE signature and no optional
+# header — it starts at byte 0 with the 20-byte COFF file header — so it needs
+# its own entry point. The output PE image is written by `pe_exec_writer.spl`.
+#
+# Two details that silently corrupt a link if they are got wrong, both pinned
+# by `T/compiler/backend/linker/coff_object_spec.spl`:
+#
+#   * a relocation's SymbolTableIndex is the RAW 18-byte-slot index and COUNTS
+#     auxiliary records, so `symbols` keeps one entry per slot with aux slots
+#     present as placeholders. `pe_parse_coff_symbols` compresses aux records
+#     away and is therefore unusable here;
+#   * section alignment is encoded in Characteristics bits 20..23 as
+#     IMAGE_SCN_ALIGN_<n>BYTES, not in any size field.
+#
+# Everything this lane does not model returns a named Err (design D4).
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val COFF_FILE_HEADER_SIZE: i64 = 20
+val COFF_SECTION_HEADER_SIZE: i64 = 40
+val COFF_SYMBOL_SIZE_C: i64 = 18
+val COFF_RELOC_SIZE: i64 = 10
+
+val IMAGE_FILE_MACHINE_AMD64_C: i64 = 0x8664
+
+val IMAGE_SCN_CNT_CODE_C: i64 = 0x00000020
+val IMAGE_SCN_CNT_INITIALIZED_DATA_C: i64 = 0x00000040
+val IMAGE_SCN_CNT_UNINITIALIZED_DATA_C: i64 = 0x00000080
+val IMAGE_SCN_TYPE_NO_PAD: i64 = 0x00000008
+val IMAGE_SCN_LNK_INFO: i64 = 0x00000200
+val IMAGE_SCN_LNK_REMOVE: i64 = 0x00000800
+val IMAGE_SCN_LNK_COMDAT: i64 = 0x00001000
+val IMAGE_SCN_ALIGN_MASK: i64 = 0x00F00000
+val IMAGE_SCN_MEM_DISCARDABLE_C: i64 = 0x02000000
+val IMAGE_SCN_MEM_EXECUTE_C: i64 = 0x20000000
+val IMAGE_SCN_MEM_READ_C: i64 = 0x40000000
+val IMAGE_SCN_MEM_WRITE_C: i64 = 0x80000000
+
+val IMAGE_SYM_CLASS_EXTERNAL: i64 = 2
+val IMAGE_SYM_CLASS_STATIC: i64 = 3
+val IMAGE_SYM_CLASS_LABEL: i64 = 6
+val IMAGE_SYM_CLASS_FILE: i64 = 103
+val IMAGE_SYM_CLASS_SECTION: i64 = 104
+val IMAGE_SYM_CLASS_WEAK_EXTERNAL: i64 = 105
+
+val IMAGE_SYM_UNDEFINED: i64 = 0
+val IMAGE_SYM_ABSOLUTE: i64 = -1
+val IMAGE_SYM_DEBUG: i64 = -2
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct CoffReloc:
+    vaddr: i64        # offset of the field within its own section
+    sym_index: i64    # RAW symbol-table slot index (counts aux records)
+    rtype: i64        # IMAGE_REL_AMD64_*
+
+struct CoffSection:
+    name: text
+    raw_size: i64         # SizeOfRawData; for BSS this is the zero-fill size
+    raw_pointer: i64
+    characteristics: i64
+    align: i64            # decoded from Characteristics bits 20..23
+    data: [i64]           # empty for BSS
+    relocs: [CoffReloc]
+    keep: bool            # false = discarded before the link (see coff_section_keep)
+
+struct CoffSymbol:
+    name: text
+    value: i64
+    section_number: i64   # 1-based; 0 = undefined/common, -1 absolute, -2 debug
+    storage_class: i64
+    aux_count: i64
+    raw_index: i64
+    is_defined: bool
+    is_absolute: bool
+    is_aux: bool          # true = an auxiliary record occupying a slot
+
+struct CoffObject:
+    machine: i64
+    sections: [CoffSection]   # 0-based array; section_number N is sections[N-1]
+    symbols: [CoffSymbol]     # RAW-indexed, one entry per 18-byte slot
+    origin: text              # file or archive-member name, for error text
+
+# ============================================================================
+# Byte readers
+# ============================================================================
+
+fn coff_u8(b: [i64], o: i64) -> i64:
+    b[o] & 0xff
+
+fn coff_u16(b: [i64], o: i64) -> i64:
+    coff_u8(b, o) | (coff_u8(b, o + 1) << 8)
+
+fn coff_u32(b: [i64], o: i64) -> i64:
+    coff_u16(b, o) | (coff_u16(b, o + 2) << 16)
+
+fn coff_i16(b: [i64], o: i64) -> i64:
+    val v = coff_u16(b, o)
+    if v >= 0x8000:
+        v - 0x10000
+    else:
+        v
+
+fn coff_ascii(b: [i64], o: i64, max_len: i64) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < max_len and o + i < b.len():
+        val c = coff_u8(b, o + i)
+        if c == 0:
+            break
+        out = out + text.from_char_code(c)
+        i = i + 1
+    out
+
+# ============================================================================
+# Characteristics decoding
+# ============================================================================
+
+fn coff_section_align(characteristics: i64) -> i64:
+    """IMAGE_SCN_ALIGN_<n>BYTES lives in bits 20..23: a value of k means
+    2^(k-1) bytes. 0 means "unspecified", which the PE/COFF spec and lld-link
+    both treat as 16-byte alignment for x64 — EXCEPT when
+    IMAGE_SCN_TYPE_NO_PAD (0x8) is set, which llvm and lld read as 1-byte
+    alignment. Treating NO_PAD as unspecified pads every contribution to 16
+    and gives e.g. a .text of 0x3f where lld gives 0x34."""
+    if (characteristics & IMAGE_SCN_TYPE_NO_PAD) != 0:
+        return 1
+    val k = (characteristics & IMAGE_SCN_ALIGN_MASK) >> 20
+    if k == 0:
+        return 16
+    var a: i64 = 1
+    var i: i64 = 1
+    while i < k:
+        a = a * 2
+        i = i + 1
+    a
+
+fn coff_is_bss(s: CoffSection) -> bool:
+    (s.characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA_C) != 0
+
+fn coff_is_code(s: CoffSection) -> bool:
+    (s.characteristics & IMAGE_SCN_CNT_CODE_C) != 0
+
+fn coff_is_writable(s: CoffSection) -> bool:
+    (s.characteristics & IMAGE_SCN_MEM_WRITE_C) != 0
+
+fn coff_is_executable(s: CoffSection) -> bool:
+    (s.characteristics & IMAGE_SCN_MEM_EXECUTE_C) != 0
+
+fn coff_name_starts_with(name: text, prefix: text) -> bool:
+    if name.len() < prefix.len():
+        return false
+    name[0..prefix.len()] == prefix
+
+fn coff_section_keep(name: text, characteristics: i64) -> bool:
+    """Which input sections reach the link. Mirrors lld-link's default
+    (no /debug): IMAGE_SCN_LNK_REMOVE and LNK_INFO sections are link metadata
+    (.drectve, .llvm_addrsig), and `.debug$*` / `.debug` carry CodeView that
+    a no-/debug link discards. Everything else is laid out."""
+    if (characteristics & IMAGE_SCN_LNK_REMOVE) != 0:
+        return false
+    if (characteristics & IMAGE_SCN_LNK_INFO) != 0:
+        return false
+    if coff_name_starts_with(name, ".debug"):
+        return false
+    true
+
+# ============================================================================
+# Parsing
+# ============================================================================
+
+fn coff_parse_relocs(b: [i64], ptr: i64, count: i64, origin: text, sec: text) -> Result<[CoffReloc], text>:
+    var out: [CoffReloc] = []
+    if count == 0:
+        return Ok(out)
+    if ptr == 0:
+        return Err("coff: {origin}: section {sec} declares {count} relocations but PointerToRelocations is 0")
+    var i: i64 = 0
+    while i < count:
+        val o = ptr + i * COFF_RELOC_SIZE
+        if o + COFF_RELOC_SIZE > b.len():
+            return Err("coff: {origin}: section {sec} relocation {i} runs past end of file")
+        out = out.push(CoffReloc(
+            vaddr: coff_u32(b, o),
+            sym_index: coff_u32(b, o + 4),
+            rtype: coff_u16(b, o + 8),
+        ))
+        i = i + 1
+    Ok(out)
+
+fn coff_parse_object(b: [i64], origin: text) -> Result<CoffObject, text>:
+    """Parse one COFF object file. `origin` names the file (or archive member)
+    in every error message."""
+    if b.len() < COFF_FILE_HEADER_SIZE:
+        return Err("coff: {origin}: file is shorter than a 20-byte COFF header")
+
+    val machine = coff_u16(b, 0)
+    if machine != IMAGE_FILE_MACHINE_AMD64_C:
+        return Err("coff: {origin}: unsupported machine 0x{machine.to_hex()} (lane E1 models x86_64 only)")
+
+    val nsec = coff_u16(b, 2)
+    val symtab = coff_u32(b, 8)
+    val nsym = coff_u32(b, 12)
+    val opt_size = coff_u16(b, 16)
+
+    if opt_size != 0:
+        return Err("coff: {origin}: object carries a {opt_size}-byte optional header; only relocatable objects are linked")
+
+    val sec_off = COFF_FILE_HEADER_SIZE + opt_size
+    if sec_off + nsec * COFF_SECTION_HEADER_SIZE > b.len():
+        return Err("coff: {origin}: section table runs past end of file")
+
+    # The string table follows the symbol table; its first u32 is its own size.
+    var str_off: i64 = 0
+    if symtab != 0 and nsym != 0:
+        str_off = symtab + nsym * COFF_SYMBOL_SIZE_C
+        if str_off + 4 > b.len():
+            return Err("coff: {origin}: symbol table runs past end of file")
+
+    var sections: [CoffSection] = []
+    var si: i64 = 0
+    while si < nsec:
+        val o = sec_off + si * COFF_SECTION_HEADER_SIZE
+        var name = coff_ascii(b, o, 8)
+        if coff_name_starts_with(name, "/"):
+            # Long section name: "/N" indexes the string table.
+            val n = name[1..].to_i64() ?? -1
+            if n < 0:
+                return Err("coff: {origin}: section {si} has a malformed long name '{name}'")
+            name = coff_ascii(b, str_off + n, 1024)
+        val raw_size = coff_u32(b, o + 16)
+        val raw_ptr = coff_u32(b, o + 20)
+        val rel_ptr = coff_u32(b, o + 24)
+        val rel_cnt = coff_u16(b, o + 32)
+        val chars = coff_u32(b, o + 36)
+
+        if (chars & IMAGE_SCN_LNK_COMDAT) != 0:
+            return Err("coff: {origin}: section {name} is IMAGE_SCN_LNK_COMDAT; COMDAT selection is not modelled")
+
+        val keep = coff_section_keep(name, chars)
+        var data: [i64] = []
+        if keep and raw_ptr != 0 and (chars & IMAGE_SCN_CNT_UNINITIALIZED_DATA_C) == 0:
+            if raw_ptr + raw_size > b.len():
+                return Err("coff: {origin}: section {name} data runs past end of file")
+            var k: i64 = 0
+            while k < raw_size:
+                data = data.push(b[raw_ptr + k] & 0xff)
+                k = k + 1
+
+        var relocs: [CoffReloc] = []
+        if keep:
+            val rr = coff_parse_relocs(b, rel_ptr, rel_cnt, origin, name)
+            if rr.is_err():
+                return Err(rr.unwrap_err())
+            relocs = rr.unwrap()
+
+        sections = sections.push(CoffSection(
+            name: name,
+            raw_size: raw_size,
+            raw_pointer: raw_ptr,
+            characteristics: chars,
+            align: coff_section_align(chars),
+            data: data,
+            relocs: relocs,
+            keep: keep,
+        ))
+        si = si + 1
+
+    var symbols: [CoffSymbol] = []
+    var i: i64 = 0
+    while i < nsym:
+        val o = symtab + i * COFF_SYMBOL_SIZE_C
+        if o + COFF_SYMBOL_SIZE_C > b.len():
+            return Err("coff: {origin}: symbol {i} runs past end of file")
+
+        var name = ""
+        if coff_u32(b, o) == 0:
+            name = coff_ascii(b, str_off + coff_u32(b, o + 4), 4096)
+        else:
+            name = coff_ascii(b, o, 8)
+
+        val value = coff_u32(b, o + 8)
+        val secnum = coff_i16(b, o + 12)
+        val sclass = coff_u8(b, o + 16)
+        val naux = coff_u8(b, o + 17)
+
+        if sclass == IMAGE_SYM_CLASS_WEAK_EXTERNAL:
+            return Err("coff: {origin}: symbol {name} is IMAGE_SYM_CLASS_WEAK_EXTERNAL; weak externals are not modelled")
+        if sclass == IMAGE_SYM_CLASS_EXTERNAL and secnum == IMAGE_SYM_UNDEFINED and value != 0:
+            return Err("coff: {origin}: symbol {name} is a COMMON definition of {value} bytes; COMMON is not modelled (compile with -fno-common)")
+        if secnum > sections.len():
+            return Err("coff: {origin}: symbol {name} names section {secnum}, past the {sections.len()}-entry section table")
+
+        val absolute = secnum == IMAGE_SYM_ABSOLUTE
+        symbols = symbols.push(CoffSymbol(
+            name: name,
+            value: value,
+            section_number: secnum,
+            storage_class: sclass,
+            aux_count: naux,
+            raw_index: i,
+            is_defined: secnum > 0 or absolute,
+            is_absolute: absolute,
+            is_aux: false,
+        ))
+
+        # Auxiliary records occupy slots that relocations can never name, but
+        # that every later SymbolTableIndex counts. Keep them as placeholders.
+        var a: i64 = 0
+        while a < naux:
+            symbols = symbols.push(CoffSymbol(
+                name: "", value: 0, section_number: 0, storage_class: -1,
+                aux_count: 0, raw_index: i + 1 + a, is_defined: false,
+                is_absolute: false, is_aux: true,
+            ))
+            a = a + 1
+        i = i + 1 + naux
+
+    Ok(CoffObject(machine: machine, sections: sections, symbols: symbols, origin: origin))
+
+# ============================================================================
+# Queries
+# ============================================================================
+
+fn coff_section_index(obj: CoffObject, name: text) -> i64:
+    """0-based index of the named section, or -1."""
+    var i: i64 = 0
+    while i < obj.sections.len():
+        if obj.sections[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn coff_symbol_at(obj: CoffObject, raw_index: i64) -> CoffSymbol:
+    obj.symbols[raw_index]
+
+fn coff_link_sections(obj: CoffObject) -> [CoffSection]:
+    """The sections that reach the link, in input order."""
+    var out: [CoffSection] = []
+    for s in obj.sections:
+        if s.keep:
+            out = out.push(s)
+    out
+
+export CoffReloc, CoffSection, CoffSymbol, CoffObject
+export coff_parse_object, coff_parse_relocs
+export coff_section_index, coff_symbol_at, coff_link_sections
+export coff_section_align, coff_section_keep
+export coff_is_bss, coff_is_code, coff_is_writable, coff_is_executable
+export coff_u8, coff_u16, coff_u32, coff_i16, coff_ascii, coff_name_starts_with
+export IMAGE_FILE_MACHINE_AMD64_C
+export COFF_FILE_HEADER_SIZE, COFF_SECTION_HEADER_SIZE, COFF_SYMBOL_SIZE_C, COFF_RELOC_SIZE
+export IMAGE_SCN_CNT_CODE_C, IMAGE_SCN_CNT_INITIALIZED_DATA_C, IMAGE_SCN_CNT_UNINITIALIZED_DATA_C
+export IMAGE_SCN_LNK_REMOVE, IMAGE_SCN_LNK_COMDAT, IMAGE_SCN_ALIGN_MASK, IMAGE_SCN_TYPE_NO_PAD, IMAGE_SCN_LNK_INFO
+export IMAGE_SCN_MEM_DISCARDABLE_C, IMAGE_SCN_MEM_EXECUTE_C, IMAGE_SCN_MEM_READ_C, IMAGE_SCN_MEM_WRITE_C
+export IMAGE_SYM_CLASS_EXTERNAL, IMAGE_SYM_CLASS_STATIC, IMAGE_SYM_CLASS_LABEL
+export IMAGE_SYM_CLASS_FILE, IMAGE_SYM_CLASS_SECTION, IMAGE_SYM_CLASS_WEAK_EXTERNAL
+export IMAGE_SYM_UNDEFINED, IMAGE_SYM_ABSOLUTE, IMAGE_SYM_DEBUG

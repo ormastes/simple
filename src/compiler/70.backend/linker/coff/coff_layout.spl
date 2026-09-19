@@ -1,0 +1,495 @@
+# COFF -> PE output-section layout (lane E1).
+#
+# EVERY address and offset decision for a PE image is made in this file and
+# nowhere else, so that lane F2's shared placement module can replace
+# `coff_place_inputs` without touching the writer.
+#
+# What is SHARED and NOT re-implemented here:
+#   * the byte primitives `align_up` / `write_zeros` / `write_bytes` come from
+#     the `_ElfWriter` encoding module through the `elf_writer` facade — they
+#     are format-neutral and this file defines no local copy;
+#   * the resolution rules come from `sym_resolver` via `sym_add_entries`
+#     (added by this lane precisely so COFF does not restate them);
+#   * the relocation VALUES come from the `smf_reloc_formulas` oracle (D4).
+#
+# `coff_place_inputs` below is the one genuinely shared *algorithm*: fold each
+# input section into a named output section, aligning the running size to the
+# input's alignment, recording the member offset, and raising the output
+# section's alignment to the maximum of its members. That is the same fold as
+# `elf/elf_static_link.spl:elf_static_place`, and it is deliberately written
+# over a neutral `(out_name, align, size, is_zero_fill)` view of an input
+# rather than over `CoffSection`, so that lane F2 can lift it verbatim. It was
+# NOT copied out of the ELF writer: the ELF version is typed on `ElfObject` and
+# folds ELF's flag semantics inline, so there was nothing shareable to call.
+# See § "Handoff to lane F2" at the end of this file.
+#
+# What is genuinely PE-SPECIFIC and belongs here rather than in a shared
+# module (`coff_assign_addresses`):
+#   * TWO alignments — SectionAlignment (0x1000, in memory) and FileAlignment
+#     (0x200, on disk) — where ELF has one page size and the constraint
+#     `p_offset == p_vaddr (mod page)`. They are NOT independent knobs, and the
+#     earlier wording here ("PE has no congruence rule") was too strong: the PE
+#     spec requires SectionAlignment >= FileAlignment, both powers of two, and
+#     FileAlignment in [512, 65536] — and when SectionAlignment is BELOW a
+#     4096-byte page it requires FileAlignment == SectionAlignment and RVA ==
+#     file offset for every section, because the image is then mapped as-is,
+#     which is a stricter tie than ELF's modular congruence. All of that is
+#     enforced by `coff_validate_alignments` and `coff_assign_addresses`.
+#     Freedom from congruence holds only in the SectionAlignment >= 4096 regime
+#     this capsule actually generates (0x1000 / 0x200); there, and only there,
+#     each output section gets an independent RVA and file offset, and there is
+#     nothing to pack into permission-grouped segments;
+#   * RVA vs file offset as two separate address spaces over one ImageBase,
+#     rather than ELF's single vaddr space;
+#   * `SizeOfRawData` counts only the INITIALIZED prefix of a section. Measured
+#     against lld-link 23.1.0: a `.data` whose only contributions are `.bss`
+#     gets `SizeOfRawData` 0 and `PointerToRawData` 0 with `VirtualSize`
+#     0x4000 — the same "zero-fill tail" concept as ELF's memsz > filesz, but
+#     expressed in different fields, which is why zero-fill members are placed
+#     after file-backed ones in `coff_place_inputs`;
+#   * the `.reloc` base-relocation table, which has no ELF equivalent in a
+#     non-PIE static link.
+
+use std.common.algorithm_utils.{stable_order_by_key}
+use compiler.backend.linker.elf_writer.{align_up}
+use compiler.backend.linker.coff.coff_object.{
+    CoffObject, CoffSection, coff_is_bss, coff_name_starts_with,
+    IMAGE_SCN_CNT_CODE_C, IMAGE_SCN_CNT_INITIALIZED_DATA_C,
+    IMAGE_SCN_CNT_UNINITIALIZED_DATA_C,
+    IMAGE_SCN_MEM_DISCARDABLE_C, IMAGE_SCN_MEM_EXECUTE_C,
+    IMAGE_SCN_MEM_READ_C, IMAGE_SCN_MEM_WRITE_C,
+}
+
+# ============================================================================
+# PE image constants (lld-link 23.1.0 defaults for a /subsystem:console EXE)
+# ============================================================================
+
+val PE_IMAGE_BASE_EXE: i64 = 0x140000000
+val PE_SECTION_ALIGNMENT: i64 = 0x1000
+val PE_FILE_ALIGNMENT: i64 = 0x200
+val PE_PAGE_SIZE: i64 = 0x1000
+val PE_FILE_ALIGN_MIN: i64 = 512
+val PE_FILE_ALIGN_MAX: i64 = 65536
+
+# lld bins input sections by (name, characteristics & this mask) and carries the
+# masked value into the output: CNT_* content bits (0xE0) plus MEM_* attribute
+# bits (0xFE000000). Alignment and every LNK_* bit are dropped.
+val COFF_OUT_CHAR_MASK: i64 = 0xFE0000E0
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct CoffOutSec:
+    name: text
+    characteristics: i64
+    align: i64          # max member alignment; member placement only
+    init_size: i64      # bytes with file content (the file-backed prefix)
+    total_size: i64     # init_size + zero-fill tail == VirtualSize
+    rva: i64            # assigned by coff_assign_addresses
+    file_offset: i64    # 0 when init_size == 0
+    raw_size: i64       # align_up(init_size, FileAlignment)
+
+struct CoffPlacement:
+    outs: [CoffOutSec]
+    sec_out: [[i64]]    # [obj][sec] -> index into outs, -1 = not placed
+    sec_off: [[i64]]    # [obj][sec] -> offset within that output section
+
+# ============================================================================
+# PE-specific: input section name -> output section name
+# ============================================================================
+
+fn coff_strip_grouped(name: text) -> text:
+    """`.text$mn` -> `.text`: the `$suffix` of a COFF grouped section is not
+    part of the OUTPUT name.
+
+    It does carry ordering information, and this capsule does not use it. lld
+    sorts the contributions inside one output section by their FULL input
+    section name (so `.text$mn` precedes `.text$zz`), whereas this engine keeps
+    input order within each of its two placement phases. The two agree on every
+    fixture here because none uses `$`-grouped sections, and they would differ by the
+    member order — not the section set — on an MSVC-produced object.
+    Recorded, not silently assumed:
+    doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md § 3."""
+    var i: i64 = 0
+    while i < name.len():
+        if name[i..i + 1] == "$":
+            return name[0..i]
+        i = i + 1
+    name
+
+fn coff_out_name(name: text, characteristics: i64) -> Result<text, text>:
+    """lld-link's default output-section merge map, restricted to what this
+    capsule actually models: `.text`, `.rdata`, `.data`, and `.bss` folding
+    into `.data` (which is why the golden's `.data` is `0xC0000040`, i.e.
+    CNT_INITIALIZED even though a `.bss` contributed to it). `.xdata` folds
+    into `.rdata` because it needs no data directory of its own.
+
+    EVERY other name is a named Err, including names that lld-link would merge
+    happily. Merging `.idata` into `.rdata` without building an import
+    directory, or laying out an unrecognised name with guessed Characteristics
+    (a writable `.CRT$XCU` placed read-only), is exactly the silent success
+    design rule D4 forbids: the image would link and be wrong. Widening this
+    map means implementing the corresponding directory, not adding a row."""
+    val base = coff_strip_grouped(name)
+    if base == ".text" or base == ".rdata" or base == ".data":
+        return Ok(base)
+    if base == ".bss":
+        return Ok(".data")
+    if base == ".xdata":
+        return Ok(".rdata")
+    if base == ".idata":
+        return Err("section {name}: imports need an import directory and an IAT that are not modelled")
+    if base == ".edata":
+        return Err("section {name}: exports need an export directory that is not modelled")
+    if base == ".didat":
+        return Err("section {name}: delay imports need a delay-import directory that is not modelled")
+    if base == ".00cfg" or base == ".gfids":
+        return Err("section {name}: control-flow guard needs a load-config directory that is not modelled")
+    if base == ".tls":
+        return Err("section {name}: thread-local storage is not modelled")
+    if base == ".pdata":
+        return Err("section {name}: exception (.pdata) tables need a data directory that is not modelled")
+    if base == ".rsrc":
+        return Err("section {name}: resources need a data directory that is not modelled")
+    if base == ".reloc":
+        return Err("section {name}: an input .reloc section cannot be relinked; base relocations are synthesized")
+    Err("section {name}: unmodelled output section; only .text, .rdata, .data, .bss and .xdata are laid out")
+
+fn coff_out_characteristics(input_chars: i64) -> i64:
+    """Output section Characteristics, derived from the INPUT section's flags.
+
+    lld bins input sections by `(name, characteristics & 0xFE0000E0)` and
+    carries that masked value into the output, which is why the mask is the
+    authority here and the section NAME is not. Deriving flags from the name
+    instead wrote a `.rdata` that carries IMAGE_SCN_MEM_WRITE as read-only
+    (`0x40000040` where lld reports `0xC0000040`); the image then links and
+    faults on the first write, so this was a silent-wrong-output defect, not a
+    cosmetic one. Fixture: `wrdata_x64.obj` + `wrdata_x64.lld.exe`.
+
+    The mask keeps the CNT_* content bits (0xE0) and the MEM_* attribute bits
+    (0xFE000000) and drops alignment and every LNK_* bit, none of which belong
+    in an image. The single transform on top of the mask is the `.bss` fold:
+    CNT_UNINITIALIZED becomes CNT_INITIALIZED, because `.bss` merges into
+    `.data` and the golden's `.data` is `0xC0000040`, not `0xC0000080`."""
+    var c = input_chars & COFF_OUT_CHAR_MASK
+    if (c & IMAGE_SCN_CNT_UNINITIALIZED_DATA_C) != 0:
+        c = (c & (0 - 1 - IMAGE_SCN_CNT_UNINITIALIZED_DATA_C)) | IMAGE_SCN_CNT_INITIALIZED_DATA_C
+    c
+
+fn coff_reloc_section_characteristics() -> i64:
+    """The synthesized `.reloc` has no input section to derive flags from."""
+    IMAGE_SCN_CNT_INITIALIZED_DATA_C | IMAGE_SCN_MEM_DISCARDABLE_C | IMAGE_SCN_MEM_READ_C
+
+fn coff_out_rank(name: text) -> i64:
+    """Output section order, matching lld-link: code, read-only, writable,
+    then the synthesized base-relocation table last."""
+    if name == ".text":
+        return 0
+    if name == ".rdata":
+        return 1
+    if name == ".data":
+        return 2
+    if name == ".reloc":
+        return 4
+    3
+
+# ============================================================================
+# SHARED-CANDIDATE (lane F2): generic member placement
+# ============================================================================
+
+fn coff_find_out(outs: [CoffOutSec], name: text) -> i64:
+    var i: i64 = 0
+    while i < outs.len():
+        if outs[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn coff_grow_out(o: CoffOutSec, align: i64, size: i64, zero_fill: bool) -> CoffOutSec:
+    """Append one member of `size` bytes at `align` to an output section.
+    Zero-fill members extend only total_size; file-backed members extend both.
+    The caller has already ordered file-backed members first."""
+    var nal = o.align
+    if align > nal:
+        nal = align
+    val at = align_up(o.total_size, align)
+    var init = o.init_size
+    if not zero_fill:
+        init = at + size
+    CoffOutSec(name: o.name, characteristics: o.characteristics, align: nal,
+        init_size: init, total_size: at + size, rva: 0, file_offset: 0, raw_size: 0)
+
+fn coff_member_offset(o: CoffOutSec, align: i64) -> i64:
+    align_up(o.total_size, align)
+
+fn coff_place_inputs(objects: [CoffObject]) -> Result<CoffPlacement, text>:
+    """Fold every kept input section into a named output section + offset.
+
+    Two passes, because PE records the file-backed prefix of a section as
+    `SizeOfRawData` and the whole thing as `VirtualSize`: pass 1 places every
+    file-backed member, pass 2 appends every zero-fill (`.bss`) member, so a
+    section's zero-fill tail is contiguous at its end. This is the same
+    invariant ELF expresses as "NOBITS sections come last in a PT_LOAD"."""
+    var outs: [CoffOutSec] = []
+    var sec_out: [[i64]] = []
+    var sec_off: [[i64]] = []
+
+    var oi: i64 = 0
+    while oi < objects.len():
+        var idxs: [i64] = []
+        var offs: [i64] = []
+        var si: i64 = 0
+        while si < objects[oi].sections.len():
+            idxs = idxs.push(-1)
+            offs = offs.push(0)
+            si = si + 1
+        sec_out = sec_out.push(idxs)
+        sec_off = sec_off.push(offs)
+        oi = oi + 1
+
+    var phase: i64 = 0
+    while phase < 2:
+        val want_zero = phase == 1
+        oi = 0
+        while oi < objects.len():
+            val obj = objects[oi]
+            var si: i64 = 0
+            while si < obj.sections.len():
+                val sec = obj.sections[si]
+                if sec.keep and coff_is_bss(sec) == want_zero:
+                    val oname = coff_out_name(sec.name, sec.characteristics)
+                    if oname.is_err():
+                        return Err("coff: {obj.origin}: {oname.unwrap_err()}")
+                    val name = oname.unwrap()
+                    val chars = coff_out_characteristics(sec.characteristics)
+                    var k = coff_find_out(outs, name)
+                    if k < 0:
+                        outs = outs.push(CoffOutSec(name: name,
+                            characteristics: chars,
+                            align: 1, init_size: 0, total_size: 0,
+                            rva: 0, file_offset: 0, raw_size: 0))
+                        k = outs.len() - 1
+                    elif outs[k].characteristics != chars:
+                        # lld would emit TWO output sections both named `name`
+                        # here (it bins by name AND masked characteristics).
+                        # This capsule does not model duplicate output section
+                        # names, so it refuses rather than silently picking one
+                        # set of flags for both.
+                        return Err("coff: {obj.origin}: section {sec.name} merges into {name} with Characteristics 0x{chars.to_hex()}, but an earlier input gave it 0x{outs[k].characteristics.to_hex()}; duplicate output section names are not modelled")
+                    var al = sec.align
+                    if al < 1:
+                        al = 1
+                    sec_off[oi][si] = coff_member_offset(outs[k], al)
+                    sec_out[oi][si] = k
+                    outs[k] = coff_grow_out(outs[k], al, sec.raw_size, want_zero)
+                si = si + 1
+            oi = oi + 1
+        phase = phase + 1
+
+    Ok(CoffPlacement(outs: outs, sec_out: sec_out, sec_off: sec_off))
+
+fn coff_reserved_out_count(objects: [CoffObject]) -> Result<i64, text>:
+    """How many section-table entries `SizeOfHeaders` must reserve room for.
+
+    PE-SPECIFIC, and a measured lld-link behaviour rather than a spec rule:
+    lld computes `SizeOfHeaders` over the output sections it has CREATED, and
+    only later removes the ones that turned out empty — and it always creates a
+    `.reloc`, even when no base relocation ends up in it. So the reservation is
+    `distinct output names over every kept input section (regardless of size)
+    + 1 for .reloc`, which can exceed the final SectionCount.
+
+    Measured across four lld-link 23.1.0 images (all `/timestamp:0`):
+
+    | image | reserved | headers | SizeOfHeaders | final SectionCount |
+    |---|---|---|---|---|
+    | hello_x64  | 4 (.text .rdata .data .reloc) | 544 | 0x400 | 4 |
+    | secrel_x64 | 4 (.text .rdata .data .reloc) | 544 | 0x400 | 2 |
+    | chain_x64  | 3 (.text .data .reloc)        | 504 | 0x200 | 1 |
+    | big (probe)| 3 (.text .data .reloc)        | 504 | 0x200 | 2 |
+
+    `secrel_x64` is the case that proves the rule: two final sections but a
+    1024-byte header, because its empty `.data`/`.bss` and its empty `.reloc`
+    were counted before being dropped. Computing `SizeOfHeaders` from the FINAL
+    count gives 0x200 there and every section's file offset then differs from
+    the oracle by 0x200. Reproducing this is what makes the engine a drop-in
+    for lld-link rather than merely a valid-PE writer."""
+    var names: [text] = []
+    for obj in objects:
+        for sec in obj.sections:
+            if not sec.keep:
+                continue
+            val oname = coff_out_name(sec.name, sec.characteristics)
+            if oname.is_err():
+                return Err("coff: {obj.origin}: {oname.unwrap_err()}")
+            if coff_name_index(names, oname.unwrap()) < 0:
+                names = names.push(oname.unwrap())
+    Ok(names.len() + 1)
+
+fn coff_name_index(names: [text], name: text) -> i64:
+    var i: i64 = 0
+    while i < names.len():
+        if names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+fn coff_sort_outs(outs: [CoffOutSec]) -> [CoffOutSec]:
+    """Stable sort by coff_out_rank, via the shared
+    std.common.algorithm_utils permutation. Callers must re-point placement
+    indices through coff_reindex after sorting."""
+    var keys: [i64] = []
+    for s in outs:
+        keys = keys.push(coff_out_rank(s.name))
+    var out: [CoffOutSec] = []
+    for idx in stable_order_by_key(keys):
+        out = out.push(outs[idx])
+    out
+
+fn coff_drop_empty_outs(outs: [CoffOutSec]) -> [CoffOutSec]:
+    """Remove output sections that ended up with no bytes at all.
+
+    A zero-size input section is still PLACED (see coff_place_inputs): its
+    alignment advances the running size, which is how lld gets a 4-byte .data
+    out of one 2-byte and one 0-byte 4-aligned contribution. But an output
+    section that is empty after all of them is removed from the table, exactly
+    as lld creates-then-removes. `coff_reindex` maps a dropped section to -1,
+    and a member of a dropped section contributes 0 bytes by definition."""
+    var out: [CoffOutSec] = []
+    for s in outs:
+        if s.total_size > 0:
+            out = out.push(s)
+    out
+
+fn coff_reindex(place: CoffPlacement, sorted: [CoffOutSec]) -> CoffPlacement:
+    """Re-point sec_out from the unsorted `place.outs` order to `sorted`."""
+    var map: [i64] = []
+    var i: i64 = 0
+    while i < place.outs.len():
+        map = map.push(coff_find_out(sorted, place.outs[i].name))
+        i = i + 1
+    var sec_out = place.sec_out
+    var oi: i64 = 0
+    while oi < sec_out.len():
+        var si: i64 = 0
+        while si < sec_out[oi].len():
+            if sec_out[oi][si] >= 0:
+                sec_out[oi][si] = map[sec_out[oi][si]]
+            si = si + 1
+        oi = oi + 1
+    CoffPlacement(outs: sorted, sec_out: sec_out, sec_off: place.sec_off)
+
+# ============================================================================
+# PE-SPECIFIC: RVA + file-offset assignment
+# ============================================================================
+
+fn coff_is_power_of_two(v: i64) -> bool:
+    v > 0 and (v & (v - 1)) == 0
+
+fn coff_validate_alignments(sec_align: i64, file_align: i64) -> Result<bool, text>:
+    """The PE/COFF optional-header alignment rules (spec § 3.4). These are NOT
+    independent knobs, and a violation produces an image the Windows loader
+    rejects, so each one is a named Err rather than something we emit anyway.
+
+      * FileAlignment is a power of two in [512, 65536];
+      * SectionAlignment is a power of two and is >= FileAlignment;
+      * if SectionAlignment is below a 4096-byte page, FileAlignment must
+        EQUAL SectionAlignment — the image is then mapped as-is, which is also
+        why `coff_assign_addresses` additionally requires RVA == file offset in
+        that mode. The "PE imposes no offset/address congruence" statement in
+        this file's header is true only for SectionAlignment >= 4096, which is
+        the regime this capsule actually generates (0x1000 / 0x200)."""
+    if not coff_is_power_of_two(file_align):
+        return Err("coff: FileAlignment 0x{file_align.to_hex()} is not a power of two")
+    if file_align < PE_FILE_ALIGN_MIN or file_align > PE_FILE_ALIGN_MAX:
+        return Err("coff: FileAlignment 0x{file_align.to_hex()} is outside the permitted range 512..65536")
+    if not coff_is_power_of_two(sec_align):
+        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is not a power of two")
+    if sec_align < file_align:
+        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is smaller than FileAlignment 0x{file_align.to_hex()}")
+    if sec_align < PE_PAGE_SIZE and sec_align != file_align:
+        return Err("coff: SectionAlignment 0x{sec_align.to_hex()} is below a 4096-byte page, so FileAlignment must equal it, not 0x{file_align.to_hex()}")
+    Ok(true)
+
+fn coff_assign_addresses(outs: [CoffOutSec], sec_align: i64, file_align: i64, header_size: i64) -> Result<[CoffOutSec], text>:
+    """Give every output section an RVA and a file offset.
+
+    PE-specific in a way no shared segment planner covers: each section starts
+    at its own SectionAlignment-aligned RVA and its own FileAlignment-aligned
+    file offset, with NO congruence between them, so there is nothing to pack
+    into permission-grouped segments. A section with no file-backed bytes gets
+    `PointerToRawData` 0 and `SizeOfRawData` 0, which is how lld-link records a
+    pure-`.bss` output section."""
+    val av = coff_validate_alignments(sec_align, file_align)
+    if av.is_err():
+        return Err(av.unwrap_err())
+    var out: [CoffOutSec] = []
+    var rva = align_up(header_size, sec_align)
+    var off = align_up(header_size, file_align)
+    for s in outs:
+        if s.align > sec_align:
+            return Err("coff: section {s.name} needs {s.align}-byte alignment, above SectionAlignment {sec_align}")
+        val raw = align_up(s.init_size, file_align)
+        var this_off: i64 = 0
+        if raw > 0:
+            this_off = off
+            off = off + raw
+        if sec_align < PE_PAGE_SIZE and this_off != rva:
+            return Err("coff: section {s.name} would sit at RVA 0x{rva.to_hex()} and file offset 0x{this_off.to_hex()}; below a 4096-byte page the image is mapped as-is, so the two must be equal")
+        out = out.push(CoffOutSec(name: s.name, characteristics: s.characteristics,
+            align: s.align, init_size: s.init_size, total_size: s.total_size,
+            rva: rva, file_offset: this_off, raw_size: raw))
+        rva = align_up(rva + s.total_size, sec_align)
+    Ok(out)
+
+fn coff_image_size(outs: [CoffOutSec], sec_align: i64) -> i64:
+    if outs.len() == 0:
+        return align_up(0, sec_align)
+    val last = outs[outs.len() - 1]
+    align_up(last.rva + last.total_size, sec_align)
+
+fn coff_out_find(outs: [CoffOutSec], name: text) -> i64:
+    coff_find_out(outs, name)
+
+# ============================================================================
+# Handoff to lane F2
+# ============================================================================
+# To drop this file's remaining duplication, F2's shared module needs to offer:
+#   1. a member-placement fold over a neutral input view
+#      `(out_name, align, size, zero_fill)` returning `(member_offset,
+#      out_index)` and a per-output `(align, init_size, total_size)` — i.e.
+#      `coff_place_inputs` minus `coff_out_name`, which must stay a
+#      caller-supplied function because the merge map is per format;
+#   2. a stable rank-ordered sort with index re-pointing (`coff_sort_outs` +
+#      `coff_reindex`), which is pure bookkeeping and identical for ELF;
+#   3. an explicit "zero-fill tail" concept on an output section, carrying BOTH
+#      a file-backed size and a total size, so ELF's memsz/filesz and PE's
+#      SizeOfRawData/VirtualSize are two projections of one record rather than
+#      two implementations.
+# `coff_assign_addresses` must NOT move into the shared module: dual alignment
+# with no offset/address congruence is the PE address model, and forcing it
+# into ELF's single-page-size segment planner is what would create the next
+# duplicate.
+
+export CoffOutSec, CoffPlacement
+export coff_out_name, coff_out_characteristics, coff_out_rank, coff_strip_grouped
+export coff_reloc_section_characteristics, COFF_OUT_CHAR_MASK, coff_out_is_discardable
+export coff_place_inputs, coff_grow_out, coff_member_offset, coff_find_out
+export coff_reserved_out_count, coff_name_index
+export coff_sort_outs, coff_reindex, coff_drop_empty_outs
+export coff_assign_addresses, coff_image_size, coff_out_find
+export PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT
+export PE_PAGE_SIZE, PE_FILE_ALIGN_MIN, PE_FILE_ALIGN_MAX
+export coff_validate_alignments, coff_is_power_of_two
+
+fn coff_out_is_discardable(s: CoffOutSec) -> bool:
+    """IMAGE_SCN_MEM_DISCARDABLE: the loader drops this section after load.
+
+    lld skips such sections when collecting base relocations — rebasing a
+    field the loader is about to discard is pointless, and emitting the entry
+    changes the image (an extra `.reloc` section: 3 sections / 2048 B where
+    lld gives 2 / 1536 B). Reachable here only by hand-patching a section
+    header, since no compiler emits a DISCARDABLE section carrying an ADDR64,
+    but the mask `COFF_OUT_CHAR_MASK` preserves the bit, so the condition has
+    to be checked explicitly."""
+    (s.characteristics & IMAGE_SCN_MEM_DISCARDABLE_C) != 0

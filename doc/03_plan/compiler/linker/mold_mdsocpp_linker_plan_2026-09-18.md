@@ -537,3 +537,23 @@ Verified under real concurrency rather than by inspection: both trees' copies
 of `native_linking_internal_spec` run at the same time now give
 `outcome=OK ... passed=21 failed=0` and rc 0, where the fixed `/tmp` names had
 each run linking over the other's binary mid-assertion.
+## 17. Lane status — 2026-09-19 (fourth wave: E1 COFF/PE)
+
+| Lane | Result | Evidence |
+|---|---|---|
+| E1 COFF/PE (A10 Windows slice) | **pass, structural only** | `coff_static_link` links clang `--target=x86_64-windows-msvc` objects plus a `.lib` fixpoint into a PE32+ EXE that is **byte-identical to `lld-link 23.1.0 /timestamp:0`** on the same inputs (all 3072 bytes: DOS stub, COFF + optional header, all 16 data directories, 4-section table, `.text`/`.rdata`/`.data` contents, `.reloc`). `pe_exec_writer_spec` 25/25 (20/20 red first), `coff_reloc_oracle_spec` 18/18 (12/12 red first), `coff_object_spec` 12/12; all 27 linker specs green. THREE goldens, byte-identical to all three: `hello_x64` (4 sections), `secrel_x64` (SECREL/SECTION/ADDR32NB, 2 sections) and `chain_x64` (archive fixpoint, 1 section — which also pins member selection and order). Section GC is not implemented and parity holds anyway, because lld `/opt:ref` only GCs COMDAT sections and COMDAT is a named Err here. **No execution proof — no Windows host and no wine on this machine**; nothing claims runnability. Reuse: `sym_resolver.sym_add_entries` (new format-agnostic entry point, `sym_add_object` delegates to it), `archive_parser` unchanged (a `.lib` IS an ar archive), `smf_reloc_formulas` as the single value oracle (`coff_reloc_compute`), `_ElfWriter` encoding primitives plus a new shared `write_fill`. All PE address decisions are isolated in `coff/coff_layout.spl` with a written lane-F2 handoff |
+
+Measured lld-link behaviours that parity depends on, now in
+`test/fixtures/linker/coff/RECIPE.md`: input `.bss` folds into `.data` and
+`SizeOfRawData` counts only the file-backed prefix (a pure-`.bss` output
+section gets `SizeOfRawData` 0 / `PointerToRawData` 0 with a non-zero
+`VirtualSize`); code-section padding is `0xcc` (`int3`) for both alignment gaps
+and the tail, not zero; PE32+ has no `BaseOfData`, so `ImageBase` is a u64 at
+optional-header offset 24.
+
+Next for this capsule: the import table / IAT (currently a named
+`UnsupportedFeature`, which is what blocks any program that calls into a DLL,
+i.e. every real Windows program), `.pdata`/`.xdata` exception tables, COMDAT
+selection, weak externals, `/subsystem:windows`, DLL output, and Windows ARM64.
+Execution proof needs either wine or a Windows runner and is filed as
+`doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md`.

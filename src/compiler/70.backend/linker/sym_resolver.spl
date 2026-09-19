@@ -81,16 +81,32 @@ fn sym_resolution_new() -> SymResolution:
 
 # reason: positional linker sym_resolver API
 fn sym_add_object(res: SymResolution, obj: ElfObject, obj_idx: i64) -> SymResolution:
+    var entries: [SymEntry] = []
+    for sym in obj.symbols:
+        if sym.name == "":
+            continue
+        entries = entries.push(sym_entry_from_elf(sym, obj_idx))
+    sym_add_entries(res, entries)
+
+# reason: positional linker sym_resolver API
+fn sym_add_entries(res: SymResolution, entries: [SymEntry]) -> SymResolution:
+    """Fold one input's already-converted symbols into the global table.
+
+    Format-agnostic: the strong > weak / duplicate-strong-is-an-error rules and
+    the per-object local table live here, so a non-ELF front end (COFF, lane
+    E1) reuses the resolution semantics instead of restating them. `entries`
+    must all carry the same obj_idx — this call appends exactly one local
+    table."""
     var defined = res.defined
     var errors = res.errors
     var locals: [SymEntry] = []
     var local_tables = res.local_tables
 
-    for sym in obj.symbols:
-        if sym.name == "":
+    for entry in entries:
+        if entry.name == "":
             continue
-
-        val entry = sym_entry_from_elf(sym, obj_idx)
+        val sym = entry
+        val obj_idx = entry.obj_idx
 
         if entry.binding == SymBinding.Local:
             locals = locals.push(entry)
@@ -180,7 +196,7 @@ fn sym_local_count(res: SymResolution, obj_idx: i64) -> i64:
 # ============================================================================
 
 export SymBinding, SymEntry, SymResolution
-export sym_resolution_new, sym_add_object, sym_collect_undefined
+export sym_resolution_new, sym_add_object, sym_add_entries, sym_collect_undefined
 export sym_resolve_objects, sym_get, sym_is_resolved
 export sym_defined_count, sym_undefined_count, sym_error_count
 export sym_has_symbol, sym_local_count

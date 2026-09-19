@@ -1,0 +1,570 @@
+# COFF -> PE32+ static link driver (lane E1).
+#
+# Owns the L0..L9 sequence for the Windows x86_64 capsule, reusing the ELF
+# engine's architecture rather than restating it:
+#
+#   L0/L1 read      -> `coff/coff_object.spl` (COFF objects), `archive_parser`
+#                      (the SAME Unix-ar reader; a Microsoft .lib IS an ar
+#                      archive, so no second archive parser exists)
+#   L3/L4 resolve   -> `sym_resolver.sym_add_entries`, the format-agnostic
+#                      entry point this lane added so the strong/weak and
+#                      duplicate-definition rules are stated once
+#   L5 archive       -> demand-driven fixpoint over undefined symbols
+#   L7 layout        -> `coff/coff_layout.spl` (all address decisions)
+#   L8 relocate      -> `reloc_engine.coff_reloc_apply` encoders over the
+#                      `smf_reloc_formulas.coff_reloc_compute` value oracle (D4)
+#   L9 write         -> `coff/pe_exec_writer.spl`
+#
+# Nothing falls back and nothing is skipped: every unmodelled input feature
+# returns a named Err (design D4). The named-Err surface is listed at the end
+# of this file.
+#
+# NOT PROVEN: no image produced here has ever been executed. This host has no
+# Windows and no wine, so correctness evidence is structural parity against
+# `lld-link` on the same objects (see test/fixtures/linker/coff/RECIPE.md).
+
+use compiler.backend.linker.coff.coff_object.{
+    CoffObject, CoffSection, CoffSymbol, coff_parse_object, coff_is_bss,
+    IMAGE_SYM_CLASS_EXTERNAL, IMAGE_SYM_CLASS_STATIC, IMAGE_SYM_CLASS_LABEL,
+    IMAGE_SYM_CLASS_FILE, IMAGE_SYM_CLASS_SECTION, IMAGE_SYM_DEBUG,
+}
+use compiler.backend.linker.coff.coff_layout.{
+    CoffOutSec, CoffPlacement, coff_place_inputs, coff_sort_outs, coff_reindex,
+    coff_assign_addresses, coff_out_find, coff_reserved_out_count, coff_drop_empty_outs,
+    coff_reloc_section_characteristics, coff_out_is_discardable,
+    PE_IMAGE_BASE_EXE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT,
+}
+use compiler.backend.linker.coff.pe_exec_writer.{
+    PeImageRequest, PeBaseReloc, pe_write_image, pe_build_reloc_section,
+    pe_size_of_headers, pe_pad_byte, IMAGE_REL_BASED_DIR64,
+}
+use compiler.backend.linker.sym_resolver.{
+    SymBinding, SymEntry, SymResolution, sym_resolution_new, sym_add_entries,
+}
+use compiler.backend.linker.reloc_engine.{
+    coff_reloc_apply, coff_reloc_patch_bytes,
+}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
+    coff_reloc_needs_base_reloc, coff_reloc_width, coff_reloc_type_name,
+    coff_reloc_is_section_relative,
+}
+use compiler.backend.linker.archive_parser.{ArMember, ar_parse, ar_check_magic}
+use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_fill}
+
+# ============================================================================
+# Request / result
+# ============================================================================
+
+struct CoffLinkRequest:
+    objects: [[i64]]     # COFF object bytes, in command-line order
+    names: [text]        # origin name per object (same length)
+    archives: [[i64]]    # .lib archives, demand-driven fixpoint
+    archive_names: [text]
+    entry: text          # /entry:<name>
+    image_base: i64
+    timestamp: i64       # /timestamp:<n>
+
+fn coff_link_request(objects: [[i64]], names: [text], archives: [[i64]], archive_names: [text], entry: text) -> CoffLinkRequest:
+    CoffLinkRequest(objects: objects, names: names, archives: archives,
+        archive_names: archive_names, entry: entry,
+        image_base: PE_IMAGE_BASE_EXE, timestamp: 0)
+
+# ============================================================================
+# L3/L4 — COFF symbol -> the shared SymEntry model
+# ============================================================================
+
+fn coff_sym_binding(sym: CoffSymbol) -> SymBinding:
+    """COFF storage class maps onto the shared binding lattice: EXTERNAL is a
+    global, everything else (STATIC, LABEL, SECTION, FILE) is object-private.
+    COFF has no strong/weak distinction in the modelled set — weak externals
+    are rejected at parse time — so nothing maps to SymBinding.Weak."""
+    if sym.storage_class == IMAGE_SYM_CLASS_EXTERNAL:
+        SymBinding.Global
+    else:
+        SymBinding.Local
+
+fn coff_sym_is_linkable(sym: CoffSymbol) -> bool:
+    if sym.is_aux:
+        return false
+    if sym.name == "":
+        return false
+    if sym.storage_class == IMAGE_SYM_CLASS_FILE:
+        return false
+    if sym.section_number == IMAGE_SYM_DEBUG:
+        return false
+    true
+
+fn coff_sym_entries(obj: CoffObject, obj_idx: i64) -> [SymEntry]:
+    """Convert one object's symbols into SymEntry values.
+
+    `section_idx` carries the 0-based index into `obj.sections` for a section
+    definition, -1 for an absolute symbol, and -2 for an undefined reference,
+    so the caller never has to re-derive COFF's 1-based/0/-1 encoding.
+    `offset` is the COFF symbol Value, i.e. the byte offset inside its own
+    input section."""
+    var out: [SymEntry] = []
+    for sym in obj.symbols:
+        if not coff_sym_is_linkable(sym):
+            continue
+        var sidx: i64 = -2
+        if sym.is_absolute:
+            sidx = -1
+        elif sym.section_number > 0:
+            sidx = sym.section_number - 1
+        out = out.push(SymEntry(
+            name: sym.name,
+            section_idx: sidx,
+            offset: sym.value,
+            size: 0,
+            binding: coff_sym_binding(sym),
+            obj_idx: obj_idx,
+            is_defined: sym.is_defined,
+        ))
+    out
+
+fn coff_resolve(objects: [CoffObject]) -> SymResolution:
+    var res = sym_resolution_new()
+    var oi: i64 = 0
+    while oi < objects.len():
+        res = sym_add_entries(res, coff_sym_entries(objects[oi], oi))
+        oi = oi + 1
+    res
+
+fn coff_undefined(objects: [CoffObject], res: SymResolution) -> [text]:
+    """Global references no definition satisfies, in first-seen order."""
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    for obj in objects:
+        for sym in obj.symbols:
+            if not coff_sym_is_linkable(sym):
+                continue
+            if sym.storage_class != IMAGE_SYM_CLASS_EXTERNAL:
+                continue
+            if sym.is_defined:
+                continue
+            if not res.defined.has(sym.name) and not seen.has(sym.name):
+                out = out.push(sym.name)
+                seen[sym.name] = true
+    out
+
+# ============================================================================
+# L5 — archive fixpoint
+# ============================================================================
+
+fn coff_ar_member_bytes(raw: [i64], m: ArMember) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < m.data_size:
+        out = out.push(raw[m.data_offset + i] & 0xff)
+        i = i + 1
+    out
+
+fn coff_ar_is_object_member(name: text) -> bool:
+    """A Microsoft .lib is an ar archive whose first two members are the
+    linker symbol indices ("/" twice) and whose long names live in "//".
+    Those three are metadata, not objects."""
+    name != "/" and name != "//" and name != ""
+
+fn coff_archive_closure(req: CoffLinkRequest, objects: [CoffObject]) -> Result<[CoffObject], text>:
+    """Pull archive members until no new undefined symbol can be satisfied.
+
+    Demand driven, like the ELF engine's `archive_closure`: a member is added
+    only when it defines a symbol that is currently undefined, and adding one
+    can create new undefined symbols, so the loop repeats to a fixpoint. An
+    archive member that is never needed is never parsed into the link."""
+    var sel = objects
+    var taken: {text: bool} = {}
+    var progress = true
+    while progress:
+        progress = false
+        val res = coff_resolve(sel)
+        val undef = coff_undefined(sel, res)
+        if undef.len() == 0:
+            break
+        var ai: i64 = 0
+        while ai < req.archives.len():
+            val raw = req.archives[ai]
+            var aname = "archive{ai}"
+            if ai < req.archive_names.len():
+                aname = req.archive_names[ai]
+            if not ar_check_magic(raw):
+                return Err("coff: {aname}: not an ar archive (a .lib must carry the \"!<arch>\\n\" magic)")
+            val parsed = ar_parse(raw)
+            if parsed.is_err():
+                return Err("coff: {aname}: {parsed.unwrap_err()}")
+            val reader = parsed.unwrap()
+            for m in reader.members:
+                if not coff_ar_is_object_member(m.name):
+                    continue
+                val key = "{aname}({m.name})"
+                if taken.has(key):
+                    continue
+                val bytes = coff_ar_member_bytes(raw, m)
+                val po = coff_parse_object(bytes, key)
+                if po.is_err():
+                    return Err(po.unwrap_err())
+                val cand = po.unwrap()
+                var wanted = false
+                for sym in cand.symbols:
+                    if not coff_sym_is_linkable(sym):
+                        continue
+                    if sym.storage_class != IMAGE_SYM_CLASS_EXTERNAL or not sym.is_defined:
+                        continue
+                    for u in undef:
+                        if u == sym.name:
+                            wanted = true
+                if wanted:
+                    taken[key] = true
+                    sel = sel.push(cand)
+                    progress = true
+            ai = ai + 1
+    Ok(sel)
+
+# ============================================================================
+# L7 — contents
+# ============================================================================
+
+fn coff_section_contents(objects: [CoffObject], place: CoffPlacement) -> [[i64]]:
+    """Concatenate each output section's file-backed members at their assigned
+    offsets. Zero-fill members contribute nothing here — they are the tail
+    beyond `init_size`, which the writer records as VirtualSize > SizeOfRawData."""
+    var out: [[i64]] = []
+    var k: i64 = 0
+    while k < place.outs.len():
+        var buf: [i64] = []
+        val pad = pe_pad_byte(place.outs[k].characteristics)
+        var oi: i64 = 0
+        while oi < objects.len():
+            val obj = objects[oi]
+            var si: i64 = 0
+            while si < obj.sections.len():
+                if place.sec_out[oi][si] == k and not coff_is_bss(obj.sections[si]):
+                    buf = write_fill(buf, place.sec_off[oi][si] - buf.len(), pad)
+                    var bi: i64 = 0
+                    while bi < obj.sections[si].data.len():
+                        buf = buf.push(obj.sections[si].data[bi])
+                        bi = bi + 1
+                si = si + 1
+            oi = oi + 1
+        buf = write_fill(buf, place.outs[k].init_size - buf.len(), pad)
+        out = out.push(buf)
+        k = k + 1
+    out
+
+# ============================================================================
+# L8 — symbol addresses and relocation application
+# ============================================================================
+
+struct CoffTarget:
+    va: i64          # resolved virtual address of the symbol
+    sec_va: i64      # virtual address of the output section it lands in
+    sec_index: i64   # 1-based output section index
+    is_absolute: bool # COFF section -1: a constant, in no section at all
+
+fn coff_member_va(place: CoffPlacement, image_base: i64, oi: i64, si: i64) -> i64:
+    val k = place.sec_out[oi][si]
+    image_base + place.outs[k].rva + place.sec_off[oi][si]
+
+fn coff_target_of(objects: [CoffObject], place: CoffPlacement, image_base: i64,
+                  e: SymEntry) -> Result<CoffTarget, text>:
+    """Address of a resolved definition plus the output-section context that
+    SECREL and SECTION need."""
+    if e.section_idx == -1:
+        # An absolute symbol (COFF section -1, e.g. clang's @feat.00) has no
+        # section, so SECREL/SECTION over it cannot be expressed.
+        return Ok(CoffTarget(va: e.offset, sec_va: 0, sec_index: 0, is_absolute: true))
+    if e.section_idx < 0:
+        return Err("coff: undefined symbol: {e.name}")
+    if e.obj_idx >= objects.len():
+        return Err("coff: symbol {e.name} names object {e.obj_idx}, past the {objects.len()} selected inputs")
+    val k = place.sec_out[e.obj_idx][e.section_idx]
+    if k < 0:
+        return Err("coff: symbol {e.name} is defined in section {objects[e.obj_idx].sections[e.section_idx].name}, which is not laid out in the image")
+    Ok(CoffTarget(
+        va: coff_member_va(place, image_base, e.obj_idx, e.section_idx) + e.offset,
+        sec_va: image_base + place.outs[k].rva,
+        sec_index: k + 1,
+        is_absolute: false,
+    ))
+
+fn coff_lookup(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
+               image_base: i64, oi: i64, sym: CoffSymbol) -> Result<CoffTarget, text>:
+    """Resolve one relocation's target symbol. A local (non-EXTERNAL) symbol
+    resolves inside its own object; an EXTERNAL one goes through the global
+    table, so a reference to another object's definition is a real link edge
+    rather than an accidental self-reference."""
+    if sym.storage_class == IMAGE_SYM_CLASS_EXTERNAL and not sym.is_defined:
+        if not res.defined.has(sym.name):
+            return Err("coff: undefined symbol: {sym.name}")
+        return coff_target_of(objects, place, image_base, res.defined[sym.name])
+    if sym.storage_class == IMAGE_SYM_CLASS_EXTERNAL:
+        if res.defined.has(sym.name):
+            return coff_target_of(objects, place, image_base, res.defined[sym.name])
+    if sym.is_absolute:
+        return Ok(CoffTarget(va: sym.value, sec_va: 0, sec_index: 0, is_absolute: true))
+    if sym.section_number <= 0:
+        return Err("coff: undefined symbol: {sym.name}")
+    coff_target_of(objects, place, image_base, SymEntry(
+        name: sym.name, section_idx: sym.section_number - 1, offset: sym.value,
+        size: 0, binding: SymBinding.Local, obj_idx: oi, is_defined: true))
+
+struct CoffPatched:
+    contents: [[i64]]
+    base_relocs: [PeBaseReloc]
+
+fn coff_emits_base_relocs(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
+                          image_base: i64) -> Result<bool, text>:
+    """Will this link produce a non-empty `.reloc`?
+
+    Needed BEFORE relocations are applied, because a SECTION relocation against
+    an absolute symbol takes the value `numOutputSections + 1` and lld counts
+    the synthesized `.reloc` in that total (measured: 0x0003 without one,
+    0x0004 with). Deriving the count from `place.outs` alone is off by one
+    exactly when a base relocation exists. This is a pure predicate over the
+    same ADDR64-and-not-absolute condition the apply loop uses."""
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val pk = place.sec_out[oi][si]
+            if pk >= 0 and not coff_out_is_discardable(place.outs[pk]):
+                for r in obj.sections[si].relocs:
+                    if coff_reloc_needs_base_reloc(r.rtype):
+                        if r.sym_index >= obj.symbols.len():
+                            return Err("coff: {obj.origin}: relocation symbol index {r.sym_index} is past the {obj.symbols.len()}-slot symbol table")
+                        val tgt = coff_lookup(objects, place, res, image_base, oi, obj.symbols[r.sym_index])
+                        if tgt.is_err():
+                            return Err(tgt.unwrap_err())
+                        if not tgt.unwrap().is_absolute:
+                            return Ok(true)
+            si = si + 1
+        oi = oi + 1
+    Ok(false)
+
+fn coff_abs_section_index(place: CoffPlacement, emits_reloc: bool) -> i64:
+    """The value lld writes for a SECTION relocation against an absolute
+    symbol: one past the last output section index, counting `.reloc`."""
+    var n = place.outs.len()
+    if emits_reloc:
+        n = n + 1
+    n + 1
+
+fn coff_apply_relocations(objects: [CoffObject], place: CoffPlacement, res: SymResolution,
+                          image_base: i64, contents: [[i64]], abs_sec_index: i64) -> Result<CoffPatched, text>:
+    var bufs = contents
+    var brs: [PeBaseReloc] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val k = place.sec_out[oi][si]
+            if k >= 0 and obj.sections[si].relocs.len() > 0:
+                if coff_is_bss(obj.sections[si]):
+                    return Err("coff: {obj.origin}: section {obj.sections[si].name} is zero-fill but carries {obj.sections[si].relocs.len()} relocations")
+                val member_off = place.sec_off[oi][si]
+                for r in obj.sections[si].relocs:
+                    if r.sym_index >= obj.symbols.len():
+                        return Err("coff: {obj.origin}: relocation symbol index {r.sym_index} is past the {obj.symbols.len()}-slot symbol table")
+                    val tgt = coff_lookup(objects, place, res, image_base, oi, obj.symbols[r.sym_index])
+                    if tgt.is_err():
+                        return Err(tgt.unwrap_err())
+                    val t = tgt.unwrap()
+                    if t.is_absolute and coff_reloc_is_section_relative(r.rtype):
+                        # lld-link: "SECREL relocation cannot be applied to
+                        # absolute symbols" (rc=1). An absolute symbol is in no
+                        # section, so there is no section base to subtract; we
+                        # used to link SECREL as `value - 0`, i.e. silently
+                        # emit the raw constant. SECREL7 is NOT covered here:
+                        # lld calls it `unsupported relocation type 0xc` for
+                        # every target, so it is named by the oracle instead.
+                        return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()}: {coff_reloc_type_name(r.rtype)} relocation cannot be applied to absolute symbol {obj.symbols[r.sym_index].name}")
+                    val field_off = member_off + r.vaddr
+                    val p = image_base + place.outs[k].rva + field_off
+                    var sec_idx = t.sec_index
+                    if t.is_absolute:
+                        # An absolute symbol has no section; lld writes one
+                        # past the last output section index here.
+                        sec_idx = abs_sec_index
+                    val ar = coff_reloc_apply(bufs[k], field_off, r.rtype, t.va, p,
+                        image_base, t.sec_va, sec_idx)
+                    if not ar.success:
+                        return Err("coff: {obj.origin}: {obj.sections[si].name}+0x{r.vaddr.to_hex()} -> {obj.symbols[r.sym_index].name}: {ar.error}")
+                    bufs[k] = coff_reloc_patch_bytes(bufs[k], field_off, coff_reloc_width(r.rtype), ar.value)
+                    # Three conditions, identical to coff_emits_base_relocs so
+                    # the pre-scan and this loop cannot disagree about whether
+                    # a `.reloc` exists: the type must hold an absolute VA, the
+                    # target must live in the image, and the SECTION the field
+                    # sits in must survive load — lld skips DISCARDABLE
+                    # sections when collecting base relocations, since nothing
+                    # is there to rebase once the loader drops them.
+                    if coff_reloc_needs_base_reloc(r.rtype) and not t.is_absolute and not coff_out_is_discardable(place.outs[k]):
+                        brs = brs.push(PeBaseReloc(rva: place.outs[k].rva + field_off, kind: IMAGE_REL_BASED_DIR64))
+            si = si + 1
+        oi = oi + 1
+    Ok(CoffPatched(contents: bufs, base_relocs: brs))
+
+# ============================================================================
+# Driver
+# ============================================================================
+
+fn coff_static_link(req: CoffLinkRequest) -> Result<[i64], text>:
+    """Link COFF objects (plus archive members on demand) into a PE32+ EXE."""
+    if req.objects.len() == 0:
+        return Err("coff: refusing to link with no input objects")
+    if req.entry == "":
+        return Err("coff: no entry symbol given (/entry:<name> is required; there is no CRT default here)")
+
+    var parsed: [CoffObject] = []
+    var i: i64 = 0
+    while i < req.objects.len():
+        var name = "object{i}"
+        if i < req.names.len():
+            name = req.names[i]
+        val po = coff_parse_object(req.objects[i], name)
+        if po.is_err():
+            return Err(po.unwrap_err())
+        parsed = parsed.push(po.unwrap())
+        i = i + 1
+
+    val closed = coff_archive_closure(req, parsed)
+    if closed.is_err():
+        return Err(closed.unwrap_err())
+    val objects = closed.unwrap()
+
+    val res = coff_resolve(objects)
+    if res.errors.len() > 0:
+        return Err("coff: {res.errors[0]}")
+    val undef = coff_undefined(objects, res)
+    if undef.len() > 0:
+        return Err("coff: undefined symbol: {undef[0]}")
+    if not res.defined.has(req.entry):
+        return Err("coff: entry symbol {req.entry} is not defined by any input")
+
+    val placed = coff_place_inputs(objects)
+    if placed.is_err():
+        return Err(placed.unwrap_err())
+    var place = coff_reindex(placed.unwrap(),
+        coff_drop_empty_outs(coff_sort_outs(placed.unwrap().outs)))
+
+    # SizeOfHeaders is reserved from the PRE-removal section count, exactly as
+    # lld-link does it (see coff_reserved_out_count for the measurement), so it
+    # is known before any address is assigned and does not change when `.reloc`
+    # is appended below. That is what lets relocations be applied ONCE: every
+    # RVA and file offset here is final.
+    val reserved = coff_reserved_out_count(objects)
+    if reserved.is_err():
+        return Err(reserved.unwrap_err())
+    val header_size = pe_size_of_headers(reserved.unwrap(), PE_FILE_ALIGNMENT)
+    val a1 = coff_assign_addresses(place.outs, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, header_size)
+    if a1.is_err():
+        return Err(a1.unwrap_err())
+    place = CoffPlacement(outs: a1.unwrap(), sec_out: place.sec_out, sec_off: place.sec_off)
+
+    val emits = coff_emits_base_relocs(objects, place, res, req.image_base)
+    if emits.is_err():
+        return Err(emits.unwrap_err())
+    val abs_sec_index = coff_abs_section_index(place, emits.unwrap())
+
+    val contents = coff_section_contents(objects, place)
+    val patched = coff_apply_relocations(objects, place, res, req.image_base, contents, abs_sec_index)
+    if patched.is_err():
+        return Err(patched.unwrap_err())
+    val pt = patched.unwrap()
+
+    var outs = place.outs
+    var bufs = pt.contents
+    val reloc_bytes = pe_build_reloc_section(pt.base_relocs, PE_SECTION_ALIGNMENT)
+    if reloc_bytes.len() > 0:
+        outs = outs.push(CoffOutSec(name: ".reloc",
+            characteristics: coff_reloc_section_characteristics(), align: 4,
+            init_size: reloc_bytes.len(), total_size: reloc_bytes.len(),
+            rva: 0, file_offset: 0, raw_size: 0))
+        bufs = bufs.push(reloc_bytes)
+
+    # Re-address including `.reloc`. Nothing before it moves: the header size is
+    # fixed above and `.reloc` is ranked last, so the already-patched bytes stay
+    # valid and L8 does not run twice.
+    if outs.len() > reserved.unwrap():
+        return Err("coff: {outs.len()} output sections exceed the {reserved.unwrap()} entries reserved in SizeOfHeaders")
+    val a2 = coff_assign_addresses(outs, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, header_size)
+    if a2.is_err():
+        return Err(a2.unwrap_err())
+    val final_outs = a2.unwrap()
+    val final_bufs = bufs
+
+    val ent = coff_target_of(objects, place, req.image_base, res.defined[req.entry])
+    if ent.is_err():
+        return Err(ent.unwrap_err())
+
+    pe_write_image(PeImageRequest(
+        outs: final_outs,
+        contents: final_bufs,
+        entry_rva: ent.unwrap().va - req.image_base,
+        image_base: req.image_base,
+        sec_align: PE_SECTION_ALIGNMENT,
+        file_align: PE_FILE_ALIGNMENT,
+        timestamp: req.timestamp,
+        header_size: header_size,
+    ))
+
+# ============================================================================
+# Named-Err surface (design D4: nothing is silently skipped)
+# ============================================================================
+# From coff_object.spl (parse):    unsupported machine; optional header on an
+#   object; truncated header / section table / section data / symbol / relocs;
+#   IMAGE_SCN_LNK_COMDAT; IMAGE_SYM_CLASS_WEAK_EXTERNAL; COMMON definitions;
+#   malformed long section name; out-of-range section number.
+# From coff_layout.spl (place):    the output-section map is a CLOSED set —
+#   only .text, .rdata, .data, .bss and .xdata are laid out. .idata, .edata,
+#   .didat, .00cfg, .gfids, .tls, .pdata, .rsrc, an input .reloc and ANY
+#   unrecognised name are named Errs. That deliberately includes names lld-link
+#   would happily merge into .rdata: merging .idata without building an import
+#   directory, or laying out a writable .CRT$XCU with guessed read-only
+#   Characteristics, links successfully and produces a WRONG image, which is
+#   the silent success D4 exists to forbid. Two inputs that merge to one output
+#   NAME with different masked Characteristics are also an Err (lld emits two
+#   same-named output sections; duplicate output names are not modelled). Also:
+#   the PE alignment rules (FileAlignment not a power of two or outside
+#   512..65536, SectionAlignment not a power of two or below FileAlignment, and
+#   below a 4096-byte page FileAlignment != SectionAlignment or a section whose
+#   RVA and file offset differ); a section needing more alignment than
+#   SectionAlignment.
+# From smf_reloc_formulas.spl:     IMAGE_REL_AMD64_ADDR32, SECREL7, TOKEN,
+#   SREL32, PAIR, SSPAN32, UNKNOWN_<n>; every width overflow (REL32 family
+#   signed-32, ADDR32NB and SECREL unsigned-32, SECTION unsigned-16).
+# From this file:                  no inputs; no /entry; entry not defined;
+#   more output sections than SizeOfHeaders reserved room for; SECREL or
+#   SECREL7 applied to an ABSOLUTE symbol, which lld-link also refuses outright
+#   ("SECREL relocation cannot be applied to absolute symbols"). NOTE that
+#   SECTION against an absolute symbol is NOT an Err: lld links it with rc=0,
+#   writing numOutputSections + 1, and so do we (coff_abs_section_index).
+#   Also: undefined symbol; duplicate symbol (via sym_resolver); a .lib without ar
+#   magic; a relocation on a zero-fill section; a relocation symbol index past
+#   the symbol table; a definition in a section that was not laid out.
+# From pe_exec_writer.spl:         section/content count mismatch; zero
+#   sections; a section name over 8 bytes; a SizeOfHeaders that cannot hold the
+#   section table or is not FileAlignment-aligned; optional-header size drift;
+#   overlapping file offsets; content longer than SizeOfRawData.
+#
+# KNOWN DIVERGENCE, pre-existing and deliberate: IMAGE_REL_AMD64_ADDR32NB
+# against an ABSOLUTE symbol. The formula is S - ImageBase, which for a small
+# constant is negative, so the oracle's unsigned-32 check rejects it by name.
+# lld instead lets it wrap and writes 0xC0001234 for absval = 0x1234 at the
+# default base. Rejecting is the safer reading of an image-relative field, but
+# it IS a divergence from the oracle and is recorded rather than implied away:
+# doc/08_tracking/bug/coff_pe_no_execution_proof_2026-09-19.md § 4.
+#
+# Not modelled at all, and therefore not reachable rather than wrong: imports
+# and the IAT, exports, delay imports, resources, exception tables, TLS
+# directory, load config / CFG, debug directories and PDB, DLLs, /subsystem
+# values other than console, and x86 or ARM64 machines.
+
+export CoffLinkRequest, CoffTarget, CoffPatched
+export coff_link_request, coff_static_link
+export coff_resolve, coff_undefined, coff_sym_entries, coff_sym_binding, coff_sym_is_linkable
+export coff_archive_closure, coff_ar_is_object_member, coff_ar_member_bytes
+export coff_section_contents, coff_apply_relocations, coff_target_of, coff_lookup
+export coff_emits_base_relocs, coff_abs_section_index
+export coff_member_va

@@ -13,7 +13,10 @@
 
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
-use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
+    smf_reloc_compute, coff_reloc_compute, coff_reloc_width, coff_reloc_type_name,
+    IMAGE_REL_AMD64_ABSOLUTE, IMAGE_REL_AMD64_ADDR64, IMAGE_REL_AMD64_SECTION,
+}
 
 # ============================================================================
 # x86_64 Relocation Types (elf.h R_X86_64_*)
@@ -405,3 +408,93 @@ export R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_A
 export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
 export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
 export R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_HI20, R_RISCV_LO12_I
+
+# ============================================================================
+# COFF / PE x86_64 encoders (lane E1)
+# ============================================================================
+# Values come from `coff_reloc_compute`, the single oracle (design D4); this
+# layer only decides how many bytes to store and where. COFF carries no
+# explicit addend, so the addend is READ OUT of the field being patched — the
+# read must therefore happen before the write, and a signed field must be
+# sign-extended or the bias is wrong by 2^32.
+
+fn read_i32_le(bytes: [i64], offset: i64) -> i64:
+    """Sign-extended 32-bit little-endian read. Needed for COFF addends: a
+    RIP-relative displacement already in the field is signed, and reading it
+    as unsigned turns a small negative bias into +4294967292."""
+    val v = read_u32_le(bytes, offset) & 0xffffffff
+    if v >= 0x80000000:
+        v - 0x100000000
+    else:
+        v
+
+fn read_i64_le(bytes: [i64], offset: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = (v << 8) | (bytes[offset + i] & 0xff)
+        i = i - 1
+    v
+
+fn patch_u16_le_at(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(value & 0xff)
+        elif i == offset + 1:
+            result = result.push((value >> 8) & 0xff)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
+fn coff_reloc_addend(bytes: [i64], offset: i64, rtype: i64) -> i64:
+    """The implicit addend: whatever the relocated field already holds."""
+    if rtype == IMAGE_REL_AMD64_ADDR64:
+        return read_i64_le(bytes, offset)
+    if rtype == IMAGE_REL_AMD64_SECTION:
+        return 0
+    if rtype == IMAGE_REL_AMD64_ABSOLUTE:
+        return 0
+    read_i32_le(bytes, offset)
+
+fn coff_reloc_apply(bytes: [i64], offset: i64, rtype: i64, s: i64, p: i64,
+                    image_base: i64, sec_va: i64, sec_index: i64) -> RelocResult:
+    """Apply one IMAGE_REL_AMD64_* relocation to `bytes` at `offset`.
+
+    `p` is the virtual address of the field. The addend is read out of the
+    field. Every unmodelled type and every out-of-width value fails by name
+    (the oracle's `err`), never masked and never silently skipped."""
+    if offset < 0:
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "coff: relocation offset {offset} is negative")
+    val w = coff_reloc_width(rtype)
+    if w < 0:
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "coff: {coff_reloc_type_name(rtype)} at offset {offset} is unsupported or out of range")
+    if offset + w > bytes.len():
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "coff: relocation at offset {offset} needs {w} bytes past the end of a {bytes.len()}-byte section")
+    val a = coff_reloc_addend(bytes, offset, rtype)
+    val r = coff_reloc_compute(rtype, s, a, p, image_base, sec_va, sec_index)
+    if not r.ok:
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "coff: {r.err} at offset {offset} is unsupported or out of range")
+    if offset + r.width > bytes.len():
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "coff: relocation at offset {offset} needs {r.width} bytes past the end of a {bytes.len()}-byte section")
+    RelocResult(success: true, offset: offset, value: r.value, error: "")
+
+fn coff_reloc_patch_bytes(bytes: [i64], offset: i64, width: i64, value: i64) -> [i64]:
+    """Store an already-computed relocation value. width 0 writes nothing."""
+    if width == 8:
+        return patch_u64_le(bytes, offset, value)
+    if width == 4:
+        return patch_u32_le(bytes, offset, value)
+    if width == 2:
+        return patch_u16_le_at(bytes, offset, value)
+    bytes
+
+export read_i32_le, read_i64_le, patch_u16_le_at
+export coff_reloc_addend, coff_reloc_apply, coff_reloc_patch_bytes
