@@ -1,0 +1,42 @@
+# One parse per (path, source) for the whole lint of one file.
+#
+# Linting one file used to parse the same buffer THREE times: twice inside
+# `check_param_object_rules` (one for the struct projection, one for the env
+# walk) and once more in `lint_cli_source` for the AST rule loops. Under the
+# interpreted lint path a parse of a real compiler file is the dominant cost —
+# measured on `src/compiler/50.mir/hwir/zca_rows.spl` (1901 lines) at 12.8s,
+# 11.8s and 13.0s of a 78s run, with every lint rule that consumes the result
+# costing under 1s in total.
+#
+# The validity key is the same `(path, source, ast_generation())` triple
+# `lint_parsed_revision` already uses. `ast_reset()` bumps the generation
+# BEFORE it clears the arena, so any other parse between two calls invalidates
+# the memo and the next call re-parses. A miss therefore costs one text
+# comparison; it can never serve decls from a module the arena no longer holds.
+use compiler.core.parser.{
+    parse_module_silent_checked, parser_has_errors, parser_set_had_error}
+use compiler.core.ast_expr.{ast_generation}
+
+var _LINT_PARSE_VALID: bool = false
+var _LINT_PARSE_PATH: text = ""
+var _LINT_PARSE_SOURCE: text = ""
+var _LINT_PARSE_GENERATION: i64 = -1
+var _LINT_PARSE_FAILED: bool = false
+
+# Parse `source` as `path` unless the arena already holds exactly that module.
+# Returns the parse-failed flag, exactly like `parse_module_silent_checked`,
+# and leaves `parser_has_errors()` as the caller found it.
+fn lint_parse_module_memo(source: text, path: text) -> bool:
+    if (_LINT_PARSE_VALID and _LINT_PARSE_GENERATION == ast_generation()
+            and _LINT_PARSE_PATH == path and _LINT_PARSE_SOURCE == source):
+        return _LINT_PARSE_FAILED
+    val previous_parse_error = parser_has_errors()
+    val failed = parse_module_silent_checked(source, path)
+    parser_set_had_error(previous_parse_error)
+    _LINT_PARSE_PATH = path
+    _LINT_PARSE_SOURCE = source
+    _LINT_PARSE_GENERATION = ast_generation()
+    _LINT_PARSE_FAILED = failed
+    _LINT_PARSE_VALID = true
+    failed
+
