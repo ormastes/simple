@@ -6,7 +6,7 @@
 
 ❌ **array_at_option_spec.spl** (10771ms)
   - Source: `test/01_unit/lib/common/array_at_option_spec.spl`
-  - Generated doc: `spec/array_at_option_spec.md`
+  - Generated doc: `doc/06_spec/01_unit/lib/common/array_at_option_spec.md`
 
 
 ---

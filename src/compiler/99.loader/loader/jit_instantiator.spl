@@ -6,7 +6,7 @@
 # Phase 5: Load-Time JIT Instantiation
 
 use std.env.{env_get_or}
-use std.nogc_sync_mut.io_runtime.{file_write_exact}
+use std.nogc_sync_mut.io_runtime.{file_write}
 
 use .object_mapper.{
     SharedExecMapper,
@@ -521,7 +521,7 @@ impl JitInstantiator:
 
             self.loaded_metadata[smf_path] = metadata
             val sidecar_path = _metadata_sidecar_path(smf_path)
-            val persisted = file_write_exact(sidecar_path, serialize_loaded_metadata(metadata))
+            val persisted = file_write(sidecar_path, serialize_loaded_metadata(metadata))
             if not persisted:
                 return Err("Failed to persist JIT metadata sidecar: {sidecar_path}")
 
@@ -630,15 +630,9 @@ impl JitSymbolResolver:
 # Exports
 # ============================================================================
 
-# The sidecar used to be written as `<smf_path> + ".jit.note.sdn"`. When
-# `smf_path` is relative (a bare `map.smf` on the command line) that lands the
-# sidecar in the CURRENT WORKING DIRECTORY — which is how `map.smf.jit.note.sdn`
-# came to sit tracked in the repository root. Route it through the worktree
-# storage root when one is declared; fall back to the historical
-# beside-the-artifact path so behaviour is unchanged where it is not.
+# Keep JIT metadata out of the caller's current directory. The storage-root
+# override supports isolated worktrees; the SCV quarantine is the local default.
 fn _metadata_sidecar_path(path: text) -> text:
-    val worktree_root = env_get_or("SIMPLE_WORKTREE_STORAGE_ROOT", "")
-    if worktree_root != "":
-        val key = path.replace("/", "_").replace("\\", "_").replace(":", "_")
-        return worktree_root + "/jit/" + key + ".jit.note.sdn"
-    path + ".jit.note.sdn"
+    val worktree_root = env_get_or("SIMPLE_WORKTREE_STORAGE_ROOT", ".scv/quarantine")
+    val key = path.replace("/", "_").replace("\\", "_").replace(":", "_")
+    worktree_root + "/jit/" + key + ".jit.note.sdn"
