@@ -120,3 +120,17 @@ this lane's Windows seed (`/c/Users/ormas/dev/simple/bin/simple.exe`):
 
 Pinned tree behavior is correct on the JIT engine; the spec is red purely
 from seed test-mode spawn/capture debt. Spec and probe left unmodified.
+
+## Cross-reference 2026-09-19 (collections lane triage)
+
+Also blocks `test/03_system/feature/usage/negative_step_slice_spec.spl`
+(0/7 examples PASS under `--mode=interpreter`, every assertion
+`expected <empty> to contain .reversed()`): the spec's oracle spawns
+fixture compiles via `process_run` children and captures their semantic
+error text, but test-mode child spawns return empty — same neutered-spawn
+shape as above. The pinned tree behavior itself is verifiably correct:
+compiling any `s[::-1]` form in-process under this seed emits
+`semantic: invalid operation: negative slice step is not supported --
+use .reversed() to reverse` (observed directly while triaging
+`test/system/features/collections_spec.spl`, whose restored
+`arr.reversed()` example now passes 60/60). Spec left unmodified.
