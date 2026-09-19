@@ -422,3 +422,28 @@ three in `src/app/sspec_maintain/source_facts.spl`) for a hazard that is not
 there. Caught by re-measuring the corpus rather than by any spec, which is
 why e4 now pins it: the rule applies to `val`/`var`/`lazy val`/`bind`
 declarations only.
+
+### Provenance of the 10/68 figure at HEAD
+
+The complete 52-file sweep that produced **10 of 68** was run at the
+destructuring commit. Two commits landed after it (the alias escape and its
+`for` correction), and a full re-sweep on this host takes hours under load, so
+the figure was carried forward on an argument plus per-site verification
+rather than a second full sweep:
+
+- The alias rule can only ADD refusals — it is an extra escape test, and
+  nothing in either commit relaxes a check — so 10 is an upper bound at HEAD
+  and the only question is whether any of the 10 was lost.
+- All ten were therefore re-run individually with `bin/simple fix --dry-run`
+  from inside the lane worktree at HEAD, and all ten still offer exactly the
+  COLL fixes they did before: `feature_gen/main.spl` 1,
+  `sspec_maintain/source_facts.spl` 2, `coupling/lcom.spl` 1,
+  `sffi_gen/intern_codegen.spl` 1, `sffi_gen/rust_codegen.spl` 1,
+  `enterprise_payment/payment.spl` 1, `text_layout/font_types.spl` 1,
+  `simd_capabilities_extern_backing_spec.spl` 1,
+  `local_ci_receipt_gate_wiring_spec.spl` 1.
+
+The interim rows of the re-sweep that had completed at the time agree
+(`feature_gen` 1, `source_facts` 2). A full re-sweep is the cleaner evidence
+and should be re-run on an idle host before this number is quoted anywhere
+load-bearing.
