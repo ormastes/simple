@@ -258,3 +258,48 @@ One shape got STRICTER, deliberately: `print seen` — the array itself as a
 call argument — is now refused where round 3 allowed it. Proving a callee
 does not mutate its argument needs interprocedural analysis this does not
 have, so it fails closed. `print seen.len()` is fine.
+
+### The real ceiling was an admission rule, not a proof
+
+Those two precision fixes alone moved coverage 5/68 -> 7/68, far short of the
+~40 sites they were expected to unlock. The reason was upstream of every
+proof: `collection_single_safe_proof` admitted a fix only when the file held
+**exactly one** candidate of that code and **no** unsafe one. That rule dates
+from when the renderer recovered its edit location by scanning text, where a
+second candidate genuinely made the location ambiguous. Proofs now carry the
+parser's own `guard_line` / `push_line` / `decl_line`, so the ambiguity it
+guarded against no longer exists — it was only suppressing real fixes.
+
+It is replaced by `collection_safe_proofs`, which renders **every** safe site.
+Two spec examples flip with A/B-by-execution evidence, both previously
+refusing for this reason and this reason only:
+
+- `collection_easy_fix_spec` "more than one `.contains(` line": two DIFFERENT
+  arrays searched in one loop. `search_twice([1,4,7,2,5])` is `[1,4,2,5]`
+  before and after; both sites now fix.
+- `collection_fix_adversarial_spec` a19: the same array NAME as a separate
+  local in two functions. `2` / `2` before and after; element types resolve
+  per function (`Dict<i64,bool>` and `Dict<text,bool>`).
+
+**One asymmetry this exposed, and it is a real hazard.** For COLL020 two safe
+candidates on the same array cannot coexist: the second site's push is a
+mutation the first site's proof does not permit, so both are already refused.
+For COLL002 they can, because `contains` is a READER — a lookup table read in
+two loops proves safe at both, and rendering both emitted
+`var known_set: Dict<...>` after the SAME declaration twice. That is a
+duplicate binding, i.e. exactly the class of wrong rewrite this record exists
+to stop, and it is a common shape in real code. Safe proofs are therefore
+deduped by `(receiver, decl_line)`: the first site renders, the rest keep
+their warning and get no fix. Covered by
+`collection_certain_fix_safety_spec` "two COLL002 reads of one un-mutated
+table hoist the Dict once".
+
+**And one mis-attribution in the lint path.** `lint_cli_append_parsed_results`
+attached every rendered fix to the FIRST warning of that code and then set a
+once-per-file flag, so with two safe sites `simple lint --fix` would have
+offered a fix for site B on the diagnostic for site A while `simple fix`
+applied both — the round-1 "lint and fix disagree" class, reintroduced one
+level down. A diagnostic now carries the fix for its OWN site only:
+`collection_render_proven_fixes` takes a `for_line`, and the warning's span
+and the proof's `guard_line` are the same node resolved the same way, so the
+match is exact.

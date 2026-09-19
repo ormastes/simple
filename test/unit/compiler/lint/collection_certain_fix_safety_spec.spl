@@ -25,7 +25,7 @@
 # scratchpad/d2/fx/{nested,outer_mut,pop_expr,coll002_pop,setname_clash}.spl,
 # minus the trailing `print` driver line (which no generator reads).
 use std.spec.*
-use compiler.tools.lint.main.{collection_002_fix, collection_020_fix}
+use compiler.tools.lint.main.{collection_002_fix, collection_020_fix, collection_certain_fixes}
 use std.tooling.easy_fix.*
 
 fn fix002(src: text) -> EasyFix?:
@@ -370,3 +370,50 @@ describe "round 4: expression traversal is generic too":
         step("but the array itself may not")
         val escapes = "fn grow(a: [i64], v: i64):\n    a.push(v)\n\nfn f(xs: [i64]) -> [i64]:\n    var seen: [i64] = []\n    for x in xs:\n        if not seen.contains(x):\n            seen.push(x)\n        grow(seen, x)\n    seen\n"
         assert_false(is_some(fix020(escapes)))
+
+# ---------------------------------------------------------------------------
+# Per-site rendering: one Dict per DECLARATION, not per site.
+#
+# Round 4 replaced the old "exactly one candidate in the whole file" admission
+# rule — obsolete once proofs carry exact lines — with per-site rendering, and
+# that alone took coverage from 5/68 real dedup sites to 8/68. For COLL020 two
+# safe candidates on the same array cannot coexist (the second's push is a
+# mutation the first does not permit), but for COLL002 they can: `contains` is
+# a READER, so a lookup table read in two loops proves safe at both, and
+# rendering both inserted `var known_set: Dict<...>` after the SAME declaration
+# twice — a duplicate binding, i.e. exactly the class of wrong rewrite this
+# whole file exists to stop. Safe proofs are therefore deduped by
+# (receiver, declaration line): the first site renders, the rest keep their
+# warning and get no fix.
+# ---------------------------------------------------------------------------
+
+fn all_certain_replacements(src: text) -> [Replacement]:
+    var all: [Replacement] = []
+    for fix in collection_certain_fixes("/tmp/certain_safety.spl", src):
+        for r in easyfix_replacements(fix):
+            all.push(r)
+    all
+
+fn applied_all(src: text) -> text:
+    easyfix_apply_sorted_replacements(
+        src, easyfix_sort_replacements_descending(all_certain_replacements(src)))
+
+describe "per-site rendering inserts one Dict per declaration":
+    it "two COLL002 reads of one un-mutated table hoist the Dict once":
+        step("two COLL002 reads of one un-mutated table hoist the Dict once")
+        """`known` is never mutated, so BOTH loops yield a safe COLL002 proof.
+        Rendering both would emit two `var known_set` declarations after the
+        one `val known` — a duplicate binding. Exactly one is emitted."""
+        val two_reads = "fn f(xs: [i64], ys: [i64]) -> i64:\n    val known: [i64] = [1, 2, 3]\n    var n = 0\n    for x in xs:\n        if known.contains(x):\n            n = n + 1\n    for y in ys:\n        if known.contains(y):\n            n = n + 1\n    n\n"
+        val out = applied_all(two_reads)
+        assert_equal(1, out.split("var known_set").len() - 1)
+
+    it "two independent arrays each get their own Dict":
+        step("two independent arrays each get their own Dict")
+        """Per-site rendering must still be a net gain: distinct receivers
+        have distinct declarations, distinct generated names and disjoint
+        edits, so both sites are fixed in one pass."""
+        val two_arrays = "fn f(xs: [i64], ys: [i64]) -> i64:\n    val alpha: [i64] = [1, 2, 3]\n    val beta: [i64] = [4, 5, 6]\n    var n = 0\n    for x in xs:\n        if alpha.contains(x):\n            n = n + 1\n    for y in ys:\n        if beta.contains(y):\n            n = n + 1\n    n\n"
+        val out = applied_all(two_arrays)
+        assert_equal(1, out.split("var alpha_set").len() - 1)
+        assert_equal(1, out.split("var beta_set").len() - 1)

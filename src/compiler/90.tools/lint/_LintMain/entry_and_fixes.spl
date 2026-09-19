@@ -194,13 +194,12 @@ fn lint_cli_append_parsed_results(
         val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
             .with_fix(warning.hint)
         results.push(LintRunResult.new(path, warning.line, 0, lint))
-    # Certain fixes are attached at most once per file per code — a second
-    # attach would duplicate the same Replacement spans and corrupt the
-    # applied output. Precondition 3 (file-unique `.contains(`/push line)
-    # already makes a second eligible warning impossible in practice; these
-    # flags are the explicit belt-and-suspenders guarantee.
-    var coll002_fix_attached = false
-    var coll020_fix_attached = false
+    # A Certain fix is attached to the warning whose own site it rewrites, and
+    # to no other: proofs carry the exact line of the guard they proved, so the
+    # fix for site B can no longer land on the diagnostic for site A. The old
+    # once-per-file flags did exactly that when a file had two safe sites, and
+    # made `simple lint --fix` disagree with `simple fix` about which line the
+    # edit belongs to.
     # Proofs for the SAME parse, computed once before the loop. The fix
     # generators must never re-parse here: `decls` is live for the whole loop
     # and a re-parse resets the arena underneath it.
@@ -220,16 +219,14 @@ fn lint_cli_append_parsed_results(
             .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
             .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
             .with_evidence_tier(LintEvidenceTier.SourcePattern)
-        if warning.code == "COLL002" and not coll002_fix_attached:
+        if warning.code == "COLL002":
             for fix in collection_render_proven_fixes(
-                    path, lines, coll_proofs, coll_module_names, true, false):
+                    path, lines, coll_proofs, coll_module_names, true, false, warning.line):
                 lint = lint.with_easy_fix(fix)
-                coll002_fix_attached = true
-        elif warning.code == "COLL020" and not coll020_fix_attached:
+        elif warning.code == "COLL020":
             for fix in collection_render_proven_fixes(
-                    path, lines, coll_proofs, coll_module_names, false, true):
+                    path, lines, coll_proofs, coll_module_names, false, true, warning.line):
                 lint = lint.with_easy_fix(fix)
-                coll020_fix_attached = true
         # Position. The AST DOES carry real spans on the nodes these rules
         # anchor on (method calls, slices, `if` statements) — the earlier note
         # here ("expr/stmt spans all read 0 and span_is_valid is false") was
@@ -666,22 +663,40 @@ fn collection_ws_prefix(line: text) -> text:
         i = i + 1
     line
 
-# The single safe proof for `code`, or nil. Fail-closed on ambiguity: more
-# than one candidate of the same code in a file, or any candidate that could
-# NOT be proved safe, means no fix at all — the renderer works on whole-file
-# line text and must not have to decide which of several sites it is at.
-fn collection_single_safe_proof(proofs: [CollectionFixProof], code: text) -> CollectionFixProof?:
-    var found: CollectionFixProof? = nil
-    var seen = 0
+# The safe proofs for `code`, each renderable on its own.
+#
+# This used to demand EXACTLY ONE candidate of the code in the whole file and
+# no unsafe ones, because the renderer hunted for its site by scanning text
+# and could not be told which of several it was at. It no longer hunts: every
+# proof names its own guard, push and declaration lines. Measured, that
+# obsolete rule — not the analysis — was what capped coverage: of 68 real
+# dedup sites in the tree, most live in files that hold more than one
+# `.contains(` candidate, so the file was refused wholesale.
+#
+# Dropping it is sound because each proof is established over the WHOLE
+# function for ONE receiver: an unsafe candidate on a different array says
+# nothing about this one, and two safe candidates on the SAME array cannot
+# coexist — the second one's push is a mutation the first does not permit, so
+# neither would be safe. Distinct receivers also give distinct generated
+# names and disjoint edits.
+# One caveat, and it is not symmetric between the two codes. For COLL020 two
+# safe candidates on the SAME array genuinely cannot coexist. For COLL002 they
+# can: `contains` is a READER, so a lookup table that is never mutated yields
+# a safe proof at every loop that reads it — and rendering each would insert
+# `var known_set: Dict<...>` after the same declaration twice, a duplicate
+# binding. So proofs are deduped by (receiver, declaration): the first site
+# renders, the others keep their warning and get no fix.
+fn collection_safe_proofs(proofs: [CollectionFixProof], code: text) -> [CollectionFixProof]:
+    var found: [CollectionFixProof] = []
     for proof in proofs:
-        if proof.code != code:
+        if proof.code != code or not proof.safe:
             continue
-        seen = seen + 1
-        if not proof.safe:
-            return nil
-        found = Some(proof)
-    if seen != 1:
-        return nil
+        var already = false
+        for kept in found:
+            if kept.receiver == proof.receiver and kept.decl_line == proof.decl_line:
+                already = true
+        if not already:
+            found.push(proof)
     found
 
 # A generated name not bound or mentioned anywhere in the module, per the
@@ -870,13 +885,13 @@ fn collection_fix_from_lines(file_path: text, lines: [text], code: text) -> Easy
     val decls = module_get_decls()
     val proofs = collection_fix_proofs(decls)
     val module_names = collection_module_names(decls)
-    match collection_single_safe_proof(proofs, code):
-        case Some(proof):
-            if code == "COLL020":
-                return collection_020_fix_proven(file_path, lines, proof, module_names)
-            return collection_002_fix_proven(file_path, lines, proof, module_names)
-        case nil:
-            return nil
+    # Single-fix entry point: the FIRST safe proof, for callers that want one
+    # `EasyFix?`. `collection_render_proven_fixes` renders every safe site.
+    for proof in collection_safe_proofs(proofs, code):
+        if code == "COLL020":
+            return collection_020_fix_proven(file_path, lines, proof, module_names)
+        return collection_002_fix_proven(file_path, lines, proof, module_names)
+    nil
 
 fn collection_002_fix(file_path: text, lines: [text]) -> EasyFix?:
     collection_fix_from_lines(file_path, lines, "COLL002")
@@ -936,30 +951,33 @@ pub fn collection_certain_fixes(file_path: text, content: text) -> [EasyFix]:
     val proofs = collection_fix_proofs(decls)
     val module_names = collection_module_names(decls)
     val lines = content.split("\n")
-    for fix in collection_render_proven_fixes(file_path, lines, proofs, module_names, saw_coll002, saw_coll020):
+    for fix in collection_render_proven_fixes(file_path, lines, proofs, module_names, saw_coll002, saw_coll020, 0):
         fixes.push(fix)
     fixes
 
 # Render the fixes the proofs admit, for a caller that already parsed.
+# `for_line` is 0 for "every safe site" (the `simple fix` whole-file path) or
+# a 1-based line for "only the site anchored on this line". The lint path uses
+# the latter, because a diagnostic must carry the fix for ITS OWN site: the
+# warning's span and the proof's `guard_line` are the same node resolved the
+# same way, so the match is exact rather than positional.
 fn collection_render_proven_fixes(
     file_path: text, lines: [text], proofs: [CollectionFixProof], module_names: [text],
-    want_coll002: bool, want_coll020: bool
+    want_coll002: bool, want_coll020: bool, for_line: i64
 ) -> [EasyFix]:
     var fixes: [EasyFix] = []
     if want_coll002:
-        match collection_single_safe_proof(proofs, "COLL002"):
-            case Some(proof):
-                match collection_002_fix_proven(file_path, lines, proof, module_names):
-                    case Some(fix): fixes.push(fix)
-                    case nil: val _ = 0
-            case nil: val _ = 0
+        for proof in collection_safe_proofs(proofs, "COLL002"):
+            if for_line > 0 and proof.guard_line != for_line: continue
+            match collection_002_fix_proven(file_path, lines, proof, module_names):
+                case Some(fix): fixes.push(fix)
+                case nil: val _ = 0
     if want_coll020:
-        match collection_single_safe_proof(proofs, "COLL020"):
-            case Some(proof):
-                match collection_020_fix_proven(file_path, lines, proof, module_names):
-                    case Some(fix): fixes.push(fix)
-                    case nil: val _ = 0
-            case nil: val _ = 0
+        for proof in collection_safe_proofs(proofs, "COLL020"):
+            if for_line > 0 and proof.guard_line != for_line: continue
+            match collection_020_fix_proven(file_path, lines, proof, module_names):
+                case Some(fix): fixes.push(fix)
+                case nil: val _ = 0
     fixes
 
 fn lint_evidence_json(evidence: [text]) -> text:
