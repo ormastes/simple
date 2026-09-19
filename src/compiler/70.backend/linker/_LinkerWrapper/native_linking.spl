@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, list_dir}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -302,9 +302,19 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         val unsupported_field = internal_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
+        # The runtime archives and the native_all support table the EXTERNAL
+        # argv path applies further down (native_all_gnu_support_args, and the
+        # config.libraries loop after it). The internal branch used to pass
+        # neither, which dropped `-u rt_vulkan_provider_is_available` and the
+        # eight `-l`s silently -- the exact masking design D4 forbids.
+        val planned = internal_link_plan(object_files, config, os)
+        if planned.is_err():
+            return Err(planned.unwrap_err())
+        val plan = planned.unwrap()
         if trace:
-            print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine"
-        return internal_link_native(os, arch, config.pie, object_files, output)
+            print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine ({plan.archives.len()} archive(s), {plan.libraries.len()} library(ies), {plan.roots.len()} root(s))"
+        return internal_link_native(os, arch, config.pie, object_files, output,
+            plan.archives, plan.libraries, plan.roots, plan.lib_dirs)
 
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
@@ -517,15 +527,14 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 # First NativeLinkConfig field the internal engine would silently ignore, or ""
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
+#
+# `libraries`, `library_paths`, `runtime_path` and `runtime_bundle` used to be
+# listed here and are NOT any more -- internal_link_plan below now honours all
+# four (libraries resolve to real shared objects, library_paths join the search
+# path, the runtime bundle selects the static archives). Removing a field from
+# this list is only legitimate together with the code that honours it; the
+# rule is "reject what you cannot do", not "reject whatever is inconvenient".
 fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
-    if config.libraries.len() > 0:
-        return "libraries"
-    if config.library_paths.len() > 0:
-        return "library_paths"
-    if config.runtime_path != "":
-        return "runtime_path"
-    if config.runtime_bundle != "":
-        return "runtime_bundle"
     if config.extra_flags.len() > 0:
         return "extra_flags"
     if config.retained_symbols.len() > 0:
@@ -535,6 +544,89 @@ fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
     if config.debug:
         return "debug"
     ""
+
+struct InternalLinkPlan:
+    """Everything the internal ELF engine needs beyond the object files, in the
+    same shape the external argv path builds it."""
+    archives: [text]    # static archives: the selected runtime bundle
+    libraries: [text]   # `-l` names: the native_all table, then config.libraries
+    roots: [text]       # `-u` symbols from the native_all table
+    lib_dirs: [text]    # extra search dirs: config.library_paths (`-L`)
+
+pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
+        os: text) -> Result<InternalLinkPlan, text>:
+    """Assemble the internal engine's inputs exactly as link_native_unix's
+    external arm assembles its argv: resolve the runtime bundle to archives,
+    arm the native_all support table on the SAME support-input set (objects +
+    runtime archives), and append the caller's own libraries/library paths.
+
+    Every entry of the table is either translated or named in an Err -- this is
+    the route that used to pass libraries=[] and no roots."""
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    var archives: [text] = []
+    if runtime_dir != "" and runtime_dir != "none":
+        archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+        val selection_error = native_runtime_provider_selection_error_for(
+            runtime_dir, config.runtime_bundle,
+            file_exists(runtime_dir + "/libsimple_compiler.a"),
+            file_exists(runtime_dir + "/libsimple_compiler_backfill.a"),
+            file_exists(runtime_dir + "/libsimple_native_all.a"))
+        if selection_error != "":
+            return Err("internal engine: {selection_error}")
+    var support_inputs = object_files
+    for archive in archives:
+        support_inputs = support_inputs.push(archive)
+    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    val support = internal_support_plan(support_inputs, os, brew_prefix)?
+    var libraries = support.libraries
+    for lib in config.libraries:
+        libraries = libraries.push(lib)
+    var lib_dirs: [text] = []
+    for dir in config.library_paths:
+        lib_dirs = lib_dirs.push(dir)
+    Ok(InternalLinkPlan(archives: archives, libraries: libraries,
+        roots: support.roots, lib_dirs: lib_dirs))
+
+fn internal_file_is_elf(path: text) -> bool:
+    val head = file_read_bytes(path)
+    if head.len() < 4:
+        return false
+    head[0] as i64 == 127 and head[1] as i64 == 69 and head[2] as i64 == 76 and head[3] as i64 == 70
+
+pub fn internal_resolve_shared_library(name: text, dirs: [text]) -> Result<text, text>:
+    """Resolve an `-l<name>` to one shared-object FILE, or say why it cannot be.
+
+    internal:elf consumes shared-object bytes, not a linker command line, so a
+    `-l` that cannot be turned into a readable ET_DYN file must be a named
+    error. Two refusals are called out separately because they need different
+    fixes: a GNU linker script (glibc ships `libc.so`/`libm.so` as text GROUP
+    scripts) is a feature this engine does not implement, while nothing found
+    at all is a missing development package or a missing `-L`."""
+    for dir in dirs:
+        if dir == "":
+            continue
+        val plain = "{dir}/lib{name}.so"
+        if file_exists(plain):
+            if internal_file_is_elf(plain):
+                return Ok(plain)
+            return Err("internal engine: '{plain}' is a GNU linker script, not an ELF shared object (internal:elf does not follow linker scripts)")
+        # No `lib<name>.so` development symlink (common on a host with only the
+        # runtime package installed): fall back to the highest soname version,
+        # which is what the symlink would have pointed at.
+        var best = ""
+        for entry in list_dir(dir):
+            if not entry.starts_with("lib{name}.so."):
+                continue
+            val candidate = "{dir}/{entry}"
+            if not file_exists(candidate) or not internal_file_is_elf(candidate):
+                continue
+            if best == "" or entry.len() > best.len() or (entry.len() == best.len() and entry > best):
+                best = entry
+        if best != "":
+            return Ok("{dir}/{best}")
+    Err("internal engine: cannot resolve '-l{name}' to a shared object under {dirs.len()} search directory(ies) (internal:elf needs a readable lib{name}.so)")
 
 fn internal_link_native_read_i64(path: text) -> [i64]:
     """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
@@ -546,7 +638,9 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
         i = i + 1
     out
 
-fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text) -> Result:
+fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text,
+        extra_archives: [text] = [], libraries: [text] = [], roots: [text] = [],
+        extra_lib_dirs: [text] = []) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -589,14 +683,35 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
     val nonshared = "{libdir}/libc_nonshared.a"
     if file_exists(nonshared):
         archives = archives.push(internal_link_native_read_i64(nonshared))
+    for archive in extra_archives:
+        if not file_exists(archive):
+            return Err("internal engine: archive {archive} cannot be read")
+        archives = archives.push(internal_link_native_read_i64(archive))
+    # `-l` resolution: crt.lib_dirs is the same set the external direct-ld arm
+    # emits as `-L` (the crt directory plus the gcc lib dirs), and ld.lld has
+    # no built-in search path, so this is what makes -lstdc++ resolvable at all.
+    var search_dirs: [text] = []
+    for dir in extra_lib_dirs:
+        search_dirs = search_dirs.push(dir)
+    for dir in crt.lib_dirs:
+        search_dirs = search_dirs.push(dir)
+    if not search_dirs.contains(libdir):
+        search_dirs = search_dirs.push(libdir)
+    var shared_objects: [[u8]] = [file_read_bytes(libc)]
+    for name in libraries:
+        val resolved = internal_resolve_shared_library(name, search_dirs)
+        if resolved.is_err():
+            return Err(resolved.unwrap_err())
+        shared_objects = shared_objects.push(file_read_bytes(resolved.unwrap()))
     var target_arch = RelocArch.X86_64
     if norm_arch == "aarch64":
         target_arch = RelocArch.AArch64
     var mode = ELF_LINK_DYNAMIC_EXEC
     if pie:
         mode = ELF_LINK_DYNAMIC_PIE
-    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [file_read_bytes(libc)],
-        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
+    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_objects,
+        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
+        roots: roots))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []

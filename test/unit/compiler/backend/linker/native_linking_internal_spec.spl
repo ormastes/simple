@@ -65,17 +65,31 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
             expect(result.unwrap_err()).to_contain("cannot be read")
         )
 
-    it "rejects a config field the internal engine would silently ignore (libraries), naming it":
+    it "rejects a config field the internal engine would silently ignore (extra_flags), naming it":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
-        step("SIMPLE_LINKER=internal + libraries=[m] -> named 'unsupported config field' error, not a silent drop")
+        step("SIMPLE_LINKER=internal + extra_flags -> named 'unsupported config field' error, not a silent drop")
         with_env("SIMPLE_LINKER", "internal", fn():
             var cfg = NativeLinkConfig.default()
-            cfg.libraries = ["m"]
+            cfg.extra_flags = ["-Wl,-z,now"]
+            val result = link_to_native(
+                ["test/fixtures/linker/elf/hello_libc_a64.o"],
+                "/tmp/native_linking_internal_spec_flags_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'extra_flags'")
+        )
+
+    it "now HONOURS config.libraries, and refuses one it cannot resolve by name":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("libraries left this rejection list when internal_link_plan started resolving them; an unresolvable -l is still a named Err, never a drop")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["definitely_not_a_library_xyz"]
             val result = link_to_native(
                 ["test/fixtures/linker/elf/hello_libc_a64.o"],
                 "/tmp/native_linking_internal_spec_libs_out", cfg)
             expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err()).to_contain("unsupported config field 'libraries'")
+            expect(result.unwrap_err().contains("unsupported config field")).to_equal(false)
+            expect(result.unwrap_err()).to_contain("definitely_not_a_library_xyz")
         )
 
     it "SIMPLE_LINKER unset still resolves through the external path unchanged":
