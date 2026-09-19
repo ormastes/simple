@@ -431,10 +431,11 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                 val a2 = boot_eval(sec.align_expr, _bl_ctx_at(ctx, dot))?
                 if a2 > align:
                     align = a2
-            # lld keeps an explicit output-section address as written (it only warns
-            # when it is misaligned); otherwise the location counter is aligned.
+            # lld keeps an explicit output-section address as written, even with ALIGN()
+            # after the colon (it only warns when misaligned); input sections inside are
+            # still aligned absolutely. Otherwise the location counter is aligned.
             var addr = boot_align_up(dot, align)
-            if sec.vma_expr != "" and sec.align_expr == "":
+            if sec.vma_expr != "":
                 addr = dot
             ctx = boot_eval_bind(ctx, "ADDR({sec.name})", addr)
             # lld (Output-Section-LMA heuristics): AT() or AT> recompute the lma offset;
@@ -518,7 +519,9 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
             if region_idx >= 0:
                 region_cur[region_idx] = dot
                 _bl_region_fits(plan, region_idx, dot, sec.name)?
-            if lma_ri >= 0 and sh_type != SHT_NOBITS_E:
+            # lld advances an AT> region by the section size even for NOBITS, and a
+            # region that is both the VMA and the LMA region advances once.
+            if lma_ri >= 0 and lma_ri != region_idx:
                 region_cur[lma_ri] = region_cur[lma_ri] + cur
                 _bl_region_fits(plan, lma_ri, region_cur[lma_ri], sec.name)?
 
@@ -560,10 +563,22 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
 fn _bl_region_fits(plan: BootLayoutPlan, ri: i64, end: i64, sec_name: text) -> Result<bool, text>:
     """lld: a section that pushes a MEMORY region cursor past ORIGIN + LENGTH is an error."""
     val r = plan.regions[ri]
+    # ld.lld 23 compares against origin + length computed modulo 2^64 (a region that
+    # ends exactly at the top of memory wraps to 0 and is rejected) and reports the
+    # overflow as an unsigned count; both are matched here (verified with ld.lld 23.1.0).
     val limit = r.origin + r.length
     if _bl_ult(limit, end):
-        return Err("elf_boot_link: section {sec_name} will not fit in region {r.name}: overflowed by {end - limit} bytes")
+        return Err("elf_boot_link: section {sec_name} will not fit in region {r.name}: overflowed by {_bl_udec(end - limit)} bytes")
     Ok(true)
+
+fn _bl_udec(v: i64) -> text:
+    """Unsigned decimal text of a 64-bit value."""
+    if v >= 0:
+        return "{v}"
+    val half = (v >> 1) & 0x7fffffffffffffff
+    val q = half / 5
+    val r = v - q * 10
+    "{q}{r}"
 
 fn _bl_ranges_overlap(a0: i64, an: i64, b0: i64, bn: i64) -> bool:
     """[a0, a0+an) and [b0, b0+bn) intersect (unsigned addresses, empty ranges never do)."""

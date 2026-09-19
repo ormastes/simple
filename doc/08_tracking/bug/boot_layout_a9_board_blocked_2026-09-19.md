@@ -1,4 +1,4 @@
-# Boot layout (lane A9): internal-linker rungs 3-4 reached on QEMU real firmware; board run blocked
+# Boot layout (lane A9): internal-linker rung 3 reached, rung 4 partial (hello kernel boots, gate FAIL by design); board run blocked
 
 Status: OPEN (P2)
 **Date:** 2026-09-19
@@ -13,7 +13,7 @@ Status: OPEN (P2)
 | 1. `ld_parse` round-trips all 6 `src/os/kernel/arch/*/linker.ld` | **PASS** | `test/01_unit/compiler/backend/linker/linker_script_spec.spl` 44/44. Before this change: 31 pass, 12 fail (PHDRS, AT, KEEP, NOLOAD, `+=`, OUTPUT_FORMAT, PROVIDE, ASSERT, round-trip) |
 | 2. Typed `BootLayoutPlan` | **PASS** | `test/01_unit/compiler/backend/linker/boot_layout_plan_spec.spl` 22/22, with values worked out by hand for x86_64 (higher half) and arm64 (MEMORY/NOLOAD). A mutation run flipped 3 expectations and all 3 went red |
 | 3. `llvm-readelf -l -S` parity: internal engine vs `ld.lld -T` | **PASS** (2026-09-19, lane B1) | See "Rung 3 evidence" |
-| 4. Real-firmware QEMU boot with the internally linked kernel | **PASS** for the hello kernel (EDK2 -> Limine -> `kernel.elf`) | See "Rung 4 evidence" |
+| 4. Real-firmware QEMU boot with the internally linked kernel | **PARTIAL.** The gate verdict is FAIL (exit 1) for BOTH the internal and the ld.lld kernel, because the hello kernel is not the kernel the gate checks. The internal kernel boots and prints the same serial log as the ld.lld one. | See "Rung 4 evidence" |
 | Board boot | **BLOCKED** | This host has no board access |
 
 Rung 1 is not vacuous. `ld_tokens_equivalent` compares the source token stream with the
@@ -28,8 +28,8 @@ The engine is `src/compiler/70.backend/linker/elf/elf_boot_link.spl` (`elf_boot_
 `BootLayoutPlan` now keeps that order (`ops`, `top_ops`, and a `body` for each section).
 `elf_exec_writer` now writes `p_paddr`. Specs:
 
-- `elf_boot_link_spec`: 15 examples. Every expected number comes from `ld.lld --no-relax -T`.
-- `boot_layout_ops_spec`: 9 examples.
+- `elf_boot_link_spec`: 25 examples. Every expected number comes from ld.lld 23.1.0 (`--no-relax -T`).
+- `boot_layout_ops_spec`: 17 examples.
 
 **Objects.** The seed `native-build` from the hello build script was run with
 `SIMPLE_BOOTSTRAP=1 SIMPLE_KEEP_NATIVE_OBJS=1 ... --verbose`. This keeps the object directory and
@@ -102,8 +102,33 @@ The two full serial logs are byte-identical (sha256 prefix `ca096ec8f4144032`).
 - Logs: `build/os/b1/{int,ext}.serial.log`
 - Hashes: `build/os/b1/boot_hashes.txt`
 - Gate: the command above, with `BOOT_TIMEOUT=60`, run once for each kernel.
-- The ESP images were deleted after the run. Both gate verdicts are FAIL, which is expected. The gate waits for the full kernel's
-`[BOOT] Memory map:` marker, and the hello kernel does not print it.
+- The ESP images were deleted after the run.
+- The logs, the hash file and both ELFs are under `build/`, which is gitignored. They are local
+  evidence on this host and are not tracked. The table above is the only committed record of the
+  hashes.
+
+**What the gate verdict is, exactly.** `check-simpleos-arm64-efi-real-firmware-boot.shs` exited 1
+(`FAIL`) for both kernels:
+
+```
+FAIL — aarch64 kernel never printed '[BOOT] Memory map:' under EDK2/AAVMF pflash — boot did not complete
+```
+
+The gate requires four markers that only the full SimpleOS kernel prints (`[BOOT] Memory map:`,
+`[BOOT] Boot info assembled successfully`, `[BOOT] Handing off to memory layer`,
+`SIMPLEOS-AARCH64-LIMINE-KERNEL-OK`). Both runs used the hello kernel, which prints the `[hello]` /
+`HELLO_NATIVE_SIMPLEOS_AARCH64_OK` lines instead. So the FAIL is a mismatch between the gate and the
+payload. It is not a firmware, Limine, board or linker failure:
+
+- EDK2 started.
+- Limine loaded the ELF by its program headers.
+- The kernel ran to `[hello] parking`.
+
+The claim this record makes is therefore narrower than "the gate passes": the internally linked
+hello kernel produces the same serial log as the ld.lld-linked one under the real-firmware chain.
+The gate itself has NOT passed for any internally linked kernel. That needs the full kernel's
+objects linked internally, which is still open. No board run was attempted, because there is no
+board on this host.
 
 ## Why rung 3 was not reached before lane B1 (historical)
 

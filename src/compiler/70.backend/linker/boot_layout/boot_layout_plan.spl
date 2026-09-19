@@ -207,9 +207,9 @@ fn _boot_eval_primary(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
                     return _boot_fail(arg2.pos, "{fname} takes at most two arguments")
                 var v2 = boot_align_up(arg.value, arg2.value)
                 if fname == "MAX":
-                    v2 = if arg.value > arg2.value: arg.value else: arg2.value
+                    v2 = if _boot_ult(arg2.value, arg.value): arg.value else: arg2.value
                 if fname == "MIN":
-                    v2 = if arg.value < arg2.value: arg.value else: arg2.value
+                    v2 = if _boot_ult(arg.value, arg2.value): arg.value else: arg2.value
                 return _BootEv(pos: arg2.pos + 1, value: v2, err: "")
             return _boot_fail(pos, "unsupported function {fname}")
         if tok.value == ".":
@@ -234,9 +234,27 @@ fn _boot_eval_term(toks: [LdToken], pos: i64, ctx: BootEvalCtx) -> _BootEv:
         if op.kind == LdTokenKind.Op:
             if rhs.value == 0:
                 return _boot_fail(acc.pos, "division by zero")
-            v = if op.value == "/": acc.value / rhs.value else: acc.value % rhs.value
+            val (q, r) = _boot_udivmod(acc.value, rhs.value)
+            v = if op.value == "/": q else: r
         acc = _BootEv(pos: rhs.pos, value: v, err: "")
     acc
+
+fn _boot_udivmod(a: i64, b: i64) -> (i64, i64):
+    """Unsigned 64-bit a / b and a % b (b != 0); linker-script values are unsigned."""
+    if b < 0:
+        # divisor >= 2^63: the quotient is 0 or 1
+        if _boot_ult(a, b):
+            return (0, a)
+        return (1, a - b)
+    if a >= 0:
+        return (a / b, a % b)
+    val half = (a >> 1) & 0x7fffffffffffffff
+    var q = (half / b) * 2
+    var r = a - q * b
+    if not _boot_ult(r, b):
+        q = q + 1
+        r = r - b
+    (q, r)
 
 fn _boot_ult(a: i64, b: i64) -> bool:
     """Unsigned a < b (addresses are unsigned: the higher half is negative as i64)."""
