@@ -259,3 +259,39 @@ runtimes (`linker.rs:1642`, ~514 duplicate `rt_*` symbols at `:1649` resolved by
 archive order + `/FORCE:MULTIPLE` at `:1654-1668`). Full write-up, table and
 landmine: [runtime layer expert](../runtime/skill.md) § Session update
 2026-09-06. Tracking PR: <https://github.com/ormastes/simple/pull/403>.
+
+## internal:elf route now carries the native_all table (2026-09-19)
+
+`SIMPLE_LINKER=internal` routes `link_native_unix` to the pure-Simple ELF
+engine. Until this date that branch called `internal_link_native` with no
+archives, no libraries and no roots, while the external argv path a few lines
+below applies `native_all_gnu_support_args` and `config.libraries` — so the
+whole support table was dropped on the internal route.
+
+Traps worth knowing:
+
+- `-u rt_vulkan_provider_is_available` is NOT decoration. The symbol is
+  defined in exactly one member of `libsimple_native_all.a` and referenced by
+  no other member, so without a forced-undefined root the archive fixpoint
+  drops that member. `ElfLinkRequest.roots` is that root list; it seeds
+  `elf_archive_closure` and is a `--gc-sections` liveness root, and a root
+  nothing defines is `Err("root symbol not defined: …")`.
+- `retained_symbols` does NOT fire on a bootstrap link — it comes only from
+  `SIMPLE_LINK_OBJECTS` (`llvm_native_link_stage4_projection.spl:40`), which
+  no bootstrap script sets. Do not spend time on it.
+- Removing a field from `internal_unsupported_config_field` is only legitimate
+  together with the code that honours it (design D4: reject, never mask).
+  `libraries`/`library_paths`/`runtime_path`/`runtime_bundle` left the list
+  when `internal_link_plan` started honouring them; `extra_flags`,
+  `retained_symbols`, `strip_output`, `debug` stay.
+- `ld.lld` has no built-in library search path, so `-l` resolution uses
+  `crt.lib_dirs` (crt dir + gcc lib dirs) — the same set the external direct-ld
+  arm emits as `-L`. `libstdc++` lives in the gcc dir, not in
+  `/usr/lib/<triple>`.
+- Still blocked on COMDAT dedup, TLS and multiple-definition handling once the
+  373 MB aggregate archive is actually fed in:
+  `doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md`.
+
+Stage 3 opts in with `SIMPLE_STAGE3_LINKER=internal`
+(`bootstrap_stage3_linker_env`, `scripts/check/lib/bootstrap-stage3/authority.shs`);
+default off, and Stage 2 stays on the external linker.
