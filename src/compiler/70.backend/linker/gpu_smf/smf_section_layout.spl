@@ -10,19 +10,34 @@
 # and no batch shape; it is the deterministic CPU reference a future GPU
 # scan must byte-match.
 #
-# Semantics: offset[i] = align_up(cursor, alignments[i]); cursor = offset[i]
-# + sizes[i]; input order preserved (no reordering this wave — ordering is a
-# profile decision). Every i64 overflow is checked BEFORE the add that could
-# wrap — the cursor never wraps, a too-large layout is `ok: false`, never a
-# garbage address.
+# UNIFIED 2026-09-19 (lane F2). The prefix-sum, the align_up helper, the
+# power-of-two validity predicate and the overflow guard used to be
+# implemented here and separately in five other places (the ELF writer, the
+# boot layout planner, the loader's bytecode section writer and the two
+# mirrored remote target code allocators). They now all call ONE oracle,
+# `std.common.placement` — see src/lib/common/placement.spl for the
+# divergence table. The names below are kept as thin aliases because
+# smf_link_driver.spl, smf_link_receipts.spl and the L7 specs import them,
+# and because `SmfLayoutResult` is part of the L7 CPU-reference contract a
+# future GPU scan must byte-match.
+#
+# Semantics are UNCHANGED: offset[i] = align_up(cursor, alignments[i]);
+# cursor = offset[i] + sizes[i]; input order preserved. Every i64 overflow
+# is checked BEFORE the add that could wrap.
 #
 # Composition only, no inheritance (repo rule): one result struct + free
 # functions, same discipline as the sibling gpu_smf modules.
 # ============================================================================
 
-# i64 max (2^63 - 1), spelled out. Overflow guards compare against this
-# BEFORE any add so no intermediate value can wrap.
-val SMF_LAYOUT_I64_MAX: i64 = 9223372036854775807
+use std.common.placement.{
+    PLACEMENT_I64_MAX,
+    placement_align_up,
+    placement_pack
+}
+
+# i64 max (2^63 - 1). Re-exported under the L7 name; the value lives in the
+# shared oracle so the two can never drift.
+val SMF_LAYOUT_I64_MAX: i64 = PLACEMENT_I64_MAX
 
 # ----------------------------------------------------------------------------
 # SmfLayoutResult — outcome of one layout pass.
@@ -44,29 +59,22 @@ fn smf_layout_reject() -> SmfLayoutResult:
     SmfLayoutResult(ok: false, offsets: [], total_size: 0)
 
 # ----------------------------------------------------------------------------
-# align_up helper + its overflow guard.
+# align_up helper + its overflow guard — aliases of the shared oracle.
 # ----------------------------------------------------------------------------
 
-fn smf_layout_alignment_valid(alignment: i64) -> bool:
-    """True when `alignment` is usable: strictly positive and a power of
-    two (`n & (n - 1) == 0` trick, same as layout_attrs.is_power_of_two)."""
-    alignment > 0 and (alignment & (alignment - 1)) == 0
-
-fn smf_align_up_overflows(value: i64, alignment: i64) -> bool:
-    """True when `smf_align_up(value, alignment)` would exceed i64 —
-    checked BEFORE the add inside align_up so nothing ever wraps. For a
-    power-of-two alignment this guard is exact: the add
-    `value + (alignment - 1)` stays in range iff the rounded-up multiple
-    itself stays in range (largest representable multiple of `alignment`
-    is 2^63 - alignment == SMF_LAYOUT_I64_MAX - (alignment - 1))."""
-    value > SMF_LAYOUT_I64_MAX - (alignment - 1)
-
 fn smf_align_up(value: i64, alignment: i64) -> i64:
-    """Smallest multiple of `alignment` that is >= `value`. Preconditions
-    (caller-enforced, see smf_layout_sections): value >= 0, alignment a
-    positive power of two, and `smf_align_up_overflows(value, alignment)`
-    is false."""
-    ((value + (alignment - 1)) / alignment) * alignment
+    """Smallest multiple of `alignment` that is >= `value`. Alias of
+    `placement_align_up`. Preconditions (now enforced inside
+    `placement_pack`, which `smf_layout_sections` delegates to): value >= 0
+    and alignment a positive power of two.
+
+    The former siblings `smf_layout_alignment_valid` and
+    `smf_align_up_overflows` are GONE, not aliased: once the layout pass
+    delegated, nothing called them (verified — zero references in src/ and
+    test/ outside their own definitions), and an alias with no caller is
+    unused code. `placement_alignment_is_power_of_two` and
+    `placement_align_up_overflows` are their surviving form."""
+    placement_align_up(value, alignment)
 
 # ----------------------------------------------------------------------------
 # smf_layout_sections — stage L7 sequential aligned prefix-sum.
@@ -76,6 +84,11 @@ fn smf_layout_sections(base_addr: i64, sizes: [i64], alignments: [i64]) -> SmfLa
     """Assign each section its output address by a sequential aligned
     prefix-sum starting at `base_addr`, preserving input order. `sizes[i]`
     and `alignments[i]` are positionally paired.
+
+    Delegates to `placement_pack` (src/lib/common/placement.spl), the one
+    placement oracle the ELF writer, the boot layout planner, the loader's
+    section writer and the remote target allocator also use, and re-wraps
+    its result in the L7 `SmfLayoutResult` contract type.
 
     Rejects (ok false, empty offsets, total_size 0):
       - sizes/alignments length mismatch,
@@ -87,28 +100,16 @@ fn smf_layout_sections(base_addr: i64, sizes: [i64], alignments: [i64]) -> SmfLa
 
     On success `total_size` is the final cursor minus `base_addr`.
     Zero-size sections occupy no bytes but are still aligned (the next
-    section may land on the same address)."""
-    if sizes.len() != alignments.len():
+    section may land on the same address).
+
+    NOTE, and it is a real divergence rather than an oversight: this pass
+    accepts ANY power-of-two alignment, including one stronger than a page.
+    The loader's segment mapper cannot map such a section — see
+    src/compiler/99.loader/segment_mapper.spl, which refuses an alignment
+    above `PLACEMENT_PAGE_SIZE`. The cap is a property of the consumer, so
+    it is asked for explicitly with `placement_align_within` rather than
+    baked in here."""
+    val packed = placement_pack(base_addr, sizes, alignments)
+    if not packed.ok:
         return smf_layout_reject()
-    if base_addr < 0:
-        return smf_layout_reject()
-    var offsets: [i64] = []
-    var cursor = base_addr
-    var i = 0
-    val n = sizes.len()
-    while i < n:
-        val size = sizes[i]
-        val alignment = alignments[i]
-        if size < 0:
-            return smf_layout_reject()
-        if not smf_layout_alignment_valid(alignment):
-            return smf_layout_reject()
-        if smf_align_up_overflows(cursor, alignment):
-            return smf_layout_reject()
-        val offset = smf_align_up(cursor, alignment)
-        if offset > SMF_LAYOUT_I64_MAX - size:
-            return smf_layout_reject()
-        offsets.push(offset)
-        cursor = offset + size
-        i = i + 1
-    SmfLayoutResult(ok: true, offsets: offsets, total_size: cursor - base_addr)
+    SmfLayoutResult(ok: true, offsets: packed.offsets, total_size: packed.total_size)

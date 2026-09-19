@@ -25,6 +25,7 @@ use compiler.backend.linker.elf_writer.{
     ELF64_PHDR_SIZE
 }
 use compiler.backend.linker.elf_inspect.{ELF64_HEADER_SIZE, ELF64_SHDR_SIZE}
+use std.common.placement.{placement_align_within, placement_page_congruent}
 
 # ============================================================================
 # Constants
@@ -106,8 +107,12 @@ fn elf_exec_find(plan: ElfExecPlan, name: text) -> i64:
     -1
 
 fn elf_exec_page_align(prev_vend: i64, offset: i64, page: i64) -> i64:
-    """First vaddr >= next page after prev_vend that is congruent to offset mod page."""
-    align_up(prev_vend, page) + (offset % page)
+    """First vaddr >= next page after prev_vend that is congruent to offset
+    mod page. Alias of the shared `placement_page_congruent`
+    (src/lib/common/placement.spl) — the rule is ELF-specific in that PE
+    does not need it, but the arithmetic is not, so a PE writer opts out by
+    not calling it rather than by owning a second copy."""
+    placement_page_congruent(prev_vend, offset, page)
 
 fn elf_exec_seg_flags(seg: i64) -> i64:
     if seg == ELF_SEG_RX:
@@ -129,7 +134,12 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     var prev_seg: i64 = 0
     var seen_nobits = false
     for s in secs:
-        if s.align > page:
+        # Same rule, same predicate, as the loader's segment mapper
+        # (src/compiler/99.loader/segment_mapper.spl): a section aligned more
+        # strongly than the consumer's guaranteed alignment is refused rather
+        # than emitted under-aligned. `placement_align_within` is the one
+        # spelling — see src/lib/common/placement.spl.
+        if not placement_align_within(s.align, page):
             return Err("section {s.name} alignment {s.align} exceeds page size {page}")
         if s.seg < prev_seg:
             return Err("section {s.name} is out of segment order")

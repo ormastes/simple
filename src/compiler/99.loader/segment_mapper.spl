@@ -48,6 +48,7 @@ use .smf_mmap_native.{
 use app.startup.load_plan_receipt.{
     LoadPlanV1, LoadReceiptV1, load_plan_seal, load_receipt_record
 }
+use std.common.placement.{placement_align_within}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.common.structural.parallel_commit.executable_mapping_receipt.{
     ExecutableMappingProducerKindV1,
@@ -167,7 +168,15 @@ impl SegmentMapper:
         val size = bytes.len() as i64
         if size <= 0:
             return Err("Cannot map empty segment {section_index} for {owner_id}")
-        if alignment > SEGMENT_MAX_ALIGNMENT:
+        # Same rule, same predicate, as the ELF exec planner
+        # (src/compiler/70.backend/linker/elf/elf_exec_writer.spl): refuse a
+        # section aligned more strongly than this consumer can guarantee,
+        # rather than map it under-aligned. `placement_align_within` is the
+        # one spelling — src/lib/common/placement.spl. This is the live
+        # divergence with the SMF layout pass, which happily lays out an
+        # 8192-aligned section that this mapper then cannot map; see
+        # test/01_unit/compiler/linker/placement_shared_oracle_spec.spl.
+        if not placement_align_within(alignment, SEGMENT_MAX_ALIGNMENT):
             return Err("Segment {section_index} alignment {alignment} exceeds page alignment {SEGMENT_MAX_ALIGNMENT}")
 
         val key = segment_key(owner_id, section_index)

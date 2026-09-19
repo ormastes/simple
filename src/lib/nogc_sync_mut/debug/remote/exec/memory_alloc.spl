@@ -6,6 +6,7 @@
 # Feature ID: #RJE-002
 
 use std.nogc_sync_mut.debug.remote.exec.types.{MemoryMap}
+use std.common.placement.{placement_align_up}
 
 class TargetMemoryAllocator:
     """Bump allocator for target code memory."""
@@ -19,7 +20,17 @@ class TargetMemoryAllocator:
     me allocate(size: i64, align: i64) -> Result<i64, text>:
         """Allocate `size` bytes with `align` alignment. Returns start address."""
         val current = self.map.code_start + self.offset
-        val aligned = align_up(current, align)
+        # Placement arithmetic is the ONE shared oracle
+        # (src/lib/common/placement.spl). The local mask copy that used to
+        # live at the foot of this file was WRONG for a non-power-of-two
+        # alignment, and the defect was MISALIGNMENT, not overlap:
+        # the mask formula `(v + (a-1)) & ~(a-1)` returns a value
+        # that is always >= its input -- it never overlapped anything -- but
+        # that is NOT a multiple of `align` unless `align` is a power of two.
+        # align_up(10, 6) gave 10: correctly forward, wrongly MISALIGNED.
+        # The only live caller passes 4, so nothing shipped was misaligned;
+        # the copy was a latent trap, removed rather than left loaded.
+        val aligned = placement_align_up(current, align)
         val end = aligned + size
         if end > self.map.code_end:
             return Err("memory exhausted: need {size} bytes, {self.remaining()} available")
@@ -44,9 +55,3 @@ class TargetMemoryAllocator:
 class CodeAllocation:
     addr: i64
     size: i64
-
-fn align_up(value: i64, align: i64) -> i64:
-    if align <= 1:
-        return value
-    val mask = align - 1
-    (value + mask) & (~mask)

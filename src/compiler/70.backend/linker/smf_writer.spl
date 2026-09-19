@@ -9,6 +9,7 @@ use compiler.hir.hir_types.{Effect}
 use compiler.backend.linker.smf_header.{SmfHeader, SMF_FLAG_ASPECT_PACK}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
+use std.common.placement.{placement_align_up}
 
 # ============================================================================
 # Constants
@@ -389,14 +390,20 @@ impl SmfWriter:
         while soi < self.sections.len():
             val section = self.sections[soi]
             val align = if section.alignment > 0: section.alignment else: 1
-            cursor = smf_align_up(cursor, align)
+            # This loop is where SMF section file offsets are PRODUCED (the
+            # loader's smf_segment_load.spl only reads them back). It is the
+            # fourth aligned prefix-sum in the tree and it now rounds with the
+            # one shared oracle, src/lib/common/placement.spl -- the private
+            # smf_align_up that used to sit at the foot of this file was a
+            # seventh copy of the ELF formula and is deleted.
+            cursor = placement_align_up(cursor, align)
             section_offsets.push(cursor)
             cursor = cursor + section.data.len()
             soi = soi + 1
 
         var reloc_offset: i64 = 0
         if has_reloc_section:
-            cursor = smf_align_up(cursor, 8)
+            cursor = placement_align_up(cursor, 8)
             reloc_offset = cursor
             cursor = cursor + reloc_bytes.len()
 
@@ -635,14 +642,6 @@ fn u64_to_bytes_u8(value: i64) -> [u8]:
 # ============================================================================
 # write() helpers
 # ============================================================================
-
-"""Round `offset` up to the next multiple of `align` (align <= 1 is a no-op)."""
-fn smf_align_up(offset: i64, align: i64) -> i64:
-    if align <= 1:
-        offset
-    else:
-        val rem = offset % align
-        if rem == 0: offset else: offset + (align - rem)
 
 """FNV-1a hash, matching Rust's `hash_name` (common/src/smf/symbol.rs) and
 the pure-Simple equivalent `smf_name_hash` (compiler.driver.smf_writer)."""
