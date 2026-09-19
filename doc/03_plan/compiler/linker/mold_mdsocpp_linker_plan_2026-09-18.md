@@ -414,3 +414,7 @@ name) still needs a field on that struct, which is lane A7's file. Keying the
 *dedup* on SONAME is independent of that.
 
 `native_linking_internal_spec` 20/21 → 21/21, both trees byte-identical.
+
+All 27 linker specs re-run individually at `cc758db2ea5` (the round-3 SONAME
+dedup): 27/27 `outcome=OK`, 0 failed. The only later commit, `d2a5ba6fc98`, is
+comment-only.
