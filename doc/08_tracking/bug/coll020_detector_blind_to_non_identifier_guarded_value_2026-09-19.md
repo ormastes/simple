@@ -86,3 +86,29 @@ Not attempted in the round that found it. The Certain door had just closed 21
 measured wrong rewrites across four rounds, and widening WHAT IT SEES is a
 separate change class from proving what it may rewrite. A correct warning with
 no fix is a fine outcome; a wrong rewrite is not.
+
+## A second, related blindness in the same family
+
+`if not allowed.contains(x):` — the plain FILTER form, with no push onto
+`allowed` — also produces no COLL002. Verified with the real CLI on a
+two-array fixture: `Lint passed: all files clean`. The cause is visible in the
+source: the if-condition path tests `is_contains_call(cond)`, and under `not`
+the condition node is a unary expression, not the method call. The positive
+form `if arr.contains(t):` is detected (two sites, `amb.spl:6:12` and `8:12`,
+each carrying its own Certain fix), so this is specifically the negated one.
+
+Both blindnesses live in the same place — the rule asks whether ONE node has
+the shape it expects, instead of looking for the `contains` call anywhere in
+the condition — and a fix for one should cover the other.
+
+## Two precision notes on the measurement above
+
+- The "26 of 68" figure is a **classification by argument text** over the site
+  list, not 26 separate CLI runs. Two were confirmed against the real CLI: the
+  original `src/compiler/90.tools/depgraph/analyzer.spl` (6 warnings, none
+  COLL) and its two-function reduction.
+- **Why COLL002 is also silent on the field-access form is not established
+  here.** COLL002 has its own `.contains()`-in-loop path that does not depend
+  on the push, so a handoff or suppression between the two rules is the
+  likely cause, but it was not traced. Whoever fixes COLL020's matcher must
+  re-check that interaction rather than assume one change covers both.
