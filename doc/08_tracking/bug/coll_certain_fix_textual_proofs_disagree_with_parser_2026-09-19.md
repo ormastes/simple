@@ -412,3 +412,13 @@ All four now refuse; the controls still fix. Covered by
 `collection_certain_fix_safety_spec` e1, e2 and e3 (`val n = seen.len()` binds
 a FRESH value and stays fixable, so the rule is about the array itself and not
 about every binding).
+
+**One correction to the first cut of that rule.** It applied the escape test
+to every BINDING form, including `for`. A `for` statement's expression is the
+ITERABLE and its binding is the ELEMENT, so `for imp in crate_imports:` reads
+the array and hands nothing to anyone; treating it as an escape refused two
+real sites (`src/compiler/90.tools/sffi_gen/rust_codegen.spl` and one of the
+three in `src/app/sspec_maintain/source_facts.spl`) for a hazard that is not
+there. Caught by re-measuring the corpus rather than by any spec, which is
+why e4 now pins it: the rule applies to `val`/`var`/`lazy val`/`bind`
+declarations only.
