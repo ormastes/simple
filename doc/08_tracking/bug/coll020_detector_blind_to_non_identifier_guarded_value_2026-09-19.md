@@ -189,3 +189,41 @@ not part of the idiom.
 envelope was not widened with the detector: `coll020_proof` refuses any
 guarded value that is not a plain identifier, so every newly-seen site warns
 with no fix.
+
+### Round 5 — nested blocks, and the number is now auditable
+
+The attribution above ("the multi-statement guard-body limit is the only
+remaining detector gap") was **wrong**. An adversarial review found every
+remaining silent site was nested under an `if` or `case` INSIDE the loop, and
+that a top-level multi-statement body reports fine. `check_loop_body` only
+examined the loop body's top level, and `check_fn_body` descends into blocks
+hunting for LOOPS, not for in-loop patterns — so such a guard was checked by
+neither. It now descends generically, skipping loops (reached in their own
+right, so descending would double-report).
+
+| | of the 54 in-loop sites |
+|---|---|
+| before any widening | 18 |
+| + structural value, negated filter | 37 |
+| + method bodies | 40 |
+| + nested blocks | **47** |
+
+**47 of 47 — every in-loop site `bin/simple lint` can reach is diagnosed.**
+The remaining 7 are in files the linter aborts on before any rule runs, which
+is the front-end defect filed separately, not a rule gap.
+
+**The numbers are now reproducible.** `scripts/check/scan-dedup-sites.shs`
+generates the site list, and the 52-file sample used above is committed as
+`coll_dedup_sites_52file_sample_2026-09-19.txt`. Over the whole tree the
+script finds **213 sites, 157 of them in a loop**; the 68/54 quoted above and
+a reviewer's independent 105/78 were both subsets differing by scan scope.
+Coverage has NOT been re-measured at tree scale — linting every file holding
+one of the 157 takes hours on this host — so the 47/47 figure is the 52-file
+sample, and a tree-wide re-measure is named here as remaining work rather
+than extrapolated.
+
+Fix coverage is **10 of 68 on that sample and unchanged by all four
+widenings**, except as corrected below: the method walk DID widen the
+envelope (a method-local `var seen` is now fixed), which round 4 wrongly
+claimed it had not. Those rewrites are output-identical, and the case is now
+pinned deliberately by `collection_certain_fix_safety_spec` m1/m2/m3.
