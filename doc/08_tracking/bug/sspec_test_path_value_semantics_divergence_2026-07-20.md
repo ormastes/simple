@@ -134,6 +134,21 @@ per their `describe`/file naming) — i.e. these assert previously-working
 behavior and are currently red under `bin/simple test`, the project's default
 test-running path.
 
+## Addendum 2026-09-19 — twin spec on shard3 (Windows suite-fix lane)
+
+`test/system/features/memory_system_spec.spl` (wave-6 twin carrying the same
+pins verbatim) reproduces Symptom 1 on the current shared seed
+(`/c/Users/ormas/dev/simple/bin/simple.exe`, interpreter test mode,
+branch `suite-2026-09-18`): `slow_it "workflow 2 - error handling"`
+(`verify(error.? == true)`) and `it "error 5 - missing key"`
+(`verify(dict.get("b").? == false)`) fail with `expected false to equal true`,
+while `it "integration 5 - error propagation"` (`verify(error.?)`) passes —
+same mixed picture as the canonical spec, still run-correct (run-mode probe:
+`dict.get("b")` is nil; nil-then-string `var` + `.?` recovers presence).
+Note the merge at e274cd33719 had rewritten these two sites from
+`verify(error != nil)` / `verify(dict.get("b") == nil)` into the `.?` forms;
+both forms are covered by this ledger, so no spec edit was made.
+
 ## 2026-09-19 — twin spec `test/system/features/ffi_system_spec.spl` carries the same two red examples
 
 Verified during shard3 suite-fix triage (seed interpreter,
