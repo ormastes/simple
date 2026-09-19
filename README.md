@@ -1001,8 +1001,7 @@ simple/
 │   └── 07_guide/             # User and contributor guides
 │
 ├── .scv/quarantine/          # Ignored local SCV/JIT/root artifacts
-├── build/                    # Ignored build output and bootstrap artifacts
-└── scratchpad/               # Mutable developer probes, not quarantine
+└── build/                    # Ignored output, bootstrap artifacts, and scratchpad probes
 ```
 
 ### Incremental Compile and Interpreter Boundaries

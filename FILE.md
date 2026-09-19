@@ -49,11 +49,9 @@ FILE.md files) are allowed.
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
 | `.claude-plugin` | Claude Code plugin manifest |
-| `build` | Build output (mutable, includes target/ and bootstrap/) |
+| `build` | Build output and mutable developer probes (`build/scratchpad/`), including target/ and bootstrap/ |
 | `.build` | Mutable local build cache and dashboard state |
 | `tmp` | Temporary files (mutable) |
-| `scratchpad` | Mutable developer probe sources; not a quarantine location |
-| `docs` | Generated spec samples (INDEX/README/test-spec); distinct from `doc/` |
 | `assets` | Fonts and other binary assets consumed by tests and packaging |
 | `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
 | `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
