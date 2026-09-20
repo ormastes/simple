@@ -50,6 +50,33 @@ env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_PACKAGE_INDEX_COLD_INIT=
   --mode dynload -o /tmp/p build/<dir>/main.spl
 ```
 
+## Update 2026-09-20 12:05 — the sort is NON-DETERMINISTIC
+
+Bug 2 is fixed (PR #1144) and Stage 2 was rebuilt with the fix. Bug 1 survives
+unchanged, so the two are independent.
+
+The decisive measurement: two Stage 3 cold-init runs over the **same** tree
+produced **different** inventory files — same 6,314,157 bytes and same 16,796
+rows, but different content, with **1,881** out-of-order adjacent pairs in the
+first run and **1,897** in the second. A deterministic-but-wrong sort would have
+produced the same file twice and matched on read-back. It does not.
+
+That is why the read-back fails: `encode(decode(file))` sorts a second time and
+reaches a different order than the file holds.
+
+Likely cause, from the same investigation:
+`stage2_compiled_program_returned_array_len_zero_2026-09-20.md` records that in
+Stage-2-compiled programs a struct's `text` field read out of an array prints a
+POINTER rather than the text. If `sorted[cursor - 1].source_identity` yields a
+pointer-like value, `<` compares addresses, and the result depends on where the
+allocator happened to place each string — non-deterministic between runs, and
+partially ordered within one.
+
+The narrow test to write first: build an array of structs holding text, sort it
+with `compile_source_inventory_sort_v1`'s exact shape, print each
+`entry.source_identity` and the comparison results, and check that reading the
+field out of the array yields text, not an address.
+
 ## Next steps
 - Fix bug 2 with this fixture as the red test, then check whether the same array-of-struct store/alias defect explains bug 1.
 - Re-run the FreeBSD Stage 3 resume: `sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=… --bootstrap-receipt=…` with the checker's env plus `SIMPLE_SCV_INVENTORY_COLD_INIT=1`.
