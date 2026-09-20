@@ -1278,3 +1278,35 @@ Out of lane: verification needs "one future canonical build" (a full Stage 3
 bootstrap run to measure RSS), which this lane does not run (no bootstrap per
 the fan-out brief). No change made.
 
+
+## Triage 2026-09-20 (Windows worktree, diagnosis-only, no reproduction attempted)
+
+Read in full before touching anything, per this record's own repeated warning
+that a kill without a monotonic HIR-phase RSS trace is not a repro. Per the
+task brief for this session, no attempt was made to reproduce the ~24.8 GB
+signal-15 termination directly — that is explicitly out of scope for this
+host/session (do not brute-force a 25 GB run), and matches the "Triage
+2026-09-13 (BUGFIX-7 lane)" entry immediately above this one, which reached
+the same conclusion for the same reason.
+
+No new measurement was taken, so nothing here promotes any of section 7 /
+section 10's candidates. Restating the state as of section 10 for the next session that *can*
+run an instrumented Stage 3, since it is the most actionable pointer in the
+record: the leading candidate is the untyped word-scan in
+`rt_transient_heap_promote` (`src/runtime/runtime_native.c:2131-2162`), which
+clears the owned bit on every node transitively reachable from a promoted HIR
+module (by scanning every 8-byte word of each block, not by following typed
+fields) -- a conservative retention path with no stated bound. Section 10's
+"cheapest next test" is unchanged and still unrun: report, per source,
+(a) blocks/bytes registered while the transient scope is paused, (b)
+blocks/bytes un-owned by promotion, and (c) blocks/bytes actually freed by
+`rt_core_reclaim_transient_raw`, alongside the existing `hir-promotion` /
+`hir-promotion-total` snapshot rows already present in
+`rt_core_transient_raw_register_state`, `rt_transient_heap_promote`, and
+`rt_core_reclaim_transient_raw`. That is a counter-only change (no
+representation or behaviour change) and would settle attribution across all
+four still-open candidates in one transaction. Not implemented in this lane:
+it requires driving a real Stage 2 + canonical Stage 3 to the HIR phase, which
+this record documents (section 11) as taking ~40 min (63-source closure) to ~12 h
+(775-source closure) on comparable hardware, and this session had neither a
+Stage 2 artifact nor the time budget for that.
