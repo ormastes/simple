@@ -1382,7 +1382,82 @@ pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i
     }
 }
 
-#[cfg(not(unix))]
+/// Windows twin of the unix `rt_mmap`: same bounds and capability contract,
+/// CreateFileMappingW + MapViewOfFile instead of mmap(2). The view keeps the
+/// file and section alive, so both handles are closed before returning.
+/// Released by `rt_munmap` (UnmapViewOfFile). The CACHING op is a no-op on
+/// Windows at the SOSIX facade and never reaches this symbol.
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i64 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, PAGE_READONLY, PAGE_READWRITE,
+        UnmapViewOfFile,
+    };
+
+    let Some(path) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || offset < 0 {
+        return 0;
+    }
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID)
+        || (readonly == 0 && !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID))
+    {
+        return 0;
+    }
+    let Ok(size) = usize::try_from(size) else {
+        return 0;
+    };
+    let Some(end) = (offset as u64).checked_add(size as u64) else {
+        return 0;
+    };
+    let file = if readonly != 0 {
+        File::open(path)
+    } else {
+        OpenOptions::new().read(true).write(true).open(path)
+    };
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.metadata().map_or(true, |metadata| metadata.len() < end) {
+        return 0;
+    }
+    let (protect, access) = if readonly != 0 {
+        (PAGE_READONLY, FILE_MAP_READ)
+    } else {
+        (PAGE_READWRITE, FILE_MAP_WRITE)
+    };
+    let address = unsafe {
+        let mapping = CreateFileMappingW(file.as_raw_handle() as HANDLE, std::ptr::null(), protect, 0, 0, std::ptr::null());
+        if mapping.is_null() {
+            return 0;
+        }
+        let view = MapViewOfFile(
+            mapping,
+            access,
+            ((offset as u64) >> 32) as u32,
+            ((offset as u64) & 0xFFFF_FFFF) as u32,
+            size,
+        );
+        CloseHandle(mapping);
+        view.Value
+    };
+    if address.is_null() {
+        0
+    } else if (address as usize) > i64::MAX as usize {
+        unsafe {
+            UnmapViewOfFile(windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: address })
+        };
+        0
+    } else {
+        address as usize as i64
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) -> i64 {
     0
@@ -1397,7 +1472,18 @@ pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::munmap(addr as usize as *mut libc::c_void, size) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
+    use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+    addr > 0
+        && size > 0
+        && unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: addr as usize as *mut std::ffi::c_void }) != 0
+        }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_munmap(_addr: i64, _size: i64) -> bool {
     false
@@ -1420,7 +1506,15 @@ pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::madvise(addr as usize as *mut libc::c_void, size, advice) == 0 }
 }
 
-#[cfg(not(unix))]
+/// Windows has no madvise; mirror the C twin: validate the arguments and the
+/// advice code, report success for a known code (advice is a hint everywhere).
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
+    addr > 0 && size > 0 && (0..=4).contains(&advice)
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_madvise(_addr: i64, _size: i64, _advice: i64) -> bool {
     false
@@ -1435,7 +1529,17 @@ pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::msync(addr as usize as *mut libc::c_void, size, libc::MS_SYNC) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
+    use windows_sys::Win32::System::Memory::FlushViewOfFile;
+    let Ok(size) = usize::try_from(size) else {
+        return false;
+    };
+    addr > 0 && size > 0 && unsafe { FlushViewOfFile(addr as usize as *const std::ffi::c_void, size) != 0 }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_msync(_addr: i64, _size: i64) -> bool {
     false
