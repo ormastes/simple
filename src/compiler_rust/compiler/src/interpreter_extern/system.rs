@@ -12,7 +12,7 @@ use std::process::Child;
 /// safely manufacture or project. Keep every registered entry fail-closed.
 pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::Runtime(
-        "OwnedProcessV3 requires the native runtime".to_string(),
+        "OwnedProcessV3 opaque adapter is unavailable in the interpreter; it requires the native runtime provider".to_string(),
     ))
 }
 

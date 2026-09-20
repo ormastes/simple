@@ -6,27 +6,48 @@ use std.spec.step
 
 extern fn rt_file_read_text(path: text) -> text
 
-describe "record_external_layout_reference nil-info guard":
-    # @manual scenario evidence
-    it "guards the unwrapped symbol info before reading any field":
-        # @req REQ-SSPEC-COMPILER
-        step("guards the unwrapped symbol info before reading any field")
-        # A Stage-2 native binary SEGVs (EXC_BAD_ACCESS code=1 address=0x48) in
-        # this method for EVERY program that declares a class with a method,
-        # because `Option<SymbolInfo>`'s nil case does not survive the staged
-        # native ABI: `symbol_info.?` reads PRESENT and `unwrap()` yields nil.
-        # The sibling `mir_struct_symbol_name` in the same file already applies
-        # this guard; pin that this call site keeps it too.
-        val module_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+fn record_external_layout_reference_body(module_source: text) -> text:
+    val start = module_source.index_of("me record_external_layout_reference(symbol: SymbolId):")
+    if start < 0:
+        return ""
+    val rest = module_source[start:module_source.len()]
+    val next_method = rest.index_of("\n    me attach_external_layout_traces(")
+    if next_method < 0:
+        return ""
+    # Code lines only: the method's comment block names the old
+    # `symbol_info.unwrap()` / `info.defining_module` shapes on purpose.
+    var code: [text] = []
+    for line in rest[0:next_method].split("\n"):
+        if not line.trim().starts_with("#"):
+            code.push(line)
+    code.join("\n")
 
-        expect(module_source).to_contain("me record_external_layout_reference(symbol: SymbolId):")
-        expect(module_source).to_contain("val info = symbol_info.unwrap()")
-        expect(module_source).to_contain("if info == nil:")
-        expect(module_source).to_contain("does not survive the staged native")
-        # The guard must precede the first field read of `info`.
-        val guard_at = module_source.index_of("if info == nil:")
-        val first_field_read_at = module_source.index_of("mir_layout_canonical_module_name(info.defining_module")
-        expect(guard_at > 0).to_equal(true)  # oracle: true — the guard exists
-        expect(first_field_read_at > guard_at).to_equal(true)  # oracle: true — guard precedes the field read
-        # The sibling site that already documented the hazard must keep its guard.
+describe "record_external_layout_reference symbol lookup":
+    # @manual scenario evidence
+    it "reads the symbol through scalar readers, never through an unwrapped HirSymbol?":
+        # @req REQ-SSPEC-COMPILER
+        step("reads the symbol through scalar readers, never through an unwrapped HirSymbol?")
+        # A Stage-2 native compiler SEGVs (fault address 0x48) in this method
+        # for every program with a struct-typed local. Disassembly of the
+        # 2026-09-20 aarch64 Linux Stage 2 shows `symbol_info.unwrap()` bound
+        # to `Poll.unwrap`, which returns 0: `info` was a NULL pointer, so the
+        # previous `if info == nil: return` guard (nil is sentinel 3) could
+        # never fire. The fix keeps the struct-valued Dict access inside
+        # SymbolTable via its scalar readers. Pin that the method does not go
+        # back to transporting `HirSymbol?` or calling `.unwrap()`.
+        val module_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        val body = record_external_layout_reference_body(module_source)
+
+        expect(body.len() > 0).to_equal(true)  # oracle: true — the method body was located
+        expect(body).to_contain("self.symbols.symbol_name_scalar_raw(symbol.id)")
+        expect(body).to_contain("self.symbols.symbol_defining_module_scalar_raw(symbol.id)")
+        expect(body.contains("get_symbol_raw(")).to_equal(false)  # oracle: false — no HirSymbol? transport
+        expect(body.contains(".unwrap()")).to_equal(false)  # oracle: false — no unwrap to be misbound
+        expect(body.contains("info.")).to_equal(false)  # oracle: false — no struct field read off an unwrapped value
+        # The absent-symbol guard must precede every use of the name.
+        val guard_at = body.index_of("if info_name == \"\":")
+        val first_use_at = body.index_of("var owner = mir_layout_canonical_module_name(")
+        expect(guard_at > 0).to_equal(true)  # oracle: true — the absent-symbol guard exists
+        expect(first_use_at > guard_at).to_equal(true)  # oracle: true — guard precedes the first use
+        # The sibling site that already documented the hazard keeps its guard.
         expect(module_source).to_contain("if info != nil and info.name != \"\": return info.name")

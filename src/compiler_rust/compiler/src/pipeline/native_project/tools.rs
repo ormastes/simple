@@ -374,7 +374,6 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
-        "runtime_file_view.c",
         // Groups F/G/I-rest/J of stage2_windows_unresolved_inventory_2026-08-31:
         // the 12 io/system externs (rt_stdin_read{,_all}, rt_term_{write,flush},
         // rt_file_modified{,_time}, rt_list_dir_recursive, rt_path_normalize,
@@ -1512,6 +1511,11 @@ pub(super) fn validate_stage4_cli_c_provider_archive_contract(path: &Path, sourc
 
 fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<String, String>, String> {
     let mut owners = BTreeMap::<String, String>::new();
+    // Core-C fallbacks are weak by design (runtime_native.c SPL_CORE_C_WEAK:
+    // "Full hosted builds provide stronger implementations"), so a strong
+    // provider definition overrides them at link time. Only that pairing is
+    // admitted; any other overlap stays fatal.
+    let mut weak_core = BTreeSet::<String>::new();
     for (label, archive) in archives {
         // Providers must arrive constructor-free (validate_stage4_cli_c_provider_archive
         // enforces the same on each one). The CORE is different: it is the whole C
@@ -1535,15 +1539,23 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         if defined.is_empty() {
             return Err(format!("Stage4 archive {label} defines no global symbols"));
         }
+        let weak = archive_weak_global_symbols(archive)?;
         for (raw_symbol, count) in defined {
             let symbol = canonical_archive_symbol(&raw_symbol).to_string();
             if count != 1 {
                 return Err(format!("Stage4 archive {label} defines `{symbol}` {count} times"));
             }
+            let is_weak = weak.contains(&raw_symbol);
             if let Some(first_owner) = owners.insert(symbol.clone(), (*label).to_string()) {
+                if !is_weak && weak_core.remove(&symbol) {
+                    continue;
+                }
                 return Err(format!(
                     "Stage4 archive overlap: `{symbol}` is defined by both {first_owner} and {label}"
                 ));
+            }
+            if *label == "core" && is_weak {
+                weak_core.insert(symbol);
             }
         }
     }
@@ -2227,15 +2239,11 @@ fn project_stage4_archive_closure(
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(
-            &localize_path,
-            if localize_text.is_empty() {
-                String::new()
-            } else {
-                localize_text + "\n"
-            },
-        )
-        .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
+        // Always newline-terminated: GNU objcopy 2.42 exits 1 with no message
+        // on a zero-byte --localize-symbols/--weaken-symbols file, while a
+        // lone "\n" is an empty list to both GNU and LLVM objcopy.
+        std::fs::write(&localize_path, localize_text + "\n")
+            .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
         // Allowed-external symbols that are kept global (above) must yield to
         // the owner at the final link, i.e. be WEAK, not strong. The core-C
@@ -2258,15 +2266,8 @@ fn project_stage4_archive_closure(
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(
-            &weaken_path,
-            if weaken_text.is_empty() {
-                String::new()
-            } else {
-                weaken_text + "\n"
-            },
-        )
-        .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
+        std::fs::write(&weaken_path, weaken_text + "\n")
+            .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
         let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
         let localized = std::process::Command::new(&objcopy)
@@ -2290,7 +2291,8 @@ fn project_stage4_archive_closure(
             .map_err(|err| format!("failed to execute Stage4 runtime capsule objcopy: {err}"))?;
         if !localized.status.success() {
             return Err(format!(
-                "Stage4 runtime capsule objcopy failed: {}",
+                "Stage4 runtime capsule objcopy failed ({}): {}",
+                localized.status,
                 String::from_utf8_lossy(&localized.stderr).trim()
             ));
         }
