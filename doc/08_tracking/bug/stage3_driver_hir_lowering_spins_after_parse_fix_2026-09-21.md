@@ -1,4 +1,4 @@
-# Stage 3 spins in driver HIR lowering once the parse phase passes
+# Stage 3 makes no observable progress in driver HIR lowering once the parse phase passes
 
 - **Status:** OPEN
 - **Found:** 2026-09-21, aarch64-unknown-linux-gnu, `origin/main` 63fdcd9ea57
@@ -21,7 +21,7 @@ lowering the first module:
 
 That is the last line written to `stage3-native-build.log`.
 
-## Why this is a spin, not slow progress
+## What was measured (and what it does NOT establish)
 
 Sampled every 2 minutes over 8 minutes, 62+ minutes after the last log write:
 
@@ -33,13 +33,25 @@ Sampled every 2 minutes over 8 minutes, 62+ minutes after the last log write:
 | 06:18:11 | 43600224 | 01:26:18 | 737606 |
 
 CPU time advances exactly 2:00 per 2:00 of wall clock — the process is `R` at
-99.9% and genuinely burning a core. RSS is identical **to the byte** across the
-whole window, and the log does not grow. Forward progress through 840 remaining
-modules would allocate and would log; neither happens. `/proc/<pid>/io` shows
-`read_bytes: 0`.
+99.9% and genuinely burning a core. Across that window RSS is identical **to the
+byte** and the log does not grow.
 
-Before this window RSS climbed steadily (33.7 GB at 03:57 -> 36.4 GB -> 43.6 GB),
-so the flat line is a state change, not a measurement artifact.
+**This is NOT proof of a non-terminating spin, and an earlier draft of this
+record overstated it.** When the process was killed at 06:37 (1h45m CPU) its RSS
+had **dropped to 38,262,216 KB** — 5.3 GB below the flat value. A process stuck
+in a tight loop does not release 5 GB. The drop is more consistent with a
+collection or a phase boundary inside a stretch of work that happens to emit no
+log lines.
+
+What is established: **no forward progress was observable for 60+ minutes** — the
+module counter stayed at `done=1`, the log did not grow, and a full core was
+consumed throughout. What is NOT established: that the phase would never
+terminate. It was killed, not observed to fail.
+
+Discriminator for whoever picks this up: the FreeBSD QEMU lane on fixed `main`
+reaches the same phase. If it also stalls there, the claim is two-host and much
+stronger; if it completes, this was a very slow phase and the bug is a
+performance/observability one, not a hang.
 
 ## Not caused by the parse fix
 
@@ -75,3 +87,6 @@ about 18 minutes and does not leave it.
   in-guest repro needs far more than that.
 - `signal=none` on the earlier parse failure and a live `R` state here both rule
   out the OOM killer.
+- The phase emits no progress line between `phase3:hir:imports:start` and the
+  next module, so "no log growth" cannot by itself distinguish slow from stuck.
+  That observability gap is worth closing independently of the root cause.
