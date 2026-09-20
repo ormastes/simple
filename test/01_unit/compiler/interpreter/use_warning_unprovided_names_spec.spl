@@ -1,0 +1,227 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# [use-warning] oracle: braced `use` names are checked against the module's real surface
+
+Bug: doc/08_tracking/bug/spec_imports_declared_nowhere_2026-08-04.md (§5.2 sabotage
+proof: corrupting a braced import name — used or unused — changed no verdict).
+Mechanism record: doc/08_tracking/bug/use_list_names_never_checked_2026-08-04.md —
+the seed (Rust) loader gained the `[use-warning]` oracle in 98e468602fd, but the
+canonical pure-Simple loader
+(src/compiler/10.frontend/core/interpreter/module_loader_core.spl) never got
+parity; its follow-up 2 is this lane.
+
+Behavior pinned here (pure-Simple parity of the seed oracle,
+`warn_unprovided_use_names` in
+src/compiler_rust/compiler/src/interpreter_module/module_loader.rs):
+
+- `record_module_surface` captures a freshly loaded module's provided names
+  (fns, extern fns, structs, classes, vals, vars, lazy vals, type aliases, cli
+  blocks, enums + variants + in-body members, impl-block methods, and explicit
+  re-export lists with `name:alias` items) keyed by resolved path.
+- `warn_unprovided_use_names` emits, per braced `use` name the module does not
+  provide, exactly one `[use-warning]` on fd 2 and into `eval_warnings`,
+  deduped per (module path, name, importer). Message wording matches the seed
+  oracle verbatim.
+- Modules whose surface is genuinely unknowable — glob re-exports
+  (`export use m.*`, `export *`, `export m.*`) and bare `export use {A, B}`
+  (parsed as a use-decl with an empty module path) — are recorded opaque and
+  skipped, never guessed at. Unrecorded surfaces fail open the same way.
+- Warning only, never fatal: the module still loads and its whole surface
+  stays registered (the record deliberately rejects making this an error — it
+  would mass-break ~294 spec files with no migration path).
+- Escape hatch parity: any non-empty SIMPLE_NO_DEPRECATED_WARNINGS silences
+  the oracle; an empty value reads as unset and re-enables it.
+- Wiring: `load_module_selective` runs the check on both the fresh-load and
+  the module-cache-hit paths.
+
+Scope note: driving a REAL module load (load_module -> self-hosted parse) from
+an interpreter-mode spec is not possible in this environment — same documented
+limitation as module_loader_lazy_spec.spl ("actually running the self-hosted
+parser/eval ... is not possible from interpreter-mode specs"). The real-load
+wiring is one `warn_unprovided_use_names` call immediately after the
+already-pinned `record_module_surface` call in `load_module`; the cache-hit
+branch is pinned end-to-end here because it needs no parse.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{env_set}
+use compiler.core.ast.{
+    ast_reset,
+    decl_enum_def,
+    decl_export_names,
+    decl_extern_fn,
+    decl_fn,
+    decl_impl_block,
+    decl_struct_def,
+    decl_use_import
+}
+use compiler.core.interpreter.module_loader_core.{
+    load_module_selective,
+    module_loader_init,
+    module_mark_loaded,
+    record_module_surface,
+    use_list_warnings_enabled,
+    warn_unprovided_use_names
+}
+use compiler.core.interpreter.eval.{eval_warnings}
+
+fn spec_current_file() -> text:
+    "test/01_unit/compiler/interpreter/use_warning_unprovided_names_spec.spl"
+
+fn spec_surface_path() -> text:
+    "spec/fixture/uw_spec_surface.spl"
+
+fn build_surface_decls() -> [i64]:
+    [
+        decl_fn("uw_spec_fn", [], [], 0, [], 0, [], 0),
+        decl_extern_fn("uw_spec_extern", [], [], 0, [], 0),
+        decl_struct_def("UwSpecStruct", [], [], [], [], 0),
+        decl_enum_def("UwSpecEnum", ["UW_SPEC_ALPHA", "UW_SPEC_BETA"], [], [], [], [], 0),
+        decl_impl_block("UwSpecStruct", [decl_fn("uw_spec_method", [], [], 0, [], 0, [], 0)], 0),
+        decl_export_names(["uw_spec_exported", "uw_spec_alias_src:uw_spec_alias_dst"], 0)
+    ]
+
+fn use_warnings_after(mark: i64) -> [text]:
+    var out: [text] = []
+    var i = mark
+    while i < eval_warnings.len():
+        if eval_warnings[i].contains("[use-warning]"):
+            out.push(eval_warnings[i])
+        i = i + 1
+    out
+
+fn count_naming(warnings: [text], name: text) -> i64:
+    var n = 0
+    for w in warnings:
+        if w.contains("'" + name + "'"):
+            n = n + 1
+    n
+
+fn check_provided_surface_stays_silent() -> text:
+    module_loader_init()
+    ast_reset()
+    record_module_surface(spec_surface_path(), build_surface_decls())
+    val mark = eval_warnings.len()
+    warn_unprovided_use_names(
+        "uw_spec_mod", spec_surface_path(),
+        [
+            "uw_spec_fn", "uw_spec_extern", "UwSpecStruct", "UwSpecEnum",
+            "UW_SPEC_ALPHA", "UW_SPEC_BETA", "uw_spec_method",
+            "uw_spec_exported", "uw_spec_alias_dst"
+        ],
+        spec_current_file()
+    )
+    val got = use_warnings_after(mark)
+    if got.len() != 0:
+        return "expected silence for the full provided surface, got " + got.len().to_text() + " warning(s): " + got[0]
+    ""
+
+fn check_absent_names_warn_once_with_seed_wording() -> text:
+    module_loader_init()
+    ast_reset()
+    record_module_surface(spec_surface_path(), build_surface_decls())
+    val mark = eval_warnings.len()
+    warn_unprovided_use_names(
+        "uw_spec_mod", spec_surface_path(),
+        ["uw_spec_fn", "uw_spec_absent_one", "uw_spec_absent_two"],
+        spec_current_file()
+    )
+    # Same (module, name, importer) again: dedupe must keep it at one.
+    warn_unprovided_use_names(
+        "uw_spec_mod", spec_surface_path(), ["uw_spec_absent_one"], spec_current_file()
+    )
+    val got = use_warnings_after(mark)
+    if count_naming(got, "uw_spec_absent_one") != 1:
+        return "absent_one warnings=" + count_naming(got, "uw_spec_absent_one").to_text() + " (want 1)"
+    if count_naming(got, "uw_spec_absent_two") != 1:
+        return "absent_two warnings=" + count_naming(got, "uw_spec_absent_two").to_text() + " (want 1)"
+    if count_naming(got, "uw_spec_fn") != 0:
+        return "provided name uw_spec_fn drew a warning (false positive)"
+    val want_msg = "[use-warning] 'uw_spec_absent_one' is named in `use uw_spec_mod.{{...}}` but module '" + spec_surface_path() + "' does not provide it (imported from " + spec_current_file() + ")"
+    if got[0] != want_msg:
+        return "message wording mismatch:\n  got:  " + got[0] + "\n  want: " + want_msg
+    ""
+
+fn check_opaque_and_unrecorded_surfaces_skip() -> text:
+    module_loader_init()
+    ast_reset()
+    # Glob re-export (`export use m.*` records a "m.*" export item).
+    record_module_surface("spec/fixture/uw_spec_glob.spl", [decl_export_names(["uw_spec_glob_src.*"], 0)])
+    # Bare `export use {A, B}`: use-decl with an empty module path.
+    record_module_surface("spec/fixture/uw_spec_bare.spl", [decl_use_import("", ["uw_spec_sibling_name"], 0)])
+    # `export *`.
+    record_module_surface("spec/fixture/uw_spec_star.spl", [decl_export_names(["*"], 0)])
+    val mark = eval_warnings.len()
+    warn_unprovided_use_names("uw_spec_glob_mod", "spec/fixture/uw_spec_glob.spl", ["uw_spec_anything_glob"], spec_current_file())
+    warn_unprovided_use_names("uw_spec_bare_mod", "spec/fixture/uw_spec_bare.spl", ["uw_spec_anything_bare"], spec_current_file())
+    warn_unprovided_use_names("uw_spec_star_mod", "spec/fixture/uw_spec_star.spl", ["uw_spec_anything_star"], spec_current_file())
+    warn_unprovided_use_names("uw_spec_unrecorded_mod", "spec/fixture/uw_spec_unrecorded.spl", ["uw_spec_anything_unrecorded"], spec_current_file())
+    val got = use_warnings_after(mark)
+    if got.len() != 0:
+        return "opaque/unrecorded surfaces must fail open, got: " + got[0]
+    ""
+
+fn check_escape_hatch() -> text:
+    if not use_list_warnings_enabled():
+        return "oracle disabled in the default test-lane environment"
+    env_set("SIMPLE_NO_DEPRECATED_WARNINGS", "1")
+    val disabled_now = not use_list_warnings_enabled()
+    module_loader_init()
+    ast_reset()
+    record_module_surface(spec_surface_path(), build_surface_decls())
+    val mark = eval_warnings.len()
+    warn_unprovided_use_names("uw_spec_mod", spec_surface_path(), ["uw_spec_absent_hatch"], spec_current_file())
+    val count = use_warnings_after(mark).len()
+    # Empty value reads as unset through env_get_opt: re-enables (documented
+    # relaxation of the seed's var_os presence semantics).
+    env_set("SIMPLE_NO_DEPRECATED_WARNINGS", "")
+    if not disabled_now:
+        return "SIMPLE_NO_DEPRECATED_WARNINGS=1 did not silence the oracle"
+    if count != 0:
+        return "warning fired while silenced: " + count.to_text()
+    if not use_list_warnings_enabled():
+        return "empty SIMPLE_NO_DEPRECATED_WARNINGS did not re-enable the oracle"
+    ""
+
+fn check_selective_cache_hit_wires_oracle() -> text:
+    module_loader_init()
+    ast_reset()
+    val mod_name = "uw_spec_cached_mod"
+    module_mark_loaded(mod_name, spec_surface_path(), [])
+    record_module_surface(spec_surface_path(), build_surface_decls())
+    val mark = eval_warnings.len()
+    val ok = load_module_selective(mod_name, ["uw_spec_fn", "uw_spec_absent_cached"], spec_current_file())
+    if ok != 1:
+        return "cache-hit selective load returned " + ok.to_text() + " (want 1; the warning must not block loading)"
+    val got = use_warnings_after(mark)
+    if count_naming(got, "uw_spec_absent_cached") != 1:
+        return "cache-hit load did not warn on the absent name: count=" + count_naming(got, "uw_spec_absent_cached").to_text()
+    if count_naming(got, "uw_spec_fn") != 0:
+        return "cache-hit load warned on the provided name (false positive)"
+    ""
+
+describe "use-warning oracle: braced use names checked against the module surface":
+    it "stays silent for every kind of name the module actually provides":
+        step("stays silent for every kind of name the module actually provides")
+        expect(check_provided_surface_stays_silent()).to_equal("")
+
+    it "warns once per absent braced name with the seed oracle's exact wording":
+        step("warns once per absent braced name with the seed oracle's exact wording")
+        expect(check_absent_names_warn_once_with_seed_wording()).to_equal("")
+
+    it "skips opaque re-export surfaces and never-recorded surfaces":
+        step("skips opaque re-export surfaces and never-recorded surfaces")
+        expect(check_opaque_and_unrecorded_surfaces_skip()).to_equal("")
+
+    it "honours SIMPLE_NO_DEPRECATED_WARNINGS as the silencing escape hatch":
+        step("honours SIMPLE_NO_DEPRECATED_WARNINGS as the silencing escape hatch")
+        expect(check_escape_hatch()).to_equal("")
+
+    it "is wired into load_module_selective's module-cache-hit path without blocking the load":
+        step("is wired into load_module_selective's module-cache-hit path without blocking the load")
+        expect(check_selective_cache_hit_wires_oracle()).to_equal("")
