@@ -185,6 +185,32 @@ link_subprojects() {
   done < "$config"
 }
 
+setup_root_manifest_hook() {
+  workspace_marker="$HOST_ROOT/FILE.md"
+  hook_setup="$HOST_ROOT/scripts/setup/setup-hooks.shs"
+  root_guard="$HOST_ROOT/scripts/hooks/pre-commit-root-guard"
+
+  if [ ! -f "$workspace_marker" ]; then
+    echo "skip_root_manifest_hook missing_workspace_marker FILE.md"
+    return 0
+  fi
+  if [ ! -f "$hook_setup" ]; then
+    echo "skip_root_manifest_hook missing_hook_setup scripts/setup/setup-hooks.shs"
+    return 0
+  fi
+  if [ ! -f "$root_guard" ]; then
+    echo "skip_root_manifest_hook missing_root_guard scripts/hooks/pre-commit-root-guard"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "would_install_root_manifest_hook .git/hooks/pre-commit"
+    return 0
+  fi
+
+  sh "$hook_setup"
+  echo "installed_root_manifest_hook .git/hooks/pre-commit"
+}
+
 link_one "skill_command"
 link_one "spipe"
 link_one "template"
@@ -192,3 +218,4 @@ link_one "project_expert"
 link_one "domain_expert"
 link_one "tool_expert"
 link_subprojects
+setup_root_manifest_hook

@@ -181,6 +181,8 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_push_constants_raw", Ret::I, "iiii"),
     ("rt_vulkan_read_buffer_bytes", Ret::V, "iii"),
     ("rt_vulkan_readback_u32_checksum", Ret::I, "viii"),
+    ("rt_vulkan_readback_u32_array", Ret::V, "iii"),
+    ("rt_vulkan_readback_u32_array_checksum", Ret::I, "iii"),
     ("rt_vulkan_copy_u32_slots", Ret::I, "vvi"),
     ("rt_vulkan_reset_fence", Ret::I, "i"),
     ("rt_vulkan_select_device", Ret::I, "i"),
@@ -476,12 +478,12 @@ mod tests {
         );
     }
 
-    /// Cross-validated against the runtime crate's exports (108 after the
-    /// raw compute-pipeline provider ABI was added on 2026-08-29); hold that
+    /// Cross-validated against the runtime crate's exports (131 after the u32
+    /// array readback exports were registered on 2026-09-19); hold that
     /// number so a silent drop is a failure.
     #[test]
-    fn family_size_is_one_hundred_eight() {
-        assert_eq!(VULKAN_FNS.len(), 120);
+    fn family_size_is_pinned() {
+        assert_eq!(VULKAN_FNS.len(), 131);
     }
 
     /// A duplicated registry row can satisfy source coverage while inflating
@@ -522,8 +524,8 @@ mod tests {
             .collect();
         assert_eq!(
             refused.len(),
-            14,
-            "expected 14 RuntimeValue entry points, got {refused:?}"
+            18,
+            "expected 18 RuntimeValue entry points, got {refused:?}"
         );
 
         for name in refused {

@@ -21,4 +21,5 @@ gate:
 ```
 
 Full guide: `sosix_runtime_library.md`.
+- File mapping (`sosix.file_map`, the only mapping path): `sosix_file_map`/`sosix_file_unmap` = ACTUAL access (POSIX `mmap`, Windows `MapViewOfFile`); `sosix_file_map_prefetch` = CACHING warm-up (POSIX `mmap`+`madvise(WILLNEED)`+`munmap`; Windows no-op `true`). Gate: `scripts/check/check-file-map-c.shs`.
 - Real files: `SosixHostedFileDriver` (`open_path`, `buffer_from`, `buffer_bytes`) + the sync leg; sync calls release their slot on return. Perf: one ring hop per op, ~38× a direct read on the seed interpreter (report in `doc/10_metrics/runtime/`).

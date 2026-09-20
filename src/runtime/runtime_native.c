@@ -10215,16 +10215,91 @@ int64_t rt_log_is_enabled(int64_t level, const uint8_t* scope_ptr, uint64_t scop
     return level <= current_level ? 1 : 0;
 }
 
+/* ---- file_ops.rs: rt_mmap ------------------------------------------------- */
+/* ACTUAL-access mapping (the SOSIX `sosix_file_map` op). Same bounds contract
+ * as the Rust owner: size > 0, offset >= 0, offset + size must not overflow
+ * and must lie inside an existing file, read-only vs read-write selected by
+ * `readonly`; 0 on any failure. POSIX maps with mmap(2); Windows with
+ * CreateFileMapping + MapViewOfFile (released by UnmapViewOfFile in
+ * rt_munmap). The CACHING op (`sosix_file_map_prefetch`) is composed in
+ * Simple from this + rt_madvise + rt_munmap on POSIX and is a no-op on
+ * Windows, so no second runtime symbol exists for it. The core-C lane has no
+ * runtime sandbox (no C file op consults one), so there is no capability gate
+ * to mirror; the Rust owner keeps its READ_FILE/WRITE_FILE gate.
+ *
+ * Strong (not SPL_CORE_C_WEAK) on purpose: every lane that links the core-C
+ * archive resolves this symbol statically from it. */
+int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+    if (size <= 0 || offset < 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
+#if defined(_WIN32)
+    DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0 ||
+        (uint64_t)file_size.QuadPart < end) {
+        CloseHandle(file);
+        return 0;
+    }
+    HANDLE mapping = CreateFileMappingA(file, NULL, readonly ? PAGE_READONLY : PAGE_READWRITE,
+                                        0, 0, NULL);
+    if (!mapping) {
+        CloseHandle(file);
+        return 0;
+    }
+    void* address = MapViewOfFile(mapping, readonly ? FILE_MAP_READ : FILE_MAP_WRITE,
+                                  (DWORD)((uint64_t)offset >> 32),
+                                  (DWORD)((uint64_t)offset & 0xFFFFFFFFu), (SIZE_T)size);
+    /* The view keeps the file and section alive; the handles can go now. */
+    CloseHandle(mapping);
+    CloseHandle(file);
+    if (!address) return 0;
+    if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
+        UnmapViewOfFile(address);
+        return 0;
+    }
+    return (int64_t)(intptr_t)address;
+#else
+    int fd = open(path, (readonly ? O_RDONLY : O_RDWR) | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
+        close(fd);
+        return 0;
+    }
+    int protection = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
+    void* address = mmap(NULL, (size_t)size, protection, MAP_SHARED, fd, (off_t)offset);
+    close(fd);
+    if (address == MAP_FAILED) return 0;
+    if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
+        munmap(address, (size_t)size);
+        return 0;
+    }
+    return (int64_t)(intptr_t)address;
+#endif
+}
+
 /* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
 
 bool rt_munmap(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
 #if defined(_WIN32)
-    /* Pairs with rt_mmap_raw above, which reserves with VirtualAlloc rather
-     * than a file mapping; MEM_RELEASE frees the whole reservation and
-     * requires a zero size. */
+    /* Pairs with rt_mmap above (a MapViewOfFile view), never with rt_mmap_raw:
+     * VirtualAlloc reservations from rt_mmap_raw are released by rt_munmap_raw
+     * (runtime_legacy_core.c), and no Simple call site unmaps one through here.
+     * UnmapViewOfFile takes the base address only. */
     (void)size;
-    return VirtualFree((void*)(intptr_t)addr, 0, MEM_RELEASE) != 0;
+    return UnmapViewOfFile((void*)(intptr_t)addr) != 0;
 #else
     return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
 #endif
@@ -10232,10 +10307,7 @@ bool rt_munmap(int64_t addr, int64_t size) {
 bool rt_msync(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
 #if defined(_WIN32)
-    /* rt_mmap_raw refuses fd != -1 on Windows, so every mapping reachable here
-     * is private anonymous memory with no file behind it to flush. Validate the
-     * arguments as the POSIX branch does and report success. */
-    return true;
+    return FlushViewOfFile((void*)(intptr_t)addr, (SIZE_T)size) != 0;
 #else
     return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
 #endif
