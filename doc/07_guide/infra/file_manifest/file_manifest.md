@@ -62,6 +62,14 @@ and contributors discover which entries are external repositories.
    `## dir/` section as well
 4. Run `sh scripts/check-workspace-root-guard.shs audit` to verify
 
+## SCV Temporary State
+
+SCV repository state belongs under the workspace's `.scv/` directory. Local
+unreviewed packs and other recoverable artifacts belong in
+`.scv/quarantine/`; do not create root-level `tmp*` directories for them.
+The root manifest intentionally does not admit `tmp5`, `tmp10`, `tmp50`,
+`tmp5b`, or `tmpdrv`.
+
 ## How to Create a New Child Manifest
 
 1. Create `<dir>/FILE.md` with `## Allowed Entries` listing the directory contents
