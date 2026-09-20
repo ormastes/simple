@@ -103,14 +103,20 @@ extern fn rt_thread_yield()
 
 class ThreadHandle:
     handle: i64  # Rust thread handle ID (opaque)
+    joined: bool  # join() consumed the handle; further joins return nil
 
     # Blocks until thread completes and returns its result value.
-    # Thread handle is consumed - cannot call join() twice.
+    # Thread handle is consumed - cannot call join() twice; a repeat call
+    # returns nil instead of re-reading the (freed or result-less) runtime
+    # handle, whose value is backend-defined (0 on the pure-std and C ABIs).
     # Optional: the spawned closure may legitimately produce no value, in
     # which case the runtime hands back nil. Declaring this non-optional made
     # that path abort under the non-optional return contract (E-SFFI-016).
     # @tag:api
-    fn join() -> i64?:
+    me fn join() -> i64?:
+        if self.joined:
+            return nil
+        self.joined = true
         rt_thread_join(self.handle)
 
     # Non-blocking check if thread has completed.
@@ -140,7 +146,7 @@ class ThreadHandle:
 # @tag:api
 fn thread_spawn(closure: () -> i64) -> ThreadHandle:
     val handle = rt_thread_spawn_isolated(closure, nil)
-    ThreadHandle(handle: handle)
+    ThreadHandle(handle: handle, joined: false)
 
 # Spawns a thread with explicit immutable worker arguments.
 # Useful for passing data without closure capture.
@@ -148,7 +154,7 @@ fn thread_spawn(closure: () -> i64) -> ThreadHandle:
 # @tag:api
 fn thread_spawn_with_args(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) -> ThreadHandle:
     val handle = rt_thread_spawn_isolated_with_args(closure, data1, data2)
-    ThreadHandle(handle: handle)
+    ThreadHandle(handle: handle, joined: false)
 
 # Scalar lifecycle facade for native owners that must retain and join a worker
 # without constructing a ThreadHandle class across a staged ABI boundary.

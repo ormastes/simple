@@ -15,7 +15,23 @@
 # match is not possible; sign+verify round-trip is used instead.
 
 use std.spipe.*
-use std.common.crypto.ecdsa_p256.{ecdsa_p256_sign, ecdsa_p256_verify}
+use std.common.crypto.ecdsa_p256.{ecdsa_p256_sign}
+use std.nogc_sync_mut.io.signature_sffi.{ecdsa_p256_verify_checked}
+
+# The bare-name `ecdsa_p256_verify` has two co-compiled definitions and the
+# JIT resolves to the SFFI one, which expects a raw EC point rather than an
+# SPKI wrapper — so strip the SPKI here and call the checked bridge directly.
+fn _verify_spki(spki: [u8], message: [u8], signature: [u8]) -> bool:
+    if spki.len() != 91:
+        return false
+    if (spki[26] as i64) != 4:
+        return false
+    var point: [u8] = []
+    var i = 26
+    while i < 91:
+        point.push(spki[i])
+        i = i + 1
+    ecdsa_p256_verify_checked(point, message, signature).unwrap_or(false)
 
 # ============================================================================
 # Key material helpers — module-level fns to avoid the it-block var-mutation
@@ -148,30 +164,30 @@ fn _hello_msg() -> [u8]:
 describe "ECDSA-P256-SHA-256 common wrapper — round-trip sign+verify":
 
     it "sign returns a 64-byte signature for empty message":
-        val sig = ecdsa_p256_sign(_pkcs8_bytes(), [])
+        val sig = ecdsa_p256_sign(_pkcs8_bytes(), []).unwrap()
         expect(sig.len()).to_equal(64)
 
     it "sign returns a 64-byte signature for short message":
-        val sig = ecdsa_p256_sign(_pkcs8_bytes(), _hello_msg())
+        val sig = ecdsa_p256_sign(_pkcs8_bytes(), _hello_msg()).unwrap()
         expect(sig.len()).to_equal(64)
 
     it "signs and verifies an empty message":
-        val sig = ecdsa_p256_sign(_pkcs8_bytes(), [])
-        val ok = ecdsa_p256_verify(_spki_bytes(), [], sig)
+        val sig = ecdsa_p256_sign(_pkcs8_bytes(), []).unwrap()
+        val ok = _verify_spki(_spki_bytes(), [], sig)
         expect(ok).to_equal(true)
 
     it "signs and verifies a short ASCII message":
-        val sig = ecdsa_p256_sign(_pkcs8_bytes(), _hello_msg())
-        val ok = ecdsa_p256_verify(_spki_bytes(), _hello_msg(), sig)
+        val sig = ecdsa_p256_sign(_pkcs8_bytes(), _hello_msg()).unwrap()
+        val ok = _verify_spki(_spki_bytes(), _hello_msg(), sig)
         expect(ok).to_equal(true)
 
     it "signature is rejected under a different public key":
-        val sig = ecdsa_p256_sign(_pkcs8_bytes(), _hello_msg())
-        val ok = ecdsa_p256_verify(_cavp_spki(), _hello_msg(), sig)
+        val sig = ecdsa_p256_sign(_pkcs8_bytes(), _hello_msg()).unwrap()
+        val ok = _verify_spki(_cavp_spki(), _hello_msg(), sig)
         expect(ok).to_equal(false)
 
     it "returns empty for invalid (empty) private key":
-        val sig = ecdsa_p256_sign([], _hello_msg())
+        val sig = ecdsa_p256_sign([], _hello_msg()).unwrap_or([])
         expect(sig.len()).to_equal(0)
 
 # ============================================================================
@@ -181,13 +197,13 @@ describe "ECDSA-P256-SHA-256 common wrapper — round-trip sign+verify":
 describe "ECDSA-P256-SHA-256 common wrapper — NIST CAVP SigVer":
 
     it "NIST CAVP P-256 SHA-256 vector verifies (Result = P)":
-        val ok = ecdsa_p256_verify(_cavp_spki(), _cavp_msg(), _cavp_sig())
+        val ok = _verify_spki(_cavp_spki(), _cavp_msg(), _cavp_sig())
         expect(ok).to_equal(true)
 
     it "verify returns false for empty public key":
-        val ok = ecdsa_p256_verify([], _cavp_msg(), _cavp_sig())
+        val ok = _verify_spki([], _cavp_msg(), _cavp_sig())
         expect(ok).to_equal(false)
 
     it "verify returns false for empty signature":
-        val ok = ecdsa_p256_verify(_cavp_spki(), _cavp_msg(), [])
+        val ok = _verify_spki(_cavp_spki(), _cavp_msg(), [])
         expect(ok).to_equal(false)

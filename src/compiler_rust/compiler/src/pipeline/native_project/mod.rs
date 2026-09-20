@@ -288,6 +288,11 @@ fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
     }
 }
 
+#[cfg(not(windows))]
+fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
+    target
+}
+
 /// CLI-provided runtime library directory override.
 /// Set before building; read by `find_native_all_library()` and `find_runtime_library()`.
 pub(crate) static RUNTIME_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
