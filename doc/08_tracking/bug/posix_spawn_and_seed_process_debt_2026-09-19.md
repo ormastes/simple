@@ -164,3 +164,19 @@ Harness convention discovered: child-binary specs resolve the binary via
 env `SIMPLE_TEST_BINARY`, then `SIMPLE_BIN` (falling back empty). Suite
 runners must export both (plus `SIMPLE_BINARY`) pointing at the binary
 under test, or the child command is malformed and output is empty.
+
+## Addendum 2026-09-20: facade shell discovery is flaky in the interpreter lane
+
+After the interpreter-lane path rewrite (0b28248caa3), RAW
+`rt_process_run("/bin/sh", ...)` works reliably in both modes, but the
+`std.io_runtime.process_run` FACADE is order-flaky in the interpreter lane:
+the first facade call in a process often returns -1 while a later call
+succeeds, and priming by calling `host_path_native` +
+`_resolve_posix_tool` first makes subsequent facade calls work. Root cause
+not yet isolated (suspect `_windows_posix_shell_path()` discovery
+via env_get("PATH")/file_exists returning the cmd.exe fallback on first
+call in the interpreted context; needs a dedicated lane).
+
+Workaround: export `SIMPLE_POSIX_SHELL=C:/dev/tool/Git/usr/bin/sh.exe`
+(explicit-override first in the discovery order) — makes the facade
+deterministic. Suite runners should set it.
