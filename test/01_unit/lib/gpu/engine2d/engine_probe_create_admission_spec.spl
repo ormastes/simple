@@ -1,0 +1,225 @@
+"""
+## Purpose and audience
+Purpose: Pin the production-side fix for the GPU probe-then-create TOCTOU
+(doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md). Before this
+fix, Engine2D.probe_backend() created + initialised a backend, reported the
+answer, and shut the backend down; a later Engine2D create for the same
+backend then ran a SECOND, independent acquisition. Under host contention the
+probe's answer did not survive to the create (probe=vulkan + create=failed
+false reds; probe=software + skipped GPU branches vacuous greens).
+
+The fix caches the probe ADMISSION between probe and create: a successful
+probe_backend() admits its result (and, for the record's device-acquiring
+family vulkan/cuda, the live initialized backend object itself) into a
+single-slot process-global cache keyed by (canonical name, width, height);
+the next create_requested_backend() / create_with_backend_strict() with the
+SAME key consumes the admission and adopts the probed backend, so the pair
+shares ONE device acquisition and the probe answer cannot diverge from the
+create. Non-matching creates never consume: they acquire independently and
+leave the admission pending.
+
+Audience: engine2d maintainers touching probe_backend(),
+create_requested_backend(), or create_with_backend_strict().
+
+## Honest device disclosure (the record's rule)
+
+The vulkan examples assert BOTH directions on the real probe outcome:
+- probe Initialized -> an admission must be pending, the matching create must
+  consume it (consumed count +1), and the created engine must carry the SAME
+  session device the probe admitted (one acquisition for the pair).
+- probe Unavailable -> the failed probe must install nothing (no pending
+  admission, consumed count unchanged), so a device-less pass cannot read as
+  a device-proving pass.
+
+On this host (macOS, MoltenVK) vulkan initializes, so the adoption path runs
+for real. On a host without vulkan the same examples still assert the
+negative direction; nothing is asserted from a prediction.
+
+## Sabotage teeth (must go red)
+
+1. Re-add `b.shutdown()` on probe_backend's vulkan success path (before the
+   admission install): the vulkan pair example's `pending` assertion fails.
+2. Remove the `_probe_admission_take_vulkan` call in create_requested_backend:
+   the vulkan pair example's consumed-count +1 assertion fails.
+3. Change the take key to ignore width/height: the dim-mismatch example fails.
+
+## Device-free
+
+software/cpu legs are pure CPU rasterizers; no GPU, driver, window, or
+display is touched there.
+"""
+# @req: REQ-LIB-GPU-PROADMIT-001 — probe->create admission cache contract
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 3%
+# @tag: unit, engine2d, gpu, toctou, admission
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gc_async_mut.gpu.engine2d.engine.{
+    Engine2D,
+    engine2d_probe_admission_pending,
+    engine2d_probe_admission_name,
+    engine2d_probe_admission_width,
+    engine2d_probe_admission_height,
+    engine2d_probe_admission_generation,
+    engine2d_probe_admission_consumed_count,
+    engine2d_probe_admission_vulkan_device,
+    engine2d_probe_admission_clear
+}
+use std.gpu.engine2d.backend_probe.{backend_probe_initialized}
+
+val W: i32 = 8
+val H: i32 = 8
+
+fn _shutdown_if_present(created: Result<Engine2D, text>):
+    """Shut down a created engine when the lane has a typed shutdown route."""
+    match created:
+        Ok(engine):
+            if engine.selected_backend_name == "vulkan" or engine.selected_backend_name == "software":
+                engine.shutdown()
+        Err(_):
+            pass_do_nothing
+
+describe "probe->create admission cache — device-free lifecycle":
+
+    it "a successful software probe installs an admission the matching create consumes":
+        step("clear, probe software, expect a pending admission, create, expect consumed")
+        engine2d_probe_admission_clear()
+        assert_false(engine2d_probe_admission_pending())
+        val consumed_before = engine2d_probe_admission_consumed_count()
+        val probe = Engine2D.probe_backend(W, H, "software")
+        assert_true(backend_probe_initialized(probe))
+        assert_true(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_name()).to_equal("software")
+        expect(engine2d_probe_admission_width()).to_equal(W)
+        expect(engine2d_probe_admission_height()).to_equal(H)
+        assert_true(engine2d_probe_admission_generation() > 0)
+        val created = Engine2D.create_requested_backend(W, H, "software")
+        expect(created.is_ok()).to_equal(true)
+        assert_false(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before + 1)
+        match created:
+            Ok(engine):
+                expect(engine.backend_name()).to_equal("software")
+                engine.shutdown()
+            Err(_):
+                pass_do_nothing
+
+    it "a successful cpu probe installs an admission the matching create consumes":
+        step("clear, probe cpu, expect a pending admission, create, expect consumed")
+        engine2d_probe_admission_clear()
+        assert_false(engine2d_probe_admission_pending())
+        val consumed_before = engine2d_probe_admission_consumed_count()
+        val probe = Engine2D.probe_backend(W, H, "cpu")
+        assert_true(backend_probe_initialized(probe))
+        assert_true(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_name()).to_equal("cpu")
+        val created = Engine2D.create_requested_backend(W, H, "cpu")
+        expect(created.is_ok()).to_equal(true)
+        assert_false(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before + 1)
+
+    it "a create with different dimensions does not consume the pending admission":
+        step("probe at 4x4, create at 8x8, expect the 4x4 admission still pending")
+        engine2d_probe_admission_clear()
+        val consumed_before = engine2d_probe_admission_consumed_count()
+        val probe = Engine2D.probe_backend(4, 4, "software")
+        assert_true(backend_probe_initialized(probe))
+        assert_true(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_width()).to_equal(4)
+        expect(engine2d_probe_admission_height()).to_equal(4)
+        val created = Engine2D.create_requested_backend(W, H, "software")
+        expect(created.is_ok()).to_equal(true)
+        # Key mismatch: the (software,4,4) admission must survive untouched.
+        assert_true(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_name()).to_equal("software")
+        expect(engine2d_probe_admission_width()).to_equal(4)
+        expect(engine2d_probe_admission_height()).to_equal(4)
+        expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before)
+        engine2d_probe_admission_clear()
+        assert_false(engine2d_probe_admission_pending())
+
+    it "installing a new admission evicts the previous one and advances the generation":
+        step("probe 4x4 then 8x8; the 8x8 admission replaces the 4x4 one")
+        engine2d_probe_admission_clear()
+        val probe_a = Engine2D.probe_backend(4, 4, "software")
+        assert_true(backend_probe_initialized(probe_a))
+        val generation_a = engine2d_probe_admission_generation()
+        val probe_b = Engine2D.probe_backend(8, 8, "software")
+        assert_true(backend_probe_initialized(probe_b))
+        assert_true(engine2d_probe_admission_pending())
+        expect(engine2d_probe_admission_width()).to_equal(8)
+        expect(engine2d_probe_admission_height()).to_equal(8)
+        assert_true(engine2d_probe_admission_generation() > generation_a)
+        engine2d_probe_admission_clear()
+
+describe "probe->create admission cache — vulkan atomic pair":
+
+    it "a successful vulkan probe is consumed by the matching create, which adopts the same session device":
+        step("probe vulkan; if Initialized the matching create must adopt the admitted backend")
+        engine2d_probe_admission_clear()
+        val consumed_before = engine2d_probe_admission_consumed_count()
+        val probe = Engine2D.probe_backend(W, H, "vulkan")
+        if backend_probe_initialized(probe):
+            assert_true(engine2d_probe_admission_pending())
+            expect(engine2d_probe_admission_name()).to_equal("vulkan")
+            val admitted_device = engine2d_probe_admission_vulkan_device()
+            assert_true(admitted_device > 0)
+            val created = Engine2D.create_requested_backend(W, H, "vulkan")
+            expect(created.is_ok()).to_equal(true)
+            assert_false(engine2d_probe_admission_pending())
+            expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before + 1)
+            match created:
+                Ok(engine):
+                    expect(engine.backend_name()).to_equal("vulkan")
+                    var engine_device: i64 = -1
+                    if val Some(vb) = engine.vulkan_backend:
+                        engine_device = vb.session.device
+                    expect(engine_device).to_equal(admitted_device)
+                    engine.clear(0xff112233u32)
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(W.to_i64() * H.to_i64())
+                    engine.shutdown()
+                Err(_):
+                    pass_do_nothing
+        else:
+            print("[admission-spec] vulkan probe Unavailable (" + probe.reason + "); asserting the failed probe installs nothing")
+            assert_false(engine2d_probe_admission_pending())
+            expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before)
+
+    it "after the admission is consumed, a second same-key create acquires independently":
+        step("probe vulkan, create twice; only the first create may consume the admission")
+        engine2d_probe_admission_clear()
+        val probe = Engine2D.probe_backend(W, H, "vulkan")
+        if backend_probe_initialized(probe):
+            val consumed_after_probe = engine2d_probe_admission_consumed_count()
+            val first = Engine2D.create_requested_backend(W, H, "vulkan")
+            expect(first.is_ok()).to_equal(true)
+            expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_after_probe + 1)
+            val second = Engine2D.create_requested_backend(W, H, "vulkan")
+            expect(second.is_ok()).to_equal(true)
+            assert_false(engine2d_probe_admission_pending())
+            expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_after_probe + 1)
+            _shutdown_if_present(first)
+            _shutdown_if_present(second)
+        else:
+            print("[admission-spec] vulkan probe Unavailable (" + probe.reason + "); independent-create leg skipped")
+
+    it "create_with_backend_strict drives probe and create through the one admission":
+        step("strict create = probe then create; the pair must share exactly one admission consume")
+        engine2d_probe_admission_clear()
+        val consumed_before = engine2d_probe_admission_consumed_count()
+        val strict = Engine2D.create_with_backend_strict(W, H, "vulkan")
+        match strict:
+            Ok(engine):
+                expect(engine.backend_name()).to_equal("vulkan")
+                assert_false(engine2d_probe_admission_pending())
+                expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before + 1)
+                engine.clear(0xff445566u32)
+                val pixels = engine.read_pixels()
+                expect(pixels.len()).to_equal(W.to_i64() * H.to_i64())
+                engine.shutdown()
+            Err(probe):
+                print("[admission-spec] strict vulkan create failed: " + probe.reason)
+                assert_false(backend_probe_initialized(probe))
+                assert_false(engine2d_probe_admission_pending())
+                expect(engine2d_probe_admission_consumed_count()).to_equal(consumed_before)

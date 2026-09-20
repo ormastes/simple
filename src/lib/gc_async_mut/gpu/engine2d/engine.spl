@@ -262,6 +262,137 @@ var _font_batch_receipt_count: i32 = 0
 # provenance readback) runs at most once per process; per-render cost is a
 # single text compare afterwards.
 var _viable_auto_backend_cache: text = ""
+# PROBE->CREATE ADMISSION CACHE
+# (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md): a
+# successful probe_backend() call ADMITS its result here instead of being a
+# throwaway prediction, and the next create_requested_backend() with the SAME
+# (canonical name, width, height) CONSUMES the admission and adopts the exact
+# live backend the probe initialized. The probe->create pair then shares ONE
+# device acquisition, so the probe answer cannot diverge from the create
+# (probe=vulkan + create=failed, or probe=software + a skipped GPU branch).
+# For vulkan/cuda the admitted backend object itself is cached (the record's
+# device-acquiring family); for software/cpu/cpu_simd the cache is metadata
+# only. A create with a non-matching key never consumes: it acquires
+# independently and leaves the admission for a later matching create.
+# Process-global, single-slot: at most one admitted backend is ever held
+# alive, and installing a new admission evicts (shuts down) the previous one.
+var _probe_admission_name: text = ""
+var _probe_admission_w: i32 = 0
+var _probe_admission_h: i32 = 0
+var _probe_admission_generation: i64 = 0
+var _probe_admission_serial: i64 = 0
+var _probe_admission_consumed: i64 = 0
+var _probe_admission_cuda: CudaBackend? = nil
+var _probe_admission_vulkan: VulkanBackend? = nil
+
+fn _probe_admission_evict():
+    """Shut down any live admitted backend and clear the cache record."""
+    if val Some(b) = _probe_admission_cuda:
+        b.shutdown()
+    if val Some(b) = _probe_admission_vulkan:
+        b.shutdown()
+    _probe_admission_cuda = nil
+    _probe_admission_vulkan = nil
+    _probe_admission_name = ""
+    _probe_admission_w = 0
+    _probe_admission_h = 0
+    _probe_admission_generation = 0
+
+fn _probe_admission_install(name: text, width: i32, height: i32):
+    """Record a probe admission for (name, width, height), evicting any prior one."""
+    _probe_admission_evict()
+    _probe_admission_serial = _probe_admission_serial + 1
+    _probe_admission_generation = _probe_admission_serial
+    _probe_admission_name = name
+    _probe_admission_w = width
+    _probe_admission_h = height
+
+fn _probe_admission_install_cuda(width: i32, height: i32, backend: CudaBackend):
+    _probe_admission_install("cuda", width, height)
+    _probe_admission_cuda = Some(backend)
+
+fn _probe_admission_install_vulkan(width: i32, height: i32, backend: VulkanBackend):
+    _probe_admission_install("vulkan", width, height)
+    _probe_admission_vulkan = Some(backend)
+
+fn _probe_admission_take(name: text, width: i32, height: i32) -> bool:
+    """Consume the cached admission iff (name, width, height) all match.
+
+    Returns true on a consume and false on any mismatch (the pending
+    admission, if any, is left untouched for a later matching create).
+    """
+    if _probe_admission_generation <= 0:
+        return false
+    if _probe_admission_name != name:
+        return false
+    if _probe_admission_w != width or _probe_admission_h != height:
+        return false
+    _probe_admission_consumed = _probe_admission_consumed + 1
+    _probe_admission_name = ""
+    _probe_admission_w = 0
+    _probe_admission_h = 0
+    _probe_admission_generation = 0
+    true
+
+fn _probe_admission_take_cuda(width: i32, height: i32) -> CudaBackend?:
+    if _probe_admission_take("cuda", width, height):
+        val admitted = _probe_admission_cuda
+        _probe_admission_cuda = nil
+        return admitted
+    nil
+
+fn _probe_admission_take_vulkan(width: i32, height: i32) -> VulkanBackend?:
+    if _probe_admission_take("vulkan", width, height):
+        val admitted = _probe_admission_vulkan
+        _probe_admission_vulkan = nil
+        return admitted
+    nil
+
+fn _probe_admission_discard(name: text, width: i32, height: i32):
+    """Create-side pairing for lanes with no live backend to adopt: consume a
+    matching metadata admission, if any."""
+    if _probe_admission_take(name, width, height):
+        pass_do_nothing
+
+pub fn engine2d_probe_admission_pending() -> bool:
+    """True when a probe admission is cached and awaiting a matching create."""
+    _probe_admission_generation > 0
+
+pub fn engine2d_probe_admission_name() -> text:
+    """Canonical backend name of the pending admission ("" when none)."""
+    _probe_admission_name
+
+pub fn engine2d_probe_admission_width() -> i32:
+    _probe_admission_w
+
+pub fn engine2d_probe_admission_height() -> i32:
+    _probe_admission_h
+
+pub fn engine2d_probe_admission_generation() -> i64:
+    """Serial of the pending admission, 0 when none. Drawn from a
+    never-reset per-process counter, so two successive admissions always
+    have distinct serials even across an evict+reinstall."""
+    _probe_admission_generation
+
+pub fn engine2d_probe_admission_consumed_count() -> i64:
+    """Total number of admissions consumed by matching creates this process."""
+    _probe_admission_consumed
+
+pub fn engine2d_probe_admission_vulkan_device() -> i64:
+    """Raw session device handle of a pending vulkan admission, else 0.
+
+    The vulkan probe->create pair is atomic because the create adopts THIS
+    backend object; a spec compares this handle against the created engine's
+    session device to prove no second acquisition happened between probe and
+    create.
+    """
+    if val Some(b) = _probe_admission_vulkan:
+        return b.session.device
+    0
+
+pub fn engine2d_probe_admission_clear():
+    """Evict any live admitted backend and reset the cache (spec/test hygiene)."""
+    _probe_admission_evict()
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -698,14 +829,24 @@ class Engine2D with DrawIrRenderTarget:
         val requested_backend = backend_canonical_name(backend_name)
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
-            if cuda.init(width, height):
+            val admitted_cuda = _probe_admission_take_cuda(width, height)
+            if val Some(b) = admitted_cuda:
+                # Adopt the backend this exact (name, w, h) key was probed with:
+                # the probe->create pair shares ONE acquisition (TOCTOU fix).
+                cuda = b
+            if cuda.initialized or cuda.init(width, height):
                 var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
                 engine.install_pinned_cuda_font_artifact()
                 return Ok(engine)
 
         if requested_backend == "vulkan":
             var vulkan = VulkanBackend.create()
-            if vulkan.init(width, height):
+            val admitted_vulkan = _probe_admission_take_vulkan(width, height)
+            if val Some(b) = admitted_vulkan:
+                # Adopt the backend this exact (name, w, h) key was probed with:
+                # the probe->create pair shares ONE acquisition (TOCTOU fix).
+                vulkan = b
+            if vulkan.initialized or vulkan.init(width, height):
                 vulkan.enable_frame_batching()
                 return Ok(Engine2D(
                     backend: vulkan, capability: backend_capability_default(),
@@ -800,6 +941,7 @@ class Engine2D with DrawIrRenderTarget:
                 return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
 
         if requested_backend == "software":
+            _probe_admission_discard("software", width, height)
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
                 val capability = sw.capability()
@@ -810,6 +952,7 @@ class Engine2D with DrawIrRenderTarget:
         # If requested here by name, fall through to CPU fallback.
 
         if requested_backend == "cpu_simd":
+            _probe_admission_discard("cpu_simd", width, height)
             if not native_pixel_rows_enabled():
                 return Err("backend unavailable: cpu_simd native SIMD pixel rows unavailable")
             var cpu_simd = CpuBackend.create_simd()
@@ -818,6 +961,7 @@ class Engine2D with DrawIrRenderTarget:
             return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
 
         if requested_backend == "cpu":
+            _probe_admission_discard("cpu", width, height)
             var cpu = CpuBackend.create()
             if not cpu.init(width, height):
                 return Err("backend unavailable: cpu init failed")
@@ -927,14 +1071,19 @@ class Engine2D with DrawIrRenderTarget:
             var b = CudaBackend.create()
             if b.init(width, height):
                 val probe = b.last_probe
-                b.shutdown()
+                # Keep the live backend admitted for a matching create instead
+                # of throwing it away (probe->create TOCTOU; see the admission
+                # cache block above).
+                _probe_admission_install_cuda(width, height, b)
                 return probe
             return b.last_probe
 
         if requested_backend == "vulkan":
             var b = VulkanBackend.create()
             if b.init(width, height):
-                b.shutdown()
+                # Keep the live backend admitted for a matching create instead
+                # of shutting it down here (probe->create TOCTOU).
+                _probe_admission_install_vulkan(width, height, b)
                 return BackendProbeResult.success("vulkan", "Vulkan initialized")
             if b.last_error != "":
                 return BackendProbeResult.unavailable("vulkan", b.last_error)
@@ -1001,14 +1150,17 @@ class Engine2D with DrawIrRenderTarget:
             return BackendProbeResult.unavailable("intel", "Intel oneAPI runtime or device unavailable")
 
         if requested_backend == "software":
+            _probe_admission_install("software", width, height)
             return BackendProbeResult.success("software", "Software always available")
 
         if requested_backend == "cpu":
+            _probe_admission_install("cpu", width, height)
             return BackendProbeResult.success("cpu", "CPU always available")
 
         if requested_backend == "cpu_simd":
             if not native_pixel_rows_enabled():
                 return BackendProbeResult.unavailable("cpu_simd", "Native SIMD pixel rows unavailable")
+            _probe_admission_install("cpu_simd", width, height)
             return BackendProbeResult.success(
                 "cpu_simd",
                 "Native CPU SIMD pixel rows available: arch=" + active_arch_text() +
