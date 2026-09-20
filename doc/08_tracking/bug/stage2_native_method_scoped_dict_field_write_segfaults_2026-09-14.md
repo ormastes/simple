@@ -122,3 +122,38 @@ ABI; `.?` reads PRESENT for an absent symbol). Guard added; pinned by
 `test/01_unit/compiler/mir/external_layout_reference_nil_info_guard_source_spec.spl`.
 Clearing the rc-139 needs a rebuilt Stage-2 candidate, which lane F77 did not have.
 
+
+## Correction 2 (2026-09-20, lane `work/stage2-nil-guard-miscompile`): the guard never worked
+
+The `if info == nil: return` guard above (f258a524cec) was ineffective in
+Stage-2-compiled code. A Stage 2 built receipt-free on Linux aarch64 from
+`origin/main` `0c25d5eef60` (sha256 `2cddadf49cd605e25246…`) still SEGVs
+compiling a struct-typed local:
+
+```
+native-build … build/fx/v3/main.spl   -> rc=139
+#0 MirLowering.record_external_layout_reference+228  ldr x0, [x25, #72]   x25=0x0
+#1 MirLowering.lower_type  #2 lower_type  #3 lower_stmt_impl …
+```
+
+Disassembly of the same function shows why:
+
+```
++104  bl  SymbolTable.get_symbol_raw
++112  bl  rt_is_present                  # symbol_info.?  -> present
++192  bl  lib__nogc_async_mut__async__poll__Poll.unwrap   # symbol_info.unwrap()  WRONG CALLEE
++204  bl  rt_native_eq (x0, #3)          # info == nil  compares against sentinel 3
+```
+
+`symbol_info.unwrap()` is bound to `Poll.unwrap`, which matches neither Poll
+tag and returns **0**. `info` is therefore NULL, not nil (3); `info == nil` is
+false; the `info.defining_module` load faults at 0 + 0x48. This is one of the
+sites of the OPEN producer bug
+`unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md`, not a
+nil-provenance problem.
+
+Fix: the method now reads the symbol through
+`SymbolTable.symbol_name_scalar_raw` / `symbol_defining_module_scalar_raw`, so no
+`HirSymbol?` and no `.unwrap()` exists at the call site. Rebuilt Stage 2 (sha256
+`ae06cc25e5c048246bfb…`) builds the same program (rc=0) and it prints `a`.
+Pinned by `test/01_unit/compiler/mir/external_layout_reference_nil_info_guard_source_spec.spl`.

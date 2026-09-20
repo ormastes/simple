@@ -66,13 +66,32 @@ describe "Workspace root write guard implementation":
         # @capture(statistics): audit exit codes for bad and clean path files
         step("Audit a stray root entry and a clean tree through the real guard")
         write_file("/tmp/wrg_bad_paths.txt", "stray_root_file.txt\n")
-        write_file("/tmp/wrg_good_paths.txt", "src/lib/foo.spl\n")
+        write_file("/tmp/wrg_good_paths.txt", "src/lib/foo.spl\n.scv/quarantine/root-packs/tmp5/.scv/objects/packs/pack.gz\n")
         val (bad_out, bad_rc) = run_guard(["audit", "--path-file", "/tmp/wrg_bad_paths.txt"])
         expect(bad_rc).to_equal(1)  # oracle: exit 1 is the guard's violation code — a misplaced root entry must fail the audit, not just warn
         expect(bad_out.contains("WRG001")).to_equal(true)
         val (good_out, good_rc) = run_guard(["audit", "--path-file", "/tmp/wrg_good_paths.txt"])
-        expect(good_rc).to_equal(0)  # oracle: an allowlisted tree path must audit clean so legitimate layouts never block the lane
+        expect(good_rc).to_equal(0)  # oracle: declared source and SCV quarantine paths must audit clean so legitimate layouts never block the lane
         expect(good_out.contains("OK")).to_equal(true)
+
+    it "rejects root temporary SCV pack directories":
+        # @req REQ-SSPEC-APP
+        # @capture(statistics): root-pack containment audit exit code and diagnostics
+        step("Audit the obsolete root temporary SCV pack directory names")
+        write_file("/tmp/wrg_root_scv_pack_paths.txt", "tmp5\ntmp10\ntmp50\ntmp5b\ntmpdrv\n")
+        val (out, rc) = run_guard(["audit", "--path-file", "/tmp/wrg_root_scv_pack_paths.txt"])
+        expect(rc).to_equal(1)  # oracle: SCV state must live under .scv/quarantine, so no root tmp pack directory is allowlisted
+        expect(out.contains("WRG001 root entry is not allowed by FILE.md: tmp5")).to_equal(true)
+        expect(out.contains("WRG001 root entry is not allowed by FILE.md: tmpdrv")).to_equal(true)
+
+    it "rejects ignored JIT notes placed at root":
+        # @req REQ-SSPEC-APP
+        # @capture(statistics): ignored-root JIT note audit exit code and diagnostics
+        step("Audit an ignored JIT sidecar placed at the repository root")
+        write_file("/tmp/wrg_ignored_root_jit_note_paths.txt", "test.smf.jit.note.sdn\n")
+        val (out, rc) = run_guard(["audit", "--path-file", "/tmp/wrg_ignored_root_jit_note_paths.txt"])
+        expect(rc).to_equal(1)  # oracle: ignore rules contain generated data below approved roots, but cannot permit an undeclared root file
+        expect(out.contains("WRG001 root entry is not allowed by FILE.md: test.smf.jit.note.sdn")).to_equal(true)
 
     it "runs its own parser and path-classification self-tests":
         # @req REQ-SSPEC-APP
@@ -115,6 +134,20 @@ describe "Workspace root write guard implementation":
         # rm -rf of a working-tree relative path would destroy user files
         expect(guard_script.contains("rm -rf \"$TMP_DIR\"")).to_equal(true)
         expect(guard_script.contains("rm -rf \"$rel\"")).to_equal(false)
+
+    it "uses the SCV quarantine for root fixes and JIT notes":
+        # @req: REQ-GEN-APP-001
+        # @capture(source_contract): canonical quarantine path contracts
+        step("Read the guard and JIT loaders for the canonical containment paths")
+        val guard_script = read_file("scripts/check-workspace-root-guard.shs")
+        val compat_jit = read_file("src/compiler/99.loader/jit_instantiator.spl")
+        val loader_jit = read_file("src/compiler/99.loader/loader/jit_instantiator.spl")
+        expect(guard_script.contains("QUARANTINE_BASE=\".scv/quarantine/root\"")).to_equal(true)
+        expect(guard_script.contains("find . -mindepth 1 -maxdepth 1 -print")).to_equal(true)
+        expect(compat_jit.contains("env_get_or(\"SIMPLE_WORKTREE_STORAGE_ROOT\", \".scv/quarantine\")")).to_equal(true)
+        expect(loader_jit.contains("env_get_or(\"SIMPLE_WORKTREE_STORAGE_ROOT\", \".scv/quarantine\")")).to_equal(true)
+        expect(compat_jit.contains("file_write(_metadata_sidecar_path(path)")).to_equal(true)
+        expect(loader_jit.contains("file_write(sidecar_path")).to_equal(true)
 
     it "documents Windows ACL locking":
         # @req: REQ-GEN-APP-001

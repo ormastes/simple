@@ -371,3 +371,168 @@ BOTH directions, so a fix cannot simply make one engine imitate the other.
 where the language specifies value semantics and the interpreter copied
 correctly (fixed 2026-09-18, PR #1090). Arrays are values and classes are
 references; each engine currently gets one of the two wrong.
+
+---
+
+## 2026-09-20 — re-reproduced, root cause confirmed, flip scoped and DECLINED
+
+### Reproduction (not a source reading)
+
+Binary `/home/yoon/cargo-main/release/simple`, worktree detached at
+`origin/main`, fixture `probe_full.spl` (the P1/P6 shape quoted above):
+
+```
+=== JIT ===                         === INTERPRET (SIMPLE_EXECUTION_MODE=interpret) ===
+opt_binding_callee_saw=1            opt_binding_callee_saw=1
+opt_binding_caller_n=1              opt_binding_caller_n=0      <- mutation lost
+field_binding_local=11              field_binding_local=11
+field_binding_owner=11              field_binding_owner=10      <- snapshot, not alias
+rc=0  fallbacks=0                   rc=0
+```
+
+The JIT lane is a genuine JIT run (`grep -ac jit-fallback` = 0).
+
+**Stale disposition, precisely.** Line 40's "Status (single authoritative
+line, 2026-08-17): CLOSED — DID NOT REPRODUCE" is the stale one, together with
+the line-30 note that rests it on a minimal two-class fixture. The 2026-09-16
+header already reopened the row, but said so as bookkeeping and explicitly not
+as verification. This pass supplies the reproduction that the reopening
+lacked.
+
+### Root cause (confirmed by source)
+
+`Value::aggregate` (`src/compiler_rust/compiler/src/value.rs:1914`) **ignores
+its `_is_value_type` parameter** and returns `Value::Object` for every
+aggregate. `Value::Object` holds `fields: Arc<HashMap<..>>` mutated through
+`Arc::make_mut`, so the first write through a second binding clones the map and
+severs identity. All 5 callers of `aggregate()` are in
+`interpreter_call/core/class_instantiation.rs` and all already pass
+`class_def.is_value_type` correctly — the construction funnel is *not* the
+problem.
+
+`Value::ClassInstance(Arc<ClassInstance>)` (`value.rs:1800`) is the intended
+reference representation and is **dead code**: `ClassInstance::new` has zero
+call sites; the only construction anywhere is a re-wrap
+(`value_pointers.rs:272`). Its 46 existing handling sites have never executed.
+
+### Why the one-line flip is declined
+
+Census of every `Value::Object` mention (method below):
+
+| class | count |
+|---|---|
+| raw `grep` matches, non-vendor | 271 |
+| outside `compiler/src` (comments, `serde_json::Value::Object`) | 8 |
+| comments in `compiler/src` | 21 |
+| construction, or a multi-line pattern arm the heuristic cannot split | 102 |
+| pattern sites whose enclosing match already has a `ClassInstance` arm | 17 |
+| **pattern sites with NO `ClassInstance` arm, production code** | **105, in 37 files** |
+| same, but under `#[cfg(test)]` | 18 |
+
+Method: every match line was classified CODE/COMMENT by leading token, then
+PATTERN/construction by the presence of `=>`, `if/while let`, `matches!` or
+`let Value::Object`; "covered" means the literal `ClassInstance` appears within
+±40 lines of the same file. **105 is approximate and most likely low.** The ±40 window is generous — a
+`ClassInstance` arm anywhere in the surrounding 80 lines counts as coverage,
+and a bare comment mentioning `ClassInstance` counts too (e.g.
+`node_exec.rs:1663`), both of which over-credit coverage; it can also miss a
+real arm more than 40 lines away in a large match, which under-credits. The
+larger bias is the 102-row above: a pattern written across several lines
+(`Value::Object {` / fields / `} =>`) has no `=>` on the matched line and lands
+there rather than in the pattern count — the 12 bare `Value::Object {` lines in
+`patterns.rs` and 8 in `node_exec.rs` are largely this shape. Net direction is
+undercount. Production/test split is by first `#[cfg(test)]` offset.
+Full list: `class_instance_flip_uncovered_sites_2026-09-20.txt`.
+
+The count is not the decisive part — the *placement* is, and the placement is
+mixed. Each cited site below was read in full; the classification is what the
+surrounding code actually does with a non-`Object` value, not an inference from
+the match line.
+
+**Fail-safe on fall-through (the majority of what was hand-read).** Many
+`Value::Object` patterns are opt-in *fast paths* whose wildcard arm is a
+deliberate bail-out to a generic path. A `ClassInstance` reaching them is a
+performance regression, not corruption:
+
+- `patterns.rs:396` — guard on an array-mutating fast path; `_ => return
+  Ok(None)` hands back to the generic mutator.
+- `patterns.rs:1411` — reads `MODULE_GLOBALS` by `obj.clone()`, `_ => None`;
+  falls through to the general method path, removes nothing.
+- `patterns.rs:657-661` — the `matches!` guard `return Ok(None)`s **before**
+  the `std::mem::replace(slot, Value::Nil)`, so the `unreachable!` below it is
+  genuinely unreachable and the slot is never destroyed.
+- `function_exec.rs:1585-1600` — the `other =>` arm calls
+  `outer_env.restore_frame_owned(obj_name, other)`, putting a taken binding
+  back.
+
+This is not cost-free. Those arms exist because of filed perf bugs
+(`seed_global_array_push_cow_per_frame_2026-08-22`, per-call dict deep copies
+in `bind_args`), so silently routing every class off them is an unmeasured
+interpreter perf regression that would have to be measured and filed in the
+same change.
+
+**Genuinely semantic (needs an arm, not just a fast path).**
+
+- `interpreter/place.rs:148,192` — `step_mut` and `store_last`, the projection
+  machinery for `a.b.c = v`; `_ => None` / `false` means the assignment does
+  not land. This is also the exact `Arc::make_mut(fields)` COW that is this
+  bug's own mechanism.
+- `interpreter_helpers/patterns.rs:525` — `resolve_object_method` dispatch,
+  in a file with **zero** `ClassInstance` sites and 16 uncovered production
+  sites.
+- `interpreter/expr/ops.rs:581,597,602` — newtype-wrap arithmetic detection.
+  Narrow in practice: the canonical newtype is a `struct` (value type) and so
+  is unaffected by the flip.
+
+**The honest limit of this census.** 8 of the 105 sites were read in full. The
+fail-safe/semantic split above cannot be extrapolated to the other 97 — that
+split *is* the remaining work, and it is per-site reading, not a grep.
+
+`981c88435e0` made exactly this flip and was reverted. Its tree is materially
+different from today's — the `node_exec.rs` (18), `expr/calls.rs:567`,
+`interpreter_method/mod.rs:1265`, `value_impl.rs`, `value_pointers.rs` and
+`value_bridge.rs` arms all landed *after* it — so a re-land is closer than it
+was. It is still not close: 105 sites / 37 files.
+
+**The decisive argument is about verifiability, not effort.** The available
+verification corpus is 7 specs in `test/01_unit/interpreter/` plus a
+`cargo test -p simple-compiler` failing-name diff. Both detect *loud* failure.
+`981c88435e0` failed loudly ("not found on type `object`"), which is why it was
+caught and reverted within a day. Today's failure mode is the opposite: a
+wildcard arm taking a different branch with no diagnostic — a lost fast path,
+an assignment that does not land, a method that resolves down a different
+route. That corpus is structurally unable to see any of it, so a green
+verification run on this change would be a false negative rather than evidence
+of correctness. Flipping on that basis would repeat `981c88435e0` with strictly
+worse observability.
+
+### What would make it tractable
+
+In order, each independently landable and verifiable:
+
+1. **Land a tripwire first.** Behind an env guard, make the interpreter report
+   (or panic) whenever a `ClassInstance` reaches a `Value::Object` wildcard
+   arm. Then flip `aggregate()` *only in that instrumented build* and run the
+   full corpus. This converts the 97 unread sites from a static grep into an
+   empirical, ranked list of paths classes actually reach — which is the
+   measurement this pass could not make and the one the decision needs.
+2. Add `ClassInstance` arms to the semantic sites the tripwire confirms,
+   starting with `place.rs` `step_mut`/`store_last` and `patterns.rs:525`
+   method resolution.
+3. Measure the interpreter perf delta from the fast paths classes now miss,
+   and either restore them with `ClassInstance` arms or file the regression.
+4. Only then flip `aggregate()` for real.
+
+Step 1 is the one that turns the required verification bar into a sufficient
+one. Until it exists, this stays open.
+
+**Follow-up, not done here (docs-only pass, `src/` untouched).** The
+`TODO(class-instance)` doc comment on `Value::aggregate`
+(`value.rs:1901-1913`) is now factually wrong: it says "neither primary
+resolution path has a `ClassInstance` arm — field access
+(`interpreter/expr/calls.rs`) and method dispatch (`interpreter_method/mod.rs`)
+both only match `Value::Object`". Both arms exist today
+(`calls.rs:567`, `interpreter_method/mod.rs:1265`). The comment should be
+retargeted at the real remaining blocker, which is the 105 uncovered sites.
+
+No code was changed by this pass.
