@@ -275,3 +275,48 @@ architectural, no code change attempted.
 Still unreproducible on this Linux host (no Windows binary present). No
 change made. Leaving OPEN — architectural, needs a native-Windows or WSL
 environment.
+
+## Re-verified 2026-09-20 on native Windows — FIXED, binary redeployed
+
+Ran directly on a real Windows 11 host (worktree `D:/wk-winbug2`), the first
+session in this bug's history with an actual Windows binary available.
+
+Binary identity: `bin/simple.exe`, `Simple Language v1.0.0-rc.1` (the
+Rust-seed bootstrap binary, per its own startup WARNING), 16,347,136 bytes,
+sha256 `6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`,
+file-dated 2026-09-20 — materially newer than the April binary this doc's
+symptom was measured against.
+
+```
+$ ./bin/simple.exe build            # exit 0, 867 bytes of bootstrap HELP text
+$ ./bin/simple.exe build --help     # exit 0, same 867-byte HELP text
+$ timeout 15 ./bin/simple.exe build bootstrap --verbose
+Bootstrap pipeline starting...
+Backend: auto
+Output dir: bootstrap
+Error: No compiler binary found at bin/simple or bin/release/<platform>/simple
+  Use --seed=<path> to specify a self-hosted compiler binary
+# exit 1
+```
+
+None of the three reproduce the original symptom (exit 0, zero stdout/stderr
+bytes). `build`/`build --help` print the full documented bootstrap HELP
+(matches CLAUDE.md's "Prints bootstrap HELP and exits"); `build bootstrap`
+fails LOUDLY with a real, actionable, non-zero-exit error instead of
+silently no-opping. Confirmed the dispatch path matches this doc's own root
+cause note: `src/app/cli/_CliMain/main_and_help.spl:29,585` still statically
+imports and calls `handle_build` from `app.build.cli_entry`, and
+`src/app/cli/dispatch/table.spl:558` still carries a `"build"` entry
+matching current source — nothing stale between dispatch and source.
+
+**Status flipped to `fixed`.** This satisfies the "Suggested follow-up 1:
+confirm staleness directly" item above — the fix was simply redeploying a
+current Windows binary; no source change was needed or made in this pass.
+
+**Not solved by this flip — kept as a separate, still-open limitation:**
+`scripts/bootstrap/bootstrap-windows.sh --deploy` still refuses on native
+Windows (`error: Stage 4 full-CLI capsule preparation requires native Linux
+or macOS`) per the "Why it can't be fixed by redeploying on Windows right
+now" section above — that Stage-4-host-gate architecture question is
+unrelated to the CLI silent-no-op symptom this row tracks and was not
+re-investigated here.
