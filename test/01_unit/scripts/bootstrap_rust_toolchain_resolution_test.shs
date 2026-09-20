@@ -165,6 +165,12 @@ EOF
         "$fixture/$modern_host.env" >/dev/null
     grep -Fx "rust-host=$modern_host" "$fixture/$modern_host.env" >/dev/null
 done
+# These sibling "stable-<host>" toolchain directories exist only to exercise
+# the loop above; remove them so later channel-prefix scans in this fixture
+# (which glob "toolchains/<channel>-*") see exactly one "stable-*" entry,
+# matching a real single-host machine.
+rm -rf -- "$rustup_root/.rustup/toolchains/stable-x86_64-pc-windows-msvc" \
+    "$rustup_root/.rustup/toolchains/stable-aarch64-pc-windows-msvc"
 cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
 
 # Exercise failure diagnostics through nested command substitution, matching
@@ -239,12 +245,36 @@ profile = "default"
 EOF
 expect_installed_rejection settings-host=parse-fail
 cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
+# The rustup GLOBAL default names a channel ("nightly") that differs from the
+# one this project pins ("stable", via rust-toolchain.toml) -- the real-world
+# bug this fixture guards: a host whose global `rustup default` channel does
+# not match the project's pinned channel must not abort bootstrap when the
+# pinned channel's toolchain is genuinely installed. The already-installed
+# "stable-x86_64-pc-windows-gnu" toolchain must still resolve, derived by
+# scanning toolchains/ for the PINNED channel directly rather than trusting
+# the mismatched default_toolchain value, and without ever invoking the
+# rustc proxy (the installed layout is used directly, exactly like the
+# matching-channel cases above).
 cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
 version = "12"
 default_toolchain = "nightly-x86_64-pc-windows-gnu"
 profile = "default"
 EOF
-expect_installed_rejection settings-host=parse-fail
+BOOTSTRAP_STAGE3_FINGERPRINT_TRACE=1 \
+    bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
+    >"$fixture/channel-mismatch.env" 2>"$fixture/channel-mismatch.log"
+for expected in \
+    "rust-toolchain-name=$installed_name" \
+    "rust-host=x86_64-pc-windows-gnu" \
+    "rust-sysroot=$installed_toolchain" \
+    "rustc-path=$installed_toolchain/bin/rustc.exe" \
+    "cargo-path=$installed_toolchain/bin/cargo.exe"; do
+    grep -Fx "$expected" "$fixture/channel-mismatch.env" >/dev/null
+done
+grep -Fx 'rust-toolchain-check=settings-host=channel-toolchain-scan' \
+    "$fixture/channel-mismatch.log" >/dev/null
+[ ! -e "$rustup_root/.cargo/bin/proxy-called" ]
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
 cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
 version = "12"
 default_toolchain = "stable-x86_64-pc-windows!msvc"
