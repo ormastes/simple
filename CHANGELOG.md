@@ -1,3 +1,29 @@
+## [1.0.0-beta.14] - 2026-09-19
+Seventh corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Release and build-binaries seed `native-build` steps now set
+  `SIMPLE_NATIVE_BUILD_RUST=1`, routing the full-tree compile through the
+  in-process Rust pipeline (peaks ~1.2 GB flat, 869 modules in ~6-8 min on
+  threads=2) instead of the interpreted Simple driver, which retained the
+  whole compiler import graph and grew without bound: hard segfault on the
+  windows-x86_64 leg (~5m45s), jetsam OOM-kill on darwin-arm64 (~13 min)
+  in the v1.0.0-beta.13 run. MCP package steps keep the interpreted lane
+  (small closures).
+- `llvm_native_link.spl` called `llvm_native_link_orchestrator.link_llvm_native`
+  through a module alias (introduced in 1df509a0ce5), which the Rust-lane
+  codegen cannot resolve (`GlobalLoad: unresolved identifier`). Now a renamed
+  function import (`orchestrator_link_llvm_native`) — the supported shape.
+- Rust native-build pipeline memory hardening: whole-graph struct/enum/owner
+  maps shared via `Arc` instead of per-module deep clones, suffix index
+  built once per compile phase, sources shared as `Arc<str>`, and the
+  per-worker parsed-source cache bounded to 256 entries
+  (`SIMPLE_PARSED_SOURCE_CACHE_MAX` overrides).
+
+### Release
+- Product version is `1.0.0-beta.14`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.14`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.13] - 2026-09-18
 Tenth corrected beta of the **1.0.0 line**.
 
