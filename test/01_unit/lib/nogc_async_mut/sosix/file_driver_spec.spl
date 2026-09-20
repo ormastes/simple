@@ -74,6 +74,27 @@ describe "SOSIX reference file driver on the host filesystem":
         expect(read.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
         expect(driver.buffer_bytes(sink)).to_equal("")
 
+    it "round-trips through a native Windows-style backslash path (sosix C5 portable-fallback verification)":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        # 2026-09-20: this host is Windows; the driver has no OS-specific branch
+        # (see file_driver.spl's C5 TODO history), so a native backslash-separated
+        # path must round-trip through the same host_path_native normalization
+        # every other example here exercises with forward slashes.
+        step("Register a backslash-separated host path and write through it")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val backslash_path = scratch_path("winpath").replace("/", "\\")
+        val file = driver.open_path(backslash_path)
+        val source = driver.buffer_from("windows path bytes")
+        val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 19u64, 0u64)
+        expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(written.error.kind).to_equal(0u8)
+        step("Read it back through the same ring")
+        val sink = driver.buffer_from("")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 19u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(driver.buffer_bytes(sink)).to_equal("windows path bytes")
+
     it "refuses a write whose buffer window starts past the buffer end without touching the file":
         step("Ask to write 4 bytes from offset 10 of a 5-byte buffer")
         val fs = setup_sosix_hosted_fs()
