@@ -207,3 +207,46 @@ interaction with `process_run`) and undiagnosed; reproducing and fixing it
 needs deep interpreter/runner instrumentation well past a shard triage
 budget. No change made. Leaving OPEN as narrowed.
 
+## Re-verified 2026-09-20 on native Windows — does not reproduce; FIXED
+
+This doc's own open question ("re-run this repro against ... a Windows-built
+seed to determine if this is Windows-specific") is finally answerable: this
+session ran directly on a real Windows 11 host (worktree `D:/wk-winbug2`),
+the first session with a Windows binary available at all.
+
+Binary: `bin/simple.exe`, `Simple Language v1.0.0-rc.1`, sha256
+`6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`, dated
+2026-09-20 — current, not the original report's stale April/June build.
+
+Repro (`scratch_repro_falsegreen.spl`, not committed): a 73-line module
+docstring followed by exactly the doc's "smallest confirmed trigger" shape —
+two `it` blocks, both calling `process_run("cmd", ["/c", "echo ok"])`
+(Windows-native subprocess, replacing the doc's `sh -c`), the first
+genuinely passing (`expect(code).to_equal(0)`), the second deliberately
+wrong (`expect(stdout).to_contain("A STRING THAT PROVABLY DOES NOT
+APPEAR")`).
+
+```
+$ SIMPLE_BINARY=D:/wk-winbug2/bin/simple.exe SIMPLE_TIMEOUT_SECONDS=120 \
+  ./bin/simple.exe test scratch_repro_falsegreen.spl --clean
+SPEC FILE VERDICT: scratch_repro_falsegreen.spl outcome=ERROR declared>=2 executed=2 passed=1 failed=1 skipped=0 dropped=0
+spec failure: 1 of 2 example(s) failed (exit 1)
+Passed: 1
+Failed: 1
+Results: 2 total, 1 passed, 1 failed
+```
+
+Correctly reports 1 passed / 1 failed — **not** a false green — with
+`--clean` set, exactly the configuration the original report says never
+avoided the bug. This does not prove the underlying compiler-internal
+interaction (whatever it was) is fixed as a mechanism; it proves the
+observable defect no longer reproduces on the currently deployed Windows
+seed. Combined with the 2026-08-10 Linux non-reproduction, this closes the
+doc's central open question: on current binaries, on both tested platforms,
+this specific repro shape no longer produces a false green.
+
+**Status flipped to `fixed`.** Residual, explicitly out of scope for this
+pass: the exact upstream fix commit was not bisected (this is a black-box
+non-reproduction, like the original Linux narrowing), and the larger
+original 5-`it`/2-describe discovery-context shape was not re-run verbatim.
+
