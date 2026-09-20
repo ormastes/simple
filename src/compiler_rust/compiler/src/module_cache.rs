@@ -45,6 +45,13 @@ use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 /// Retention limit for `PARSED_SOURCE_CACHE`; `SIMPLE_PARSED_SOURCE_CACHE_MAX`
 /// overrides, `0` means unbounded.
 pub const PARSED_SOURCE_CACHE_MAX_DEFAULT: usize = 4096;
+/// Retention limit for `PARSED_SOURCE_CACHE` on native-compile worker threads.
+/// `SIMPLE_PARSED_SOURCE_CACHE_MAX` overrides when set; the default is modest
+/// because one whole-closure compile can walk thousands of modules inside a
+/// single worker, and every entry retains a whole source string AND its parsed
+/// AST. Entries are pure recomputable memos, so eviction only costs a re-read
+/// and re-parse on a later miss in that worker.
+pub const PARSED_SOURCE_CACHE_COMPILE_MAX_DEFAULT: usize = 256;
 /// Retention limit for `PROBE_SOURCE_CACHE`; `SIMPLE_PROBE_SOURCE_CACHE_MAX`
 /// overrides, `0` means unbounded.
 pub const PROBE_SOURCE_CACHE_MAX_DEFAULT: usize = 4096;
@@ -59,6 +66,17 @@ pub const FILTERED_DICT_CACHE_MAX_DEFAULT: usize = 2048;
 fn parsed_source_cache_max() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| limit_from_env("SIMPLE_PARSED_SOURCE_CACHE_MAX", PARSED_SOURCE_CACHE_MAX_DEFAULT))
+}
+
+/// Limit a native-compile worker should set on its thread-local
+/// `PARSED_SOURCE_CACHE`: the env override when present, else the modest
+/// compile-phase default. Read on the worker thread itself (the cache is
+/// thread-local, so setting it anywhere else has no effect on the worker).
+pub fn parsed_source_cache_compile_max() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        limit_from_env("SIMPLE_PARSED_SOURCE_CACHE_MAX", PARSED_SOURCE_CACHE_COMPILE_MAX_DEFAULT)
+    })
 }
 
 fn probe_source_cache_max() -> usize {
