@@ -1,0 +1,174 @@
+# Internal ELF linker: .gnu.hash (DT_GNU_HASH) — lane B2 (A7 hardening)
+#
+# The pure builder is checked byte-for-byte against an ld.lld oracle:
+# test/fixtures/linker/elf/libgnuhash_a64.so.1 (11 exports, 2 buckets, 4 bloom
+# words, recipe in RECIPE.md). Dynamic outputs against libc.so.6 carry a
+# .gnu.hash next to the kept SysV .hash; every .dynsym entry there is an
+# import, so the table hashes nothing and symoffset == .dynsym count, exactly
+# as ld.lld writes it. ld.so consults the executable's table on every symbol
+# lookup, so the exit-42 runs (lazy and LD_BIND_NOW=1) exercise it.
+#
+# Host requirement for the libc examples: aarch64 Linux with glibc in
+# /usr/lib/aarch64-linux-gnu.
+#
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.synthetic_sections.{
+    elf_gnu_hash, elf_gnu_hash_sort, elf_build_gnu_hash, elf_gnu_hash_size
+}
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+val GLIBC: text = "/usr/lib/aarch64-linux-gnu"
+val INTERP: text = "/lib/ld-linux-aarch64.so.1"
+val DT_HASH: i64 = 4
+val DT_GNU_HASH: i64 = 0x6ffffef5
+val SHT_GNU_HASH: i64 = 0x6ffffff6
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn shdr_index(b: [i64], name: text) -> i64:
+    (shdr_by_name(b, name) - rd64(b, 0x28)) / 64
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 24)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+fn sec_bytes(b: [i64], name: text) -> [i64]:
+    val o = sec_off(b, name)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < sec_size(b, name):
+        out = out.push(b[o + i])
+        i = i + 1
+    out
+
+fn dyn_tag(b: [i64], tag: i64) -> i64:
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag:
+            return rd64(b, o + 8)
+        o = o + 16
+    -1
+
+fn dynsym_names(b: [i64]) -> [text]:
+    val so = sec_off(b, ".dynsym")
+    val n = sec_size(b, ".dynsym") / 24
+    val str = sec_off(b, ".dynstr")
+    var out: [text] = []
+    var i: i64 = 1
+    while i < n:
+        out = out.push(cstr(b, str + rd32(b, so + i * 24)))
+        i = i + 1
+    out
+
+fn link_libc(crt1: text, mode: i64) -> [i64]:
+    val objs = [load_path("{GLIBC}/{crt1}"), load_path("{GLIBC}/crti.o"),
+        load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
+    val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [file_read_bytes("{GLIBC}/libc.so.6")],
+        entry: "_start", target: RelocArch.AArch64, mode: mode, interp: INTERP))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "elf_build_gnu_hash - pure builder":
+    it "uses the DJB hash h = h * 33 + c over u32":
+        expect(elf_gnu_hash("")).to_equal(5381)
+        expect(elf_gnu_hash("iota")).to_equal(0x7C988AD2)
+        expect(elf_gnu_hash("lambda_value")).to_equal(0x32427C62)
+
+    it "hashes nothing into the 28-byte table ld.lld writes for an import-only .dynsym":
+        val t = elf_build_gnu_hash([], 5)
+        expect(t.len()).to_equal(28)
+        expect(elf_gnu_hash_size(0)).to_equal(28)
+        expect(rd32(t, 0)).to_equal(1)
+        expect(rd32(t, 4)).to_equal(5)
+        expect(rd32(t, 8)).to_equal(1)
+        expect(rd32(t, 12)).to_equal(26)
+        expect(rd64(t, 16)).to_equal(0)
+        expect(rd32(t, 24)).to_equal(0)
+
+    it "matches ld.lld byte for byte on an 11-export shared object (buckets, chains, bloom)":
+        val so = load_path("{FIX}/libgnuhash_a64.so.1")
+        val names = dynsym_names(so)
+        expect(names.len()).to_equal(11)
+        expect(elf_gnu_hash_sort(names)).to_equal(names)
+        val want = sec_bytes(so, ".gnu.hash")
+        val got = elf_build_gnu_hash(names, 1)
+        expect(got.len()).to_equal(want.len())
+        expect(elf_gnu_hash_size(11)).to_equal(want.len())
+        expect(got).to_equal(want)
+
+    it "sorts hashed symbols stably by bucket (8 names -> 2 buckets)":
+        val names = ["alpha", "iota", "beta", "kappa", "eta", "zeta", "delta", "theta"]
+        expect(elf_gnu_hash_sort(names)).to_equal(["iota", "kappa", "alpha", "beta", "eta", "zeta", "delta", "theta"])
+
+describe "elf_link - .gnu.hash in dynamic outputs":
+    it "dynamic ET_EXEC: DT_GNU_HASH points at a GNU_HASH section linked to .dynsym, DT_HASH kept":
+        val b = link_libc("crt1.o", ELF_LINK_DYNAMIC_EXEC)
+        expect(b.len() > 64).to_equal(true)
+        val h = shdr_by_name(b, ".gnu.hash")
+        expect(h > 0).to_equal(true)
+        expect(rd32(b, h + 4)).to_equal(SHT_GNU_HASH)
+        expect(rd32(b, h + 40)).to_equal(shdr_index(b, ".dynsym"))
+        expect(dyn_tag(b, DT_GNU_HASH)).to_equal(sec_addr(b, ".gnu.hash"))
+        expect(dyn_tag(b, DT_HASH)).to_equal(sec_addr(b, ".hash"))
+        val t = sec_bytes(b, ".gnu.hash")
+        expect(t.len()).to_equal(28)
+        expect(rd32(t, 0)).to_equal(1)
+        expect(rd32(t, 4)).to_equal(sec_size(b, ".dynsym") / 24)
+        expect(rd32(t, 12)).to_equal(26)
+
+    it "dynamic PIE carries the same table":
+        val b = link_libc("Scrt1.o", ELF_LINK_DYNAMIC_PIE)
+        expect(dyn_tag(b, DT_GNU_HASH)).to_equal(sec_addr(b, ".gnu.hash"))
+        expect(rd32(sec_bytes(b, ".gnu.hash"), 4)).to_equal(sec_size(b, ".dynsym") / 24)

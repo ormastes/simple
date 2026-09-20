@@ -19,6 +19,8 @@ Maintain process knowledge for the `compiler` layer: owned source, architecture 
 - [Architecture modules](../../04_architecture/architecture_modules.md)
 - [Design docs](../../05_design/)
 - [Specs](../../06_spec/)
+- [Collection planner: adaptive collections + typed queries (RC1 plan)](../../03_plan/compiler/collection_planner/adaptive_collections_typed_query_rc1_plan_2026-09-18.md)
+- [mold-MDSOC++ linker (RC1 plan)](../../03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md)
 
 ## Update Rule
 
