@@ -1939,6 +1939,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ptr_read_i32", memory::rt_ptr_read_i32);
     insert_simple!("rt_ptr_read_i64", memory::rt_ptr_read_i64);
     insert_simple!("rt_ptr_read_u8", memory::rt_ptr_read_u8);
+    insert_simple!("unsafe_addr_of", memory::unsafe_addr_of);
+    insert_simple!("rt_x86_syscall", memory::rt_x86_syscall);
     insert_simple!("rt_mmap_raw", memory::rt_mmap_raw);
     insert_simple!("rt_munmap_raw", memory::rt_munmap_raw);
     insert_simple!("rt_mprotect", memory::rt_mprotect);
