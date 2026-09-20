@@ -9986,18 +9986,25 @@ static int rt_bucket2_fsync_path(const char* path) {
      * only empties the CRT's userspace buffer). Use CreateFileW (widened,
      * extended-length-prefixed) + FlushFileBuffers, falling back to
      * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
-     * required for FlushFileBuffers to succeed. */
+     * required for FlushFileBuffers to succeed. FILE_FLAG_BACKUP_SEMANTICS is
+     * required too: callers durability-sync DIRECTORIES through this same
+     * worker (native_noop_admission.spl syncs "{root}/generations" after a
+     * rename, the POSIX fsync-the-parent-dir idiom), and CreateFile refuses
+     * to open a directory handle at all without it (ERROR_ACCESS_DENIED);
+     * harmless on a regular file. */
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     HANDLE file = INVALID_HANDLE_VALUE;
     if (wide_path) {
         file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
         free(wide_path);
     } else {
         file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
     }
     if (file == INVALID_HANDLE_VALUE) return 0;
     int ok = FlushFileBuffers(file) != 0;

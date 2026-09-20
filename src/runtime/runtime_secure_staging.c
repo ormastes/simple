@@ -107,16 +107,21 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
      * entry point capped at MAX_PATH. Prefer the wide, extended-length-
      * prefixed call so a bootstrap-length path is not silently rejected;
      * fall back to the ANSI call only when the path cannot be widened. */
+    /* FILE_FLAG_BACKUP_SEMANTICS: harmless on a regular file, but required
+     * for CreateFile to open a directory handle at all -- durability-syncing
+     * a directory (the POSIX fsync-the-parent-dir-after-rename idiom) is a
+     * real caller shape elsewhere in this bug class (rt_file_fsync in
+     * runtime.c/runtime_native.c), so this twin is made consistent too. */
     HANDLE file = INVALID_HANDLE_VALUE;
     wchar_t wide_path[32768];
     if (spl_secure_widen_long_path(path, wide_path)) {
         file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
     } else {
         file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
     }
     if (file == INVALID_HANDLE_VALUE) return 0;
     int ok = FlushFileBuffers(file);
