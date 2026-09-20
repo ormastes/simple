@@ -1,0 +1,35 @@
+"""secure_temp_dir must normalize its `parent` argument to a native path.
+
+Regression coverage for the fix at src/lib/nogc_sync_mut/io/file_ops.spl:181-183:
+`secure_temp_dir_raw` called the `rt_secure_temp_dir` extern with the raw
+`parent` text, unlike the neighboring `file_publish_noreplace_raw` two lines
+below it, which always wraps its path args in `host_path_native(...)`. On
+Windows, `get_temp_dir()` (std.nogc_sync_mut.env.platform) returns a
+forward-slash path (e.g. "C:/Users/x/AppData/Local/Temp"); passing that
+un-normalized into the native temp-dir extern is exactly the class of bug
+`host_path_native` exists to close (see CLAUDE.md's already-fixed `is_dir`,
+`path_join2`, and `rt_file_publish_noreplace` entries for the same pattern).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+
+describe "secure_temp_dir":
+    it "creates a real directory under a forward-slash parent path":
+        val parent = get_temp_dir()
+        val result = secure_temp_dir(parent, "sptdns")
+        match result:
+            case Ok(path):
+                expect(path.len() > 0).to_be(true)
+            case Err(msg):
+                assert_true(false)
+
+    it "produces the same directory whether the parent is given native or forward-slash":
+        val parent_raw = get_temp_dir()
+        val parent_native = host_path_native(parent_raw)
+        val r1 = secure_temp_dir(parent_raw, "sptdcmp")
+        val r2 = secure_temp_dir(parent_native, "sptdcmp")
+        expect(r1.is_ok()).to_be(true)
+        expect(r2.is_ok()).to_be(true)
