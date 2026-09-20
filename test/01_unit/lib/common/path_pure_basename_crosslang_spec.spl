@@ -36,6 +36,7 @@ use std.spec.step
 
 use std.spec.{describe, it, assert_equal, assert_true}
 use std.common.path_pure.{path_basename}
+use std.platform.{is_windows}
 
 # Rust-interpreter oracle (test-only; never production-linked from Simple
 # product code here).
@@ -118,11 +119,20 @@ describe "path_basename — pure-Simple vs Rust-interpreter oracle (rt_path_base
         assert_equal(path_basename("dir/café"), "café")
         assert_equal(path_basename("dir/café"), rt_path_basename("dir/café"))
 
-        # Windows-style backslash path: on this POSIX-only oracle the
-        # backslash is NOT a separator, so the whole string is one
-        # component -- confirmed a genuine (not divergent) agreement.
+        # Windows-style backslash path: `path_basename` treats "/" as the
+        # ONLY separator on every platform (see path_pure.spl:112-113,
+        # is_sep_at), so the whole string is always one component here.
         assert_equal(path_basename("C:\\a\\b"), "C:\\a\\b")
-        assert_equal(path_basename("C:\\a\\b"), rt_path_basename("C:\\a\\b"))
+        # UPDATED 2026-09-20: `rt_path_basename` wraps Rust's
+        # std::path::Path::file_name(), which is PLATFORM-DEPENDENT --
+        # https://doc.rust-lang.org/std/path/index.html: "on Windows...
+        # both / and \ are treated as separators". The oracle is therefore
+        # NOT POSIX-only on a Windows host, and the two disagree there by
+        # design (this pure-Simple helper is deliberately "/"-only on every
+        # platform). Compare against the oracle only off Windows, where the
+        # prior "genuine agreement" claim holds.
+        if not is_windows():
+            assert_equal(path_basename("C:\\a\\b"), rt_path_basename("C:\\a\\b"))
 
     it "single-char input change flips the result (discrimination)":
         # @req REQ-SSPEC-LIB
@@ -176,7 +186,13 @@ describe "path_basename — pure-Simple vs Rust-interpreter oracle (rt_path_base
             val t2 = time_now_unix_micros()
             simple_us = simple_us + (t1 - t0)
             c_us = c_us + (t2 - t1)
-            assert_equal(sr, cr)
+            # See the "matches the oracle on the mandated edge table" case
+            # above: rt_path_basename's oracle (Rust std::path::Path) treats
+            # "\" as a separator on Windows, while path_basename never does.
+            # A vector whose separator this iteration chose is "\\" is
+            # therefore an expected, documented divergence on Windows only.
+            if not (is_windows() and sep == "\\"):
+                assert_equal(sr, cr)
             i = i + 1
         print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
         assert_true(simple_us >= 0 and c_us >= 0)
