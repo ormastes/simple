@@ -2933,6 +2933,29 @@ pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
     let hostname = get_hostname();
     let lock_content = format!("{}:{}", pid, hostname);
 
+    // Re-entrant same-process acquisition: the seed fires both unsafe lanes
+    // of process helpers, so a compiled file_lock executes twice and the
+    // second attempt previously deadlocked against the first (create_new
+    // sees our own lock file, waits out the timeout, returns -1 -- e.g.
+    // every env create on Windows). If this process already holds the lock
+    // for this path, hand out another handle to the same lock instead.
+    {
+        let mut state = LOCK_HANDLES.lock().unwrap();
+        let state = state.get_or_insert_with(LockState::new);
+        let existing = state
+            .active
+            .values()
+            .any(|p| p == &std::path::PathBuf::from(&lock_path));
+        if existing {
+            let handle = state.next_id;
+            state.next_id += 1;
+            state
+                .active
+                .insert(handle, std::path::PathBuf::from(&lock_path));
+            return Ok(Value::Int(handle));
+        }
+    }
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
     let mut backoff_ms = 10u64;
 
@@ -2983,7 +3006,12 @@ pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
     let mut state = LOCK_HANDLES.lock().unwrap();
     if let Some(state) = state.as_mut() {
         if let Some(lock_path) = state.active.remove(&handle) {
-            let _ = fs::remove_file(&lock_path);
+            // Only delete the lock file when no other handle (re-entrant
+            // same-process acquisition) still references it.
+            let still_held = state.active.values().any(|p| p == &lock_path);
+            if !still_held {
+                let _ = fs::remove_file(&lock_path);
+            }
             return Ok(Value::Bool(true));
         }
     }
