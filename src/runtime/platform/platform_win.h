@@ -462,6 +462,9 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     int64_t path_len = rt_string_len(path_value);
     const uint8_t* path_ptr = rt_string_data(path_value);
     if (!path_ptr || path_len <= 0 || size <= 0 || offset < 0) return 0;
+    /* Bounds contract shared with the Rust owner and runtime_native.c. */
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
     char* path = (char*)malloc((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
@@ -475,6 +478,12 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     HANDLE hFile = CreateFileA(path, access, share, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     free(path);  /* only CreateFileA needed the C string */
     if (hFile == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(hFile, &file_size) || file_size.QuadPart < 0 ||
+        (uint64_t)file_size.QuadPart < end) {
+        CloseHandle(hFile);
+        return 0;
+    }
 
     HANDLE hMapping = CreateFileMappingA(hFile, NULL, protect, 0, 0, NULL);
     if (!hMapping) {
@@ -490,6 +499,11 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     CloseHandle(hMapping);
     CloseHandle(hFile);
 
+    if (!addr) return 0;
+    if ((uintptr_t)addr > (uintptr_t)INT64_MAX) {
+        UnmapViewOfFile(addr);
+        return 0;
+    }
     return (int64_t)(intptr_t)addr;
 }
 
