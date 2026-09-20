@@ -444,17 +444,23 @@ reap_orphan_qemu() {
 }
 
 cleanup() {
-    reap_orphan_qemu
     if [ -n "$GIT_AUTHORITY_DIR" ] && [ -d "$GIT_AUTHORITY_DIR" ]; then
         rm -rf "$GIT_AUTHORITY_DIR"
     fi
+    # Shut this run's own guest down before any reaping: a hard kill loses
+    # unflushed guest writes (2026-09-19: an empty bootstrap authority-lock
+    # claim that no later run could recover).
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             if [ -n "${VM_SSH:-}" ]; then
                 info "Requesting guest shutdown"
                 $VM_SSH "shutdown -p now" >/dev/null 2>&1 || true
-                sleep 5
+                waited=0
+                while [ "$waited" -lt 60 ] && kill -0 "$pid" 2>/dev/null; do
+                    sleep 1
+                    waited=$((waited + 1))
+                done
             fi
             info "Stopping QEMU (pid=$pid)"
             kill "$pid" 2>/dev/null || true
@@ -463,6 +469,7 @@ cleanup() {
         fi
         rm -f "$PID_FILE"
     fi
+    reap_orphan_qemu
     if [ "$SCRIPT_OK" -eq 1 ]; then
         rm -f "$OVERLAY_IMAGE" "$SERIAL_LOG"
     else
