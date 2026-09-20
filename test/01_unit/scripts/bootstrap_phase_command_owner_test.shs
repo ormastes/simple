@@ -61,6 +61,19 @@ if [ "${PHASE_TAMPER_STAGE4_TOOLING:-0}" = 1 ] && \
   stage4_lsp=$(find "$(dirname "$0")" -name simple_lsp_mcp_server -type f | head -n 1)
   printf '\n# tampered Stage4 LSP server\n' >>"$stage4_lsp"
 fi
+if [ "${PHASE_REPLACE_STAGE4_RUNTIME:-0}" = 1 ] && \
+   [ "$(basename "$0")" = simple_mcp_server ] && [ "${1:-}" = --help ]; then
+  chmod u+w "$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib" \
+    "$PHASE_RUNTIME/hosted-runtime.env" "$PHASE_ADMISSION"
+  printf '\nreplaced runtime\n' >>"$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib"
+  replacement_sha=$(sha256sum "$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib" | awk '{print $1}')
+  sed "s/^sha256=.*/sha256=$replacement_sha/" "$PHASE_RUNTIME/hosted-runtime.env" \
+    >"$PHASE_RUNTIME/hosted-runtime.replaced"
+  mv "$PHASE_RUNTIME/hosted-runtime.replaced" "$PHASE_RUNTIME/hosted-runtime.env"
+  sed "s/^hosted_runtime_sha256=.*/hosted_runtime_sha256=$replacement_sha/" "$PHASE_ADMISSION" \
+    >"$PHASE_ADMISSION.replaced"
+  mv "$PHASE_ADMISSION.replaced" "$PHASE_ADMISSION"
+fi
 if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
   [ -n "${SIMPLE_MCP_TEST_BINARY:-}" ] && [ -x "$SIMPLE_MCP_TEST_BINARY" ] || exit 23
 fi
@@ -346,6 +359,25 @@ PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
 grep -Fq 'task=simple_mcp_server_help|result=FAIL|status=90' \
   "$tmp/stage4-tampered-work/summary.env" ||
   fail "Stage4 server mutation was not rejected after help"
+
+# Replacing the runtime and both of its authority records during a successful
+# tool invocation must not overwrite the cached hash and satisfy a stale
+# Stage4 tooling receipt.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_REPLACE_STAGE4_RUNTIME=1 \
+PHASE_RUNTIME="$tmp/runtime" PHASE_ADMISSION="$tmp/stage2-admitted/admission.env" \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/stage4-runtime-replaced-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "replaced Stage4 runtime authority was admitted"
+grep -Fq 'task=simple_mcp_server_help|result=FAIL|status=90' \
+  "$tmp/stage4-runtime-replaced-work/summary.env" ||
+  fail "Stage4 runtime replacement was not rejected after help"
 
 # A compiler snapshot can be rewritten while emitting a successful native
 # artifact. Stage4 must reject that producer invocation before it can mint any

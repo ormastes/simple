@@ -536,8 +536,11 @@ validate_stage4_tooling_receipt() {
   [ "$(manifest_value command_owner_receipt_sha256 "$vstr_receipt")" = "$command_owner_receipt_sha" ] || return 1
   validate_command_owner_receipt "$command_owner_receipt" || return 1
   [ "$(manifest_value hosted_runtime_path "$vstr_receipt")" = "$runtime_path" ] || return 1
-  [ "$(manifest_value hosted_runtime_sha256 "$vstr_receipt")" = "$hosted_runtime_sha" ] || return 1
   validate_hosted_runtime_authority "$runtime_path" || return 1
+  # Revalidation refreshes hosted_runtime_sha from the current frozen authority.
+  # Compare the tooling receipt only afterward so replacing the authority and
+  # its admission record cannot retain a stale, previously matching hash.
+  [ "$(manifest_value hosted_runtime_sha256 "$vstr_receipt")" = "$hosted_runtime_sha" ] || return 1
   for vstr_server_key in mcp_server lsp_server; do
     vstr_server=$(manifest_value "${vstr_server_key}_path" "$vstr_receipt")
     vstr_server_sha=$(manifest_value "${vstr_server_key}_sha256" "$vstr_receipt")
@@ -843,7 +846,9 @@ else
   fi
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ] && [ -n "$mcp_server_sha" ]; then
-    command_owner_receipt="$tool_outputs/command-owners.$compiler_cli_sha.$test_runner_sha.env"
+    command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
+      sha256sum | awk '{print $1}')
+    command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
     write_command_owner_receipt "$command_owner_receipt" "$compiler_cli" "$compiler_cli_sha" \
       "$test_runner" "$test_runner_sha" "$mcp_server" "$mcp_server_sha" || die "cannot freeze command-owner receipt"
     command_owner_receipt_sha=$(hash_file "$command_owner_receipt")
@@ -862,10 +867,12 @@ else
       validate_stage4_compiler_snapshot || die "Stage4 compiler snapshot changed before tooling receipt"
       stage4_mcp_sha=$(hash_file "$server_outputs/simple_mcp_server")
       stage4_lsp_sha=$(hash_file "$server_outputs/simple_lsp_mcp_server")
-      # Keep the filename below common NAME_MAX limits. The frozen receipt body
-      # still binds every individual server hash; the CLI/runner receipt hash is
-      # enough to distinguish a rebuilt Phase-4 tool lineage in this namespace.
-      stage4_tooling_receipt="$server_outputs/stage4-tooling-owners.$command_owner_receipt_sha.env"
+      # Derive one compact filename identity from every mutable artifact bound
+      # by the frozen receipt. This avoids NAME_MAX overflow without aliasing a
+      # rebuilt MCP/LSP/runtime lineage onto an incompatible existing receipt.
+      stage4_tooling_lineage_sha=$(printf '%s\n' "$snapshot_sha" "$command_owner_receipt_sha" \
+        "$hosted_runtime_sha" "$stage4_mcp_sha" "$stage4_lsp_sha" | sha256sum | awk '{print $1}')
+      stage4_tooling_receipt="$server_outputs/stage4-tooling-owners.$stage4_tooling_lineage_sha.env"
       write_stage4_tooling_receipt "$stage4_tooling_receipt" \
         "$server_outputs/simple_mcp_server" "$stage4_mcp_sha" \
         "$server_outputs/simple_lsp_mcp_server" "$stage4_lsp_sha" ||
