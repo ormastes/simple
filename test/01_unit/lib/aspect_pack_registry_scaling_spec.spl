@@ -6,11 +6,21 @@ average Dict membership, lookup, insertion, and removal.
 """
 
 use std.spec
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
 use std.common.aspect_pack.{ApkModuleSourceV1, ApkCatalogEntryV1,
     apk_build_pack_v1, apk_build_catalog_v1, apk_loader_new,
     apk_loader_register_pack, apk_loader_unregister_pack,
-    apk_loader_last_error, apk_load_facet}
+    apk_loader_last_error, apk_load_facet, apk_loader_set_host_offer_v1}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
+
+# Mandatory pre-load host offer (source contract since the kernel-plugin
+# migration): facet acquisition refuses with PLUG-E-NAME before negotiation
+# unless an offer accepting this facet key is installed. V1 modules carry an
+# empty module_abi_hash, so the offer matches it with an empty digest.
+fn _registry_host() -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("registry/Facet", 1, 0, "")], [], [], [])
 
 fn _registry_pack(body: text) -> [u8]:
     var modules: [ApkModuleSourceV1] = []
@@ -37,6 +47,7 @@ describe "aspect-pack per-loader registry":
         expect(apk_loader_register_pack(ld, "aspect/registry.apk", _registry_pack("first"))).to_equal(true)
         expect(apk_loader_unregister_pack(ld, "aspect/registry.apk")).to_equal(true)
         expect(apk_loader_register_pack(ld, "aspect/registry.apk", _registry_pack("second"))).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _registry_host())
         val loaded = apk_load_facet(ld, _registry_catalog(), "registry/Facet")
         expect(loaded.ok).to_equal(true)
         expect(bytes_to_text(loaded.payload)).to_equal("second")
@@ -46,6 +57,8 @@ describe "aspect-pack per-loader registry":
         val right = apk_loader_new()
         expect(apk_loader_register_pack(left, "aspect/registry.apk", _registry_pack("left"))).to_equal(true)
         expect(apk_loader_register_pack(right, "aspect/registry.apk", _registry_pack("right"))).to_equal(true)
+        apk_loader_set_host_offer_v1(left, _registry_host())
+        apk_loader_set_host_offer_v1(right, _registry_host())
         val catalog = _registry_catalog()
         val left_loaded = apk_load_facet(left, catalog, "registry/Facet")
         val right_loaded = apk_load_facet(right, catalog, "registry/Facet")
@@ -59,6 +72,8 @@ describe "aspect-pack per-loader registry":
         val right = apk_loader_new()
         expect(apk_loader_register_pack(left, "aspect/registry.apk", _registry_pack("left"))).to_equal(true)
         expect(apk_loader_register_pack(right, "aspect/registry.apk", _registry_pack("right"))).to_equal(true)
+        apk_loader_set_host_offer_v1(left, _registry_host())
+        apk_loader_set_host_offer_v1(right, _registry_host())
         expect(apk_loader_unregister_pack(left, "aspect/registry.apk")).to_equal(true)
         val catalog = _registry_catalog()
         val missing = apk_load_facet(left, catalog, "registry/Facet")

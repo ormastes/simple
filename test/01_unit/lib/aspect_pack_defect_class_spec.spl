@@ -19,9 +19,11 @@
 
 use std.spec.step
 
-use std.common.aspect_pack.{ApkModuleSourceV3, ApkProfileRecordV1, apk_build_pack_v3, apk_build_catalog_v3, apk_catalog_select_profile_v1, apk_catalog_route_in_profile_v1, apk_loader_select_profile, apk_load_cluster_v1, apk_pack_cluster_of_v1, apk_pack_chunk_of_v1, apk_loader_set_expected_core_layout, apk_unload_facet_v1, apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1, apk_facet_refcount_v1, apk_loader_unloads, apk_open_catalog_v1, APK_CHUNK_CODE, APK_CHUNK_DEBUG, APK_CHUNK_FLAG_NONE, APK_CHUNK_FLAG_STORED, APK_FC_QUIESCING, ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_build_catalog_v2_checked, apk_try_facet, apk_load_aspect_manual, apk_loader_cache_hits, apk_loader_generation, apk_loader_set_expected_core_abi, apk_loader_set_expected_variant_fingerprint, apk_activation_stack_enter_v1, apk_activation_stack_exit_v1, APK_ENTRY_FACET, APK_ACT_OFF, APK_ACT_MANUAL, APK_ACT_LAZY_FACET, apk_build_pack_v1, apk_open_pack_v1, apk_build_catalog_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_load_module_v1, apk_loader_packs_opened, apk_loader_modules_decompressed, apk_loader_bytes_decompressed, APK_HEADER_SIZE_V1, APK_CATALOG_HEADER_SIZE_V1}
+use std.common.aspect_pack.{ApkModuleSourceV3, ApkProfileRecordV1, apk_build_pack_v3, apk_build_catalog_v3, apk_catalog_select_profile_v1, apk_catalog_route_in_profile_v1, apk_loader_select_profile, apk_load_cluster_v1, apk_pack_cluster_of_v1, apk_pack_chunk_of_v1, apk_loader_set_expected_core_layout, apk_unload_facet_v1, apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1, apk_facet_refcount_v1, apk_loader_unloads, apk_open_catalog_v1, APK_CHUNK_CODE, APK_CHUNK_DEBUG, APK_CHUNK_FLAG_NONE, APK_CHUNK_FLAG_STORED, APK_FC_QUIESCING, ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_build_catalog_v2_checked, apk_try_facet, apk_load_aspect_manual, apk_loader_cache_hits, apk_loader_generation, apk_loader_set_expected_core_abi, apk_loader_set_expected_variant_fingerprint, apk_activation_stack_enter_v1, apk_activation_stack_exit_v1, APK_ENTRY_FACET, APK_ACT_OFF, APK_ACT_MANUAL, APK_ACT_LAZY_FACET, apk_build_pack_v1, apk_open_pack_v1, apk_build_catalog_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_load_module_v1, apk_loader_packs_opened, apk_loader_modules_decompressed, apk_loader_bytes_decompressed, APK_HEADER_SIZE_V1, APK_CATALOG_HEADER_SIZE_V1, apk_loader_set_host_offer_v1}
 use std.common.compress.deflate.{deflate_compress}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
 
 
 fn _payload(tag: text, repeats: i64) -> [u8]:
@@ -55,6 +57,18 @@ fn _catalog() -> [u8]:
     val cat = apk_build_catalog_v1(entries)
     cat.bytes
 
+# Mandatory pre-load host offer (source contract since the kernel-plugin
+# migration): facet acquisition refuses with PLUG-E-NAME before negotiation
+# unless an offer accepting the facet key (and digest) is installed. Each
+# example installs one before its first successful load; corrupt-input and
+# refused-policy cases fail earlier, before negotiation, and need none.
+fn _defect_host(entries: [IfaceId]) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        entries, [], [], [])
+
+fn _defect_host_empty_digest(facet_key: text) -> HostOfferV1:
+    _defect_host([IfaceId(facet_key, 1, 0, "")])
+
 describe "aspect-pack defect class: measured claims and fail-closed errors":
     # @manual scenario evidence
     it "REQ-APK-DC-01 POSITIVE CONTROL: one facet load decompresses exactly one of 4 modules and opens only its own pack":
@@ -68,6 +82,8 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/a.apk", pa.bytes)).to_equal(true)
         expect(apk_loader_register_pack(ld, "aspect/b.apk", pb.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host(
+            [IfaceId("metrics/Observable", 1, 0, ""), IfaceId("debug/Debuggable", 1, 0, "")]))
 
         val got = apk_load_facet(ld, _catalog(), "metrics/Observable")
         expect(got.ok).to_equal(true)
@@ -197,6 +213,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val cat = apk_build_catalog_v2(entries)
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/a.apk", apk_build_pack_v1(_pack_a_modules()).bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host_empty_digest("profile/Manual"))
 
         val excluded = apk_load_facet(ld, cat.bytes, "off/Excluded")
         expect(excluded.ok).to_equal(false)
@@ -222,6 +239,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/a.apk", apk_build_pack_v1(_pack_a_modules()).bytes)).to_equal(true)
         expect(apk_loader_register_pack(ld, "aspect/b.apk", apk_build_pack_v1(_pack_b_modules()).bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host_empty_digest("metrics/Observable"))
 
         # try_facet BEFORE any load: a clean miss that moves no counter
         val cold = apk_try_facet(ld, "metrics/Observable")
@@ -278,6 +296,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
             abi_hash: "abi-2"))
         val ld2 = apk_loader_new()
         expect(apk_loader_register_pack(ld2, "aspect/b.apk", pack.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld2, _defect_host([IfaceId("debug/Debuggable", 1, 0, "abi-2")]))
         val fine = apk_load_facet(ld2, apk_build_catalog_v2(ok_entries).bytes, "debug/Debuggable")
         expect(fine.ok).to_equal(true)
         expect(fine.found).to_equal(true)
@@ -296,6 +315,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val cat = apk_build_catalog_v2(entries)
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/b.apk", pack.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host([IfaceId("debug/Debuggable", 1, 0, "abi-1")]))
         apk_loader_set_expected_core_abi(ld, "core-expected")
         expect(apk_loader_generation(ld)).to_equal(0)
         val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
@@ -319,6 +339,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val cat = apk_build_catalog_v2(entries)
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/b.apk", pack.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host([IfaceId("debug/Debuggable", 1, 0, "abi-1")]))
         apk_loader_set_expected_variant_fingerprint(ld, "vfp-expected")
         val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
         expect(got.ok).to_equal(false)
@@ -413,6 +434,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk", module_id: "debug.core"))
         val cat = apk_build_catalog_v1(entries)
         expect(apk_loader_register_pack(ld, "aspect/obs.apk", apk_build_pack_v1(mods).bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host_empty_digest("debug/Debuggable"))
         val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
         expect(got.ok).to_equal(true)
         expect(got.found).to_equal(true)
@@ -563,6 +585,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val built = apk_build_pack_v1(_pack_b_modules())
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/b.apk", built.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host_empty_digest("debug/Debuggable"))
         expect(apk_load_facet(ld, _catalog(), "debug/Debuggable").ok).to_equal(true)
         expect(apk_facet_pin_v1(ld, "debug/Debuggable")).to_equal(true)
         expect(apk_unload_facet_v1(ld, "debug/Debuggable").quiescing).to_equal(true)
@@ -585,6 +608,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         expect(apk_facet_pin_v1(ld, "debug/Debuggable")).to_equal(false)
         expect(apk_facet_unpin_v1(ld, "debug/Debuggable")).to_equal(false)
         expect(apk_loader_register_pack(ld, "aspect/b.apk", built.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host_empty_digest("debug/Debuggable"))
         expect(apk_load_facet(ld, _catalog(), "debug/Debuggable").ok).to_equal(true)
         # unpinning something that was never pinned must not underflow
         expect(apk_facet_unpin_v1(ld, "debug/Debuggable")).to_equal(false)
@@ -602,6 +626,7 @@ describe "aspect-pack defect class: measured claims and fail-closed errors":
         val built = apk_build_pack_v3(mods)
         val ld = apk_loader_new()
         expect(apk_loader_register_pack(ld, "aspect/b.apk", built.bytes)).to_equal(true)
+        apk_loader_set_host_offer_v1(ld, _defect_host_empty_digest("debug/Debuggable"))
         apk_loader_set_expected_core_layout(ld, "layout-2")
         val got = apk_load_facet(ld, _catalog(), "debug/Debuggable")
         expect(got.ok).to_equal(false)
