@@ -1,0 +1,58 @@
+# Behavioral regression pin for the pure-Simple interpreter (core_interpret):
+# static class-method calls (`Type.method(args)`) parse as EXPR_METHOD_CALL on
+# the bare class NAME, and class names live in the struct table — not the
+# value env. Before the fix, eval_method_call evaluated the class name as an
+# ordinary identifier and failed with "undefined variable: Type", which made
+# any module-level `val X = SomeClass.new()` (e.g.
+# src/lib/common/testing/mock/builder.spl's `val _global_mock_policy =
+# MockPolicy.new()`) kill the whole importing module — the eval.spl
+# state/typing leak family of
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int}
+
+describe "pure-Simple interpreter static class-method dispatch":
+    it "evaluates a module-level val initialized by a static class-method call":
+        step("Verify: module-init static call resolves Type__method, not the value env")
+        val src = "class ProbeWidget:\n" +
+            "    label: text\n" +
+            "    static fn new() -> ProbeWidget:\n" +
+            "        ProbeWidget(label: \"w\")\n" +
+            "    me describe() -> text:\n" +
+            "        \"widget:\" + self.label\n" +
+            "val GLOBAL_WIDGET = ProbeWidget.new()\n" +
+            "fn main() -> i64:\n" +
+            "    if GLOBAL_WIDGET.describe() == \"widget:w\": 1 else: 0\n"
+        val result = core_interpret(src, "static_class_module_level_pin.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(1)
+
+    it "dispatches static calls with named args from inside a function body":
+        step("Verify: NamedCodec.encode(b: 2, a: 1) binds by declaration")
+        val src = "class NamedCodec:\n" +
+            "    static fn encode(a: i64, b: i64) -> i64:\n" +
+            "        return a * 10 + b\n" +
+            "fn main() -> i64:\n" +
+            "    NamedCodec.encode(b: 2, a: 1)\n"
+        val result = core_interpret(src, "static_class_named_args_pin.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(12)
+
+    it "still prefers enum variant constructors over the static path":
+        step("Verify: Enum.Variant(payload) keeps resolving through the enum table")
+        val src = "enum PinColor:\n" +
+            "    Red\n" +
+            "    Blue\n" +
+            "fn main() -> i64:\n" +
+            "    val c = PinColor.Blue\n" +
+            "    match c:\n" +
+            "        case PinColor.Red: 1\n" +
+            "        case PinColor.Blue: 2\n" +
+            "    \n"
+        val result = core_interpret(src, "static_class_enum_variant_pin.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(2)
