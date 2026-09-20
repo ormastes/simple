@@ -95,3 +95,65 @@ corruption class the file's own comments document; harmless and more robust.
 - All Windows `native-build` lanes (blocks the linker Gate 0 real-corpus
   baseline — see doc/01_research/domain/simple_linker_mold_mdsocpp.md §17).
 - Any other JIT/AOT lane compiling the full driver closure.
+
+## 2026-09-19: two more live dispatches observed (whole-suite triage)
+
+1. `format_size` — 8 same-signature `fn format_size(bytes: i64)` definitions
+   across devhub/output, lib/common/format_utils, three
+   lib/*/package/list.spl copies, os file apps, and llm_dashboard gui.
+   `test/01_unit/app/devhub/itf_output_spec.spl` expects devhub's KiB
+   oracle but the spec closure dispatched format_utils' KB variant
+   ("1.5 KB" vs "1.5 KiB"). One shadow (env_panel_html) renamed to
+   format_size_panel; the dispatch itself remains compiler debt.
+2. `process_run` — patching the raw runners of std.nogc_sync_mut
+   io.process_ops, io_runtime, AND app.io.process_ops fixed
+   `process_run("/bin/echo")` for minimal closures, but large specs
+   (cli_misc and ~20 copy-pasted siblings with wide import closures)
+   still dispatched the gc_async_mut pure-runtime variant
+   (src/lib/gc_async_mut/pure/runtime.spl:305), which shells via its own
+   system_shell and bypasses the resolver entirely. Workaround applied:
+   specs route through shell(). Root fix remains: dispatch must resolve
+   by import path, not last-defined $dup.
+
+Also noted: cli_process_facade_source it2 ("facade contracts
+distinct/non-recursive") reports recursion-count 2 under the test runner
+while identical probes outside the runner give 1 on the same file and
+oracles — runner-environment dispatch skew, unconfirmed root cause.
+3. `FontRenderer.try_load_runtime_ttf` — third confirmed dispatch.
+   Isolated probe importing only std.nogc_sync_mut.text_layout.font_renderer
+   loads the bundled NotoSerifSC[wght].ttf fine (has_ttf=true). The
+   ui.chromium text_metrics spec (14 its, 13 failing with zero metrics)
+   imports common.text_layout.font_renderer (facade to the same canonical
+   module) PLUS std.gc_async_mut.gpu.browser_engine.text_painter, and the
+   wider closure dispatches a different FontRenderer variant whose
+   try_load_runtime_ttf leaves has_ttf=false. Candidates, SFFI backend
+   (spl_fonts_call_*), and font bytes are all verified good. Same fix class
+   as (2): dispatch by import path.
+4. `fill_series_spec` — cleanest reproduction (2026-09-19). The spec's
+   first `it` calls `detect_fill_pattern(_nums([1.0, 3.0]))` and matches
+   `FillPattern.Linear(start, step)`. The IDENTICAL code with the IDENTICAL
+   five-line import block passes in a 25-line probe file (start=1.0,
+   step=2.0, both patterns, named and positional). In the full 174-line
+   spec the same `it` falls through to `_:` (CopyCycle) — no
+   cross-family imports are involved; the wider closure alone tips the
+   co-compiled dispatch (number_cell or detect_fill_pattern $dup). Any
+   fix for the compiler debt should use this file as the regression test:
+   it is small, self-contained, and binary (pass in a stub file, fail in
+   the real one).
+5. `assistant_dashboard_e2e_spec` (mcp_unit, 2026-09-19). Identical mechanics
+   to (4): `handle_assistant_start` + `assistant_store_list_sessions` +
+   the std.nogc_async_mut.mcp.helpers jo2/jp/js body builders all work in a
+   20-line probe (session persisted, prompt exact match), but the full spec
+   (which additionally imports app.dashboard.assistant_collectors snapshot/
+   timeline collectors) finds no session — `find_session_by_prompt` returns
+   "". Two jo2/js definition families exist (app/llm_caret/json_helpers.spl,
+   app/mcp/main_lazy_json.spl); the wider closure picks a $dup whose parse
+   or store root disagrees.
+6. `storage_layout_native_projection_spec` (compiler/backend/native,
+   2026-09-19): the spec's 6-arg call to
+   `compile_module_with_backend_target_cpu_storage_bindings` (whose ONLY
+   definition takes exactly 6 params) errors "function expects argument for
+   parameter 'msg', but none was provided" -- some inner callee in the wide
+   spec closure dispatched to a $dup whose signature carries a diagnostics
+   `msg` parameter. Sixth instance; same closed-repro shape as (4)/(5)
+   should be constructible by importing the spec's exact block into a stub.
