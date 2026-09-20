@@ -62,6 +62,19 @@ int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
 #  define SIMPLE_RUNTIME_TARGET_AVX2
 #endif
 
+/* Same MSVC exception as SIMPLE_RUNTIME_TARGET_AVX2 above, for the AVX-512
+ * lane-explicit kernels further down this file. MSVC's cl.exe does not
+ * recognise `__attribute__` at all (not a GNU-compat parser), so an unguarded
+ * use is a hard syntax error under real MSVC (C2143/C2091/C2059), not merely
+ * a no-op like it would be on an unsupported GCC/clang target. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define SIMPLE_RUNTIME_TARGET_AVX512 __attribute__((target("avx512f")))
+#  define SIMPLE_RUNTIME_TARGET_AVX512BWDQ __attribute__((target("avx512f,avx512bw,avx512dq")))
+#else
+#  define SIMPLE_RUNTIME_TARGET_AVX512
+#  define SIMPLE_RUNTIME_TARGET_AVX512BWDQ
+#endif
+
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 static bool rt_msvc_x86_os_avx_enabled(void) {
     int regs[4];
@@ -2373,7 +2386,7 @@ static bool db_bitmap_cpu_has_avx512f(void) {
  *     o = ((((l & r) >> 3) & 0xFFFFFFFF) << 3)
  * is bit-identical to the scalar body for every input.
  */
-__attribute__((target("avx512f")))
+SIMPLE_RUNTIME_TARGET_AVX512
 static void db_bitmap_and_avx512(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
     int64_t i = 0;
     const __m512i mask32 = _mm512_set1_epi64((long long)0xFFFFFFFFLL);
@@ -2393,7 +2406,7 @@ static void db_bitmap_and_avx512(const int64_t* l, const int64_t* r, int64_t* o,
     }
 }
 
-__attribute__((target("avx2")))
+SIMPLE_RUNTIME_TARGET_AVX2
 static void db_bitmap_and_avx2(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
     int64_t i = 0;
     const __m256i mask32 = _mm256_set1_epi64x((long long)0xFFFFFFFFLL);
@@ -2579,7 +2592,7 @@ int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
  * opaque ramps would miss.
  */
 #if defined(__x86_64__) || defined(_M_X64)
-__attribute__((target("avx512f,avx512bw,avx512dq")))
+SIMPLE_RUNTIME_TARGET_AVX512BWDQ
 static void blend_mask_span_avx512_lanes(int64_t* dst, const uint8_t* mask,
                                          int64_t n, uint32_t color) {
     const __m512i c255   = _mm512_set1_epi64(255);
@@ -2716,7 +2729,7 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
  * early `continue` rather than blending with a == 0.
  */
 #if defined(__x86_64__) || defined(_M_X64)
-__attribute__((target("avx512f,avx512bw,avx512dq")))
+SIMPLE_RUNTIME_TARGET_AVX512BWDQ
 static void blend_cov_span_avx512_lanes(int64_t* dst, const int64_t* colcov,
                                         int64_t n, int64_t cov_y, int64_t alpha,
                                         uint32_t color) {
