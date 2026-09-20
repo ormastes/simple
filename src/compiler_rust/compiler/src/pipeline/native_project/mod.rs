@@ -1342,31 +1342,38 @@ impl NativeProjectBuilder {
             return Ok(None);
         };
 
-        let cxx = tools::find_cxx_compiler();
-        let is_clang_cl = cxx.contains("clang-cl");
-        let escaped = cxx_raw_string_literal(&registry_sdn);
+        let target = effective_target();
+        let compiler = security_registry_c_source_compiler(target);
+        let is_clang_cl = compiler.contains("clang-cl");
+        let escaped = c_string_literal(&registry_sdn);
         let loader_decl = if is_clang_cl {
-            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
+            r#"extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
         } else {
-            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
+            r#"extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
         };
         let source = format!(
             r#"
+#ifdef __cplusplus
+extern "C" {{
+#endif
 {loader_decl}
-static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = R"SECURITY_SDN({escaped})SECURITY_SDN";
-extern "C" void __module_init_security_registry(void) {{
+static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = "{escaped}";
+void __module_init_security_registry(void) {{
     if (rt_security_load_registry_sdn) {{
         rt_security_load_registry_sdn(SIMPLE_SECURITY_REGISTRY_SDN, sizeof(SIMPLE_SECURITY_REGISTRY_SDN) - 1);
     }}
 }}
+#ifdef __cplusplus
+}}
+#endif
 "#
         );
-        let source_path = temp_dir.join("_security_registry_init.cpp");
+        let source_path = temp_dir.join("_security_registry_init.c");
         std::fs::write(&source_path, source).map_err(|e| format!("write security registry init: {e}"))?;
 
         let object_path = temp_dir.join("_security_registry_init.o");
         let status = if is_clang_cl {
-            std::process::Command::new(&cxx)
+            std::process::Command::new(&compiler)
                 .arg("/c")
                 .arg("/O2")
                 .arg("/Gy")
@@ -1375,15 +1382,21 @@ extern "C" void __module_init_security_registry(void) {{
                 .status()
                 .map_err(|e| format!("compile security registry init: {e}"))?
         } else {
-            std::process::Command::new(&cxx)
-                .args(["-c", "-O2", "-ffunction-sections", "-fdata-sections", "-o"])
+            let mut cmd = std::process::Command::new(&compiler);
+            cmd.args(["-c", "-O2", "-ffunction-sections", "-fdata-sections"]);
+            if target.os == simple_common::target::TargetOS::Windows
+                && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+            {
+                cmd.arg("--target=x86_64-w64-windows-gnu");
+            }
+            cmd.arg("-o")
                 .arg(&object_path)
                 .arg(&source_path)
                 .status()
                 .map_err(|e| format!("compile security registry init: {e}"))?
         };
         if !status.success() {
-            return Err(format!("compile security registry init failed ({})", cxx));
+            return Err(format!("compile security registry init failed ({})", compiler));
         }
         Ok(Some(object_path))
     }
@@ -1486,8 +1499,20 @@ fn source_may_declare_security(source: &str) -> bool {
     })
 }
 
-fn cxx_raw_string_literal(value: &str) -> String {
-    value.replace(")SECURITY_SDN\"", ")SECURITY_SDN_\"")
+fn c_string_literal(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n\"\n\"")
+}
+
+fn security_registry_c_source_compiler(target: simple_common::target::Target) -> String {
+    if target.os == simple_common::target::TargetOS::Windows {
+        tools::target_c_compiler(target)
+    } else {
+        tools::find_cxx_compiler()
+    }
 }
 
 /// Check if a file path matches the canonical entry file path.

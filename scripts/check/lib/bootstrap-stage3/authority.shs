@@ -482,7 +482,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # name at run time -- find_tool_portable runs `where llc` on Windows and
     # `command -v` elsewhere. Under `env -i` with no PATH that lookup finds
     # nothing, the LLVM object stage returns 'llc not found', and Stage 2
-    # sanity fails. Same reasoning as CC/CXX and INCLUDE/LIB below: a tool
+    # sanity fails. Same reasoning as CC and INCLUDE/LIB below: a tool
     # this stage must execute cannot be reached without it.
     # SIMPLE_LLVM_BIN / LLVM_SYS_180_PREFIX: the backend's tool finder
     # (_env_tool_dirs in 95.interp/interpreter/llvm/tools.spl) consults these
@@ -495,15 +495,15 @@ bootstrap_stage3_stage2_canonical_env_names() {
     printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *windows-gnu*)
-            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR'
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC'
             ;;
         *windows-msvc*)
-            # INCLUDE/LIB/LIBPATH belong here for the same reason CC/CXX do:
+            # INCLUDE/LIB/LIBPATH belong here for the same reason CC does:
             # the stage runs under `env -i` with this list as the allowlist, so
             # anything absent is simply gone. Without them cl.exe cannot find the
             # MSVC headers and the core-c-bootstrap runtime supplement fails with
             # "fatal error C1083: cannot open include file 'stdint.h'".
-            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC CXX INCLUDE LIB LIBPATH'
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC INCLUDE LIB LIBPATH'
             ;;
     esac
     printf ' %s\n' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
@@ -739,26 +739,78 @@ bootstrap_stage3_host_platform() {
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
-            # Honor an explicitly selected MSVC-compatible compiler.  This is
-            # needed on hosts where cl.exe passes the lightweight authority
-            # probe but fails later in cc-rs while clang-cl succeeds under the
-            # same MSVC ABI and hermetic environment.  The runnable compiler
-            # probe remains the admission gate, and its exact path is included
-            # in the tool-authority fingerprint.
+            # Windows bootstrap is a Clang C-driver lane. Do not let an ambient
+            # compiler selection change the admitted C ABI owner.
             if [ -n "${CC:-}" ]; then
-                bootstrap_stage3_windows_runnable_compiler "$CC" '/?' &&
-                    return 0
+                case "${CC##*/}" in
+                    clang-cl|clang-cl.exe) ;;
+                    *) return 1 ;;
+                esac
+                bootstrap_stage3_windows_runnable_compiler "$CC" '--version' && return 0
             fi
-            bootstrap_stage3_windows_runnable_compiler cl.exe '/?' ||
-                bootstrap_stage3_windows_runnable_compiler clang-cl.exe '--version'
+            bootstrap_stage3_windows_runnable_compiler clang-cl.exe '--version'
             ;;
         x86_64-pc-windows-gnu)
-            command -v "${CC_x86_64_pc_windows_gnu:-gcc}" 2>/dev/null
+            bootstrap_stage3_windows_gnu_clang_path \
+                "${CC_x86_64_pc_windows_gnu:-clang}" || return 1
+            "$bootstrap_stage3_gnu_tool_path" \
+                --target=x86_64-w64-windows-gnu --version >/dev/null 2>&1
             ;;
         *)
             command -v cc 2>/dev/null
             ;;
     esac
+}
+
+bootstrap_stage3_windows_gnu_tool_path() {
+    bootstrap_stage3_gnu_tool_selected=$(command -v "$1" 2>/dev/null) || return 1
+    bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_gnu_tool_selected") || return 1
+    [ -x "$bootstrap_stage3_gnu_tool_path" ] || return 1
+    printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
+}
+
+bootstrap_stage3_windows_gnu_clang_path() {
+    bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_windows_gnu_tool_path "$1") || return 1
+    case "${bootstrap_stage3_gnu_tool_path##*/}" in
+        clang|clang.exe) printf '%s\n' "$bootstrap_stage3_gnu_tool_path" ;;
+        *) return 1 ;;
+    esac
+}
+
+bootstrap_stage3_windows_gnu_llvm_ar_path() {
+    bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_windows_gnu_tool_path "$1") || return 1
+    case "${bootstrap_stage3_gnu_tool_path##*/}" in
+        llvm-ar|llvm-ar.exe) printf '%s\n' "$bootstrap_stage3_gnu_tool_path" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Print the exact C linker/compiler and archiver that Cargo must receive for
+# the Windows GNU target. Git Bash prepends /mingw64/bin when it starts a
+# shell, including a shell launched from an otherwise hermetic `env -i`.
+# Passing bare tool names therefore lets Cargo reselect tools after the bootstrap
+# authority has already admitted a particular executable.
+bootstrap_stage3_windows_gnu_cargo_tools() {
+    bootstrap_stage3_gnu_cc=$1
+    [ -n "$bootstrap_stage3_gnu_cc" ] || return 1
+    bootstrap_stage3_gnu_cc=$(bootstrap_stage3_windows_gnu_clang_path \
+        "$bootstrap_stage3_gnu_cc") || return 1
+    bootstrap_stage3_gnu_linker=$(bootstrap_stage3_windows_gnu_clang_path \
+        "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-$bootstrap_stage3_gnu_cc}" \
+        ) || return 1
+    bootstrap_stage3_gnu_target_cc=$(bootstrap_stage3_windows_gnu_clang_path \
+        "${CC_x86_64_pc_windows_gnu:-$bootstrap_stage3_gnu_cc}" \
+        ) || return 1
+    bootstrap_stage3_gnu_ar=$(bootstrap_stage3_windows_gnu_llvm_ar_path \
+        "${AR_x86_64_pc_windows_gnu:-llvm-ar}") || return 1
+    [ -x "$bootstrap_stage3_gnu_linker" ] || return 1
+    [ -x "$bootstrap_stage3_gnu_target_cc" ] || return 1
+    [ -x "$bootstrap_stage3_gnu_ar" ] || return 1
+    printf 'linker=%s\ncc=%s\nar=%s\n' \
+        "$bootstrap_stage3_gnu_linker" \
+        "$bootstrap_stage3_gnu_target_cc" \
+        "$bootstrap_stage3_gnu_ar"
 }
 
 bootstrap_stage3_windows_msvc_candidate_path() {
@@ -1809,9 +1861,8 @@ bootstrap_stage3_tool_authority_snapshot() (
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
     bootstrap_stage3_tool_c_name=cc
     # Unix hosts bind their cc command. Both Windows ABIs must use the same
-    # target C-compiler owner as the Rust build: GNU installations may provide
-    # gcc.exe without a cc alias, and MSVC selects a runnable cl/clang-cl.
-    # The requested-path helper consumes this exact selected identity.
+    # target C-driver owner as the Rust build. The requested-path helper
+    # consumes this exact selected identity.
     bootstrap_stage3_tool_c_path=$(command -v cc 2>/dev/null || printf '')
     case "$(bootstrap_stage3_host_platform)" in
         *-pc-windows-msvc|*-pc-windows-gnu)
@@ -4196,10 +4247,12 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             >>"$bootstrap_stage3_seed_records" || exit 1
         if [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-gnu ]; then
-            printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\n' \
-                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}" \
-                "${CC_x86_64_pc_windows_gnu:-gcc}" \
-                "${AR_x86_64_pc_windows_gnu:-ar}" \
+            printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\ntarget-cflags=%s\ntarget-rustflags=%s\n' \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-clang}" \
+                "${CC_x86_64_pc_windows_gnu:-clang}" \
+                "${AR_x86_64_pc_windows_gnu:-llvm-ar}" \
+                "${CFLAGS_x86_64_pc_windows_gnu:---target=x86_64-w64-windows-gnu}" \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:--C link-arg=--target=x86_64-w64-windows-gnu}" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
         elif [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-msvc ]; then
