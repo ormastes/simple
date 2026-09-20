@@ -1014,7 +1014,9 @@ impl NativeProjectBuilder {
         let effective_backend = self.config.backend.as_str();
 
         // Determine which files need recompilation via content hash
-        let mut to_compile: Vec<(usize, PathBuf, String, Option<PathBuf>)> = Vec::new();
+        // `Arc<str>` so the dirty-set shares source text with `file_sources`
+        // instead of cloning every module's source again.
+        let mut to_compile: Vec<(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
 
         if use_incremental {
@@ -1062,7 +1064,7 @@ impl NativeProjectBuilder {
                     // inline-asm sidecars remain excluded above.
                     immediate_cache = Some(cached_o);
                 }
-                to_compile.push((i, path.clone(), source.clone(), immediate_cache));
+                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), immediate_cache));
             }
         } else {
             for (i, (path, source)) in file_sources.iter().enumerate() {
@@ -1070,7 +1072,7 @@ impl NativeProjectBuilder {
                 if !compile_indices.contains(&i) {
                     continue;
                 }
-                to_compile.push((i, path.clone(), source.clone(), None));
+                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), None));
             }
         }
 
