@@ -9,6 +9,7 @@ use compiler.loader.smf_mmap_native.{
     native_reloc_write_i32,
     native_reloc_write_i64
 }
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
 use os.smf.host_target.{smf_target_is_host_compatible}
 use std.common.structural.parallel_commit.executable_mapping_receipt.{
     ExecutableMappingReleaseOutcomeV1,
@@ -367,13 +368,6 @@ fn smf_dynlib_checked_add(left: i64, right: i64) -> i64?:
     if right < 0 and left < SMF_DYNLIB_I64_MIN - right:
         return nil
     Some(left + right)
-
-fn smf_dynlib_checked_sub(left: i64, right: i64) -> i64?:
-    if right > 0 and left < SMF_DYNLIB_I64_MIN + right:
-        return nil
-    if right < 0 and left > SMF_DYNLIB_I64_MAX + right:
-        return nil
-    Some(left - right)
 
 fn smf_dynlib_relocation_width(reloc_type: i32) -> i64:
     if reloc_type == 1: 8 else: 4
@@ -753,23 +747,44 @@ fn smf_dynlib_rollback(req: DynLoadRequest, owner_id: text, expected_segments: i
     return DynLoadResult.fail(req.library_name, error_message)
 
 fn smf_dynlib_apply_relocation(code_base: i64, relocation: DynSmfRelocation, target: i64) -> Result<(), text>:
+    """Converged onto the single value oracle (smf_reloc_compute_wire,
+    gpu_smf/smf_reloc_formulas.spl) instead of hand-rolled checked add/sub --
+    lane A4b, doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md §4.
+    Width behaviour is unchanged (this function already rejected an
+    out-of-i32-range Rel32/PltRel32/GotRel32/Abs32 delta before this change;
+    it still does, now via the shared oracle).
+
+    GotRel32 (wire 4) is the one wire type that CANNOT be computed correctly
+    here: R_X86_64_GOTPCREL requires S to be the address of a per-module GOT
+    slot holding the symbol's address (S == G), never the symbol's own
+    address (doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md).
+    Synthesizing that GOT needs the caller's full relocation set and resolved
+    symbol table to size and fill one slot per distinct target; this function
+    sees a single already-resolved relocation and is lane A4b's explicit
+    edit scope (`smf_dynlib_apply_relocation` only) -- the caller,
+    `_smf_dynlib_load_validated_locked`, is out of scope. Reject explicitly
+    with a named error instead of shipping the old silent wrong-value
+    computation.
+
+    The pre-existing Abs64 (wire 1) i64-overflow guard is preserved exactly
+    (same check, same error string "absolute 64-bit relocation overflows",
+    asserted by test/01_unit/os/smf/smf_dynlib_spec.spl) -- the oracle's own
+    Abs64 formula is intentionally unchecked (full i64 wraparound, matching
+    the psABI), so this function still checks it before delegating.
+    """
     val patch_address = smf_dynlib_checked_add(code_base, relocation.offset) ?? return Err("relocation patch address overflows")
+    if relocation.reloc_type == 4:
+        return Err("GotRel32 requires GOT synthesis, not supported by smf_dynlib_apply_relocation")
     if relocation.reloc_type == 1:
-        val value = smf_dynlib_checked_add(target, relocation.addend) ?? return Err("absolute 64-bit relocation overflows")
-        native_reloc_write_i64(code_base, relocation.offset, value)
+        val _overflow_checked = smf_dynlib_checked_add(target, relocation.addend) ?? return Err("absolute 64-bit relocation overflows")
+    val computed = smf_reloc_compute_wire(relocation.reloc_type as i64, target, relocation.addend, patch_address)
+    if not computed.ok:
+        return Err("relocation value out of range for wire type {relocation.reloc_type}")
+    if relocation.reloc_type == 1:
+        native_reloc_write_i64(code_base, relocation.offset, computed.value)
         return Ok(())
-    if relocation.reloc_type >= 2 and relocation.reloc_type <= 4:
-        val delta = smf_dynlib_checked_sub(target, patch_address) ?? return Err("relative relocation delta overflows")
-        val value = smf_dynlib_checked_add(delta, relocation.addend) ?? return Err("relative relocation addend overflows")
-        if value < SMF_DYNLIB_I32_MIN or value > SMF_DYNLIB_I32_MAX:
-            return Err("relative relocation does not fit i32")
-        native_reloc_write_i32(code_base, relocation.offset, value as i32)
-        return Ok(())
-    if relocation.reloc_type == 5:
-        val value = smf_dynlib_checked_add(target, relocation.addend) ?? return Err("absolute 32-bit relocation overflows")
-        if value < SMF_DYNLIB_I32_MIN or value > SMF_DYNLIB_I32_MAX:
-            return Err("absolute relocation does not fit i32")
-        native_reloc_write_i32(code_base, relocation.offset, value as i32)
+    if relocation.reloc_type == 2 or relocation.reloc_type == 3 or relocation.reloc_type == 5:
+        native_reloc_write_i32(code_base, relocation.offset, computed.value as i32)
         return Ok(())
     Err("unknown relocation type")
 

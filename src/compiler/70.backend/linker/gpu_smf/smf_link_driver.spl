@@ -1,0 +1,373 @@
+# ============================================================================
+# compiler/70.backend/linker/gpu_smf/smf_link_driver.spl — SmfLinkProfile CPU
+# driver, stages L2 -> L8 (mold-MDSOC++ linker plan lane A6)
+#
+# One function, `smf_link_modules`, runs the SMF link pipeline on the CPU
+# reference over in-memory modules and emits one StageReceipt per stage,
+# keyed by the frozen SMF_LINK_STAGE_L* ids (resolve_types.spl), in order:
+#
+#   L2 arenas      smf_collect_modules_with_receipt (smf_collect_records)
+#   L3 intern/sort smf_sort_records_with_receipt    (GraphResolveCore sorts)
+#   L4 select      smf_resolve_with_receipt         (reduce_group per key)
+#   L5 archive     smf_archive_closure_receipt      (no archive inputs: the
+#                                                    closure is empty)
+#   L6 reachable   smf_reachable_sections_with_receipt (section graph from
+#                                                    relocations, entry root)
+#   L7 layout      smf_layout_sections_with_receipt (aligned prefix-sum)
+#   L8 relocation  smf_apply_relocation_jobs_with_receipt (formula oracle)
+#
+# No new wire format: inputs are the SmfWriter's own in-memory lists, the
+# receipts are the existing StageReceipt shape, the output image is plain
+# values. Typed errors stop the pipeline; the receipts of every stage that
+# ran are still returned.
+#
+# Conventions this driver fixes (the SmfWriter record has no field for them):
+#   - a module's relocations patch its section 0 (the section
+#     `add_code_section` creates first); relocation offsets are relative to
+#     that section.
+#   - symbol address = its section's laid-out address + `value`.
+#   - sections are numbered globally in module order, then section order;
+#     only sections reachable from the entry symbol's section are laid out.
+#   - binding precedence (applied by the driver on top of GraphResolveCore's
+#     L4 reduction, whose receipt is unchanged): a Local definition resolves
+#     only references from its own module; across modules only Global/Weak
+#     definitions are visible, Global beats Weak, Weak+Weak -> lowest order
+#     wins, Global+Global -> DuplicateStrongDefinition. A reference with no
+#     visible definition is UnresolvedSymbol.
+#
+# Composition only, no inheritance (repo rule).
+# ============================================================================
+
+use std.common.compute.placement_contracts.backend.{StageReceipt}
+use std.common.structural.resolve.resolve_core.{group_sorted}
+use std.common.structural.resolve.resolve_frontier.{ResolveEdge}
+use compiler.backend.linker.smf_writer.{
+    SmfRelocation,
+    SmfSection,
+    SmfWriter,
+    SmfWriterSymbol
+}
+use compiler.backend.linker.gpu_smf.smf_link_profile.{SmfLinkInputs}
+use compiler.backend.linker.gpu_smf.smf_reader_adapter.{smf_symbol_inputs_from_writer_symbols}
+use compiler.backend.linker.gpu_smf.smf_link_receipts.{
+    SmfRelocJob,
+    smf_apply_relocation_jobs_with_receipt,
+    smf_archive_closure_receipt,
+    smf_collect_modules_with_receipt,
+    smf_layout_sections_with_receipt,
+    smf_reachable_sections_with_receipt,
+    smf_resolve_with_receipt,
+    smf_sort_records_with_receipt
+}
+
+# ----------------------------------------------------------------------------
+# Inputs / outputs
+# ----------------------------------------------------------------------------
+
+struct SmfLinkModule:
+    """One in-memory SMF module: the SmfWriter's sections, symbols and
+    relocations. `module_index` becomes `EntityRef.object_slot` of its
+    records and must be unique within one link."""
+    module_index: u32
+    sections: [SmfSection]
+    symbols: [SmfWriterSymbol]
+    relocations: [SmfRelocation]
+
+fn smf_link_module_from_writer(module_index: u32, w: SmfWriter) -> SmfLinkModule:
+    SmfLinkModule(
+        module_index: module_index,
+        sections: w.sections,
+        symbols: w.symbols,
+        relocations: w.relocations)
+
+enum SmfLinkError:
+    UnresolvedSymbol(text)
+    DuplicateStrongDefinition(text)
+    EntryNotFound(text)
+    ReachabilityRejected
+    LayoutRejected
+    RelocationRejected(text)
+
+struct SmfLinkedSection:
+    """One laid-out, relocated output section."""
+    module_index: u32
+    section_index: i64
+    name: text
+    addr: i64
+    bytes: [u8]
+
+struct SmfLinkedImage:
+    base_addr: i64
+    total_size: i64
+    entry_addr: i64
+    sections: [SmfLinkedSection]
+
+struct SmfLinkRun:
+    """The link outcome plus the receipt of every stage that ran (7 on
+    success, L2..L8)."""
+    result: Result<SmfLinkedImage, SmfLinkError>
+    receipts: [StageReceipt]
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+fn _module_pos(modules: [SmfLinkModule], module_index: u32) -> i64:
+    var i = 0
+    while i < modules.len():
+        if modules[i].module_index == module_index:
+            return i
+        i = i + 1
+    -1
+
+fn _owner_key(pos: i64, local: i64) -> text:
+    pos.to_text() + ":" + local.to_text()
+
+fn _binding_rank(sym: SmfWriterSymbol) -> i64:
+    """0 = Local, 1 = Weak, 2 = Global (strong)."""
+    match sym.binding:
+        case Local: 0
+        case Weak: 1
+        case Global: 2
+
+fn _to_u8s(data: [i64]) -> [u8]:
+    var out: [u8] = []
+    for v in data:
+        out.push((v & 0xFF) as u8)
+    out
+
+struct SmfLinkIndex:
+    """Per-link lookup tables: first global section number of each module
+    (by position) and, per reference owner key, its resolved definition
+    (module position, symbol index)."""
+    section_base: [i64]
+    def_pos: {text: i64}
+    def_local: {text: i64}
+
+fn _home_section(modules: [SmfLinkModule], idx: SmfLinkIndex, pi: i64, si: i64) -> i64:
+    """Global section number holding symbol `si` of module `pi`: its own
+    section when defined, else its resolved definition's; -1 if none."""
+    val sym = modules[pi].symbols[si]
+    if sym.section_index >= 0:
+        return idx.section_base[pi] + sym.section_index
+    val k = _owner_key(pi, si)
+    if not idx.def_pos.has(k):
+        return -1
+    val ds = modules[idx.def_pos[k]].symbols[idx.def_local[k]]
+    if ds.section_index < 0:
+        return -1
+    idx.section_base[idx.def_pos[k]] + ds.section_index
+
+fn _symbol_addr(modules: [SmfLinkModule], idx: SmfLinkIndex, addr_by_global: {i64: i64}, p: i64, s: i64) -> i64:
+    """Laid-out address of symbol `s` of module `p` (its definition's when
+    undefined); -1 when its section was not laid out."""
+    val home = _home_section(modules, idx, p, s)
+    if home < 0 or not addr_by_global.has(home):
+        return -1
+    val sym = modules[p].symbols[s]
+    if sym.section_index >= 0:
+        return addr_by_global[home] + sym.value
+    val k = _owner_key(p, s)
+    addr_by_global[home] + modules[idx.def_pos[k]].symbols[idx.def_local[k]].value
+
+fn _fail(e: SmfLinkError, receipts: [StageReceipt]) -> SmfLinkRun:
+    SmfLinkRun(result: Err(e), receipts: receipts)
+
+# ----------------------------------------------------------------------------
+# Driver
+# ----------------------------------------------------------------------------
+
+fn smf_link_modules(modules: [SmfLinkModule], entry: text, base_addr: i64) -> SmfLinkRun:
+    """Link `modules` on the CPU reference, L2 -> L8, entry symbol `entry`
+    as the reachability root, first section placed at `base_addr`."""
+    var receipts: [StageReceipt] = []
+
+    # L2 — record arenas.
+    var inputs: [SmfLinkInputs] = []
+    for m in modules:
+        inputs.push(SmfLinkInputs(
+            module_index: m.module_index,
+            symbols: smf_symbol_inputs_from_writer_symbols(m.symbols)))
+    val collected = smf_collect_modules_with_receipt(inputs)
+    receipts.push(collected.receipt)
+
+    # L3 — key-order sort.
+    val sorted = smf_sort_records_with_receipt(collected.defs, collected.refs)
+    receipts.push(sorted.receipt)
+
+    # L4 — select.
+    val resolved = smf_resolve_with_receipt(sorted.defs, sorted.refs)
+    receipts.push(resolved.receipt)
+
+    # L4 binding policy (see header), per key group of the sorted arenas:
+    # a Local definition answers only references from its own module;
+    # otherwise the Global definition wins, else the lowest-order Weak one.
+    # Two Global definitions of one key are an error even if unreferenced.
+    val defs = sorted.defs
+    val refs = sorted.refs
+    var def_pos: {text: i64} = {}
+    var def_local: {text: i64} = {}
+    var unresolved_names: [text] = []
+    for view in group_sorted(defs, refs):
+        val d0 = view.definitions_offset as i64
+        val d_end = d0 + (view.definitions_count as i64)
+        var global_pick: i64 = -1
+        var weak_pick: i64 = -1
+        var d = d0
+        while d < d_end:
+            val o = defs[d].owner
+            val binding = _binding_rank(modules[_module_pos(modules, o.object_slot)].symbols[o.local_index as i64])
+            if binding == 2:
+                if global_pick >= 0:
+                    val name = modules[_module_pos(modules, o.object_slot)].symbols[o.local_index as i64].name
+                    return _fail(SmfLinkError.DuplicateStrongDefinition(name), receipts)
+                global_pick = d
+            elif binding == 1 and weak_pick < 0:
+                weak_pick = d
+            d = d + 1
+        var ri = view.references_offset as i64
+        val r_end = ri + (view.references_count as i64)
+        while ri < r_end:
+            val r = refs[ri].owner
+            val rpos = _module_pos(modules, r.object_slot)
+            var pick: i64 = -1
+            d = d0
+            while d < d_end and pick < 0:
+                val o = defs[d].owner
+                val dpos = _module_pos(modules, o.object_slot)
+                if dpos == rpos and _binding_rank(modules[dpos].symbols[o.local_index as i64]) == 0:
+                    pick = d
+                d = d + 1
+            if pick < 0:
+                pick = if global_pick >= 0: global_pick else: weak_pick
+            val k = _owner_key(rpos, r.local_index as i64)
+            if pick < 0:
+                unresolved_names.push(modules[rpos].symbols[r.local_index as i64].name)
+            else:
+                def_pos[k] = _module_pos(modules, defs[pick].owner.object_slot)
+                def_local[k] = defs[pick].owner.local_index as i64
+            ri = ri + 1
+
+    # L5 — archive closure (no archive inputs).
+    receipts.push(smf_archive_closure_receipt(unresolved_names.len()))
+    if unresolved_names.len() > 0:
+        return _fail(SmfLinkError.UnresolvedSymbol(unresolved_names[0]), receipts)
+
+    # Global section numbering.
+    var section_base: [i64] = []
+    var total_sections: i64 = 0
+    for m in modules:
+        section_base.push(total_sections)
+        total_sections = total_sections + m.sections.len()
+    val idx = SmfLinkIndex(section_base: section_base, def_pos: def_pos, def_local: def_local)
+
+    # L6 — reachability from the entry symbol's section.
+    var roots: [u32] = []
+    var entry_pos: i64 = -1
+    var entry_sym: i64 = -1
+    var pi = 0
+    while pi < modules.len() and entry_pos < 0:
+        var si = 0
+        while si < modules[pi].symbols.len():
+            val s = modules[pi].symbols[si]
+            if s.name == entry and s.section_index >= 0 and entry_pos < 0:
+                entry_pos = pi
+                entry_sym = si
+            si = si + 1
+        pi = pi + 1
+    if entry_pos < 0:
+        return _fail(SmfLinkError.EntryNotFound(entry), receipts)
+    roots.push(_home_section(modules, idx, entry_pos, entry_sym) as u32)
+    var edges: [ResolveEdge] = []
+    pi = 0
+    while pi < modules.len():
+        if modules[pi].sections.len() > 0:
+            for r in modules[pi].relocations:
+                if r.symbol_index >= 0 and r.symbol_index < modules[pi].symbols.len():
+                    val target = _home_section(modules, idx, pi, r.symbol_index)
+                    if target >= 0:
+                        edges.push(ResolveEdge(from_index: section_base[pi] as u32, to_index: target as u32))
+        pi = pi + 1
+    val reach = smf_reachable_sections_with_receipt(total_sections, edges, roots)
+    receipts.push(reach.receipt)
+    if not reach.result.ok:
+        return _fail(SmfLinkError.ReachabilityRejected, receipts)
+
+    # L7 — lay out the reachable sections in global order.
+    var kept: [i64] = []
+    var sizes: [i64] = []
+    var aligns: [i64] = []
+    pi = 0
+    while pi < modules.len():
+        var si = 0
+        while si < modules[pi].sections.len():
+            val g = section_base[pi] + si
+            if reach.result.values[g]:
+                kept.push(g)
+                sizes.push(modules[pi].sections[si].data.len())
+                aligns.push(modules[pi].sections[si].alignment)
+            si = si + 1
+        pi = pi + 1
+    val layout = smf_layout_sections_with_receipt(base_addr, sizes, aligns)
+    receipts.push(layout.receipt)
+    if not layout.result.ok:
+        return _fail(SmfLinkError.LayoutRejected, receipts)
+    var ki = 0
+    var addr_by_global: {i64: i64} = {}
+    while ki < kept.len():
+        addr_by_global[kept[ki]] = layout.result.offsets[ki]
+        ki = ki + 1
+
+    # L8 — relocate every kept section (a module's relocations patch its
+    # section 0).
+    var jobs: [SmfRelocJob] = []
+    var job_pos: [i64] = []
+    var job_sec: [i64] = []
+    pi = 0
+    while pi < modules.len():
+        var sym_addrs: [i64] = []
+        var si = 0
+        while si < modules[pi].symbols.len():
+            sym_addrs.push(_symbol_addr(modules, idx, addr_by_global, pi, si))
+            si = si + 1
+        var sec = 0
+        while sec < modules[pi].sections.len():
+            val gs = section_base[pi] + sec
+            if addr_by_global.has(gs):
+                val no_relocs: [SmfRelocation] = []
+                jobs.push(SmfRelocJob(
+                    section_bytes: _to_u8s(modules[pi].sections[sec].data),
+                    section_addr: addr_by_global[gs],
+                    relocs: if sec == 0: modules[pi].relocations else: no_relocs,
+                    symbol_addrs: sym_addrs))
+                job_pos.push(pi)
+                job_sec.push(sec)
+            sec = sec + 1
+        pi = pi + 1
+    val relocated = smf_apply_relocation_jobs_with_receipt(jobs)
+    receipts.push(relocated.receipt)
+
+    var out_sections: [SmfLinkedSection] = []
+    var ji = 0
+    while ji < jobs.len():
+        val res = relocated.results[ji]
+        val m = modules[job_pos[ji]]
+        if not res.ok:
+            return _fail(SmfLinkError.RelocationRejected(
+                "module " + (m.module_index as i64).to_text() + " section " +
+                job_sec[ji].to_text() + " reloc " + res.rejected_index.to_text()), receipts)
+        out_sections.push(SmfLinkedSection(
+            module_index: m.module_index,
+            section_index: job_sec[ji],
+            name: m.sections[job_sec[ji]].name,
+            addr: jobs[ji].section_addr,
+            bytes: res.bytes))
+        ji = ji + 1
+
+    SmfLinkRun(
+        result: Ok(SmfLinkedImage(
+            base_addr: base_addr,
+            total_size: layout.result.total_size,
+            entry_addr: _symbol_addr(modules, idx, addr_by_global, entry_pos, entry_sym),
+            sections: out_sections)),
+        receipts: receipts)
