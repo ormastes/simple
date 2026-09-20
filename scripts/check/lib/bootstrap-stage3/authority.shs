@@ -956,6 +956,44 @@ bootstrap_stage3_native_metadata_probe() (
     return "$bootstrap_stage3_probe_status"
 )
 
+# Derive the rustup host tuple for a specific CHANNEL directly from the
+# toolchains directory, bypassing rustup's "default_toolchain" entirely. This
+# is the fail-closed fallback used when the global rustup default names a
+# different channel than the one this project pins (e.g. the host default is
+# "stable" while `rust-toolchain.toml` pins "nightly") -- a state that is
+# normal and common, not evidence of a corrupted rustup install, and which
+# `rustup show active-toolchain` / `RUSTUP_TOOLCHAIN=<channel> rustc` would
+# also resolve correctly, but only by executing rustup/rustc; this reads the
+# filesystem the same way the rest of this file already does. Requires
+# EXACTLY one non-symlink "<channel>-*" directory -- zero or several (e.g. a
+# dated nightly alongside a plain one) is ambiguous and fails closed.
+bootstrap_stage3_channel_toolchain_host() (
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_scan_home=$1
+    bootstrap_stage3_scan_channel=$2
+    case "$bootstrap_stage3_scan_channel" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    bootstrap_stage3_scan_prefix="$bootstrap_stage3_scan_channel-"
+    bootstrap_stage3_scan_match=
+    bootstrap_stage3_scan_count=0
+    for bootstrap_stage3_scan_dir in \
+        "$bootstrap_stage3_scan_home/toolchains/$bootstrap_stage3_scan_prefix"*
+    do
+        [ -d "$bootstrap_stage3_scan_dir" ] || continue
+        [ ! -L "$bootstrap_stage3_scan_dir" ] || continue
+        bootstrap_stage3_scan_count=$((bootstrap_stage3_scan_count + 1))
+        bootstrap_stage3_scan_match=$bootstrap_stage3_scan_dir
+    done
+    [ "$bootstrap_stage3_scan_count" -eq 1 ] || return 1
+    bootstrap_stage3_scan_name=${bootstrap_stage3_scan_match##*/}
+    case "$bootstrap_stage3_scan_name" in
+        "$bootstrap_stage3_scan_prefix"?*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "${bootstrap_stage3_scan_name#"$bootstrap_stage3_scan_prefix"}"
+)
+
 bootstrap_stage3_installed_rust_toolchain() (
     [ "$#" -eq 4 ] || return 1
     bootstrap_stage3_installed_frontend=$1
@@ -1007,7 +1045,7 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
         bootstrap_stage3_rust_toolchain_trace settings=noncanonical
         return 1
     }
-    bootstrap_stage3_installed_host=$(
+    if bootstrap_stage3_installed_host=$(
         awk -F= -v channel="$bootstrap_stage3_installed_channel" '
             /^[[:space:]]*default_host_tuple[[:space:]]*=/ {
                 value = $2
@@ -1026,27 +1064,65 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
             END {
                 if (legacy_count > 1 || modern_count > 1) exit 1
                 if (legacy_count == 1) {
+                    # The legacy field is channel-agnostic (it names only the
+                    # host platform), so it alone is authoritative. Only cross
+                    # check it against the modern field when the modern field
+                    # actually names THIS run'"'"'s channel -- a channel that
+                    # differs (e.g. the rustup global default is "stable"
+                    # while this project pins "nightly") is not evidence the
+                    # legacy field is wrong.
                     if (modern_count == 1) {
                         prefix = channel "-"
-                        if (index(modern, prefix) != 1) exit 1
-                        modern_host = substr(modern, length(prefix) + 1)
-                        if (modern_host == "" || modern_host != legacy) exit 1
+                        if (index(modern, prefix) == 1) {
+                            modern_host = substr(modern, length(prefix) + 1)
+                            if (modern_host == "" || modern_host != legacy) exit 1
+                        }
                     }
                     print legacy
                     exit 0
                 }
                 if (modern_count != 1) exit 1
                 prefix = channel "-"
-                if (index(modern, prefix) != 1) exit 1
+                if (index(modern, prefix) != 1) {
+                    # "default_toolchain" names a *different* channel than
+                    # this run'"'"'s pinned one (e.g. rustup'"'"'s global
+                    # default is "stable-x86_64-..." while the project pins
+                    # "nightly"). That is a normal, common state -- not proof
+                    # the file is malformed -- so it is signalled distinctly
+                    # (exit 3) from a genuinely unparsable value (exit 1),
+                    # via a dash-count heuristic: a real "<channel>-<host>"
+                    # value carries a host triple with >= 2 dashes of its
+                    # own, while a bare/truncated value (e.g. "stable" with
+                    # no host at all) does not and stays a hard parse-fail.
+                    modern_dashes = modern
+                    dash_count = gsub(/-/, "-", modern_dashes)
+                    if (dash_count >= 2) exit 3
+                    exit 1
+                }
                 host = substr(modern, length(prefix) + 1)
                 if (host == "") exit 1
                 print host
             }
         ' "$bootstrap_stage3_installed_settings"
-    ) || {
+    ); then
+        bootstrap_stage3_installed_host_status=0
+    else
+        bootstrap_stage3_installed_host_status=$?
+    fi
+    if [ "$bootstrap_stage3_installed_host_status" -eq 3 ]; then
+        bootstrap_stage3_installed_host=$(
+            bootstrap_stage3_channel_toolchain_host \
+                "$bootstrap_stage3_installed_home" \
+                "$bootstrap_stage3_installed_channel"
+        ) || {
+            bootstrap_stage3_rust_toolchain_trace settings-host=channel-toolchain-absent
+            return 1
+        }
+        bootstrap_stage3_rust_toolchain_trace settings-host=channel-toolchain-scan
+    elif [ "$bootstrap_stage3_installed_host_status" -ne 0 ]; then
         bootstrap_stage3_rust_toolchain_trace settings-host=parse-fail
         return 1
-    }
+    fi
     case "$bootstrap_stage3_installed_host" in
         ''|*[!A-Za-z0-9._-]*)
             bootstrap_stage3_rust_toolchain_trace settings-host=invalid
