@@ -72,8 +72,8 @@ fn binop_result_type(op: BinOp, lhs_ty: Option<TypeId>) -> Option<TypeId> {
 /// need the TypeId to emit each instruction, only to pick signed-vs-unsigned
 /// variants later (FR-DRIVER-0002b). Walking in block + instruction order is
 /// enough for SSA-style MIR: defs precede uses within a block, and block order
-/// is topological for most functions. Cross-block phi-like propagation may
-/// miss some `Copy` destinations — consumers treat missing entries as
+/// is NOT topological once inlining appends callee blocks, so the walk repeats
+/// until no new entry appears. Consumers treat still-missing entries as
 /// "unknown" (default signed in FR-0002b).
 pub(super) fn build_vreg_types(
     func: &MirFunction,
@@ -81,399 +81,409 @@ pub(super) fn build_vreg_types(
 ) -> HashMap<VReg, TypeId> {
     let mut types_map: HashMap<VReg, TypeId> = HashMap::new();
 
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            match inst {
-                MirInst::ConstInt { dest, .. } => {
-                    // MIR integer constants widen to i64 in Cranelift
-                    // (see constants::compile_const_int).
-                    types_map.insert(*dest, TypeId::I64);
-                }
-                MirInst::ConstFloat { dest, .. } => {
-                    types_map.insert(*dest, TypeId::F64);
-                }
-                MirInst::ConstBool { dest, .. } => {
-                    types_map.insert(*dest, TypeId::BOOL);
-                }
-                MirInst::ConstString { dest, .. } => {
-                    types_map.insert(*dest, TypeId::STRING);
-                }
-                MirInst::Copy { dest, src } => {
-                    if let Some(&ty) = types_map.get(src) {
-                        types_map.insert(*dest, ty);
+    // Iterate to a fixpoint: the MIR inliner appends callee blocks after the
+    // caller block that uses their result, so one forward walk misses uses
+    // that precede their def in block order. Stop once a pass adds no new
+    // entry; the map is bounded by the vreg count, so this terminates.
+    loop {
+        let typed_before = types_map.len();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::ConstInt { dest, .. } => {
+                        // MIR integer constants widen to i64 in Cranelift
+                        // (see constants::compile_const_int).
+                        types_map.insert(*dest, TypeId::I64);
                     }
-                }
-                MirInst::BinOp { dest, op, left, .. } => {
-                    let lhs_ty = types_map.get(left).copied();
-                    if let Some(ty) = binop_result_type(*op, lhs_ty) {
-                        types_map.insert(*dest, ty);
+                    MirInst::ConstFloat { dest, .. } => {
+                        types_map.insert(*dest, TypeId::F64);
                     }
-                }
-                MirInst::UnaryOp { dest, op, operand } => {
-                    let ty = match op {
-                        UnaryOp::Not => Some(TypeId::BOOL),
-                        _ => types_map.get(operand).copied(),
-                    };
-                    if let Some(ty) = ty {
-                        types_map.insert(*dest, ty);
+                    MirInst::ConstBool { dest, .. } => {
+                        types_map.insert(*dest, TypeId::BOOL);
                     }
-                }
-                MirInst::Cast { dest, to_ty, .. } => {
-                    types_map.insert(*dest, *to_ty);
-                }
-                MirInst::Load { dest, ty, .. } => {
-                    types_map.insert(*dest, *ty);
-                }
-                MirInst::GlobalLoad { dest, ty, .. } => {
-                    types_map.insert(*dest, *ty);
-                }
-                MirInst::GcAlloc { dest, ty } => {
-                    types_map.insert(*dest, *ty);
-                }
-                MirInst::StructInit { dest, type_id, .. } => {
-                    types_map.insert(*dest, *type_id);
-                }
-                MirInst::FieldGet { dest, field_type, .. } => {
-                    types_map.insert(*dest, *field_type);
-                }
-                MirInst::IndirectCall {
-                    dest: Some(d),
-                    return_type,
-                    ..
-                } => {
-                    types_map.insert(*d, *return_type);
-                }
-                MirInst::IndirectCall { dest: None, .. } => {}
-                MirInst::MethodCallVirtual {
-                    dest: Some(d),
-                    return_type,
-                    ..
-                } => {
-                    types_map.insert(*d, *return_type);
-                }
-                MirInst::MethodCallVirtual { dest: None, .. } => {}
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_text"
-                    || func_name == "to_string"
-                    || func_name == "str"
-                    || func_name.ends_with(".to_text")
-                    || func_name.ends_with(".to_string")
-                    || func_name.ends_with(".str") =>
-                {
-                    types_map.insert(*d, TypeId::STRING);
-                }
-                // String-only transformation methods that return a fresh
-                // String (hir/lower/expr/mod.rs's `is_string` table:
-                // "trim" | "trim_start" | "trim_end" | "appended" |
-                // "prepended" => Some(TypeId::STRING)`) were missing from
-                // this types_map pre-pass, unlike their to_text/to_string/
-                // str sibling arm just above and the to_u8..to_i32 arms
-                // below. A CHAINED call directly off one of these (e.g.
-                // `s.trim().to_i64()`, no intermediate `val`) left the
-                // receiver untyped here, so the outer call took the
-                // untyped-receiver fallback path instead of the safe
-                // builtin/qualified dispatch (same failure class the
-                // `arr.len().to_i64()` comment below this documents and
-                // fixes for the `MirInst::Call` case) — silently
-                // mis-resolving to the wrong `Type.to_i64` symbol.
-                // Reproduced with a 6-line minimal repro under
-                // SIMPLE_EXECUTION_MODE=jit (gap 7,
-                // doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md):
-                // interpreter gives the correct decoded ints, JIT prints
-                // large garbage that scales in fixed 32-byte steps per
-                // occurrence in the same function — consistent with reading
-                // an un-loaded slot/frame address for the receiver instead
-                // of its value. An intermediate `val t = s.trim(); t.to_i64()`
-                // was already correct (the Load arm below types `t`), which
-                // is why only the directly-chained form was affected.
-                //
-                // Deliberately NOT included here: "concat" / "slice" /
-                // "replace", which HIR's own table also types STRING for a
-                // string receiver, but "slice" collides with a real array
-                // method of the same name (`"slice" | "filter" | "map" =>
-                // Some(receiver.ty)` in the array-methods table just above
-                // in the same HIR file) that must NOT be typed STRING here.
-                // This `func_name`-only match has no receiver-type guard to
-                // disambiguate, so widening it to those three risks a new
-                // regression for chained array `.slice()`/`.concat()` — out
-                // of scope for this contained fix.
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "trim"
-                    || func_name == "trim_start"
-                    || func_name == "trim_end"
-                    || func_name == "appended"
-                    || func_name == "prepended"
-                    || func_name.ends_with(".trim")
-                    || func_name.ends_with(".trim_start")
-                    || func_name.ends_with(".trim_end")
-                    || func_name.ends_with(".appended")
-                    || func_name.ends_with(".prepended") =>
-                {
-                    types_map.insert(*d, TypeId::STRING);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_u8" || func_name.ends_with(".to_u8") => {
-                    types_map.insert(*d, TypeId::U8);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_u16" || func_name.ends_with(".to_u16") => {
-                    types_map.insert(*d, TypeId::U16);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_u32" || func_name.ends_with(".to_u32") => {
-                    types_map.insert(*d, TypeId::U32);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_u64" || func_name.ends_with(".to_u64") => {
-                    types_map.insert(*d, TypeId::U64);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_i8" || func_name.ends_with(".to_i8") => {
-                    types_map.insert(*d, TypeId::I8);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_i16" || func_name.ends_with(".to_i16") => {
-                    types_map.insert(*d, TypeId::I16);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_i32" || func_name.ends_with(".to_i32") => {
-                    types_map.insert(*d, TypeId::I32);
-                }
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_i64"
-                    || func_name == "to_int"
-                    || func_name.ends_with(".to_i64")
-                    || func_name.ends_with(".to_int") =>
-                {
-                    types_map.insert(*d, TypeId::I64);
-                }
-                // F64-returning methods (`to_float`/`to_f64`) were missing from
-                // this arm list, unlike every I8..I64/U8..U64/STRING arm above.
-                // Without a vreg_types entry the dest VReg was untyped, so a
-                // CHAINED `.to_string()` on the result (e.g.
-                // `s.to_float().to_string()`) saw `allow_qualified_builtin =
-                // false` in compile_method_call_static (closures_structs.rs),
-                // fell through to name-suffix symbol resolution instead of the
-                // safe builtin `rt_to_string` dispatch, and printed the raw f64
-                // bit pattern as an int under the JIT. Mirrors the I64 arm just
-                // above. See float print bug (lane FLOATBOX, 2026-07-29).
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if func_name == "to_float"
-                    || func_name == "to_f64"
-                    || func_name.ends_with(".to_float")
-                    || func_name.ends_with(".to_f64") =>
-                {
-                    types_map.insert(*d, TypeId::F64);
-                }
-                // USER-DEFINED methods returning f32/f64. The arms above only
-                // cover the hard-coded builtin conversion names; a plain
-                // `class B: fn getf(k: i64) -> f64` fell through to the empty
-                // catch-all and left its dest VReg UNTYPED.
-                //
-                // User functions use a uniform i64 return ABI that carries an
-                // f64 as raw IEEE-754 BITS; consumers must bitcast i64->f64.
-                // `compile_binop` (instr/core.rs) only emits that
-                // `reinterpret_f64` when `vreg_types[vreg]` is F64/F32, so an
-                // untyped method result stayed "an integer" and Add/Sub/Mul/Div
-                // lowered to `iadd`/`isub`/`imul`/`sdiv` ON THE BIT PATTERN.
-                // `a.getf(1) * b.getf(1)` therefore computed
-                // `bits(11.0) * bits(101.0)` mod 2^64 == 0 -> printed `0.0`,
-                // and comparisons INVERTED (`3.0 < 5.0` -> false). Silent wrong
-                // numbers, exit 0.
-                //
-                // Free functions (`MirInst::Call`, just below) and static
-                // methods already consulted `function_return_types`; instance
-                // methods were the only unstamped call form. MIR names class
-                // methods `"B.getf"` — exactly the key `function_return_types`
-                // is populated with in common_backend.rs — so a direct lookup
-                // closes the gap. Stamping is restricted to float returns to
-                // match the existing i64-default behaviour for every other type.
-                // Same family as the 2026-06-21 f64-call-result fix (07d87555f0e),
-                // which stamped free-function results and missed methods.
-                MirInst::MethodCallStatic {
-                    dest: Some(d),
-                    func_name,
-                    ..
-                } if matches!(
-                    function_return_types.get(func_name.as_str()),
-                    Some(&TypeId::F64) | Some(&TypeId::F32)
-                ) =>
-                {
-                    let ty = function_return_types[func_name.as_str()];
-                    types_map.insert(*d, ty);
-                }
-                MirInst::MethodCallStatic { .. } => {}
-                MirInst::Call {
-                    dest: Some(d),
-                    target,
-                    args,
-                    ..
-                } => {
-                    if let Some(&ty) = function_return_types.get(target.name()) {
-                        types_map.insert(*d, ty);
-                        continue;
+                    MirInst::ConstString { dest, .. } => {
+                        types_map.insert(*dest, TypeId::STRING);
                     }
-                    let base = target
-                        .name()
-                        .rsplit_once("__")
-                        .map(|(_, tail)| tail)
-                        .unwrap_or(target.name());
-                    let ty = match base {
-                        "spl_load_i64" => Some(TypeId::I64),
-                        "spl_load_u8" => Some(TypeId::U8),
-                        "rt_env_get" | "rt_get_env" | "rt_file_read_text" | "rt_file_read_text_rv" => {
-                            Some(TypeId::STRING)
+                    MirInst::Copy { dest, src } => {
+                        if let Some(&ty) = types_map.get(src) {
+                            types_map.insert(*dest, ty);
                         }
-                        "rt_is_some" | "rt_is_present" | "rt_is_none" => Some(TypeId::BOOL),
-                        "rt_string_eq" | "rt_native_eq" | "rt_native_neq" | "rt_native_cmp" => Some(TypeId::I64),
-                        // Array/collection length returns a native i64. Recording
-                        // it here types the `len()` result VReg so a CHAINED
-                        // `arr.len().to_i64()` (or `.to_u32()` etc.) sees an i64
-                        // receiver and takes the builtin-identity/cast path in
-                        // compile_method_call_static — identical to the
-                        // bound-intermediate `val n = arr.len(); n.to_i64()` form,
-                        // whose reload is a typed `Load`. Without this the chained
-                        // receiver is untyped, `prefer_builtin_first` is false, and
-                        // `i64.to_i64` falls through to name-based symbol
-                        // resolution that mis-picks an unrelated `Type.to_i64` in a
-                        // large whole-program link (x64 freestanding SSH kernel:
-                        // `our_version.len().to_i64()` returned garbage → empty
-                        // server version → KEX "incorrect signature").
-                        "rt_array_len" | "rt_len" => Some(TypeId::I64),
-                        // libm-backed math helpers. Declared `-> F64` in
-                        // runtime_sffi.rs::RUNTIME_FUNCS, so the Cranelift call
-                        // really does produce an F64 value; without the stamp
-                        // the result VReg is untyped and a directly-printed
-                        // `sqrt(16.0)` renders the float as an integer.
-                        // Emitted by mir/lower/lowering_expr_builtin.rs
-                        // (`lower_libm_math`, Defect B).
-                        "rt_math_sqrt" | "rt_math_floor" | "rt_math_ceil" | "rt_math_pow" | "rt_math_round" => {
-                            Some(TypeId::F64)
+                    }
+                    MirInst::BinOp { dest, op, left, .. } => {
+                        let lhs_ty = types_map.get(left).copied();
+                        if let Some(ty) = binop_result_type(*op, lhs_ty) {
+                            types_map.insert(*dest, ty);
                         }
-                        "rt_array_get_text" => Some(TypeId::STRING),
-                        "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
-                        "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
-                            Some(TypeId::U32)
+                    }
+                    MirInst::UnaryOp { dest, op, operand } => {
+                        let ty = match op {
+                            UnaryOp::Not => Some(TypeId::BOOL),
+                            _ => types_map.get(operand).copied(),
+                        };
+                        if let Some(ty) = ty {
+                            types_map.insert(*dest, ty);
                         }
-                        "rt_typed_words_u64_at"
-                        | "rt_typed_words_u64_unchecked"
-                        | "rt_typed_words_u64_data_at"
-                        | "rt_typed_words_u64_data_at_checked"
-                        | "rt_typed_words_u64_raw_data_at" => Some(TypeId::U64),
-                        // Text-in/text-out runtime helpers. These names are
-                        // string-only (no array overload), so the result is a
-                        // String regardless of what typed the receiver.
-                        "rt_string_concat"
-                        | "rt_string_trim"
-                        | "rt_string_trim_start"
-                        | "rt_string_trim_end"
-                        | "rt_string_replace"
-                        | "rt_string_to_upper"
-                        | "rt_string_to_lower"
-                        | "rt_string_substr"
-                        | "rt_string_substr_from" => Some(TypeId::STRING),
-                        _ => None,
-                    };
-                    // RECEIVER-POLYMORPHIC runtime helpers: one symbol serves
-                    // both String and Array receivers, so the result type is
-                    // only knowable by PROPAGATING the receiver's type from
-                    // arg 0. Without this, a CHAINED call off one of them
-                    // (`t.substring(2).to_int()`, no intermediate `val`) left
-                    // the receiver vreg untyped, and the numeric-cast block in
-                    // codegen/instr/closures_structs.rs:1497 defaults a missing
-                    // type to `TypeId::I64` (`unwrap_or(TypeId::I64)`) — so
-                    // `to_int` skipped the `from_ty == TypeId::STRING` branch
-                    // that routes to `rt_string_to_int` and fell into the
-                    // generic raw-register conversion, returning the
-                    // intermediate string's HEAP POINTER as a "successful"
-                    // integer. Exit 0, no diagnostic, plausible-looking number
-                    // (`"ab1234".substring(2).to_int()` -> 2791233887617 under
-                    // the JIT, 1234 in the interpreter and in the
-                    // bound-intermediate form, whose reload is a typed `Load`).
+                    }
+                    MirInst::Cast { dest, to_ty, .. } => {
+                        types_map.insert(*dest, *to_ty);
+                    }
+                    MirInst::Load { dest, ty, .. } => {
+                        types_map.insert(*dest, *ty);
+                    }
+                    MirInst::GlobalLoad { dest, ty, .. } => {
+                        types_map.insert(*dest, *ty);
+                    }
+                    MirInst::GcAlloc { dest, ty } => {
+                        types_map.insert(*dest, *ty);
+                    }
+                    MirInst::StructInit { dest, type_id, .. } => {
+                        types_map.insert(*dest, *type_id);
+                    }
+                    MirInst::FieldGet { dest, field_type, .. } => {
+                        types_map.insert(*dest, *field_type);
+                    }
+                    MirInst::IndirectCall {
+                        dest: Some(d),
+                        return_type,
+                        ..
+                    } => {
+                        types_map.insert(*d, *return_type);
+                    }
+                    MirInst::IndirectCall { dest: None, .. } => {}
+                    MirInst::MethodCallVirtual {
+                        dest: Some(d),
+                        return_type,
+                        ..
+                    } => {
+                        types_map.insert(*d, *return_type);
+                    }
+                    MirInst::MethodCallVirtual { dest: None, .. } => {}
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_text"
+                        || func_name == "to_string"
+                        || func_name == "str"
+                        || func_name.ends_with(".to_text")
+                        || func_name.ends_with(".to_string")
+                        || func_name.ends_with(".str") =>
+                    {
+                        types_map.insert(*d, TypeId::STRING);
+                    }
+                    // String-only transformation methods that return a fresh
+                    // String (hir/lower/expr/mod.rs's `is_string` table:
+                    // "trim" | "trim_start" | "trim_end" | "appended" |
+                    // "prepended" => Some(TypeId::STRING)`) were missing from
+                    // this types_map pre-pass, unlike their to_text/to_string/
+                    // str sibling arm just above and the to_u8..to_i32 arms
+                    // below. A CHAINED call directly off one of these (e.g.
+                    // `s.trim().to_i64()`, no intermediate `val`) left the
+                    // receiver untyped here, so the outer call took the
+                    // untyped-receiver fallback path instead of the safe
+                    // builtin/qualified dispatch (same failure class the
+                    // `arr.len().to_i64()` comment below this documents and
+                    // fixes for the `MirInst::Call` case) — silently
+                    // mis-resolving to the wrong `Type.to_i64` symbol.
+                    // Reproduced with a 6-line minimal repro under
+                    // SIMPLE_EXECUTION_MODE=jit (gap 7,
+                    // doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md):
+                    // interpreter gives the correct decoded ints, JIT prints
+                    // large garbage that scales in fixed 32-byte steps per
+                    // occurrence in the same function — consistent with reading
+                    // an un-loaded slot/frame address for the receiver instead
+                    // of its value. An intermediate `val t = s.trim(); t.to_i64()`
+                    // was already correct (the Load arm below types `t`), which
+                    // is why only the directly-chained form was affected.
                     //
-                    // This is the same defect class the `builtin_method_result_type`
-                    // helper in closures_structs.rs was added for, but that fix
-                    // only covers receivers produced by `MethodCallStatic`.
-                    // `.substring()`/`.slice()` are expanded to a direct
-                    // `MirInst::Call { Pure("rt_slice") }` during MIR lowering,
-                    // so they never reach that helper — this arm is where the
-                    // Call-shaped half of the family must be typed.
-                    let ty = ty.or_else(|| match base {
-                        "rt_slice" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
-                            match args.first().and_then(|a| types_map.get(a).copied()) {
-                                Some(TypeId::STRING) => Some(TypeId::STRING),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    });
-                    if let Some(ty) = ty {
+                    // Deliberately NOT included here: "concat" / "slice" /
+                    // "replace", which HIR's own table also types STRING for a
+                    // string receiver, but "slice" collides with a real array
+                    // method of the same name (`"slice" | "filter" | "map" =>
+                    // Some(receiver.ty)` in the array-methods table just above
+                    // in the same HIR file) that must NOT be typed STRING here.
+                    // This `func_name`-only match has no receiver-type guard to
+                    // disambiguate, so widening it to those three risks a new
+                    // regression for chained array `.slice()`/`.concat()` — out
+                    // of scope for this contained fix.
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "trim"
+                        || func_name == "trim_start"
+                        || func_name == "trim_end"
+                        || func_name == "appended"
+                        || func_name == "prepended"
+                        || func_name.ends_with(".trim")
+                        || func_name.ends_with(".trim_start")
+                        || func_name.ends_with(".trim_end")
+                        || func_name.ends_with(".appended")
+                        || func_name.ends_with(".prepended") =>
+                    {
+                        types_map.insert(*d, TypeId::STRING);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_u8" || func_name.ends_with(".to_u8") => {
+                        types_map.insert(*d, TypeId::U8);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_u16" || func_name.ends_with(".to_u16") => {
+                        types_map.insert(*d, TypeId::U16);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_u32" || func_name.ends_with(".to_u32") => {
+                        types_map.insert(*d, TypeId::U32);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_u64" || func_name.ends_with(".to_u64") => {
+                        types_map.insert(*d, TypeId::U64);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_i8" || func_name.ends_with(".to_i8") => {
+                        types_map.insert(*d, TypeId::I8);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_i16" || func_name.ends_with(".to_i16") => {
+                        types_map.insert(*d, TypeId::I16);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_i32" || func_name.ends_with(".to_i32") => {
+                        types_map.insert(*d, TypeId::I32);
+                    }
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_i64"
+                        || func_name == "to_int"
+                        || func_name.ends_with(".to_i64")
+                        || func_name.ends_with(".to_int") =>
+                    {
+                        types_map.insert(*d, TypeId::I64);
+                    }
+                    // F64-returning methods (`to_float`/`to_f64`) were missing from
+                    // this arm list, unlike every I8..I64/U8..U64/STRING arm above.
+                    // Without a vreg_types entry the dest VReg was untyped, so a
+                    // CHAINED `.to_string()` on the result (e.g.
+                    // `s.to_float().to_string()`) saw `allow_qualified_builtin =
+                    // false` in compile_method_call_static (closures_structs.rs),
+                    // fell through to name-suffix symbol resolution instead of the
+                    // safe builtin `rt_to_string` dispatch, and printed the raw f64
+                    // bit pattern as an int under the JIT. Mirrors the I64 arm just
+                    // above. See float print bug (lane FLOATBOX, 2026-07-29).
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_float"
+                        || func_name == "to_f64"
+                        || func_name.ends_with(".to_float")
+                        || func_name.ends_with(".to_f64") =>
+                    {
+                        types_map.insert(*d, TypeId::F64);
+                    }
+                    // USER-DEFINED methods returning f32/f64. The arms above only
+                    // cover the hard-coded builtin conversion names; a plain
+                    // `class B: fn getf(k: i64) -> f64` fell through to the empty
+                    // catch-all and left its dest VReg UNTYPED.
+                    //
+                    // User functions use a uniform i64 return ABI that carries an
+                    // f64 as raw IEEE-754 BITS; consumers must bitcast i64->f64.
+                    // `compile_binop` (instr/core.rs) only emits that
+                    // `reinterpret_f64` when `vreg_types[vreg]` is F64/F32, so an
+                    // untyped method result stayed "an integer" and Add/Sub/Mul/Div
+                    // lowered to `iadd`/`isub`/`imul`/`sdiv` ON THE BIT PATTERN.
+                    // `a.getf(1) * b.getf(1)` therefore computed
+                    // `bits(11.0) * bits(101.0)` mod 2^64 == 0 -> printed `0.0`,
+                    // and comparisons INVERTED (`3.0 < 5.0` -> false). Silent wrong
+                    // numbers, exit 0.
+                    //
+                    // Free functions (`MirInst::Call`, just below) and static
+                    // methods already consulted `function_return_types`; instance
+                    // methods were the only unstamped call form. MIR names class
+                    // methods `"B.getf"` — exactly the key `function_return_types`
+                    // is populated with in common_backend.rs — so a direct lookup
+                    // closes the gap. Stamping is restricted to float returns to
+                    // match the existing i64-default behaviour for every other type.
+                    // Same family as the 2026-06-21 f64-call-result fix (07d87555f0e),
+                    // which stamped free-function results and missed methods.
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if matches!(
+                        function_return_types.get(func_name.as_str()),
+                        Some(&TypeId::F64) | Some(&TypeId::F32)
+                    ) =>
+                    {
+                        let ty = function_return_types[func_name.as_str()];
                         types_map.insert(*d, ty);
                     }
-                }
-                MirInst::Call { dest: None, .. } => {}
-                MirInst::UnitWiden {
-                    dest, to_bits, signed, ..
-                }
-                | MirInst::UnitNarrow {
-                    dest, to_bits, signed, ..
-                } => {
-                    if let Some(ty) = unit_bits_to_type_id(*to_bits, *signed) {
-                        types_map.insert(*dest, ty);
+                    MirInst::MethodCallStatic { .. } => {}
+                    MirInst::Call {
+                        dest: Some(d),
+                        target,
+                        args,
+                        ..
+                    } => {
+                        if let Some(&ty) = function_return_types.get(target.name()) {
+                            types_map.insert(*d, ty);
+                            continue;
+                        }
+                        let base = target
+                            .name()
+                            .rsplit_once("__")
+                            .map(|(_, tail)| tail)
+                            .unwrap_or(target.name());
+                        let ty = match base {
+                            "spl_load_i64" => Some(TypeId::I64),
+                            "spl_load_u8" => Some(TypeId::U8),
+                            "rt_env_get" | "rt_get_env" | "rt_file_read_text" | "rt_file_read_text_rv" => {
+                                Some(TypeId::STRING)
+                            }
+                            "rt_is_some" | "rt_is_present" | "rt_is_none" => Some(TypeId::BOOL),
+                            "rt_string_eq" | "rt_native_eq" | "rt_native_neq" | "rt_native_cmp" => Some(TypeId::I64),
+                            // Array/collection length returns a native i64. Recording
+                            // it here types the `len()` result VReg so a CHAINED
+                            // `arr.len().to_i64()` (or `.to_u32()` etc.) sees an i64
+                            // receiver and takes the builtin-identity/cast path in
+                            // compile_method_call_static — identical to the
+                            // bound-intermediate `val n = arr.len(); n.to_i64()` form,
+                            // whose reload is a typed `Load`. Without this the chained
+                            // receiver is untyped, `prefer_builtin_first` is false, and
+                            // `i64.to_i64` falls through to name-based symbol
+                            // resolution that mis-picks an unrelated `Type.to_i64` in a
+                            // large whole-program link (x64 freestanding SSH kernel:
+                            // `our_version.len().to_i64()` returned garbage → empty
+                            // server version → KEX "incorrect signature").
+                            "rt_array_len" | "rt_len" => Some(TypeId::I64),
+                            // libm-backed math helpers. Declared `-> F64` in
+                            // runtime_sffi.rs::RUNTIME_FUNCS, so the Cranelift call
+                            // really does produce an F64 value; without the stamp
+                            // the result VReg is untyped and a directly-printed
+                            // `sqrt(16.0)` renders the float as an integer.
+                            // Emitted by mir/lower/lowering_expr_builtin.rs
+                            // (`lower_libm_math`, Defect B).
+                            "rt_math_sqrt" | "rt_math_floor" | "rt_math_ceil" | "rt_math_pow" | "rt_math_round" => {
+                                Some(TypeId::F64)
+                            }
+                            "rt_array_get_text" => Some(TypeId::STRING),
+                            "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
+                            "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {
+                                Some(TypeId::U32)
+                            }
+                            "rt_typed_words_u64_at"
+                            | "rt_typed_words_u64_unchecked"
+                            | "rt_typed_words_u64_data_at"
+                            | "rt_typed_words_u64_data_at_checked"
+                            | "rt_typed_words_u64_raw_data_at" => Some(TypeId::U64),
+                            // Text-in/text-out runtime helpers. These names are
+                            // string-only (no array overload), so the result is a
+                            // String regardless of what typed the receiver.
+                            "rt_string_concat"
+                            | "rt_string_trim"
+                            | "rt_string_trim_start"
+                            | "rt_string_trim_end"
+                            | "rt_string_replace"
+                            | "rt_string_to_upper"
+                            | "rt_string_to_lower"
+                            | "rt_string_substr"
+                            | "rt_string_substr_from" => Some(TypeId::STRING),
+                            _ => None,
+                        };
+                        // RECEIVER-POLYMORPHIC runtime helpers: one symbol serves
+                        // both String and Array receivers, so the result type is
+                        // only knowable by PROPAGATING the receiver's type from
+                        // arg 0. Without this, a CHAINED call off one of them
+                        // (`t.substring(2).to_int()`, no intermediate `val`) left
+                        // the receiver vreg untyped, and the numeric-cast block in
+                        // codegen/instr/closures_structs.rs:1497 defaults a missing
+                        // type to `TypeId::I64` (`unwrap_or(TypeId::I64)`) — so
+                        // `to_int` skipped the `from_ty == TypeId::STRING` branch
+                        // that routes to `rt_string_to_int` and fell into the
+                        // generic raw-register conversion, returning the
+                        // intermediate string's HEAP POINTER as a "successful"
+                        // integer. Exit 0, no diagnostic, plausible-looking number
+                        // (`"ab1234".substring(2).to_int()` -> 2791233887617 under
+                        // the JIT, 1234 in the interpreter and in the
+                        // bound-intermediate form, whose reload is a typed `Load`).
+                        //
+                        // This is the same defect class the `builtin_method_result_type`
+                        // helper in closures_structs.rs was added for, but that fix
+                        // only covers receivers produced by `MethodCallStatic`.
+                        // `.substring()`/`.slice()` are expanded to a direct
+                        // `MirInst::Call { Pure("rt_slice") }` during MIR lowering,
+                        // so they never reach that helper — this arm is where the
+                        // Call-shaped half of the family must be typed.
+                        let ty = ty.or_else(|| match base {
+                            "rt_slice" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
+                                match args.first().and_then(|a| types_map.get(a).copied()) {
+                                    Some(TypeId::STRING) => Some(TypeId::STRING),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        });
+                        if let Some(ty) = ty {
+                            types_map.insert(*d, ty);
+                        }
                     }
+                    MirInst::Call { dest: None, .. } => {}
+                    MirInst::UnitWiden {
+                        dest, to_bits, signed, ..
+                    }
+                    | MirInst::UnitNarrow {
+                        dest, to_bits, signed, ..
+                    } => {
+                        if let Some(ty) = unit_bits_to_type_id(*to_bits, *signed) {
+                            types_map.insert(*dest, ty);
+                        }
+                    }
+                    MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
+                        types_map.insert(*dest, TypeId::I64);
+                    }
+                    MirInst::BoxFloat { dest, .. } => {
+                        // BoxFloat produces a tagged RuntimeValue, not a raw f64.
+                        // Keeping it out of the raw-float provenance lane is
+                        // essential when it crosses a block boundary.
+                        types_map.insert(*dest, TypeId::ANY);
+                    }
+                    MirInst::UnboxFloat { dest, .. } => {
+                        types_map.insert(*dest, TypeId::F64);
+                    }
+                    // Remaining variants either produce no typed value, or their
+                    // typed output (arrays, closures, enums, SIMD lanes, GPU ops,
+                    // futures, actors, generators, etc.) is not yet needed by
+                    // FR-0002b's signedness dispatch. Leave `vreg_types` entry
+                    // absent — consumers treat missing as "unknown".
+                    _ => {}
                 }
-                MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
-                    types_map.insert(*dest, TypeId::I64);
-                }
-                MirInst::BoxFloat { dest, .. } => {
-                    // BoxFloat produces a tagged RuntimeValue, not a raw f64.
-                    // Keeping it out of the raw-float provenance lane is
-                    // essential when it crosses a block boundary.
-                    types_map.insert(*dest, TypeId::ANY);
-                }
-                MirInst::UnboxFloat { dest, .. } => {
-                    types_map.insert(*dest, TypeId::F64);
-                }
-                // Remaining variants either produce no typed value, or their
-                // typed output (arrays, closures, enums, SIMD lanes, GPU ops,
-                // futures, actors, generators, etc.) is not yet needed by
-                // FR-0002b's signedness dispatch. Leave `vreg_types` entry
-                // absent — consumers treat missing as "unknown".
-                _ => {}
             }
+        }
+        if types_map.len() == typed_before {
+            break;
         }
     }
 
@@ -1459,6 +1469,74 @@ mod tests {
         assert_eq!(map.get(&r5).copied(), Some(TypeId::U32), "Copy propagates src type");
         assert_eq!(map.get(&r6).copied(), Some(TypeId::F64), "Load carries ty");
         assert_eq!(map.get(&r7).copied(), Some(TypeId::BOOL), "ConstBool -> BOOL");
+    }
+
+    /// The MIR inliner appends a callee's blocks AFTER the caller block that
+    /// consumes the result, so an inlined `spl_load_i64` wrapper defines its
+    /// result `Copy` in a later-listed block than the `BitAnd`/`Eq` using it.
+    /// A single forward walk left that chain untyped, and `compile_binop`
+    /// then lowered `(load & mask) == MAGIC` to `rt_native_eq(raw, raw)`,
+    /// which dereferenced a raw header word inside the pure-Simple runtime.
+    #[test]
+    fn build_vreg_types_types_uses_before_later_block_defs() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::BOOL, Visibility::Private);
+        let ptr = func.new_vreg();
+        let loaded = func.new_vreg();
+        let copied = func.new_vreg();
+        let mask = func.new_vreg();
+        let masked = func.new_vreg();
+        let magic = func.new_vreg();
+        let eq = func.new_vreg();
+        let use_block = func.new_block();
+        let inlined_block = func.new_block();
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::ConstInt { dest: ptr, value: 4096 });
+        entry.terminator = Terminator::Jump(inlined_block);
+
+        let use_bb = func.block_mut(use_block).unwrap();
+        use_bb.instructions.push(MirInst::ConstInt {
+            dest: mask,
+            value: 4294967295,
+        });
+        use_bb.instructions.push(MirInst::BinOp {
+            dest: masked,
+            op: BinOp::BitAnd,
+            left: copied,
+            right: mask,
+        });
+        use_bb.instructions.push(MirInst::ConstInt {
+            dest: magic,
+            value: 0x55494E54,
+        });
+        use_bb.instructions.push(MirInst::BinOp {
+            dest: eq,
+            op: BinOp::Eq,
+            left: masked,
+            right: magic,
+        });
+        use_bb.terminator = Terminator::Return(Some(eq));
+
+        let inlined_bb = func.block_mut(inlined_block).unwrap();
+        inlined_bb.instructions.push(MirInst::Call {
+            dest: Some(loaded),
+            target: CallTarget::from_name("spl_load_i64"),
+            args: vec![ptr, ptr],
+        });
+        inlined_bb.instructions.push(MirInst::Copy {
+            dest: copied,
+            src: loaded,
+        });
+        inlined_bb.terminator = Terminator::Jump(use_block);
+
+        let map = build_vreg_types(&func, &HashMap::new());
+
+        assert_eq!(map.get(&copied).copied(), Some(TypeId::I64));
+        assert_eq!(
+            map.get(&masked).copied(),
+            Some(TypeId::I64),
+            "a BitAnd whose operand is defined in a later-listed block must still be typed"
+        );
     }
 
     #[test]
