@@ -50,6 +50,20 @@ revision, entry path, target, backend, runtime authority, and exact argv. Reuse
 the same directory for incremental retries of that lineage. Never let parallel
 writers or different compiler hashes share a cache.
 
+`bootstrap-phase-verification.shs` freezes a command-owner receipt beside the
+two built tools. The receipt binds the exact full CLI and standalone runner
+paths and SHA-256 values. Every check and test validates the receipt and both
+tools before and after execution, and test subprocesses receive
+`SIMPLE_BINARY=<that full CLI>`. A runner must never select itself or an ambient
+deployed compiler as its child command owner. Same-lineage retries may reuse an
+identical frozen receipt; a changed tool pair receives a hash-qualified receipt.
+
+Phase verification runs representative compiler bootstrap and MCP behavior in
+both `--mode=interpreter` and `--mode=compile`. A native build of the runner is
+build evidence only; it does not establish compiled test execution. Full
+compiler inventory rows remain distinct from the repository-wide Stage 6
+`test test --whole --mode=interpreter` release gate.
+
 Stage 2 and Stage 3 `bootstrap_main` artifacts are intentionally compiler-only.
 They can native-build self-running specs but do not expose suite discovery. Run
 `test test --whole --mode=interpreter` only with the non-vacuous full CLI built
