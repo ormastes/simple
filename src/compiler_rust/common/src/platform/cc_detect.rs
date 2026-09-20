@@ -13,6 +13,25 @@ const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
 const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang", "cl.exe"];
 const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
 
+/// True when `target` names the *same* Windows machine we are already
+/// running on with a GNU ABI, i.e. cross-prefixing the compiler would be
+/// wrong.
+///
+/// `Target::is_host()` only compares arch/os, not the explicit ABI a parsed
+/// triple carries in `linker_flavor_hint`. On a Windows host whose
+/// auto-detected flavor is MSVC (no `MSYSTEM`, no `target_env = "gnu"`
+/// toolchain), a target parsed from the literal string
+/// `"x86_64-pc-windows-gnu"` still satisfies `is_host()` on arch/os alone,
+/// even though the requested ABI (GNU) disagrees with the host's actual one
+/// (MSVC) — so a bare `gcc` picked up from PATH would silently be used
+/// instead of the `x86_64-w64-mingw32-*` cross toolchain. Compare against
+/// the host's *auto-detected* flavor (a fresh `Target` with no explicit
+/// hint) rather than `target.linker_flavor()`, which just echoes the hint
+/// back.
+fn is_native_gnu_windows_host(target: &Target) -> bool {
+    target.is_host() && Target::new(target.arch, target.os).linker_flavor() == LinkerFlavor::Gnu
+}
+
 fn compiler_matches_flavor(compiler: &str, flavor: LinkerFlavor) -> bool {
     match flavor {
         LinkerFlavor::Msvc => is_msvc_target(compiler),
@@ -52,7 +71,7 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
         return to_native_owned(cc);
     }
     let flavor = target.linker_flavor();
-    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !target.is_host() {
+    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
         return WINDOWS_GNU_CROSS_C_COMPILERS[0].to_string();
     }
     if flavor == LinkerFlavor::Msvc {
@@ -97,7 +116,7 @@ pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
         return to_native_owned(cxx);
     }
     let flavor = target.linker_flavor();
-    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !target.is_host() {
+    if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
         return WINDOWS_GNU_CROSS_CXX_COMPILERS[0].to_string();
     }
     for cxx in cxx_candidates(target, flavor) {

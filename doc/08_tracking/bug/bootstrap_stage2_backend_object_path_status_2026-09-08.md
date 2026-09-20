@@ -371,3 +371,39 @@ Three states on one number is not a measurement. A diagnostic code space must
 make "I was never set" distinguishable from every real answer before its
 readout is worth anything.
 
+
+## Triage 2026-09-20 (Windows worktree, no new fix cycle run)
+
+Re-read this record plus the current source before touching anything. The
+"opacity" complaint this record opens with is **already resolved in source**,
+matching the `bug_db.sdn` row's `2026-09-18: fix landed (unwrap transport
+rewrite + 2 val-to-var blocker repairs)` note:
+
+- `src/lib/nogc_sync_mut/io/file_ops.spl:100-128`
+  (`file_read_regular_no_follow_bounded`) now distinguishes "extern reported
+  nil" from "payload decoded to len -1" and names the admission arm via
+  `_read_no_follow_failure_name()`, instead of the force-unwrap
+  (`content.?` / `.unwrap()`) pattern this record traced as miscompiling the
+  nullable-text transport.
+- `src/compiler/80.driver/driver_aot_native_output.spl:2525-2550` now chains
+  through `diagnostic file empty` / `diagnostic <n> bytes on disk, payload
+  lost on read` / `diagnostic unreadable: <reason>` before falling back to the
+  bare `backend object-path status {status}`, so a caller no longer sees only
+  a number.
+
+No fresh `bootstrap-from-scratch --full-bootstrap --stop-after-stage2` run was
+attempted in this lane (a full cycle here is ~40 min per this record's own
+"Honest note on effort", and the mandate for this session was diagnosis/small
+fix, not a fresh bootstrap rollout). The remaining open item is exactly what
+`cad6eb16550` ("fix(compiler,io): route stage2 AOT diagnostic read off the
+miscompiled unwrap shape") states in its own commit body: the **native AOT
+A/B differential** (old force-unwrap wrapper reproducing `PROBE-ERR` vs the
+fixed transport reproducing `PROBE-OK`, run through an actual native AOT
+build, not the interpreter/JIT lane that already went green twice) "was
+prepared but the local builds deadlocked under load; that leg rides CI / a
+re-run". That native build is the single missing piece to flip this row to
+`fixed` — it was explicitly out of scope for this session (heavy native
+build, already reported as deadlocking under load elsewhere), so it was not
+attempted here either. No code change made in this session; status left as
+`fix-implemented-verification-pending` for the owning lane to close once that
+differential lands.

@@ -50,21 +50,21 @@ Per the RISC-V RTL disconnect audit:
 ## Files Created
 
 ### Calibration Testbenches
-- `/home/ormastes/dev/pub/simple/build/vhdl/rv32/tb_calibration_retire.vhd` - Low retirement detection
-- `/home/ormastes/dev/pub/simple/build/vhdl/rv32/tb_calibration_alu.vhd` - ALU corruption detection
-- `/home/ormastes/dev/pub/simple/build/vhdl/rv32/tb_calibration_bus.vhd` - Bus stall detection
-- `/home/ormastes/dev/pub/simple/build/vhdl/rv32/tb_calibration_pmp.vhd` - PMP protection (skip pending)
-- `/home/ormastes/dev/pub/simple/build/vhdl/rv32/tb_calibration_hash.vhd` - Artifact hash verification
+- `$repo/build/vhdl/rv32/tb_calibration_retire.vhd` - Low retirement detection
+- `$repo/build/vhdl/rv32/tb_calibration_alu.vhd` - ALU corruption detection
+- `$repo/build/vhdl/rv32/tb_calibration_bus.vhd` - Bus stall detection
+- `$repo/build/vhdl/rv32/tb_calibration_pmp.vhd` - PMP protection (skip pending)
+- `$repo/build/vhdl/rv32/tb_calibration_hash.vhd` - Artifact hash verification
 
 ### Infrastructure
-- `/home/ormastes/dev/pub/simple/test/riscv_isa_gate/run_calibration.sh` - Calibration suite runner
-- `/home/ormastes/dev/pub/simple/test/riscv_isa_gate/CALIBRATION_README.md` - Technical documentation
-- `/home/ormastes/dev/pub/simple/test/riscv_isa_gate/VERIFY_001_IMPLEMENTATION.md` - This report
+- `$repo/test/riscv_isa_gate/run_calibration.sh` - Calibration suite runner
+- `$repo/test/riscv_isa_gate/CALIBRATION_README.md` - Technical documentation
+- `$repo/test/riscv_isa_gate/VERIFY_001_IMPLEMENTATION.md` - This report
 
 ## Usage
 
 ```bash
-cd /home/ormastes/dev/pub/simple/test/riscv_isa_gate
+cd $repo/test/riscv_isa_gate
 ./run_calibration.sh
 ```
 
@@ -107,7 +107,7 @@ This ensures meta-validation precedes execution validation.
 
 ## References
 
-- Bug Document: `/home/ormastes/dev/pub/simple/doc/01_research/hardware/riscv/riscv_rtl_disconnect_audited_bugs_2026-07-21.md`
+- Bug Document: `$repo/doc/01_research/hardware/riscv/riscv_rtl_disconnect_audited_bugs_2026-07-21.md`
 - Audit Triage: VERIFY-001 marked "REAL + HIGH-VALUE - The meta-bug"
 - Related Bugs: RISCV-004 (fixture exclusion), VERIFY-002 (provenance manifests)
 

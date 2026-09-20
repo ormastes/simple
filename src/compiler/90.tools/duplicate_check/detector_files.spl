@@ -2,7 +2,6 @@
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk_native}
-use std.nogc_sync_mut.io.sffi_common.{is_absolute_path}
 
 @unsafe(reason: "raw nullable path canonicalization; provider is unsigned and unadmitted", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text?
@@ -22,10 +21,14 @@ fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
     if absolute_path == nil or absolute_path == "":
         return []
     val scan_path = (absolute_path ?? "").replace("\\", "/")
-    val relative_root = detector_relative_root(path)
+    # Keep caller-style roots in returned paths: on Windows dir_walk_native
+    # yields UNC paths with backslashes (//?/C:/tmp/x\y.spl), which break both
+    # exclude matching ("/"-segment patterns like "doc/") and callers that
+    # compare against the path style they passed in (e.g. "/tmp/x/y.spl").
+    val caller_root = detector_caller_root(path)
     var files = []
     for physical_path in dir_walk_native(scan_path):
-        val file_path = detector_restore_relative_path(physical_path, scan_path, relative_root)
+        val file_path = detector_restore_caller_path(physical_path, scan_path, caller_root)
         if not file_path.ends_with(".spl"):
             continue
         if should_exclude_detector_path(file_path, config):
@@ -34,23 +37,18 @@ fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
 
     files
 
-fn detector_relative_root(path: text) -> text:
-    if is_absolute_path(path):
-        return ""
+fn detector_caller_root(path: text) -> text:
     var root = path.replace("\\", "/")
     while root.len() > 1 and root.ends_with("/"):
         root = root.substring(0, root.len() - 1)
     root
 
-fn detector_restore_relative_path(physical_path: text, scan_path: text, relative_root: text) -> text:
-    if relative_root == "":
-        return physical_path
+fn detector_restore_caller_path(physical_path: text, scan_path: text, caller_root: text) -> text:
     val normalized = physical_path.replace("\\", "/")
     val prefix = scan_path + "/"
     if not normalized.starts_with(prefix):
-        return physical_path
-    val suffix = normalized.substring(prefix.len(), normalized.len())
-    relative_root + "/" + suffix
+        return normalized
+    caller_root + "/" + normalized.substring(prefix.len(), normalized.len())
 
 fn should_exclude_detector_path(path: text, config: DuplicationConfig) -> bool:
     for pattern in config.exclude_patterns:

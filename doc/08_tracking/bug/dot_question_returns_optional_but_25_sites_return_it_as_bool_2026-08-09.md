@@ -204,3 +204,24 @@ per this doc's standing caution and are left for a future pass:
 (cross-stream, owned by F2 per this doc), `macho_inspect.spl:204`,
 `pe_parser.spl:299`, `lean/runner.spl:102`, `durability.spl:483`,
 `vfs.spl:147`.
+
+## Triage note 2026-09-19 (suite-2026-09-18 shard3 lane)
+
+`test/system/features/serialization_system_spec.spl` and
+`test/system/features/runtime_system_spec.spl` (identical wave-6 template
+bodies from `dd5b3c98e1b`) each failed two examples under the Rust seed
+(`simple.exe test --mode=interpreter`): `verify(error.? == true)` (workflow 2)
+and `verify(dict.get("b").? == false)` (error 5), both
+`expected false to equal true`.
+
+Classification: STALE SPEC PIN, not a new seed finding. The pins assumed `.?`
+yields `bool`; the documented contract is `.?` returns `T?`
+(`doc/07_guide/quick_reference/syntax_quick_reference.md:537-549`,
+`src/compiler/10.frontend/core/_AstExpr/nodes.spl:63`). Run-mode probe
+confirmed seed behavior matches the `T?` contract (`dict.get("b") == nil` is
+true, `nil.?` is nil, the if-body assignment persists) — no run-vs-test
+divergence. Re-pinned to `verify(error != nil)` and
+`verify(dict.get("b") == nil)`, the same `!= nil` idiom recorded for BUGFIX-6
+above; both specs then went 33/33 green. Recorded here so a future pass does
+not read the removed pins as fresh evidence that the operator must yield
+bool; the operator-vs-call-sites ruling question above is unchanged.
