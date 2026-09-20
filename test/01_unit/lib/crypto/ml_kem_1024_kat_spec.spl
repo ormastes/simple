@@ -26,30 +26,19 @@ use os.crypto.ml_kem.{ml_kem_1024_ek_bytes, ml_kem_1024_dk_bytes,
     ml_kem_1024_ct_bytes, ml_kem_1024_ss_bytes,
     ml_kem_keygen_1024, ml_kem_encaps_1024, ml_kem_decaps_1024}
 
-## Operator workflow
-
-# 1. Run `bin/simple test test/01_unit/lib/crypto/ml_kem_1024_kat_spec.spl`.
-# 2. Every scenario must pass; a failure is a regression in the
-#    behavior under test.
-
-## Compatibility and limitations
-
-# Covers the interpreter and native lanes for the constructs
-# asserted here; platform-specific behavior is out of scope.
-
 describe "ML-KEM-1024 size invariants (FIPS 203 §8 Table 3)":
 
     it "ITEM-1a ek = 1568 bytes":
-        ml_kem_1024_ek_bytes().to_equal(1568)
+        expect(ml_kem_1024_ek_bytes()).to_equal(1568)
 
     it "ITEM-1b dk = 3168 bytes":
-        ml_kem_1024_dk_bytes().to_equal(3168)
+        expect(ml_kem_1024_dk_bytes()).to_equal(3168)
 
     it "ITEM-1c ciphertext = 1568 bytes":
-        ml_kem_1024_ct_bytes().to_equal(1568)
+        expect(ml_kem_1024_ct_bytes()).to_equal(1568)
 
     it "ITEM-1d shared secret = 32 bytes":
-        ml_kem_1024_ss_bytes().to_equal(32)
+        expect(ml_kem_1024_ss_bytes()).to_equal(32)
 
     it "for-range iterates the half-open span":
         step("Verify: for-range iterates the half-open span")
@@ -60,28 +49,63 @@ describe "ML-KEM-1024 size invariants (FIPS 203 §8 Table 3)":
         expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
     it "ITEM-2a k = 4":
-        ml_kem_k_1024().to_equal(4)
+        expect(ml_kem_k_1024()).to_equal(4)
 
     it "ITEM-2b η1 = 2":
-        ml_kem_eta1_1024().to_equal(2)
+        expect(ml_kem_eta1_1024()).to_equal(2)
 
     it "ITEM-2c η2 = 2":
-        ml_kem_eta2_1024().to_equal(2)
+        expect(ml_kem_eta2_1024()).to_equal(2)
 
     it "ITEM-2d du = 11":
-        ml_kem_du_1024().to_equal(11)
+        expect(ml_kem_du_1024()).to_equal(11)
 
     it "ITEM-2e dv = 5":
-        ml_kem_dv_1024().to_equal(5)
+        expect(ml_kem_dv_1024()).to_equal(5)
 
     it "ITEM-2f q = 3329 (shared)":
-        ml_kem_q().to_equal(3329)
+        expect(ml_kem_q()).to_equal(3329)
+
+# ----------------------------------------------------------------------------
+# Top-level deterministic round-trip harness (runs at module load).
+#
+# d = z = m = 0^32. A load-time crash surfaces as an error rather than a
+# silent green; the it-block below records the outcome flag.
+# ----------------------------------------------------------------------------
+
+fn _zeros32() -> list:
+    var out = []
+    var i = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _bytes_eq_i64(a: list, b: list) -> i64:
+    if a.len() != b.len():
+        return 0
+    var i = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return 0
+        i = i + 1
+    1
+
+val _ml_kem_1024_keypair = ml_kem_keygen_1024(_zeros32(), _zeros32())
+val _ml_kem_1024_ek = _ml_kem_1024_keypair[0]
+val _ml_kem_1024_dk = _ml_kem_1024_keypair[1]
+val _ml_kem_1024_encaps = ml_kem_encaps_1024(_ml_kem_1024_ek, _zeros32())
+val _ml_kem_1024_ss_enc = _ml_kem_1024_encaps[0]
+val _ml_kem_1024_ct = _ml_kem_1024_encaps[1]
+val _ml_kem_1024_ss_dec = ml_kem_decaps_1024(_ml_kem_1024_dk, _ml_kem_1024_ct)
+
+val ml_kem_1024_round_trip_ok = _bytes_eq_i64(_ml_kem_1024_ss_enc, _ml_kem_1024_ss_dec)
 
 describe "ML-KEM-1024 deterministic round-trip (top-level harness)":
 
     it "ITEM-3 KeyGen + Encaps + Decaps round-trip with d = z = m = 0^32":
-        # The actual round-trip computation runs at file load via
-        # `ml_kem_1024_round_trip_check()`. This `it` block records the
+        # The actual round-trip computation runs at file load via the
+        # top-level harness above. This `it` block records the
         # outcome flag; if loading succeeded with a wrong shared secret,
         # the flag is 0 and this assertion fails.
-        ml_kem_1024_round_trip_ok.to_equal(1)
+        expect(ml_kem_1024_round_trip_ok).to_equal(1)
