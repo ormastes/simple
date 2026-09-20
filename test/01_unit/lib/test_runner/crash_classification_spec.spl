@@ -40,3 +40,43 @@ describe "crashed specs are classified separately from failures and timeouts":
         val r = make_result_from_output("z_spec.spl", "1 example, 1 failure", "", 1, 10, 60)
         expect(r.error.starts_with("CRASHED")).to_equal(false)
         expect(r.failed).to_equal(1)
+
+describe "a crashed spec reports the fault diagnostic the runner already matched":
+    # @manual scenario evidence
+    it "surfaces `memory allocation of N bytes failed` instead of a blank last output":
+        # @req REQ-SSPEC-LIB
+        step("surfaces `memory allocation of N bytes failed` instead of a blank last output")
+        # Reproducing case: a spec child killed by the runner's `ulimit -v` cap
+        # aborts with exactly this text on stderr. `has_crash_evidence` matched
+        # it (its pattern list contains "memory allocation of") but
+        # `extract_error_message` did not (its list is semantic:/parse error:/
+        # ERROR:/... only), so the reported message was
+        # `CRASHED: child died by signal 6 (exit 134); last output: ` -- empty.
+        # 66 crashes in one directory run printed a blank diagnosis while the
+        # runner already held the reason.
+        val alloc_stderr = "memory allocation of 729096 bytes failed\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+        val r = make_result_from_output("alloc_spec.spl", "", alloc_stderr, 134, 10, 60)
+        expect(r.error.starts_with("CRASHED")).to_equal(true)
+        expect(r.error.contains("memory allocation of 729096 bytes failed")).to_equal(true)
+        expect(r.error.ends_with("last output: ")).to_equal(false)
+
+    it "reports the fault diagnostic even when an assertion line is also present":
+        # @req REQ-SSPEC-LIB
+        step("reports the fault diagnostic even when an assertion line is also present")
+        # Similar-problem detection: a fallback that only fires when
+        # `extract_error_message` is empty would let the `✗` assertion line win
+        # and hide the abort reason again. At a crash site the matched fault
+        # diagnostic must appear unconditionally.
+        val r = make_result_from_output(
+            "mixed_spec.spl",
+            "✗ some example\nexpected 1 to equal 2",
+            "memory allocation of 4096 bytes failed",
+            134, 10, 60)
+        expect(r.error.contains("memory allocation of 4096 bytes failed")).to_equal(true)
+
+    it "keeps reporting a panic diagnostic for a signal death with no exit code":
+        # @req REQ-SSPEC-LIB
+        step("keeps reporting a panic diagnostic for a signal death with no exit code")
+        val r = make_result_from_output("panic_spec.spl", "", "thread 'main' panicked at src/x.rs:1:1:\nboom", -1, 10, 60)
+        expect(r.error.starts_with("CRASHED")).to_equal(true)
+        expect(r.error.contains("panicked at")).to_equal(true)
