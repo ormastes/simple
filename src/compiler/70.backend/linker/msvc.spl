@@ -54,6 +54,33 @@ fn msvc_run_argv(exe: text, args: [text]) -> MsvcShellResult:
 fn default_windows_libs_with_suffix() -> [text]:
     ["kernel32.lib", "user32.lib", "ws2_32.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib", "ntdll.lib", "msvcrt.lib"]
 
+pub fn msvc_strip_unix_rpath_args(extra_args: [text]) -> [text]:
+    """Drop Unix rpath options before they reach an MSVC/COFF linker argv.
+
+    `-rpath` is an ELF/Mach-O runtime-search-path mechanism; MSVC link.exe
+    and lld-link have no such concept. Passed through raw, a bare `-rpath
+    $ORIGIN` pair (two positional args) or `-Wl,-rpath,<dir>` (a single
+    unrecognized token) gets treated as an input file name -- `$ORIGIN` with
+    no extension is guessed as `$ORIGIN.obj`, which does not exist, and
+    link.exe fails LNK1181 ("cannot open input file '$ORIGIN.obj'"). Mirrors
+    native_linking.spl's `native_msvc_extra_args` (same shape, kept local to
+    this module rather than imported, since native_linking.spl imports FROM
+    msvc.spl and not the reverse)."""
+    var result: [text] = []
+    var index = 0
+    while index < extra_args.len():
+        val flag = extra_args[index]
+        if flag == "-rpath":
+            index = index + 1
+            if index < extra_args.len():
+                index = index + 1
+        elif flag.starts_with("-Wl,-rpath,"):
+            index = index + 1
+        else:
+            result.push(flag)
+            index = index + 1
+    result
+
 # ===========================================================================
 # MSVC Linker Configuration
 # ===========================================================================
@@ -120,8 +147,20 @@ impl MsvcConfig:
         # No logo
         args.push("/NOLOGO")
 
-        # Extra arguments
-        for arg in self.extra_args:
+        # Extra arguments. This is the single sink every MSVC-linking caller
+        # (link_from_config, _link_native_msvc, the shared-library DLL path)
+        # funnels its `extra_args`/`extra_flags` through before they become
+        # real link.exe/lld-link argv, so strip Unix `-rpath <dir>` /
+        # `-Wl,-rpath,<dir>` here too, defensively -- even though the known
+        # callers already filter their own inputs upstream. `-rpath` is
+        # meaningful only to ELF/Mach-O linkers; MSVC/COFF has no equivalent
+        # and, unrecognized, link.exe treats a bare `$ORIGIN` token as a
+        # positional input file and fails with LNK1181
+        # ("cannot open input file '$ORIGIN.obj'"). Same filter shape as
+        # native_linking.spl's `native_msvc_extra_args`, kept local here
+        # (import direction: native_linking.spl imports this module, not the
+        # reverse) so this boundary cannot be bypassed by a future caller.
+        for arg in msvc_strip_unix_rpath_args(self.extra_args):
             args.push(arg)
 
         args
@@ -223,9 +262,10 @@ impl MsvcLinker:
                 lib
             msvc_config.libs.push(lib_name)
 
-        # Add extra linker flags
+        # Add extra linker flags. Filtered at the source too, not only in
+        # build_args() below -- see msvc_strip_unix_rpath_args's docstring.
         if config.linker_flags.len() > 0:
-            msvc_config.extra_args = config.linker_flags
+            msvc_config.extra_args = msvc_strip_unix_rpath_args(config.linker_flags)
 
         # Create linker and link
         val linker = MsvcLinker.new(msvc_config)
