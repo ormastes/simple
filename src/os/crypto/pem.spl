@@ -18,28 +18,35 @@
 # tag: crypto, pem, rfc7468
 # =============================================================================
 
-use base_encoding.base64.{base64_encode, base64_decode}
-use base_encoding.utilities.{line_wrap, line_unwrap}
+use base_encoding.base64.{base64_encode_bytes, base64_decode_bytes}
 
 # =============================================================================
 # Internal helpers
 # =============================================================================
 
-# Convert [u8] to a Simple list of i64 for base_encoding APIs.
-fn _u8_to_list(src: [u8]) -> list:
-    var out: list = []
-    var i: u64 = 0
-    while i < src.len():
-        out.push(src[i].to_i64())
-        i = i + 1
+# Wrap a flat Base64 string into fixed-width lines, one trailing "\n" after
+# each line (including the last). The Base64 alphabet is pure ASCII, so this
+# is byte-safe regardless of what binary data it originally encoded.
+fn _line_wrap64(s: text) -> text:
+    var out = ""
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val chunk_end = if i + 64 < len: i + 64 else: len
+        out = out + s.substring(i, chunk_end) + "\n"
+        i = chunk_end
     out
 
-# Convert a base_encoding list-of-i64 back to [u8].
-fn _list_to_u8(src: list) -> [u8]:
-    var out: [u8] = []
-    var i: i64 = 0
-    while i < src.len().to_i64():
-        out.push(src.get(i).to_u8())
+# Strip line breaks (LF or CRLF) from a wrapped Base64 body, recovering the
+# flat string that was originally wrapped.
+fn _line_unwrap(s: text) -> text:
+    var out = ""
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val c = s.char_at(i)
+        if c != "\n" and c != "\r":
+            out = out + c
         i = i + 1
     out
 
@@ -81,9 +88,8 @@ fn _pem_marker(prefix: text, label: text) -> text:
 # reason: positional pem encode API
 fn pem_encode(label: [u8], der_bytes: [u8]) -> [u8]:
     val label_text = _u8_to_text(label)
-    val body_list = _u8_to_list(der_bytes)
-    val b64_flat = base64_encode(body_list)
-    val b64_wrapped = line_wrap(b64_flat, 64)
+    val b64_flat = base64_encode_bytes(der_bytes)
+    val b64_wrapped = _line_wrap64(b64_flat)
     val begin = _pem_marker("BEGIN", label_text)
     # line_wrap may or may not append a trailing newline; ensure body ends with \n
     val body = if b64_wrapped.len() > 0 and b64_wrapped.char_at(b64_wrapped.len() - 1) != "\n":
@@ -177,17 +183,16 @@ fn pem_decode(pem_bytes: [u8]) -> Result<PemBlock, text>:
 
     # Extract body text and strip whitespace
     val body_raw = src.substring(body_start, end_pos)
-    val body_clean = line_unwrap(body_raw)
+    val body_clean = _line_unwrap(body_raw)
     val body_trimmed = _trim_text(body_clean)
 
     if body_trimmed.len() == 0:
         return Err("pem: empty Base64 body")
 
-    val decoded_list = base64_decode(body_trimmed)
-    if decoded_list.len() == 0:
+    val der = base64_decode_bytes(body_trimmed)
+    if der.len() == 0:
         return Err("pem: Base64 decode produced empty result — body may be malformed")
 
-    val der = _list_to_u8(decoded_list)
     val label_bytes = _text_to_u8(begin_label)
     Ok(PemBlock(label: label_bytes, der: der))
 
@@ -235,17 +240,16 @@ fn pem_decode_all(pem_bytes: [u8]) -> Result<list, text>:
                 return Err("pem: no matching END for label '" + begin_label + "'")
 
             val body_raw = src.substring(body_start, end_pos)
-            val body_clean = line_unwrap(body_raw)
+            val body_clean = _line_unwrap(body_raw)
             val body_trimmed = _trim_text(body_clean)
 
             if body_trimmed.len() == 0:
                 return Err("pem: empty Base64 body for label '" + begin_label + "'")
 
-            val decoded_list = base64_decode(body_trimmed)
-            if decoded_list.len() == 0:
+            val der = base64_decode_bytes(body_trimmed)
+            if der.len() == 0:
                 return Err("pem: Base64 decode failed for label '" + begin_label + "'")
 
-            val der = _list_to_u8(decoded_list)
             val label_bytes = _text_to_u8(begin_label)
             val block = PemBlock(label: label_bytes, der: der)
             blocks.push(block)
