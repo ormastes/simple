@@ -1,6 +1,8 @@
 # Imported trait method metadata is absent in per-file native HIR
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-09-08
 - Severity: P0 Stage4 blocker
@@ -22,5 +24,3 @@ A general fix must carry imported trait definitions and slot signatures through
 `pipeline/native_project/imports.rs` into per-file HIR, including generic
 constraint owners. That is the exact unblock condition for the next session.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

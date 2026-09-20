@@ -1,5 +1,9 @@
 # Mechanical Sweep: extern text-arg `c_char` → `(ptr, len)` ABI family
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — Completed 2026-07-29; 4 broken externs fixed; cargo build/tests pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Scope:** extern "C" functions in `src/compiler_rust/runtime/src` taking `*const c_char` text parameters must use `(*const u8, u64)` when callable from native codegen (JIT/Cranelift), per doc/08_tracking/bug/mem_attr_set_owner_jit_text_arg_dropped_2026-07-29.md.
 
@@ -75,5 +79,3 @@ cargo test -p simple-compiler --lib interpreter_extern::
 - **Interpreter engine:** no change (already correct, uses value-based paths)
 - **ABI family:** completes the `(*const u8, u64)` standardization for all text-parameter externs reachable from native codegen
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

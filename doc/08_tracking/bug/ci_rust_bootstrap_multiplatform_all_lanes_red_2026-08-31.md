@@ -1,4 +1,8 @@
 # Rust Bootstrap Multiplatform: every lane red, four independent causes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN (2 of 5 causes fixed elsewhere; 3 remain)
@@ -125,3 +129,4 @@ host, though a full-crate check is blocked by `ring`'s SDK-dependent build
 script), this workflow is the *only* thing standing between a
 non-host compile break and `main` — and it must therefore be kept green rather
 than routinely ignored.
+

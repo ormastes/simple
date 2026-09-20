@@ -1,6 +1,9 @@
 # macOS bootstrap Rust-hosted archive lacks `copy_mem`
+## Closed 2026-09-16 — Status Resolved in source 2026-07-17; focused runtime suite 7/7, archive exports copy_mem
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -37,6 +40,3 @@ separate invocation/provider-selection issue: the old Stage 3 driver selected
 `libsimple_native_all.a`, leaving 73 hosted compiler hooks unresolved. Resume
 with the explicit bootstrap hosted-bundle selector in a fresh bounded turn.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

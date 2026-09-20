@@ -1,5 +1,8 @@
 # Executable checker failed-only retry peak RSS — 2026-08-02
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Observation
 
@@ -26,9 +29,3 @@ Evidence is recorded in
 `build/mini_builds/stage4-failed-only-retry/retry.time` and the associated
 durable per-file results.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
-
-## Triage 2026-09-13 (BUGFIX-7 lane)
-
-Out of lane: a bounded RSS/perf measurement record over 414 files under /usr/bin/time -v; re-deriving needs the same heavy retry sweep, out of budget for a shared host. No change made.

@@ -1,6 +1,8 @@
 # Native: method returning text prints raw handle integer
+## Open 2026-09-16 — needs owner triage
 
-**Status:** PARTIAL (2026-07-16, per record's own Status section — strict-llvm RESOLVED, strict-cranelift blocked by a pre-existing separate failure)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-16):** RESOLVED for strict-llvm (see Resolution below);
 strict-cranelift is blocked by a separate PRE-EXISTING backend failure
@@ -97,5 +99,3 @@ Evidence (worktree at eaee86e1e4d + fix):
 "Failed to declare module statics" backend failure (fires at unmodified
 baseline for the same source; separate root, not a text-return typing issue).
 
-## Triage 2026-09-12
-Reviewed 2026-09-12: record's own nuanced status already accurate; added top-level line for gate compliance only. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,9 @@
 # Stage 3 cannot start: the canonical Stage-3 step passes no package-index authority and no cold-init
+## Closed 2026-09-16 — ...nus the planner-admission receipt. ## Fix direction (not applied by this lane) Add `SIMPLE
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: OPEN (2026-09-13)
 - Area: bootstrap / 80.driver source pipeline
@@ -67,3 +72,4 @@ the correct route, not a relaxation.
 **This changes the Stage-3 args hash, which admission receipts bind to**, so it belongs to whoever
 owns the admission chain, not to a diagnostic lane. Recorded here with the measurement instead of
 applied.
+

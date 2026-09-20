@@ -1,6 +1,9 @@
 # Bug: `test/unit/` is a drifting mirror of `test/01_unit/` — 887 diverged files, all still executed by the default scan
+## Closed 2026-09-16 — ...riscv32/64, simple_web_renderer). ## Fix direction (needs a policy decision — orchestrator
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-30
 - **Severity:** medium (structural — stale spec copies run in every full suite; fixes land in `01_unit` and silently don't apply to the mirror)
@@ -35,6 +38,3 @@ content genuinely newer on that side), or exclude it from the default
 scan root, or make it a symlink. Until then: any spec repair applied
 under `test/01_unit/` MUST check for and port to a `test/unit/` twin.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

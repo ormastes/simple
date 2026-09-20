@@ -1,5 +1,9 @@
 # `rt_screenshot_*` externs unimplemented in the seed interpreter (2026-08-18)
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Resolution 2026-08-18: FIXED in source; RED->GREEN evidence (10/11, 5/5)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 OPEN — seed-resident, cannot be deployed from this lane.
@@ -76,5 +80,3 @@ The one remaining failure is an UNRELATED parser defect, not a screenshot gap:
 whenever the local is named `exists`. Tracked in
 `doc/08_tracking/bug/expect_before_identifier_named_exists_2026-08-18.md`.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

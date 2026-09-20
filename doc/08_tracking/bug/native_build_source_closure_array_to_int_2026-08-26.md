@@ -1,6 +1,9 @@
 # Native build source closure reports locationless array-to-int conversion
+## Closed 2026-09-16 — ...rray-to-int conversion ## Status Resolved on 2026-08-26. The no-stub pure-Simple CLI build
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -39,6 +42,3 @@ only forwards integer handles to `rt_array_free`. The existing focused test
 shard advances beyond the former failure through closure item 704/1046 without
 an array-to-int conversion.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

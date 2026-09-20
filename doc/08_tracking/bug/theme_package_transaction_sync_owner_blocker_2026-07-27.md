@@ -1,6 +1,10 @@
 # Theme package transaction synchronization-owner blocker
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/**
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
+
+**Status:** open prerequisite — re-verified against `origin/main` 2026-07-27,
 still live (`ThemePackageTransactionStore` does not exist anywhere in `src/**`)  
 **Candidate:** `4f84131c55` rejected and unintegrated, and **unrecoverable** —
 never pushed, no longer resolves in the git or jj object store. The wire codec
@@ -99,6 +103,3 @@ source-capture hard stop, native codec ABI evidence, and scalar consumer
 surface are independently implemented and reviewed. See
 [source-capture hard stop](theme_package_source_capture_design_hard_stop_2026-07-27.md).
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

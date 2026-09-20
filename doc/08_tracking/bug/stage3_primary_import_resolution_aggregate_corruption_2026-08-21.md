@@ -1,6 +1,8 @@
 # Stage-3 primary import resolution aggregate corruption (2026-08-21)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -104,6 +106,3 @@ cycle still failed convergence: HIR recorded 15 unresolved `Span` errors in
 terminated once failure was certain; no Stage 4, deployment, hook PASS, or push
 is claimed.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

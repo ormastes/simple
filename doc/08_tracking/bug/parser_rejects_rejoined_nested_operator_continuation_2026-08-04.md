@@ -1,4 +1,9 @@
 # Parser rejects a continuation that rejoins the outer chain after nesting deeper
+## Closed 2026-09-16 — Status FIXED with parser fix, full evidence: 90/90 campaign files parse
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-04 (seed parser)
 **Found:** 2026-08-04
@@ -181,3 +186,4 @@ Fixing 2 also repaired a pre-existing break in the *leading*-arrow form: the
   `bin/simple`. The pure-Simple parser does not emit this message and was not
   changed; if it grows the same continuation handling it needs the same
   credit-bounded rule.
+

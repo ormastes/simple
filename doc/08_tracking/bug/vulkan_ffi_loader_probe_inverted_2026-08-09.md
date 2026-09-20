@@ -1,4 +1,9 @@
 # `VulkanFfi.loader_probe()` reports false on a host with a working Vulkan loader
+## Closed 2026-09-16 — Status RESOLVED 2026-08-17; source-content evidence fix present in ffi_vulkan.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: RESOLVED — closed on source-content evidence, not re-executed (2026-08-17).**
 Current `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl:148-158` no longer
@@ -99,3 +104,4 @@ fn main():
 EOF
 SIMPLE_MODULE_LIMIT=4000 bin/simple run probe.spl
 ```
+

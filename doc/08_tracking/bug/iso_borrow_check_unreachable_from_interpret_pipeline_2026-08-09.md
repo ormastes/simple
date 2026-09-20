@@ -1,6 +1,8 @@
 # iso/borrow-check unreachable from the interpret pipeline (`bin/simple test`)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -150,9 +152,3 @@ read of the interpret path plus an exhaustive call-site census of
 `test-slot.shs` slot (host under a live stage-3 bootstrap, 164 concurrent
 `simple` processes).
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13 (BUGFIX-7 lane)
-
-Out of lane: record's own 2026-08-17 verification concludes this needs a design decision (new iso-scoped check or MIR-lowering-in-interpret-path change) under src/compiler/50.mir, not a bug patch. No change made.

@@ -1,6 +1,8 @@
 # Audit: native-codegen registry vs interpreter extern dispatch gap (2026-08-27)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Read-only audit. Nothing fixed. Worktree: detached `origin/main` @ `ed6545f2e3b`.
 
@@ -192,5 +194,3 @@ So the failures are attributable to the missing registration, not to the harness
   - Registered/handled counts are name-set only; **signature/arity agreement was
     not checked**. A name present in both registries can still misbehave.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,9 @@
 # A variable named `literal` is hijacked by the `literal fn` parser: "expected Fn, found Assign"
+## Closed 2026-09-16 — Status FIXED verified 2026-08-17: literal now contextual keyword, repro prints 2 on rebuilt seed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-17
 **Component:** `src/compiler_rust/parser/src/parser_impl/functions.rs` (`parse_literal_function`), `src/compiler_rust/parser/src/token.rs:242` (`TokenKind::Literal`)
@@ -169,3 +174,4 @@ parser (`src/compiler_rust/parser/src/error.rs:73`); `bin/simple check` routes
 through the interpreter/self-hosted path and returns **exit 0 with no error**
 on a file that is genuinely unparseable. `check` is blind to this entire class
 and must not be used as a gate for it.
+

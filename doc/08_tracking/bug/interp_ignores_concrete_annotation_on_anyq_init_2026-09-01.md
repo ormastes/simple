@@ -1,6 +1,8 @@
 # Interpreter ignores concrete annotation on an `any?` initializer (divergence)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01. **Status:** OPEN. **Found while fixing:** MIR-side
 `any?` receiver-type erasure (fixed in `src/compiler/50.mir/mir_lowering_stmts.spl`,
@@ -33,6 +35,3 @@ frontend should reject the bare form so both modes agree loudly.
 
 Workaround accepted by both modes today: `... = get_obj(...) ?? {}`.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

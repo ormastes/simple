@@ -1,4 +1,8 @@
 # Standalone native-build of a match-bearing file crashes the unsupported-construct scan with `len` on i64
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-31
 - Severity: medium (masks the real "PatternMatch requires interpreter" report)
@@ -39,3 +43,4 @@ match with unqualified arms + `case _`, main printing the result); run
 This is NOT the stage2 `hir codec: no Visibility arm for tag -1` bug — that
 one is tracked separately; this detector crash merely blocked the standalone
 reduction path while investigating it.
+

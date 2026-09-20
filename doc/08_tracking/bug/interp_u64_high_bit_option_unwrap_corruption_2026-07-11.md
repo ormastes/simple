@@ -1,6 +1,8 @@
 # u64 struct field >= 2^63 corrupts `if val` Option unwrap after JIT shared-pointer bail
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found while implementing Lane C nested content frames
 (`test/02_integration/rendering/wm_nested_content_frame_spec.spl`,
@@ -109,5 +111,3 @@ tagged-value handling on the JIT-bailout interpreter path for
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as
 `interp_u64_high_bit_option_unwrap_corruption`.
 
-## Triage 2026-09-12
-Older than 45 days; the repro is embedded in the window-scene compositor's content-frame checksum path, not a standalone <=3 min check. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

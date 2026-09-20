@@ -1,4 +1,8 @@
 # SCRAM-SHA-1 RFC 5802 examples blow the interpreter's 10 M-operation budget once PBKDF2 actually runs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -108,3 +112,4 @@ Skipped from this row-order pass: primary file/fix surface is the Rust seed
 (`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
 pure-Simple, non-Codex lane within the triage budget. Not reproduced or
 re-diagnosed this pass; left OPEN as-is.
+

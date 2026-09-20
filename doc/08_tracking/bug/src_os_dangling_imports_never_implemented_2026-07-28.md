@@ -1,6 +1,10 @@
 # `src/os/**`: 46 imported modules/symbols that were never implemented
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** OPEN (out-of-scope — no implementation invented, per triage brief)
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` + `src/unit/**` scope)
 **Re-verified:** 2026-08-10 — reran
 `sh scripts/check/check-dangling-references.shs --path src/os --path src/unit`
@@ -144,6 +148,3 @@ where a guessed implementation is worse than a recorded gap.
    families are still wanted, or whether the importing `mod.spl` re-export lines
    should be deleted as dead.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

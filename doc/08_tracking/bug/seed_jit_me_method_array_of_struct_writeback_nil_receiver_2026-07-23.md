@@ -1,8 +1,12 @@
 # seed JIT: `me`-method write-back into a `self` array-of-structs field crashes ("nil receiver")
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** ARCHITECTURAL-OPEN (seed JIT/native only; interpreter correct). Workaround in place.
 Root cause lives in the Rust seed's cranelift/native lowering
 (`src/compiler_rust/**`), which is off-limits to edit from pure-Simple sessions
 per repo policy — this is not fixable in `.spl` source. Re-verified fresh on
@@ -131,5 +135,3 @@ free-function path which is correct. Related landmines:
 `.claude/rules/language.md` (arrays are value types) and the boxed-int JIT class
 in `seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

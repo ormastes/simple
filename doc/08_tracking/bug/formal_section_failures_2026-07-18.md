@@ -1,4 +1,8 @@
 # Formal Verification Section Test Failures (106/274)
+## Obsolete 2026-09-16 — Superseded: umbrella premise retracted; per-defect 2026-07-20 docs verified present
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **UPDATE 2026-07-20:** This doc's core premise ("the specification modules
 themselves do not exist in the codebase") is now false — re-triaged on
@@ -90,8 +94,6 @@ All 106 failures stem from missing implementations of:
 
 ---
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** DOCUMENTED  
 **No immediate action required** — this is a known future feature section.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

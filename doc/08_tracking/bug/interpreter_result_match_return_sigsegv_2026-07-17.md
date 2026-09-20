@@ -1,4 +1,8 @@
 # seed driver: `RunningType::Interpreter` SIGSEGVs on `match` over a
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # `Result`-returning call with `return` in each arm
 
 **Severity:** medium (crash, not silent-wrong -- found while regression-testing task #170)
@@ -94,3 +98,4 @@ fn main() -> i64:
    handling (`compiler/src/interpreter_patterns.rs`,
    `compiler/src/interpreter_call/block_execution.rs`) or in the test
    harness's `Interpreter::new()` per-test isolation.
+

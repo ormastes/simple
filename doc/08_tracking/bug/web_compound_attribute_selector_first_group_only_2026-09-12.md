@@ -1,4 +1,9 @@
 # Compound attribute selectors evaluated only their FIRST bracket group (2026-09-12)
+## Closed 2026-09-16 — Status FIXED; loop-all-groups fix, sabotage green->red->green verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED.
 **Component:** pure-Simple web renderer, selector matcher.
@@ -48,3 +53,4 @@ and binary (seed `src/compiler_rust/target/bootstrap/simple`).
 ## Evidence
 
 Diagnosis: `doc/10_metrics/ui/chrome_vs_simple_catalog_diff_macos_2026-09-12.md`.
+

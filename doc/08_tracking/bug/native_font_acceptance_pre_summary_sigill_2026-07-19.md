@@ -1,6 +1,8 @@
 # Native font acceptance exits 132 before its first summary
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -113,6 +115,3 @@ the class payload fixed or promote native-smoke case 20 until a representation
 rule resolves all three, a new pure-Simple compiler builds, and the unchanged
 probe exits exactly 7.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

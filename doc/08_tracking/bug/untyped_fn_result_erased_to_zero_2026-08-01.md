@@ -1,4 +1,8 @@
 # An untyped function's result is erased to `0` (or to `value << 3`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-measured 2026-09-13 — HALF FIXED, entry stays OPEN on the remaining half
 
@@ -94,3 +98,4 @@ Root-cause the Any-erasure path so an undeclared return type infers the
 trailing expression's type instead of dropping the value, and so an untyped
 parameter's indexed read is unboxed before returning. A/B against the
 interpreter, JIT, and native engines.
+

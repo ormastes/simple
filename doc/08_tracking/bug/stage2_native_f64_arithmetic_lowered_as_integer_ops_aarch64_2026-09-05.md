@@ -1,4 +1,8 @@
 # Stage-2 native codegen lowers f64 `+ - * /` as integer ops on the raw bit patterns (aarch64)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-05
 **Severity:** high — silent wrong values, no diagnostic, no crash
@@ -144,3 +148,4 @@ float kind for an f64 local on the flat path — whether the local is registered
 with a type at all, and where its MirType is assigned. A fix there repairs this
 defect and plausibly others in the same family, whereas special-casing the binop
 would leave the metadata gap intact.
+

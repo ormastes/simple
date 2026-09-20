@@ -1,5 +1,8 @@
 # RISC-V Priv/MMU/RV64 Regression Findings (2026-07-21)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Investigation scope:** Verify BUG-RISCV-002 and BUG-RISCV-003 against current source  
 **Source paths:** `src/lib/hardware/rv32i_rtl/`, `src/lib/hardware/rv64gc_rtl/`  
@@ -147,5 +150,3 @@ CI passes with disconnected/missing features because:
 - RV64 staged regression: `src/lib/hardware/rv64gc_rtl/core.spl` (staged, uncommitted)
 - Sync history: `115803a7aff`, `0a749ba7f10`, `1d6c39a87e8`
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

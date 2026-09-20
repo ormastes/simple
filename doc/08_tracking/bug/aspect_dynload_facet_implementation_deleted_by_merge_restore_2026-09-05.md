@@ -1,5 +1,9 @@
 # The aspect/dynload facet implementation was deleted wholesale by a merge-restore
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — ...the declaring module, published resolved routes gated behind a post-HIR coherence pass, an
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-09-05
 - **Offending commit:** `fcbec1c3b625f073ddbc7f1faa72937346834bad`,
@@ -100,5 +104,3 @@ two placeholder files above, fix the acceptance spec's import path, and re-run
 both specs. Audit the rest of `fcbec1c3b62` separately — the facet slice is
 unlikely to be the only casualty of a whole-subtree restore.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

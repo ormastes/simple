@@ -1,6 +1,9 @@
 # The SFFI facade cannot call a variadic libc function with a pointer — it SEGVs
+## Closed 2026-09-16 — ...en`/`spl_dlsym`) transmutes the resolved symbol to a **fixed, non-variadic** function poin
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Filed 2026-09-03. Status: OPEN.
 
@@ -62,6 +65,3 @@ better reason — a PTY stack already exists at `origin/main`
 independent of that decision and will block the next caller who needs a
 variadic libc function.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

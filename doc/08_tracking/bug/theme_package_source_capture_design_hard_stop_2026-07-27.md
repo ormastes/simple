@@ -1,6 +1,10 @@
 # Theme package source-capture design hard stop
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** rejected design series; unintegrated
 **Series:** `48fbcd1d91`, `ae814abf14`, `7e714f01b0`, `50c886ca9b`
 **Iteration state:** three design/review cycles exhausted
 
@@ -71,6 +75,3 @@ session may resume only after:
 5. keeping the legacy aggregate loader/cache independent until its consumers
    receive a separately reviewed migration.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

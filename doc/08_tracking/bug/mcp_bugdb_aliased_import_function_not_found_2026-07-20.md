@@ -1,6 +1,8 @@
 # `mcp_bugdb_spec.spl`: aliased free-function import unresolved (`file_exists as file_exists_backend`)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/lib/nogc_async_mut/mcp/bugdb_resource.spl` (and sibling
@@ -58,5 +60,3 @@ Spec left unmodified — `file_exists_backend` is correctly declared and used
 per current import-aliasing syntax; this is an evaluator/resolver defect,
 not a stale test.
 
-## Triage 2026-09-12
-Older than 45 days; has a concrete spec (`test/02_integration/app/mcp_bugdb_spec.spl`) but was not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

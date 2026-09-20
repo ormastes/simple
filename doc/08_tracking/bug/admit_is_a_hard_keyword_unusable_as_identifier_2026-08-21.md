@@ -1,6 +1,10 @@
 # `admit` is a hard keyword and cannot name a function
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/parser_move_contextual_keyword_spec.spl` now PASSes)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** OPEN (low severity, worked around)
 **Found:** 2026-08-21, Phase 5 (D4 loader admission) of
 `doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`
 
@@ -53,5 +57,3 @@ Either:
 - both names added to the **Reserved keywords** list in
   `.claude/rules/language.md`, and this record closed as by-design.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/compiler/parser_move_contextual_keyword_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

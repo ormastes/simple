@@ -9,10 +9,16 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 cranelift='phase1:load_sources:closure:scan path=src/compiler/70.backend/backend/cranelift_codegen_adapter.spl imports=1 content_len=1'
 interpreter='phase1:load_sources:closure:scan path=src/compiler/70.backend/backend/interpreter_codegen_adapter.spl imports=1 content_len=1'
 llvm='phase1:load_sources:closure:scan path=src/compiler/70.backend/backend/llvm_codegen_adapter.spl imports=1 content_len=1'
-combined_root='phase1:load_sources:closure:scan path=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl imports=1 content_len=1'
 compatibility_root='phase1:load_sources:closure:scan path=src/compiler/80.driver/bootstrap_k1_selected.spl imports=1 content_len=1'
 plugin_source='phase1:load_sources:closure:scan path=src/plugins/backend_wasm/wasm_backend.spl imports=1 content_len=1'
 composition_source="$root/src/compositions/kernel_llvm_cranelift"
+stub_size=$(wc -c <"$root/src/compiler/80.driver/bootstrap_k1_selected.spl" | tr -d ' ')
+selected_size=$(wc -c <"$composition_source/compiler/driver/bootstrap_k1_selected.spl" | tr -d ' ')
+# Ground-truth stage2/stage3 logs report the selected K1 module under its
+# LOGICAL package path with the compatibility stub's content length (the
+# composition root does not shadow the stub -- see
+# doc/08_tracking/bug/k1_composition_root_does_not_shadow_stub_2026-09-16.md).
+combined_root="phase1:load_sources:closure:scan path=src/compiler/driver/bootstrap_k1_selected.spl imports=2 content_len=$stub_size"
 
 write_transcript() {
   destination=$1
@@ -84,13 +90,67 @@ for row in \
     'policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn' \
     'llvm_adapter_present=1' \
     'cranelift_adapter_present=1' \
+    'stage2_k1_binding=stub-fallback' \
+    'stage3_k1_binding=stub-fallback' \
     'status=pass'; do
   grep -Fxq "$row" "$work/pass.env"
 done
 authority_sha256=$(shasum -a 256 \
   "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn" | awk '{print $1}')
 grep -Fxq "policy_authority_sha256=$authority_sha256" "$work/pass.env"
-[ "$(stat -f '%Lp' "$work/pass.env" 2>/dev/null || stat -c '%a' "$work/pass.env")" = 444 ]
+[ "$(stat -c '%a' "$work/pass.env" 2>/dev/null || stat -f '%Lp' "$work/pass.env")" = 444 ]
+
+# Seed-built Stage 2 fallback: a stage2 log with zero closure-scan markers
+# (the Rust seed has no log_phase instrumentation) must still admit the
+# receipt when both transcripts declare identical --source roots and the
+# same --entry/--backend/--mode, and the receipt must record the fallback.
+write_transcript "$work/stage2.transcript" llvm
+write_transcript "$work/stage3.transcript" llvm
+printf '%s\n' "$combined_root" "$cranelift" "$interpreter" "$llvm" \
+  >"$work/stage3.log"
+printf '%s\n' \
+  'warning: refusing to bind unqualified method `read` -- 2 same-named candidates' \
+  >"$work/stage2.log.seed"
+sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+  llvm-cranelift one-binary llvm "$work/stage2.log.seed" "$work/stage3.log" \
+  "$work/stage2.transcript" "$work/stage3.transcript" "$work/fallback.env"
+grep -Fxq 'stage2_closure_trace=transcript-only' "$work/fallback.env"
+grep -Fxq 'stage3_closure_trace=log-scanned' "$work/fallback.env"
+grep -Fxq 'status=pass' "$work/fallback.env"
+
+# The fallback must reject transcripts that disagree on --source roots.
+write_transcript "$work/stage2-mismatch.transcript" llvm
+{
+  echo 'schema=simple-bootstrap-command-transcript-v2'
+  for entry in \
+    "SIMPLE_ABI_POLICY=v1" \
+    "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn" \
+    "SIMPLE_KERNEL_K1_POLICY=llvm-cranelift" \
+    "SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only" \
+    "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${SIMPLE_K1_COMPOSITION_SHA256_BEFORE}"; do
+    printf 'explicit-env:%s:%s\n' "${#entry}" "$entry"
+  done
+  for argument in simple native-build --backend llvm --mode one-binary \
+      --source "$composition_source" --source src/plugins/backend_wasm; do
+    printf 'argv:%s:%s\n' "${#argument}" "$argument"
+  done
+} >"$work/stage3-mismatch.transcript"
+if sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    llvm-cranelift one-binary llvm "$work/stage2.log.seed" "$work/stage3.log" \
+    "$work/stage2-mismatch.transcript" "$work/stage3-mismatch.transcript" \
+    "$work/rejected-mismatch.env" >/dev/null 2>&1; then
+  echo 'FAIL — fallback admitted transcripts with different --source roots' >&2
+  exit 1
+fi
+[ ! -e "$work/rejected-mismatch.env" ]
+write_receipt() {
+  output=$1
+  stage2_transcript=${2:-$work/stage2.transcript}
+  stage3_transcript=${3:-$work/stage3.transcript}
+  sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    llvm-cranelift one-binary llvm "$work/stage2.log" "$work/stage3.log" \
+    "$stage2_transcript" "$stage3_transcript" "$output"
+}
 
 if write_receipt "$work/pass.env" >/dev/null 2>&1; then
   echo 'FAIL — existing receipt was overwritten' >&2
@@ -114,7 +174,7 @@ for mutation in abi manifest k1 coverage transcript compatibility plugin missing
       write_transcript "$work/stage2-$mutation.transcript" cranelift
       ;;
     compatibility) printf '%s\n' "$compatibility_root" >>"$work/stage2.log" ;;
-    plugin) printf '%s\n' "$plugin_source" >>"$work/stage2.log" ;;
+    plugin) printf '%s\n' 'phase1:load_sources:closure:scan path=src/plugins/evil/evil.spl imports=1 content_len=1' >>"$work/stage2.log" ;;
     missing-llvm) grep -v 'llvm_codegen_adapter' "$work/stage2.log" >"$work/mutated"; mv "$work/mutated" "$work/stage2.log" ;;
     malformed) printf '%s\n' 'phase1:load_sources:closure:scan path=broken' >>"$work/stage3.log" ;;
   esac
@@ -128,5 +188,44 @@ for mutation in abi manifest k1 coverage transcript compatibility plugin missing
   fi
   [ ! -e "$work/rejected-$mutation.env" ]
 done
+
+# Manifest-known P-static material (plugin backends, 90.tools) legitimately
+# appears in the full-CLI bootstrap closure scan: it must be admitted and
+# counted, not refused.
+write_logs
+printf '%s\n' "$plugin_source" >>"$work/stage2.log"
+printf '%s\n' "$plugin_source" >>"$work/stage3.log"
+write_receipt "$work/pstatic.env" >/dev/null
+grep -Fxq 'stage2_p_static_count=1' "$work/pstatic.env"
+grep -Fxq 'stage3_p_static_count=1' "$work/pstatic.env"
+grep -Fxq 'status=pass' "$work/pstatic.env"
+
+# A build that scanned the selected K1 module with the COMPOSITION's
+# content length under the logical module path (the loader shadowing the
+# stub, once the composition root wins resolution) is admitted with
+# binding=selected.
+write_logs
+grep -v 'bootstrap_k1_selected' "$work/stage3.log" >"$work/mutated"
+mv "$work/mutated" "$work/stage3.log"
+printf '%s\n' \
+  "phase1:load_sources:closure:scan path=src/compiler/driver/bootstrap_k1_selected.spl imports=2 content_len=$selected_size" \
+  >>"$work/stage3.log"
+write_receipt "$work/selected.env" >/dev/null
+grep -Fxq 'stage3_k1_binding=selected' "$work/selected.env"
+grep -Fxq 'status=pass' "$work/selected.env"
+
+# Unrecognized content at the logical module path is neither the
+# composition nor the stub: fatal.
+write_logs
+grep -v 'bootstrap_k1_selected' "$work/stage3.log" >"$work/mutated"
+mv "$work/mutated" "$work/stage3.log"
+printf '%s\n' \
+  'phase1:load_sources:closure:scan path=src/compiler/driver/bootstrap_k1_selected.spl imports=2 content_len=1' \
+  >>"$work/stage3.log"
+if write_receipt "$work/rejected-stub.env" >/dev/null 2>&1; then
+  echo 'FAIL — unrecognized bootstrap_k1_selected content was admitted' >&2
+  exit 1
+fi
+[ ! -e "$work/rejected-stub.env" ]
 
 echo 'PASS — selected K1, ABI, manifest, and atomic APK-only policies are receipt-bound; 9/9 mutations rejected'

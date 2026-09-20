@@ -1,4 +1,9 @@
 # `SIMPLE_PERF_SELF_BIN` is served from the test daemon's frozen environment
+## Closed 2026-09-16 — primary defect RESOLVED 2026-09-13, fix pinned by 3 guard rows (separate SIMPLE_BINARY hole noted)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (2026-09-13) — diagnosed by PERF-7 (the measured repro and
   cause below are theirs); the one-line fix applied and pinned by PERF-9.
@@ -111,3 +116,4 @@ Consequence for every lane: **`<candidate> test <path>`, invoking the seed
 directly as the runner, is the only trustworthy way to point a suite at a
 private build.** A `SIMPLE_BINARY=` run is not a weaker measurement, it is a
 false RED.
+

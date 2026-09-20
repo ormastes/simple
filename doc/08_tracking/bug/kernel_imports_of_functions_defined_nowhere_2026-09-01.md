@@ -1,6 +1,8 @@
 # 22 kernel functions are `use`-imported but defined nowhere in the tree
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-09-01 · **Status** OPEN (routed around, not fixed) · **Severity** high
 
@@ -50,5 +52,3 @@ should be a resolve-time error, not a link-time undefined symbol -- that check i
 the real fix, since it makes the whole class visible at once instead of one
 lane's closure at a time.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

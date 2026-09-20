@@ -1,6 +1,8 @@
 # Strict stage3 self-host body failures
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 A strict cached stage2 linked, but contained 62 uppercase weak definitions and
 was not acceptable evidence. Stage3 invalidated the compiler-dependent objects,
@@ -57,6 +59,3 @@ stage3 still visits those application trees, capture discovery trace evidence:
 their bodies are not legitimate bootstrap dependencies and must not be fixed
 merely to make the oversized closure compile.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

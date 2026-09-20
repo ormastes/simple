@@ -1,4 +1,8 @@
 # Function argument types are not checked — a `text` passed to an `i64` parameter runs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** workstream I; **independently reproduced by the parent session.**
@@ -53,3 +57,4 @@ substitute is a fail-closed textual ratchet gate
 (`check-typed-address-algebra.shs`, baseline 202 bare-`i64` address parameters in
 `fw/`), mirroring how workstream B substitutes a `use`-graph gate for the missing
 `call(...)` pointcut. The gate constrains new code; it cannot make the types real.
+

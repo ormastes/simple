@@ -1,4 +1,8 @@
 # Pure-Simple macOS shared-library link fails in linker selection/runtime closure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -82,3 +86,4 @@ runtime symbol. The output dylib must contain the five requested C exports.
 3. `nm` exposes exactly the five `simple_chromium_oracle_*` ABI symbols plus
    explicitly documented Simple runtime initialization symbols.
 4. The native ABI integration test loads, invokes, and exact-once releases it.
+

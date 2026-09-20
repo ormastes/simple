@@ -1,4 +1,8 @@
 # Flat AST Bridge: type-expr index goes stale across an interleaved `ast_reset()`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIX IMPLEMENTED; STAGE-4 ADMISSION PENDING 2026-07-17 — the original
 type bounds check remains, and native Stage-4 statement/expression stores now
@@ -266,5 +270,3 @@ rather than a hard infinite loop.
   `[ast_reset]` / `[flat-bridge]` / `[OOB-PROOF]`-style markers) to determine
   whether the re-entrant-parse arena race is real.
 
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/01_unit/compiler/frontend/flat_ast_if_else_bridge_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

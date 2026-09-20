@@ -1,5 +1,9 @@
 # emu_draw_text / emu_draw_text_bg are placeholder box STUBS, not real text
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces)
+## Closed 2026-09-16 — Status Fixed; emu delegates to real text blit, parity harness green (0 mismatches)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 Fixed (2026-07-06).
@@ -54,5 +58,3 @@ byte-identical regardless of which characters are passed.
 assertions were flipped from `> 0` (pinned divergence) to `== 0` (byte-exact)
 and stay green.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

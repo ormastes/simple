@@ -1,5 +1,8 @@
 # SimpleOS installer host file read TOCTOU and allocation bound
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/os/installer/image_bounded_file_reader_spec.spl -> 3 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: BLOCKED; unsafe admission removed on 2026-08-20
 - Owner: `src/os/installer/image_bounded_file_reader.spl`
@@ -33,5 +36,3 @@ correct fix needs one canonical facade that performs no-follow open, fstat,
 bounded chunk reads, EOF/growth detection, and close on every path without
 reopening the name. Until it lands, this tracker remains release-blocking.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/os/installer/image_bounded_file_reader_spec.spl` on the deployed seed; the spec now passes in full (3/3), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

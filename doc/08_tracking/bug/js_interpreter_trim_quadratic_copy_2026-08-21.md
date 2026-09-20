@@ -1,4 +1,9 @@
 # JS interpreter trim quadratic reconstruction
+## Closed 2026-09-16 — Status FIXED; single-slice trim fix; contract spec evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Found:** 2026-08-21
@@ -38,3 +43,4 @@ old end-index mismatch on UTF-8 input while preserving non-whitespace bytes.
 Focused seed-stage measurement (32 calls each): 20,000-byte input 1,456 us;
 40,000-byte input 1,323 us; checksum 1,920,000. The bounded contract requires
 the 2N row to remain below `3*N + 5 ms`, excluding quadratic reconstruction.
+

@@ -1,6 +1,10 @@
 # `check-dangling-references.shs` reports false SYMBOL findings for alias re-exports
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** OPEN
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
 **Area:** `scripts/check/check-dangling-references.shs`
 **Severity:** low — false positives only, no missed defects. But it inflates the
@@ -61,5 +65,3 @@ plain name is. The pass-2 call-site skip for aliased imports can stay as is.
 Of the 83 findings under `src/os/**` + `src/unit/**` as of 2026-07-28, **5 are
 this false positive** (all `NvfsHostedDriver`). Real remaining findings: 78.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

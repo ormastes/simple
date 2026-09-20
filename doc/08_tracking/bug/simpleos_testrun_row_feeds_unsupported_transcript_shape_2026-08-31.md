@@ -1,5 +1,8 @@
 # SimpleOS in-guest `testrun` row is red on every arch because the FIXTURE feeds a shape `parse_test_output` does not support
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/app/test_runner_output_parsing_spec.spl -> 15 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Rows: `testrun` on both
@@ -199,5 +202,3 @@ into `digits_to_i64` turns exactly those three examples red —
 The first fix's five cargo examples ARE genuinely red-before on the pre-fix
 parser (`12 examples, 3 failures`).
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/app/test_runner_output_parsing_spec.spl` on the deployed seed; the spec now passes in full (15/15), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

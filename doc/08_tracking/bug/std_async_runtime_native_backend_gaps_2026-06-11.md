@@ -1,6 +1,19 @@
 # std.async Runtime Native Backend Gaps - 2026-06-11
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Not closed 2026-09-13 — partly stale, partly unverified; left OPEN with the stale half recorded
+
+- **measured** Gap 1 is STALE as written: `src/lib/nogc_async_mut/async/sffi.spl` no longer
+  exists (the directory now holds future/poll/promise/executor/scheduler/sleep/timer/sync/
+  cancellation/combinators/task/io/runtime `.spl`), and `grep -rl future_alloc_pending src/`
+  returns nothing — the 14 named externs are not declared anywhere any more.
+- **inferred** Gaps 2-5 (no real cooperative yield; `Poll.unwrap()` unknown `panic`; chained
+  `self.poll().is_ready()`; poll-once `gather`/`race`/`timeout`) are behavioural and need the
+  acceptance specs under `test/01_unit/lib/async/` this entry itself demands; none exist, so
+  nothing here can be closed on evidence.
+- Left OPEN: rewrite gap 1 against the current module layout before working the rest.
+
+
+Status: open (triaged 2026-06-11)
 
 ## Summary
 
@@ -34,7 +47,3 @@ gaps need native runtime work or interpreter fixes and are tracked here.
 Each gap closes with a behavioral spec in `test/01_unit/lib/async/` proving
 suspension/resumption (no literal-vs-literal assertions), run in interpreter
 mode.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

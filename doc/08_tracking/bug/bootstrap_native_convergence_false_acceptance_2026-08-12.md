@@ -1,5 +1,9 @@
 # Bootstrap native convergence accepted unequal compiler artifacts
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Filed/fixed 2026-08-12; fix section: unequal bytes now fail; specs invoke real verifier
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed/fixed:** 2026-08-12
 **Severity:** critical — release/bootstrap authority
@@ -21,5 +25,3 @@ verifier over temporary retained blobs and cover identity, mismatch at byte
 zero, mismatch later in the file, and unequal ELF-shaped inputs with equal
 symbol counts.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,4 +1,9 @@
 # All three GPU accelerator session modules do not exist, and the coverage manifests count them as covered
+## Closed 2026-09-16 — Status ALREADY-FIXED; session modules landed aff29a24dfec9; manifest gate re-verified GREEN 2026-08-10
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** ALREADY-FIXED — re-verified 2026-08-10. Both halves of the defect
 are resolved: the three session modules
@@ -112,3 +117,4 @@ ls -d src/lib/*/crypto_accel                                   # no match
 grep -rnE '^\s*(class|struct|trait|type)\s+CryptoCudaSession\b' src/ | wc -l   # 0
 grep -n '^use ' src/os/crypto/x25519_mlkem768/cuda_ntt_provider.spl | head -1
 ```
+

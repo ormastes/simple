@@ -1,6 +1,9 @@
 # Unregistered `extern` backlog — real enumeration after the extractor fix
+## Closed 2026-09-16 — ...invisible to it. The extractor was fixed in `61ad6b7f53b`; this file records the real popu
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Companion to `unregistered_extern_silent_nil_2026-08-01.md`. That document's
 counts (385 declarations, 75 actionable) were produced by an extractor that
@@ -119,6 +122,3 @@ real unregistered symbols — they were simply a ~3% sample of the family.
 Full machine-readable enumeration: `extern_backlog_enumeration.tsv`
 (`symbol<TAB>file:line`, 2377 rows).
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

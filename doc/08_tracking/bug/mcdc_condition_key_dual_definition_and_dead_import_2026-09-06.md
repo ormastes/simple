@@ -1,4 +1,8 @@
 # Two pre-existing MC/DC runner defects, surfaced 2026-09-06
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Both were exposed while verifying unrelated work on the test runner, and
 both are **pre-existing** — verified by `git diff` over every touched runner
@@ -50,3 +54,4 @@ Running the runner over a three-spec fixture directory
 (`SIMPLE_BINARY=<debug seed> ... run src/app/test_runner_new/main.spl <dir>`)
 prints both on the way to `[setup] mcdc-native-preflight: 8918ms`. Neither
 aborts the run, which is why they have gone unnoticed.
+

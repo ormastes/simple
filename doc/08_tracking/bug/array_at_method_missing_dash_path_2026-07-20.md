@@ -1,4 +1,8 @@
 # `array.at(i)` method does not exist — breaks production `dash_path` code, not just its spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** high (production source code, not a test-only issue)
@@ -69,5 +73,3 @@ creep beyond this campaign's mandate.
   (`val bytes: [i64] = [99, 111, 108]; bytes.at(1)`), confirming this is a
   missing builtin, not a test-vs-run evaluator divergence.
 
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/unit/lib/skia/stroke_dash_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

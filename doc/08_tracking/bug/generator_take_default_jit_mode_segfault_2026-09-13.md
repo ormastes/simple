@@ -1,4 +1,8 @@
 # `std.generator` `take()` segfaults under the default JIT execution mode
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Area: Rust seed JIT (codegen/execution), out of scope for a pure-Simple bugfix lane
@@ -50,3 +54,8 @@ seed-side JIT investigation, not a stdlib fix.
    fields from a minimal repro class.
 2. Check whether the crash is specific to `generate_range`'s closure
    (`fn(n): (n + 1, n + 1 < end_val)`) or general to any generator use under JIT.
+
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

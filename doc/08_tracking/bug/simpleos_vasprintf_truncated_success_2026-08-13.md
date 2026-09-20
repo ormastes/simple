@@ -1,5 +1,8 @@
 # SimpleOS `vasprintf` truncated-success defect
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -18,5 +21,3 @@ truncated string while reporting an exact successful length.
 closed if the second pass disagrees. The focused C harness exercises a 5,014
 byte result and null output-pointer rejection.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

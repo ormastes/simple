@@ -1,6 +1,8 @@
 # `describe(...)` as the tail expression of `fn main()` leaks a constant 1 into the child exit code, manufacturing a phantom failure (2026-08-08) — FIXED
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -166,6 +168,3 @@ the `(has_summary == 0 or summary_failed == 0)` clause means that once the
 scraper is repaired, a summary reporting real failures will still veto the
 exemption.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,4 +1,9 @@
 # PTY externs are unusable under the seed interpreter, and their declarations disagree with the runtime
+## Closed 2026-09-16 — RESOLVED 2026-09-05 with tty-vs-pipe evidence; sections 1-4 fixed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **RESOLVED 2026-09-05 (lane A10).** Root cause found, fixed, and proved with a
 > tty-vs-pipe contrast. Read this block before the historical text below.
@@ -153,3 +158,4 @@ apps and interactive shells will not.
 Separately: there is **no C-runtime PTY lane at all** (`src/runtime/runtime_pty.c`
 is no longer compiled by any build path, per `interpreter_extern/pty.rs`'s own
 header), so a pure-Simple native build has no PTY regardless of the above.
+

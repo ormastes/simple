@@ -1,6 +1,8 @@
 # Multi-spec coverage output is overwritten by child processes
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 When `simple test` receives several spec files with one
 `SIMPLE_COVERAGE_OUTPUT`, each child writes that same path. The final artifact
@@ -13,5 +15,3 @@ checking schema, source revision, runtime/backend identity, static denominator,
 and duplicate decision consistency. Until then, multi-spec CSV output is not
 admissible aggregate coverage evidence.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,9 @@
 # BUG: `FontRenderBatch` missing `atlas_owner_generation` field + missing native-safe identity free functions — dropped during codex-font-branch reland
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — Status FIXED; field + free fns implemented; spec assertions pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 FIXED (2026-07-20). Root cause confirmed by git evidence; field and free
@@ -206,5 +210,3 @@ resolved).
   (the separate, pre-existing, already-filed harness bug behind the residual
   red assertion — not fixed by or in scope of this doc)
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

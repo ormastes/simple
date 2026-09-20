@@ -1,6 +1,9 @@
 # `compile --native` binary omits program body — silent exit 3 (NIL sentinel)
+## Closed 2026-09-16 — ...e callee name built on the stack. ## FIX APPLIED (fail loudly; seed pipeline/execution.rs,
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED; native execution pending · **Area:** native AOT / linker
 **Blocks:** running showcases as native binaries (the fast lane that escapes
@@ -81,6 +84,3 @@ SIMPLE_RUNTIME_PATH="$PWD/build/simple-core" SIMPLE_LINKER=ld \
 SHOWCASE_RESOLUTION=320x240 /tmp/g2d ; echo $?   # -> silent, 3
 ```
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

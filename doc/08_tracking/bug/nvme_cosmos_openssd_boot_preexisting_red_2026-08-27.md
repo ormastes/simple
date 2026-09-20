@@ -1,5 +1,8 @@
 # nvme_cosmos_openssd_boot_spec pre-existing RED (2026-08-27)
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl -> 0 passed, 15 failed, still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl is RED at
 HEAD and after the SSDOC-TRC-003 repair (score 49 -> 82, comment-only edits:
@@ -14,5 +17,3 @@ NVMe dispatcher, QEMU boot verdict, silicon profile build. Left RED per testing
 rules. Mutation dual-check skipped as weak (spec already RED); edits touched
 only comments so behavior is unchanged by construction.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl` on the deployed seed; 15 of 15 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

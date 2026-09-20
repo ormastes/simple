@@ -1,6 +1,8 @@
 # LaTeX renderer: range upper bound fixed at two call sites, root cause unfixed
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -55,5 +57,3 @@ Handle `..` in `_expr_latex` itself so every argument position inherits it, make
 `_split_range` bracket-depth-aware, and tighten the repro spec to an exact
 expected string covering both `sum` and `int`.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

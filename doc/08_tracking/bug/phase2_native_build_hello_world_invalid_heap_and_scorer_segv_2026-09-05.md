@@ -1,4 +1,8 @@
 # phase2 bootstrap CLI cannot native-build a hello world on macOS aarch64 (`AOT compile error: <invalid-heap:…>`), SEGVs on the sspec scorer entry, and SEGVs compiling a struct-level generic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05 (macOS aarch64, `bin/local/phase2-aarch64-apple-darwin/simple`, 139,502,808 bytes, `simple-bootstrap 1.0.0-rc.1`)
 **Status:** OPEN — blocks lane (a) of measuring the sspec score natively; a working
@@ -61,3 +65,4 @@ does produce for a non-generic file is rejected by the Rust seed's loader
 A phase2/stage4 binary that native-builds `build/nb/hello.spl`; then
 `native-build build/nb/sspec_score_min.spl` (the analyzer-only entry) is the
 proof that `simple sspec-maintain scan` can be built here. Sibling record from the same day, other lane: `stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
+

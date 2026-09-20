@@ -1,5 +1,8 @@
 # The `p1_unassigned.tsv` `file` column names the wrapper, not the implementation
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-17. Affects the 121-row unassigned-P1 worklist
 (`scratchpad/triage/p1_unassigned.tsv`).
@@ -49,5 +52,3 @@ function restored (see
 stale binary, yielding a false RED. A `.spl` source change needs no build, but
 this fix is in the Rust seed and does.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

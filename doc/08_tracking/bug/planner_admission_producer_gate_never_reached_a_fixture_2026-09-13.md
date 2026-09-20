@@ -1,4 +1,9 @@
 # The planner-admission-v2 producer gate died before its first fixture (macOS, 2026-09-13)
+## Closed 2026-09-16 — Status FIXED 2026-09-13: selftest PASS 13 fixtures, 3-check gate green (separate wiring gap noted)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED (2026-09-13) for the four defects below; see "Still open".
 - Area: bootstrap Stage 2 -> Stage 3 handoff; planner admission v2 producer
@@ -95,3 +100,4 @@ one of them STRICTER (it had been vacuously passing its positive twin's leak).
   change: the diff is confined to `produce-bootstrap-planner-admission-v2.shs`
   and its own gate, neither of which this guard invokes. Filed as a separate
   concern for whoever owns the scheduler's diagnostic passthrough.
+

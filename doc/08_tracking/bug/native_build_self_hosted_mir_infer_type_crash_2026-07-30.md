@@ -1,6 +1,8 @@
 # `native-build` crashes on module-level globals with a binary-expression initializer (self-hosted compiler, not the Rust seed)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed while following up on
 `doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md`'s own
@@ -153,5 +155,3 @@ existing `Error`-case precedent, adding an `Infer` arm to
 distinct piece of work in a codebase (`src/compiler/**`) this session's
 JIT-focused sweep never otherwise touched, and is left for its own pass.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

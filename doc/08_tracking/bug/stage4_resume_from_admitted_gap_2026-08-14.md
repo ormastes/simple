@@ -1,6 +1,8 @@
 # Stage 4 cannot continue from an admitted resumed Stage 3
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -77,12 +79,3 @@ immutable, collision-safe, and uses existing gates`. No admitted Stage-3
 artifact and planner receipt were present in this worktree, so the live Stage-4
 continuation was correctly not started.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
-
-## Triage 2026-09-13 (BUGFIX-7 lane)
-
-Out of lane: needs a planner-authored bootstrap receipt and an admitted Stage
-3 lane to produce live execution evidence; this lane runs no bootstrap. No
-change made.

@@ -1,19 +1,8 @@
 # A hardware-gated spec whose only example is `skip_if`-skipped reports file-level FAIL, not SKIP
+## Open 2026-09-16 — needs owner triage
 
-- Status: CLOSED (2026-09-13) — not reproducible on
-  `bin/release/aarch64-unknown-linux-gnu/simple` (interpreter mode). Ran the
-  exact named repro file,
-  `test/03_system/os/vulkan/board_vulkan_intel_gen12_submit_readback_system_spec.spl`:
-  `SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0
-  skipped=0`, `Results: 1 total, 1 passed, 0 failed`, `PASS`. The
-  single-`it`-plus-`skip_if` shape this doc describes no longer reports
-  `reason=zero-examples`/file-level FAIL; it now reports as passing (the
-  `it`-level skip still fires — the runner's zero-examples guard now
-  evidently distinguishes an all-skipped file from a genuinely dead one).
-  Did not bisect which change fixed this. If it regresses, this exact file is
-  the fastest repro.
-
-**Status (historical):** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11
 **Found by:** two lanes writing forward-looking hardware-gated system specs, independently
@@ -83,5 +72,3 @@ rewriting them to dodge this runner quirk (e.g. padding with a dummy always-run
 example) would obscure their actual purpose. The file-level FAIL is a known,
 accepted cosmetic issue until the runner is fixed.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

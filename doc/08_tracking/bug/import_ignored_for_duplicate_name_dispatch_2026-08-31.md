@@ -1,4 +1,8 @@
 # An explicit import can execute another module's same-named function
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** VERIFIED 2026-09-01 — candidate fix `b0229d663b1` is **INSUFFICIENT**:
@@ -186,3 +190,4 @@ original report is that the SYMPTOM (empty string) is masked on Unix,
 because `io_runtime`'s uname-based `host_os`/`host_arch` return real values
 there even when wrongly selected — the wrong function still runs, it just
 happens to give a plausible-looking answer.
+

@@ -1,4 +1,9 @@
 # Self-hosted parser reads `true_*` / `false_*` call arguments as bool literals
+## Closed 2026-09-16 — Status FIXED: production removed, fix in parser_expr.spl, regression spec named
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** FIXED (pending bootstrap verification)
@@ -148,3 +153,4 @@ This defect was tracked as a *whole-tree parse-state* problem ("parses clean
 alone, fails only in whole-tree build"). That framing was wrong: it reproduces
 in a 9-line standalone file. The earlier standalone probes must have used a
 different identifier spelling.
+

@@ -1,5 +1,8 @@
 # dbfs_no_regression_spec pre-existing RED at HEAD (2026-08-26)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `bin/simple test test/integration/storage/dbfs/dbfs_no_regression_spec.spl`
@@ -30,5 +33,3 @@ resolve/open hosted file paths such as `/data/README.TXT` (or the spec's
 fixture expectations must be reconciled with the driver's current hosted
 behavior by the feature owner).
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

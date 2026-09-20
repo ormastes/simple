@@ -1,6 +1,10 @@
 # `bin/simple run` vs `bin/simple test` — harness divergence measurement (2026-07-28)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** MEASURED. No fixes applied (measurement task).
 **Binary under test:** `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
 built `2026-07-27 22:06`, prints the *"Rust-built Simple binary is a bootstrap
 seed only"* banner. Both `run` and `test` are the SAME binary — the divergence
@@ -878,5 +882,3 @@ regression to report for this run.
 
 All prior sections and artifacts are left in place.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

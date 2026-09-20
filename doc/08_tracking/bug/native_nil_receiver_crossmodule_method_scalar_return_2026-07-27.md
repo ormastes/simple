@@ -1,6 +1,8 @@
 # Bug: cranelift AOT mis-tags the return value of a cross-module struct method returning a primitive scalar
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-07-27
 - **Lane:** BB2 (board-build, team BOARD)
@@ -232,5 +234,3 @@ All under `build/board_check/`:
 | `probe_i.spl` | real `std.ecs.ComponentStore` repro |
 | `probe_b/d/e/f.spl` | original TTY narrowing probes |
 
-## Triage 2026-09-12
-High-severity silent-wrong-value defect (cranelift AOT cross-module scalar return mis-tagging), older than 45 days, no minimal repro block given to re-run cheaply. Closing per age policy — flagged as a high-value candidate for a follow-up repro. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

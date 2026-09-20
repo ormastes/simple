@@ -1,6 +1,8 @@
 # Stage 4 CLI handler self-facade leaves callables unresolved
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -27,6 +29,3 @@ and `check_file` plus `CompileResult` from their driver owners. Four unused
 formatter/fix/lint imports are removed. The focused native handler contract
 imports the physical handler module and executes its bounded web-handler path.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

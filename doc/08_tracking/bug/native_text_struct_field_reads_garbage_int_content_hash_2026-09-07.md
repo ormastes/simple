@@ -1,4 +1,8 @@
 # `text` struct field reads as garbage int under native codegen — root cause NOT where predecessor localized it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status: OPEN — investigation, not fixed.** A predecessor localized this to
 `resolve_global_field_info` (`src/compiler_rust/compiler/src/hir/lower/type_resolver.rs:89`)
@@ -196,3 +200,4 @@ same file run through the seed's plain interpreter mode, `<seed> repro.spl`).
   by name via `try_resolve_global_field_for_struct` for its OWN direct field
   accesses. This asymmetry cost significant time to find and is worth its own
   note if `type_resolver.rs` is touched again.
+

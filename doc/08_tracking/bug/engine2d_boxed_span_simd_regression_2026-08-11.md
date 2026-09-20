@@ -1,5 +1,8 @@
 # Engine2D boxed span SIMD candidate regresses performance
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-11
 
@@ -50,5 +53,3 @@ gather/scatter design. On x86_64 it now measures 5.017x scalar for opaque image
 spans with exact parity. Mixed alpha deliberately remains scalar. ARM, RISC-V,
 and broad varied-alpha vectorization remain open.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

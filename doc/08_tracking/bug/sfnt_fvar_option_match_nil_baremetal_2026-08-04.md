@@ -1,6 +1,8 @@
 # Option payload extraction via `val x = match opt: Some(v): v` yields nil on freestanding native lane
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-04
 - Lane: freestanding x86_64-unknown-simpleos (cranelift native build, OVMF boot),
@@ -85,23 +87,3 @@ bug recorded — the value-position Option match lowering still needs a real
 compiler fix; until then this shape must not be reintroduced in
 freestanding-lane code).
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
-
-## Triage 2026-09-13
-Reconfirmed: freestanding x86_64-unknown-simpleos (Cranelift native build,
-OVMF boot) lane defect, needs QEMU/OVMF to re-verify. Not reproducible in
-this environment (no QEMU boot attempted this pass). Left OPEN, no code
-change attempted.
-## Triage 2026-09-13 (BUGFIX-12 shard 22)
-
-Re-verified the landed workaround is still intact at `f26970e9d93`:
-`src/lib/common/encoding/sfnt.spl:85-140` (`parse_fvar_axes`) still uses the
-flat Option-free table scan and indexed `while` loop described above, not the
-`val table = match find_table(...): Some(value): value / None: return []`
-shape that faulted on the freestanding lane. The underlying defect (value-
-position Option-match lowering substituting a nil sentinel on the
-freestanding native codegen lane) is a Rust/native-codegen fix, out of scope
-for this shard. No change made. Leaving OPEN — workaround confirmed present,
-compiler defect unresolved.

@@ -1,4 +1,9 @@
 # COLL007 does not fire on the array-rebuild-to-pop idiom
+## Closed 2026-09-16 — Status RESOLVED 2026-08-01; fixture was invalid code, real rewrite defect fixed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-31
 **Status:** RESOLVED 2026-08-01 — see "Resolution" at the bottom. The detector was
@@ -109,3 +114,4 @@ both directions) and a real `.pop()` easy-fix assertion in
 report's fixture was never executed, only linted — and it is not runnable code.
 Before declaring a matcher dead, run the fixture through the engine, not just
 the linter.
+

@@ -1,4 +1,8 @@
 # Lane S59: Seed Cranelift Dict-Return ABI Miscompile — Root-Cause Analysis
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Lane:** S59
@@ -159,3 +163,4 @@ If Cranelift version is vendored, check if a newer/older version has the bug. Th
 
 - `seed_native_cranelift_dict_return_abi_2026-07-17.md` — original bug report (S57 discovery)
 - `seed_stage4_empty_dict_literal_2026-07-17.md` — the `{}` land-war this was found alongside
+

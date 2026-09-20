@@ -1,4 +1,8 @@
 # The typed emu_* seam has no read-disturb injector, so read-disturb recovery is untestable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - id: nvme-emu-no-read-disturb-injector-2026-09-01
 - date: 2026-09-01
@@ -80,3 +84,4 @@ sub-second test.
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_read_disturb_probe_check.spl
 ```
 Verdict token: `READ DISTURB PROBE DID NOT MOVE: ...`
+

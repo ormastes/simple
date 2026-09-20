@@ -1,6 +1,8 @@
 # SReplay capability labels overstate implementation (2026-09-05)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Source-verified truth reset for `doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md`
 §4.2. That table was produced by GitHub code search, not by reading the files.
@@ -117,6 +119,3 @@ review. **No CLI/MCP help string in this tree overstates a Track-3/5/6/kernel
 capability** — the overstated wording lived entirely in the prose guide
 (`sreplay.md`), which is fixed below. No string literal edits were needed.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

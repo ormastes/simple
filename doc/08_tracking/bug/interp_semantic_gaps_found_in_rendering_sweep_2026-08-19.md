@@ -1,6 +1,8 @@
 # Interpreter/semantic gaps found during rendering sanitize sweep (2026-08-19)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Three concrete product gaps surfaced while sanitizing
 `test/02_integration/rendering/`; each was worked around in-lane, but the
@@ -41,5 +43,3 @@ file reads. Either `env_get` should return nil for an unset variable, or the
 quick-reference should warn that `??` cannot be used with it. Workaround:
 explicit empty-string guard in the spec.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,8 @@
 # BUG: `use std.spec.*` does not import `expect_not` — only the explicit form does
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status 2026-08-17: REPRODUCED, root cause located, NOT fixable inside src/lib
 
@@ -32,7 +36,7 @@ other side while fixing
 `export use std.spec.*` had to be abandoned for an explicit name list.
 
 
-**Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
+**Status:** OPEN (re-verified 2026-08-10) — architectural, needs compiler
 module-resolution work, not a source-level fix
 **Found:** 2026-08-04
 **Severity:** medium — the documented boolean-assertion shortcut is unreachable
@@ -162,29 +166,3 @@ edit scope. No regression was added beyond the existing
 `test/01_unit/std/spec_expect_bool_shortcut_spec.spl`, which already pins the
 failure precisely and continues to fail for the right reason.
 
-## Re-check 2026-09-12 (BUGFIX-5)
-
-Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
-(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
-at base `89c5e3f865d`.
-
-The failing spec named in the record still imports with a star
-(`test/01_unit/std/spec_expect_bool_shortcut_spec.spl:13` — `use std.spec.*`)
-and still calls `expect_not` three times (`:37-40`). It passes:
-
-```
-$ bin/simple test test/01_unit/std/spec_expect_bool_shortcut_spec.spl --no-session-daemon
-SPEC FILE VERDICT: ... outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0
-```
-
-`expect_not` is therefore reached through `std.spec.*`, which is the exact thing
-the record says fails.
-
-Discrimination (the pass is not vacuous — `expect_not` really asserts): flipping
-`expect_not(false)` to `expect_not(true)` in a scratch copy fails exactly that
-example — `outcome=ERROR declared>=3 executed=3 passed=2 failed=1`. A
-non-resolving or no-op `expect_not` would have stayed green.
-
-No code change made. Closing.
-
-- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, be72ceb26c6, spec test/01_unit/std/spec_expect_bool_shortcut_spec.spl

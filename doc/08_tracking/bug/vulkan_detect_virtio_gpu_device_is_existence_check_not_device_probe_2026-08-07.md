@@ -1,4 +1,9 @@
 # `detect_virtio_gpu_device` is a plain existence check, not a device-type probe — misroutes `unavailable_reason()` on any existing non-device file
+## Closed 2026-09-16 — Status Resolved 2026-08-07; verified 21/21 then 29/29; stat-primitive follow-up build-verify deferred
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved
 **Filed:** 2026-08-07
@@ -312,3 +317,4 @@ to a stage2 binary, foreground, generous timeout) to confirm
 `rt_file_is_char_device` no longer appears in the freestanding
 fabricated-stub list and to see whichever symbol/blocker is next in that
 gate.
+

@@ -1,5 +1,13 @@
 # SimpleOS libc: float functions cannot be ported to pure Simple (f64 unreliable)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — f64 premise does NOT reproduce on the seed's two arms; still OPEN
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`, under BOTH `SIMPLE_EXECUTION_MODE=interpret` and `=jit`): nested f64 return `outer(2.0)` -> `3.25`, struct-field f64 return `getv(P(v: 1.125))` -> `1.125`, accumulate loop -> `0.5`, `"2.75".to_f64()` -> `2.75`. No 0.0, no nested-return corruption, no call-boundary garbage.
+- **inferred**: this weakens but does not retire the blocker — the entry also indicts the SMF and native/freestanding backends, neither of which is exercisable on this Windows host, and no float libc function has actually been ported.
+- **inferred**: left OPEN. Whoever picks this up should re-measure the f64 claim first rather than inheriting it.
 
 Date: 2026-06-28
 
@@ -47,5 +55,3 @@ value-semantics model).
 - Syscall group: confirm each is a thin Simple-over-syscall wrapper or
   legitimately C; no pure-Simple obligation.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

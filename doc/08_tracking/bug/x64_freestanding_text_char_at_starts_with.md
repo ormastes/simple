@@ -1,6 +1,9 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
+## Closed 2026-09-16 — ...command.trim().starts_with("/")`. ## Fix Make the x86_64 freestanding native-build codegen
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 **CORRECTED (2026-07-12, evidence-based).** The original title conflates three
@@ -131,6 +134,3 @@ in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

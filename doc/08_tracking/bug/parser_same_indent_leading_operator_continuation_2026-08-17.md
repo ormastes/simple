@@ -1,4 +1,8 @@
 # Leading-operator line continuation at the SAME indent does not parse
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-17
 **Status:** OPEN — **and the obvious one-character fix is now PROVEN UNSAFE.**
@@ -169,3 +173,4 @@ unchanged, deliberately, on the evidence above.
 The source was deliberately left unchanged: reindenting it would erase the
 repro and paper over a parser defect. Fix belongs in the frontend's
 continuation handling.
+

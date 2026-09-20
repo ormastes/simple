@@ -1,9 +1,13 @@
 # ZSTD sequence-decode: "normal offset" test decodes as a straight back-reference copy instead of expected RLE-style expansion
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** low (single test-vector mismatch, sibling offset-1/rep1 tests
 in the same file pass)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** open — needs ZSTD-format domain expertise to determine which
 side (test vector or decoder) is correct; not attempted here (out of
 test-triage scope, not a mechanical fix)
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/common` cluster
@@ -64,6 +68,3 @@ of the assigned test-cluster scope regardless).
 
 - `test/unit/lib/common/zstd_sequence_rle_spec.spl` — 1 of 6 examples.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

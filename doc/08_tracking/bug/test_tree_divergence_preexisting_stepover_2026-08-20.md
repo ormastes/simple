@@ -1,6 +1,8 @@
 # Pre-existing test-tree divergence stepped over on 2026-08-20 landing
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Range: origin/main..<hardening landing>. Delta verdict: PASS — 2 pre-existing offender(s), 0 introduced by this range.
 Recorded per the scoped-delta escape in .claude/rules/vcs.md. List: 855 lines, sha256 157b3ad28d92a1cc54675d5ebd828fd5ae00e06b308b933066091341c12a8a2b.
@@ -863,6 +865,3 @@ unit:tools/cat_spec.spl
 unit:tools/simple_os_primary_spec.spl
 ```
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

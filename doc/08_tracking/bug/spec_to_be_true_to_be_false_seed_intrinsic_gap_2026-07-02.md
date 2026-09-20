@@ -1,4 +1,9 @@
 # Bug: `expect(x).to_be_true()` / `.to_be_false()` fail with "method not found on type bool"
+## Closed 2026-09-16 — ...he fix must land in the Rust seed. ## Fix Applied `src/compiler_rust/compiler/src/interpre
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** PARTIALLY FIXED (Rust seed source patched; rebuild/deploy verification pending)
 **Date:** 2026-07-02
@@ -118,3 +123,4 @@ Before fix (current deployed binary): first two cases fail with
 `semantic: method to_be_true/to_be_false not found on type bool`; the
 latter two already pass (confirms no regression path — they hit a
 different, unmodified match arm).
+

@@ -1,4 +1,9 @@
 # Bootstrap admission producer `--selftest` greps the wrong file and always FAILs
+## Closed 2026-09-16 — ...own selftest is red on every host. ## Fix Point the entry-closure grep at the producer scr
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-05
 **Status:** open
@@ -44,3 +49,4 @@ mutation (drop `--entry-closure` from the producer) going FAIL.
 
 Observed on macOS arm64, HEAD `7c292922592`, while running the adhoc
 bootstrap chain (stage2 trust root -> admission producer -> stage4 relink).
+

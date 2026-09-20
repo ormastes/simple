@@ -1,4 +1,9 @@
 # JIT named-fn-as-value guard is narrower than its own doc claims: extern fn names still miscompile
+## Closed 2026-09-16 — Status FIXED; guard verified on rebuilt+redeployed seed; fixture f10 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-08
 - Status: FIXED
@@ -121,3 +126,4 @@ covered by
 Defect 2, reached through a name the landed guard (commit `45e0e8d6`) does
 not check. File as a narrower, still-open instance of that defect rather than
 duplicating its analysis.
+

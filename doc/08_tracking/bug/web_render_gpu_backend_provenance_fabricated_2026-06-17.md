@@ -1,6 +1,19 @@
 # Web-Render GPU Backend Provenance Fabricated - 2026-06-17
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
+- **measured** — the referenced sources still exist
+  (`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`, `src/runtime/runtime_native.c`,
+  the `browser_engine` renderers), so the "all referenced paths are gone" stale test does
+  not apply.
+- **measured** — the gate's evidence directory `build/gui-web-2d-vulkan-env/` does not
+  exist here, i.e. the Vulkan/Electron/RenderDoc lane has never been run on this machine.
+- **inferred** — confirming or refuting GPU-backend behaviour requires a real Vulkan device
+  and that lane; neither is available from this Windows triage host. Left OPEN,
+  host-blocked — not stale.
 
 ## Severity
 P1 — correctness/integrity. Renders false "GPU-backed" provenance into the
@@ -85,6 +98,3 @@ asserts the lie.
 - `rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md` (why GPU
   backends silently no-op outside the classic interpreter).
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

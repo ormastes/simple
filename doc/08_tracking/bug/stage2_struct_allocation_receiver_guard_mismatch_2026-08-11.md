@@ -1,6 +1,8 @@
 # Stage-2 struct allocation and receiver-guard mismatch
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -126,6 +128,3 @@ dereferencing it. Regression coverage in
 source evidence only: in-flight bootstraps started before the edit must fail
 their source-consistency gate and cannot qualify the repair.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

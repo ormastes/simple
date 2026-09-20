@@ -1,4 +1,9 @@
 # Native: d[k] on a fn-call-derived dict during keys() iteration returns 0
+## Closed 2026-09-16 — ... iteration returns 0 **Status:** Resolved 2026-07-15 **Found:** 2026-07-14 (iterators lane
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved 2026-07-15  **Found:** 2026-07-14 (iterators lane)  **Path:** native-build --entry
 ```simple
@@ -29,3 +34,4 @@ dict exactly as it does for a literal dict. Single file
 
 Verified native == oracle (sum 3) for the exact repro. Parity harness case
 `dict_from_call_keys` is green in the `check-native-seed-parity.shs` gate.
+

@@ -1,6 +1,8 @@
 # host_compositor_entry calls `_host_backend_selector`, which is defined nowhere
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** OPEN · **Found by:** slim-UI lane (running `test/01_unit/app/ui/shared_wm_entrypoints_spec.spl`)
 
@@ -26,6 +28,3 @@ reproducing example (that spec's failing case) plus a generalization spec that g
 every `src/os/compositor` module for called-but-undefined `_`-prefixed helpers, and
 re-run `shared_wm_entrypoints_spec` to 8/8.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

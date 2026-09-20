@@ -1,5 +1,8 @@
 # seed_interp: explicit i64 default-arg marshalling poisons render-background colors
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_engine_budget_hardening_spec.spl -> 3 passed, 1 failed, still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open
 - Area: Seed interpreter default-argument marshalling; affects `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
@@ -128,5 +131,3 @@ The only difference is the i64 value at the call boundary. White pixels (0xFFFFF
 
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as `seed_interp_explicit_i64_default_arg_poisons_render_backgrounds`.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_engine_budget_hardening_spec.spl` on the deployed seed; 1 of 4 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

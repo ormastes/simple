@@ -1,5 +1,8 @@
 # Stage2 HIR field-type inference regression
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -45,5 +48,3 @@ at class/struct registration (including imported materialization) and use it
 for field layout lookup. A regression must prove that two same-named imported
 types resolve different field index/types from their own receiver TypeIds.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

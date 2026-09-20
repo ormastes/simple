@@ -1,5 +1,8 @@
 # Phase 2 Vulkan Engine2D closure requires unselected backend providers
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,5 +37,3 @@ Admission is a strict build of
 symbols, followed by physical-device execution and its normalized C parity
 gate. Do not enable `SIMPLE_ALLOW_INTERNAL_STUBS` as a workaround.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

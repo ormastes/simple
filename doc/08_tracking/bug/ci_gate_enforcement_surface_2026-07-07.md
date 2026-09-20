@@ -1,5 +1,9 @@
 # CI gate enforcement surface (task #34)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — two wiring bugs fixed, gates now CI-enforced and verified fail-closed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-07
 **Severity:** low (infra/tracking; hardens enforcement, no product regression)
@@ -111,5 +115,3 @@ Each installs ripgrep if missing and fails the job on exit ≠ 0.
 This substantially closes the CI-enforcement piece of #34: the standalone
 structural/idiom ratchet gates are now genuinely, non-bypassably enforced.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

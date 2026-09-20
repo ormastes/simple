@@ -1,4 +1,9 @@
 # `bin/simple` pointed at a 20-hour-stale ad-hoc scratch build, not the release binary
+## Closed 2026-09-16 — ...t, which is the point of this doc. ## Fix ``` ln -sfn release/x86_64-unknown-linux-gnu/sim
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (symlink restored 2026-08-05 07:05 UTC)
 **Found:** 2026-08-05
@@ -66,3 +71,4 @@ under a source tree that itself is stable.
 ```
 readlink -f bin/simple   # should resolve to .../bin/release/<triple>/simple
 ```
+

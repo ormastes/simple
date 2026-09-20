@@ -1,6 +1,8 @@
 # linker_gen `format_hex` emits blank/control characters for any nonzero input
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-06
 **File:** `src/app/linker_gen/main.spl:127-140` (`format_hex`)
@@ -77,5 +79,3 @@ Fix `format_hex` to build hex digit characters correctly regardless of
 characters return their ASCII code point consistently with letters — then
 remove the `# NOTE:` in the "formats 1MB as 0x100000" scenario.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

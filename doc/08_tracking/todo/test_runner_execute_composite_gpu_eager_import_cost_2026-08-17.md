@@ -1,7 +1,5 @@
 # TODO: test_runner_execute -> composite -> gpu_lane eager imports cost ~40s of seed-interpreter load
 
-Status: OPEN (unverified 2026-09-12)
-
 Date: 2026-08-17. Lane: Phase D startup-perf (compile-path slice).
 Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed, per `--version` banner).
 
@@ -114,3 +112,22 @@ it fails identically before and after, fast (no timeout under load 33). The
 original >570s observation was box-load, not the spec. The red itself is a
 pre-existing missing-import/injection defect in the spec, independent of the
 split; track separately if the spec is meant to be green.
+
+## 2026-09-16 — Windows re-measurement; RESOLVED as Rust-seed-only
+
+Windows host, seed binary `bin/release/x86_64-pc-windows-msvc/simple.exe`, warm
+wall-clock of `simple run` around a two-line import probe, 3 runs each:
+
+| probe | wall |
+|---|---|
+| empty script | ~0.075 s |
+| `use` both jit lane executors (cuda + vulkan) | 17.0–19.2 s |
+
+The August Linux measurement was ~40 s (cuda) + ~55 s (vulkan); the transitive
+closure has since shrunk roughly 5x, but the eager-import shape is unchanged.
+Resolution: this cost is an artifact of the Rust seed's file-granular loader and
+is paid only while the seed is the deployed tool. The pure-Simple binary
+replaces the seed loader, so per the seed-only triage rule (2026-09-16) this row
+is RESOLVED as bootstrap-only: the measurement is retained here as the baseline
+to re-check against the pure-Simple loader, and no lazy-import language work is
+queued. `simple test` on the seed remains the only affected entrypoint.

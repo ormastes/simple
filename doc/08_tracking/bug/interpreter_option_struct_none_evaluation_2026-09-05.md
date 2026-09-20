@@ -1,6 +1,8 @@
 # Interpreter lane fails on ANY evaluation of a None-valued `Option<struct>`
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 8D (modernizing `test/system/coupling_analysis_spec.spl`)
@@ -48,5 +50,3 @@ interpreter lane; then the W-rule halves in
 `test/system/coupling_analysis_spec.spl` (and its eventual twin) can be
 re-pointed at direct None-matching.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

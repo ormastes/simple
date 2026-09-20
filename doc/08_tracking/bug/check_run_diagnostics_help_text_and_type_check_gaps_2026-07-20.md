@@ -1,5 +1,8 @@
 # `simple check`/`simple run` diagnostics: missing `help:` annotations + `check` not detecting type mismatches
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/app/diagnostics/check_diagnostics_contract_spec.spl` still FAILs — still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `simple check` / `simple run` CLI diagnostics output
@@ -86,5 +89,3 @@ Both spec files are correct as written and left unmodified — the "never
 weaken an assertion" rule applies; these are real coverage/contract gaps,
 not stale test syntax.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/app/diagnostics/check_diagnostics_contract_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

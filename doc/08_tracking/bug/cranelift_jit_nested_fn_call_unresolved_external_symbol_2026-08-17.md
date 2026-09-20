@@ -1,5 +1,8 @@
 # Cranelift JIT: calling ANY nested `fn` drops the whole module to the interpreter
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-17 (lane NESTEDFN)
 - **Severity:** P2 — no wrong results, but silent whole-module loss of native codegen
@@ -90,5 +93,3 @@ earlier with a construct-level diagnostic. Both are resolver/lowering changes an
 are deliberately out of scope for this filing; the reproducer above is the
 deliverable.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

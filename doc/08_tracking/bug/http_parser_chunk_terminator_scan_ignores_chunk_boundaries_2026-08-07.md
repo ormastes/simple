@@ -1,4 +1,9 @@
 # HTTP request parser scans for the chunked terminator without respecting chunk boundaries
+## Closed 2026-09-16 — FIXED, re-verified 2026-08-17; flat substring scan gone from parser.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -56,3 +61,4 @@ until it reaches a genuine last-chunk. That also removes the need to buffer the
 whole body before decoding. It was deliberately not folded into the
 `decode_chunked` change: it rewrites the parser's streaming state machine and
 needs its own RED/GREEN/SABOTAGE cycle.
+

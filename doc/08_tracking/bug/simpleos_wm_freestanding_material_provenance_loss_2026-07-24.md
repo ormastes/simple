@@ -1,6 +1,10 @@
 # BUG: freestanding WM loses realized glass fallback provenance
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** source fix implemented; fresh QEMU verification pending
 **Severity:** high
 **Component:** Simple Web layout → Engine2D cache → shared WM frame
 **Found:** 2026-07-24
@@ -61,5 +65,3 @@ absent, the downstream provenance gate still rejects the frame.
 - QEMU runtime: retry cap was reached before the CSS-state fix could be
   exercised. A fresh session must run the canonical evidence wrapper once.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

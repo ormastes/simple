@@ -1,6 +1,8 @@
 # Native-build removed runtime bundle false-green
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own Root cause and fix section)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -38,5 +40,3 @@ Fresh deployed Stage-2/Stage-4 qualification remains pending. Before retrying,
 instrument or bound entry-closure discovery so this silent CPU-bound phase
 identifies its current module.
 
-## Triage 2026-09-12
-Not independently re-run; formalizing the record's own described fix into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

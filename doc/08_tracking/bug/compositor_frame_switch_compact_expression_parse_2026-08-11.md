@@ -1,5 +1,9 @@
 # Compositor frame-switch compact-expression parse regression
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Status: source repaired; specs now parse and execute, remaining fail tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -19,5 +23,3 @@ Both focused compositor specs previously stopped at parse time. After repair,
 `rt_is_interpreter_runtime` extern, tracked with the other deployment-skew
 externs. No 8K/80 or device-present conclusion follows from this partial run.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

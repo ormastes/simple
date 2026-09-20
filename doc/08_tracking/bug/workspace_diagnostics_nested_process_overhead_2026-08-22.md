@@ -1,6 +1,8 @@
 # Workspace diagnostics nested-process overhead
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -48,6 +50,3 @@ clean-file omission, lint-profile behavior, totals, JSON bytes, and exit status;
 no trace stdout; no cross-file state contamination; peak RSS no more than 10%
 above baseline.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

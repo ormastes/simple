@@ -1,4 +1,8 @@
 # The test runner lexes spec sources in its OWN process, with no fault boundary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Binary: `/home/yoon/dev/cargo-fulltest/release/simple`, sha256 `4dfdf671742007d30210` (Rust seed, 2026-09-13 16:00)
@@ -82,3 +86,4 @@ continuation. A long run of blank lines inside an open bracket would recurse
 identically. This was NOT censused — no file in the tree is known to trigger
 it, and none did in the 2026-09-13 sweeps, but that is an absence of
 observations, not a measured bound. Recorded rather than fixed.
+

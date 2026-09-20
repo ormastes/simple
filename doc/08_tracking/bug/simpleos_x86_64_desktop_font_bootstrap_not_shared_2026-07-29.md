@@ -1,4 +1,9 @@
 # SimpleOS x86_64 desktop entry did not share the font-bootstrap owner
+## Closed 2026-09-16 — ... x86_64 at the time it was written. ## Fix `arch/x86_64/gui_entry_desktop.spl` now imports
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Fixed in source (static verification only — not run on hardware or
 under QEMU in this pass).
@@ -56,3 +61,4 @@ Static only: confirmed by source grep and by the two specs above encoding the
 exact expected call site and ordering. No QEMU boot or hardware run was
 performed as part of this change — this is not runtime evidence that font
 registration succeeds on target.
+

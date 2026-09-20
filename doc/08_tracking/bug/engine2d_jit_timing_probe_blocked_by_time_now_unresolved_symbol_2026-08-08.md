@@ -1,5 +1,8 @@
 # engine2d JIT timing probe blocked by `rt_file_is_char_device` unresolved symbol (2026-08-08)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -91,5 +94,3 @@ Until then, B2-style probes should report their engine honestly as
 Unit B2, `doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md`,
 2026-08-08.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,8 +1,10 @@
 # `match` arm naming a `val` constant lowers as an irrefutable capture
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
-**Status (2026-07-20 -> CLOSED-STALE 2026-09-12):** OPEN. Worked around at every known call site; no root
+**Status (2026-07-20):** OPEN. Worked around at every known call site; no root
 fix yet. Distinct from `native_const_pattern_lowers_irrefutably_2026-07-13.md`
 (that one is enum-variant-vs-struct *name precedence* in native lowering, and is
 resolved) — this one is a **bare identifier that resolves to a `val` constant**
@@ -117,5 +119,3 @@ carries the row "leaves a capitalized arm on a NON-enum scrutinee a binder",
 which asserts today's (wrong) behaviour explicitly and names this record. A
 const-resolution fix must flip that row on purpose.
 
-## Triage 2026-09-12
-Older than 45 days; a workaround is already documented at every known call site. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

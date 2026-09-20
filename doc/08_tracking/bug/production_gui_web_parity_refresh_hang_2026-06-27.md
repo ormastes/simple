@@ -1,4 +1,13 @@
 # Production GUI/Web Parity Refresh Hang
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
 - Date: 2026-06-27
 - Status: mitigated; paint/text parity still open
@@ -89,3 +98,4 @@ Keep the current endpoint-exact row path until a Chrome-derived gradient oracle
 or faster mutable framebuffer pixel writer is available. Do not reintroduce the
 per-pixel repeated-gradient loop through `fb_rounded_rect_corners_opacity_clip`;
 it is too slow in the self-hosted interpreter evidence path.
+

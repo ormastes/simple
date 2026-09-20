@@ -1,4 +1,8 @@
 # Windows MSVC bootstrap lane aborts binding tool authority: PATH lacks `shasum`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Status:** Root-caused and fixed (environment fix landed); Stage 2 admission still open
@@ -177,3 +181,4 @@ producers, and the Stage 3 tool-authority snapshot records them either way.
 **Locale note for whoever reads these logs next:** MSVC diagnostics on this host
 are Korean. Grep for the codes (`error C2085`, `error C2143`, `LNK\d+`), never
 for English words — an English grep returns zero on a log full of hard errors.
+

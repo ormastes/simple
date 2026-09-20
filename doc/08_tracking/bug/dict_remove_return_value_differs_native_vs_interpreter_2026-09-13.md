@@ -1,4 +1,8 @@
 # `Dict.remove(k)` returns a new dict interpreted but the removed VALUE natively
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13
 **Lane:** seed interpreter vs seed native codegen (LLVM and Cranelift lanes alike)
@@ -49,3 +53,4 @@ all 10 sites in `mir_lowering_stmts.spl` use them. Probe
 - The `core-c-bootstrap` runtime's `rt_collection_remove` is a named TRAP stub
   (`c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md`); phase 2 only
   survived because its link resolved the Rust implementation.
+

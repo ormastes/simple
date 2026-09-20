@@ -1,6 +1,10 @@
 # SimpleOS ARM64/RV64 QMP input transport evidence gap
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** PARTIAL — ARM64/RV64 source implemented; live proof remains open
 **Scope:** `arm64-desktop-engine2d` and `riscv64-display-smoke` on QEMU `virt`
 **Observed:** 2026-07-24
 
@@ -157,5 +161,3 @@ guest-owned backing bytes directly. The current wrapper instead uses
    after guest IRQ, WM-state, later frame generation, and distinct pixels all
    correlate; serial-only or host-nonce-only evidence remains invalid.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

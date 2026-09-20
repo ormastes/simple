@@ -1,5 +1,8 @@
 # Stage2 canonical-owner precedence failures remain after cd0277
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -36,5 +39,3 @@ bounded Stage2 admission attempt and retain its exact exit, output absence or
 hash, and failure census. Do not claim performance or Stage4 evidence until
 Stage2 is emitted and admitted.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,4 +1,8 @@
 # One `val` in a while-loop body declines every native matcher: 271x
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: PERF-6, base `origin/main` f26970e9d93, seed sha256 `22878382bc1b5ccf...`
@@ -51,3 +55,4 @@ list wherever the name appears -- the same mechanism
 `emit_inline_int_expr`'s `bindings` parameter already implements for inlined
 helper arguments. It must run LAST, after PERF-3's matcher, so already-matched
 shapes keep their cheaper path.
+

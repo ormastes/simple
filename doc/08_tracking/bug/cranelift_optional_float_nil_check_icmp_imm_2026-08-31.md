@@ -1,5 +1,8 @@
 # Optional-FLOAT nil-check emits `icmp_imm.f32`, cranelift verifier rejects it, function is silently stubbed
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Backend: cranelift (native-build)
@@ -139,5 +142,3 @@ discover. When two fixtures differ in more than one dimension, the bisection is
 not finished. The pair that actually isolates a variable here is (e)/(f), which
 hold the operator and the site count fixed and vary only the early return.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,6 +1,8 @@
 # Landing record — 28-commit lane sync to origin/main (2026-08-17)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Range
 
@@ -387,5 +389,3 @@ not reachable from origin/main, and the CORRECTION-1 forward-fix is not present
 either upstream or locally. Close it only after a per-file content audit of the
 27 replayed commits against `origin/main`.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

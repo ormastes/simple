@@ -1,4 +1,30 @@
 # Bug: `text.len()` returns bytes but `text[i]` indexes codepoints
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Re-verified 2026-09-13 — STILL REPRODUCES (left open)
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+```spl
+fn main():
+    val s = "héllo"
+    print(s.len())
+    print(s[1])
+```
+
+Output: `6` then `é`. `len()` counts UTF-8 BYTES (6 for a 5-character
+string) while `s[i]` indexes CODEPOINTS (`s[1]` is the 2nd character, not
+the 2nd byte). The inconsistency this entry reports is unchanged (measured).
+Still open because it needs the semantics decision the entry calls for, not
+a bug fix — closing it would lose that decision.
 
 **Date:** 2026-07-02
 **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
@@ -68,3 +94,4 @@ Cost: codepoint-indexing users of `s[i]` on non-ASCII break — but such code is
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.
+

@@ -1,4 +1,9 @@
 # Web renderer: a first child's TOP margin never collapses through its block
+## Closed 2026-09-16 — ...llapses through its block - status: FIXED 2026-09-13 (Chrome parity round 7) - area: lib /
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - status: FIXED 2026-09-13 (Chrome parity round 7)
 - area: lib / browser_engine layout
@@ -106,3 +111,4 @@ block rather than joining the escape. Closing it needs an "still at the block's
 top edge" flag carried across self-collapsing children rather than a
 `child_count == 0` test. Not probed against a Chrome oracle in round 7 — stated
 as the next thing to measure, not as a measured defect.
+

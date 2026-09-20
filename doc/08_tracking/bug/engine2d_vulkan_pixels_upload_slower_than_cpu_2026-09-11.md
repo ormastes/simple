@@ -1,5 +1,8 @@
 # Engine2D Vulkan `pixels: [u32]` upload is SLOWER than CPU compositing (measured 1.56x)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-11 · **Status:** open · **Area:** ui / engine2d / gpu
 **Host:** Apple M4, macOS arm64. Binary `bin/release/aarch64-apple-darwin-macho/simple`,
@@ -61,5 +64,3 @@ the measured evidence that B5 is a performance requirement and not only an elega
    `chrome_web_showcase_backend_<name>_wall_ms_total` per backend and is the regression
    surface for this row.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

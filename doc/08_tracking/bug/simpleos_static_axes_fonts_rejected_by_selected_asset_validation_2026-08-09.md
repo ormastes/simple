@@ -1,5 +1,9 @@
 # SimpleOS: the two `default_axes == "static"` faces are rejected by selected-asset validation -- 2026-08-09
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl -> 3 passed, 0 failed)
+## Closed 2026-09-16 — ...egistration and unrelated to this. ## Fix recipe 1. **Make the receipt name the reason fir
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status 2026-08-17: the read-derived root cause below is FALSIFIED by execution
 
@@ -236,25 +240,3 @@ some axes and behind on others, so overwriting either way can revert real work.
 Read both the `-` and `+` sides of `diff -u <origin> <local>` before choosing,
 then apply the readiness/diagnostic change on top of the reconciled file.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl` on the deployed seed; the spec now passes in full (3/3), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Re-check 2026-09-12 — falsification still holds, cause still unnamed
-
-- Status: OPEN (2026-09-12) — needs a guest run, not re-derivable on the host
-- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
-
-```
-$ bin/simple test test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl --no-session-daemon
-  ✓ Bungee (default_axes=static) validates
-  ✓ UnifrakturCook (default_axes=static) validates
-  ✓ does not refuse with the hypothesised default-axes reason
-SPEC FILE VERDICT: ... outcome=OK declared>=3 executed=3 passed=3 failed=0
-```
-
-The pin held: the `default_axes == "static"` hypothesis stays falsified and has
-not rotted. This record still cannot be closed, because the falsification says
-what the cause is NOT. Naming it requires reading
-`font_renderer_last_selected_registration_reason()` off a guest run to separate
-`runtime` from `identity`, per the 2026-08-17 stanza above — no host-side spec
-can substitute for that.

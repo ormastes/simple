@@ -1,4 +1,8 @@
 # Interpreter FFI bridge legacy syntax blocks source check
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open compiler/source migration blocker  
 **Observed:** 2026-08-26  
@@ -31,3 +35,4 @@ deleted generic all-`u64` dynload dispatcher as a workaround.
 
 Preserve average O(1) registry lookup.  Do not add per-call library lookup,
 symbol lookup, signature parsing, generic marshalling, or extra value copies.
+

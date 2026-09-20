@@ -1,6 +1,8 @@
 # macOS Stage 4 full-CLI compile exceeds bounded resource envelope
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -81,6 +83,3 @@ within a documented time and peak-RSS budget on a 24 GiB host.
 4. The candidate passes `-c`, source-check, redeploy, MCP, and LSP smoke gates.
 5. Preserve strict `SIMPLE_NO_STUB_FALLBACK=1` and exact provider ownership.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

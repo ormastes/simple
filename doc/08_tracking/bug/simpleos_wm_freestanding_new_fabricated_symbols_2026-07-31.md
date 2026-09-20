@@ -1,6 +1,8 @@
 # SimpleOS-WM freestanding kernel link now blocked by 4 NEW unbaselined fabricated symbols (2026-07-31)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -115,6 +117,3 @@ are dead code on this entry and can be pruned). Only after the kernel links
 again can the two previously recorded blockers (vtable trap — believed fixed
 by `f2f64a137bd`; font-metrics hang — unresolved) be re-tested end to end.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

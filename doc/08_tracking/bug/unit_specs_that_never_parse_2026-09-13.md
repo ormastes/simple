@@ -1,4 +1,8 @@
 # Unit specs that never parse — a whole file's examples vanish with one line of output
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: PARTIALLY FIXED (2026-09-13, continuation) — 43 spec files repaired, 1 still OPEN
 - Binary: `/home/yoon/dev/cargo-fulltest/release/simple`, sha256 `4dfdf671742007d30210`
@@ -114,3 +118,4 @@ covered — `lib/`, `compiler/`, `app/`, `os/` and `std/` were not run to
 completion (10,706 spec files at 5-10 s each), so more instances of every shape
 above almost certainly remain. The same two typo families were also observed
 outside `test/01_unit`; they were counted, not touched.
+

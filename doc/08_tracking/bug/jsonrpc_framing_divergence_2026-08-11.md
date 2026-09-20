@@ -1,6 +1,10 @@
-## 2026-08-17 — the two SPEC-VIOLATING families are fixed; the rest stays a record
+## Closed 2026-09-16 — spec-violating families B/C fixed w/ from-source proof; D/E left as record
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
+## 2026-08-17 — the two SPEC-VIOLATING families are fixed; the rest stays a record
 
 The triage note below is right that families D and E are a substrate/typing
 refactor to leave alone. It is wrong to file B and C alongside them: those two
@@ -188,6 +192,3 @@ before and after this change -- pre-existing, unrelated, unchanged.
   references**, usage comment names a nonexistent `.sh` file, built on the
   abandoned `.smf` source-compile model. Confirmed obsolete; deliberately NOT
   wired.
-
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

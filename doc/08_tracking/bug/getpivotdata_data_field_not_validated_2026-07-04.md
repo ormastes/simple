@@ -1,4 +1,9 @@
 # GETPIVOTDATA ignores its data_field argument (opus review follow-up)
+## Closed 2026-09-16 — Status RESOLVED, triage-confirmed 2026-07-17 via seed run + git log -S
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** medium
@@ -28,3 +33,4 @@ a second-column intersection case when lifting this.
 
 Source: opus review of the FORECAST.ETS/GETPIVOTDATA batch (LANDABLE with
 follow-ups), 2026-07-04.
+

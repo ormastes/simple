@@ -1,5 +1,8 @@
 # `emu_*` shape decomposition emits ONE GPU DISPATCH PER PIXEL on GPU backends
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. Status: OPEN, root cause located and measured. Severity: HIGH
 (performance only — output is bit-exact, proven below).
@@ -138,5 +141,3 @@ grep '^feat ' build/engine2d-backend-parity/cpu.log
 grep '^feat ' build/engine2d-backend-parity/vulkan.log
 ```
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

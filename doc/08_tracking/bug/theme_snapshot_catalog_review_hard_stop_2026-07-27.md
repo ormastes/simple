@@ -1,4 +1,8 @@
 # Theme snapshot catalog review hard stop
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open / fail-closed — re-verified against `origin/main` 2026-07-27,
 both P1 gaps still fire today  
@@ -80,3 +84,4 @@ Start from current `origin/main`, not a piecemeal cherry-pick:
 Runtime completion still needs a permitted incremental entry-closure check and
 focused specs on an admitted pure-Simple runtime, then live hosted/SimpleOS
 theme/frame evidence.
+

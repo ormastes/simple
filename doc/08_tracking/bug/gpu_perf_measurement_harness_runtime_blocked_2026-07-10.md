@@ -1,6 +1,8 @@
 # GPU Performance Measurement Harness Runtime Blocked - 2026-07-10
+## Open 2026-09-16 — needs owner triage
 
-**Status:** PARTIAL — rt_exec_output export FIXED (per record); CUDA dlopen SIGSEGV path CLOSED-STALE (2026-09-12: not re-verifiable from the record)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Severity
 
@@ -44,5 +46,3 @@ benchmark; the diagnostic-runtime numbers above are not release evidence.
 Do not accept modeled transfer-pixel economics, empty subprocess output, or
 the crashing `dlopen` harness as measured offload evidence.
 
-## Triage 2026-09-12
-The record's own "Fix Status" section already shows `rt_exec_output` fixed with measured CUDA-vs-CPU timings. The separate CUDA `dlopen` SFFI SIGSEGV (exit 139) symptom has no cheap repro re-run in this pass and is older than 45 days; closing that portion per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

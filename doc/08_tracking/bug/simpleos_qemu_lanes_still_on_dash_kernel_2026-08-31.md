@@ -1,5 +1,8 @@
 # SimpleOS QEMU lanes still booting with `-kernel` (census 2026-08-31)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `.claude/rules/board-runnable.md` mandates real-firmware boot (OVMF pflash /
 EDK2-AAVMF / OpenSBI) and forbids QEMU `-kernel` pass semantics and
@@ -44,5 +47,3 @@ uncommented `-kernel ["$]` and uncommented `isa-debug-exit`. The only matches
 REJECTS those flags and two PASS-verdict strings saying "no -kernel, no
 isa-debug-exit" — not boot usage.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

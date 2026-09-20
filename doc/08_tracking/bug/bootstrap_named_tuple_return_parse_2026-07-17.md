@@ -1,4 +1,9 @@
 # Bootstrap parser rejects labeled tuple return types
+## Closed 2026-09-16 — Status SOURCE FIXED; focused regression passes 3/3 and 14/14; Stage3 rebuild acceptance pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Status:** SOURCE FIXED; FRESH STAGE3 VERIFICATION REQUIRED
@@ -52,3 +57,4 @@ No further rebuild was attempted in this session after the mandatory
 three-cycle bootstrap cap. The repository-local Rust seed `check` command is
 not independent evidence here: it delegates to the absent isolated
 `bin/simple` and exits 127.
+

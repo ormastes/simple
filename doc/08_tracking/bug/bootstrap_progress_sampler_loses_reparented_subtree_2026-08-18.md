@@ -1,6 +1,9 @@
 # bootstrap-progress-watch tree RSS silently loses re-parented / unreadable
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — FIXED; pgroup basis added; test passes with negative control
 
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 # subtrees (2026-08-18) -- FIXED
 
 A stage-3 compile measured at 67.4 GB by `ps` logged
@@ -47,5 +50,3 @@ PRE-EXISTING, UNRELATED, NOT FIXED HERE: the same test already failed at
 `ps -o rss=` vs `/proc/<pid>/stat` skew in the leaf fixture. Byte-identical
 failure before and after this change.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

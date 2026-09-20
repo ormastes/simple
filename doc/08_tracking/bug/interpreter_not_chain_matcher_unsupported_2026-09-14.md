@@ -1,4 +1,8 @@
 # `expect(x).not.to_<matcher>(...)` — a supported chain form, but only under native compilation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN, thoroughly diagnosed, deliberately not fixed this round (see "Why not fixed" below)
 - Binary: `d4c0779cef6cf0cc4054` / rebuilt `57761d4fbfed5e444a36` (neither carries a fix for this)
@@ -133,3 +137,4 @@ line raises `semantic: undefined field...` mid-example, typically failing the
 enclosing `it` block. Not a data-loss-style silent-pass risk — it fails
 loudly, every time, at ERROR severity, exactly like the JavaNew case's
 diagnostic-quality standard.
+

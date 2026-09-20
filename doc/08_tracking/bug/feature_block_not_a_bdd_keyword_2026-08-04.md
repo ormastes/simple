@@ -1,4 +1,8 @@
 # `feature "..."` is not a BDD block keyword — 10 spec files are dead entry points, 300 `it` blocks never run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-verified 2026-09-13 — STILL OPEN, blast radius has GROWN, and the fix site is now located
 
@@ -148,3 +152,4 @@ runs, so it was not attempted from this lane. It is a small change — add
 it to `BDD_KEYWORDS` — but it needs a lane that owns the seed rebuild, plus a
 SPipe-owner decision on whether `feature` is blessed vocabulary or the specs
 should be migrated instead.
+

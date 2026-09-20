@@ -1,6 +1,9 @@
 # Lean backend local binding collides with reserved `invariant`
+## Closed 2026-09-16 — fix section: local renamed to invariant_text; parse error resolved
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-12
 
@@ -20,5 +23,3 @@ Unexpected token: expected pattern, found Invariant
 The local is now named `invariant_text`; generated theorem text is unchanged.
 This keeps the backend source within the language's reserved-identifier rules.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

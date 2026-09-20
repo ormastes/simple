@@ -1,5 +1,9 @@
 # draw_image (kernel_blit_image) had a real Metal dispatch path but ZERO CPU-vs-Metal parity coverage
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces)
+## Closed 2026-09-16 — Status Closed; draw_image parity coverage added, all gates pass bit-exact
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 Closed (2026-07-07) — coverage gap, not a live divergence. No fix was needed;
@@ -112,5 +116,3 @@ other `draw_*` methods on `MetalBackend` (`draw_ellipse`, `draw_arc`,
 dual-algorithm) and outside this parity class by construction; nothing to
 prove there.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,8 @@
 # Six HAL environment-executor specs import test modules that exist nowhere — they can never execute
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 12G (modernizing the `hal_environment_*` executor specs)
@@ -44,5 +46,3 @@ Implement (or restore) the `app.test.hal_environment_executor` module
 family — or the `src/` product surface it was meant to wrap — so the six
 specs' imports resolve and their scenarios execute.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

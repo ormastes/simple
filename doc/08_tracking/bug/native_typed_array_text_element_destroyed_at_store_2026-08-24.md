@@ -1,6 +1,8 @@
 # native lane: a `text` element is DESTROYED at the STORE, not lost at the read
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: PARTIALLY FIXED. `a[i]`, `.first()`/`.last()` and `for x in a` are
   fixed for all four element types. **Nested `[[text]]` / `[[bool]]` remain
@@ -258,5 +260,3 @@ minutes and the run hit its time cap during the Stage 2 determinism re-check.
 wide `i64` (2^60), negative `i64`, `f64` 0.1, `Dict<text, text>`, plain `text`
 and `.len()`, `bool`, class-field `[text]`.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

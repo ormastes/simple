@@ -1,4 +1,8 @@
 # `std.spec.screenshot` SFFI API is declared but implemented nowhere
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** PARTIAL — title and the "implemented nowhere" claim are WRONG;
 corrected 2026-08-17. The **native runtime implementation exists**:
@@ -100,3 +104,4 @@ unimplemented.
 ## Triage 2026-09-13
 
 Confirmed still a feature gap (screenshot SFFI API declared but never implemented), deliberately left red per repo policy so the missing feature stays visible. Implementing the real screenshot capture API is out of scope for a mechanical bugfix pass. Leaving OPEN, no code change made.
+

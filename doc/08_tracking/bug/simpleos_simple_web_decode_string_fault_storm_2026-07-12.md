@@ -1,4 +1,8 @@
 # SimpleOS Simple Web `decode_string` Fault Storm
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** decode-string fault fixed live; canonical renderer now stalls before first frame
 **Component:** stage3 freestanding Simple Web HTML/CSS rendering
@@ -156,3 +160,4 @@ compiler/source incompatibility: committed `src/lib/common/encoding/sfnt_glyf.sp
 fails to parse with the current stage3 binary (`expected Comma, found Plus`).
 The decode fix itself is verified GREEN (0 decode-string-bad, 0 exception frames)
 from the last clean build (diag7).
+

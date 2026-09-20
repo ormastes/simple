@@ -1,6 +1,8 @@
 # JIT: layout_run_full_with_ports dies with nil-receiver field access (core dump)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT / gpu_web layout ports
 
@@ -41,9 +43,3 @@ with `SIMPLE_EXECUTION_MODE=interpreter` completes.
 Open. Engine-divergence family
 (`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`).
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13
-
-No persisted repro script exists (the doc notes the probe scripts were only session-scratchpad copies, which do not survive), and reconstructing the exact `LayoutExecutionRequest` probe plus a CUDA-capable host to compare JIT-vs-interpreter behavior is beyond this pass's per-bug budget. This is also a Cranelift-JIT-level divergence (Rust seed), not a pure-Simple fix target. Leaving OPEN, no code change made.

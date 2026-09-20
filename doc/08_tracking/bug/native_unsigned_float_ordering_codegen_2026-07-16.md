@@ -1,8 +1,11 @@
 # Native unsigned integer/float ordering lacks unsigned-aware coercion
+## Closed 2026-09-16 — in-body 'source fixed': unsigned uitofp cast lowering described across LLVM-lib and Cranelift
 
-**Status:** CLOSED-STALE (2026-09-12: source fix recorded but staged platform execution never completed; not re-verifiable from the record)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
-- status: source fixed -> CLOSED-STALE 2026-09-12; staged dual-backend platform execution pending
+- status: source fixed; staged dual-backend platform execution pending
 - severity: high for high-bit unsigned values
 - component: MIR numeric coercion, LLVM-lib and Cranelift cast lowering
 
@@ -18,5 +21,3 @@ in the full gate; macOS arm64/x64 and Windows x64 select it explicitly. The
 cross-module Result fixture carries high-bit controls through both backends on
 AArch64/RISC-V QEMU and FreeBSD. First staged matrix execution is pending.
 
-## Triage 2026-09-12
-Older than 45 days with the described staged-platform execution still pending; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

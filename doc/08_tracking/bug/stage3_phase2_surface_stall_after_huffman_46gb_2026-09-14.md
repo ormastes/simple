@@ -1,4 +1,8 @@
 # Linux S3-1: Stage-2-native `bootstrap_main.spl` build hangs after the surface phase completes — seed interpreter finishes the identical closure in 17 minutes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN — root cause **localized** (Stage-2 native codegen/runtime, not
   `src/compiler` algorithmically), exact defect not yet found. Filed as its
@@ -305,3 +309,4 @@ measured next (own Stage-2 rebuild + the receipt-free Stage-3 confirmation
 run); if it is not enough, the real fix has to change
 `TransientHeapScope.objects`'s data structure in
 `src/compiler_rust/runtime/src/value/collections.rs`.
+

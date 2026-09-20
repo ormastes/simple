@@ -1,5 +1,8 @@
 # SimpleOS ARM64 EL0 server syscall and VirtIO-net gap (2026-08-14)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -102,11 +105,3 @@ serial markers as ARM64 network/database proof.
 - Still open: storage policy currently forbids builds/QEMU, so device init,
   cross-page EL0 copy, and host-visible HTTP remain unproved live criteria.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13
-
-Reconfirmed via source inspection: this needs real QEMU VirtIO-net boot
-evidence to close, which is outside this lane's scope (no QEMU access in
-this pass). Left OPEN, no code change attempted.

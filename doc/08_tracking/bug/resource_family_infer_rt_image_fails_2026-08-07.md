@@ -1,4 +1,9 @@
 # Bug: Resource family inference fails for rt_image family
+## Closed 2026-09-16 — ...b=nil, failing the spec assertion. ## Fix Added "load" to the acquire_verbs list: ``` fn a
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Date:** 2026-08-07
@@ -68,3 +73,4 @@ Fixed spec now passes:
 bin/simple test test/01_unit/compiler/resource/resource_family_inference_spec.spl
 # Results: 17 total, 17 passed, 0 failed
 ```
+

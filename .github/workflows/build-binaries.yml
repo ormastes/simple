@@ -72,6 +72,15 @@ jobs:
           restore-keys: |
             seed-${{ matrix.target }}-
 
+      - name: Invalidate stale workspace-crate fingerprints
+        # Same stale-seed hazard as release.yml: the prefix restore-key can
+        # hand back a seed built from older compiler sources. Force the
+        # workspace crates to rebuild; keep the dependency cache.
+        shell: bash
+        run: |
+          find src/compiler_rust -maxdepth 3 \( -name lib.rs -o -name main.rs \) \
+            -not -path "*/vendor/*" -exec touch {} +
+
       - name: Build seed
         working-directory: src/compiler_rust
         run: |
@@ -164,6 +173,13 @@ jobs:
           restore-keys: |
             seed-linux-
 
+      - name: Invalidate stale workspace-crate fingerprints (native_all)
+        if: matrix.target == 'linux'
+        shell: bash
+        run: |
+          find src/compiler_rust -maxdepth 3 \( -name lib.rs -o -name main.rs \) \
+            -not -path "*/vendor/*" -exec touch {} +
+
       - name: Build Stage 2 (Linux)
         if: matrix.target == 'linux'
         run: |
@@ -175,9 +191,11 @@ jobs:
 
           mkdir -p bin
           echo "Building Stage 2 self-hosted binary..."
-          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+          # SIMPLE_PARSE_SHARDING=0: cache-warming shards never complete on
+          # GitHub runners and leak memory that starves the worker (beta.9).
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
             "$SEED" native-build \
-            --source-dir src \
+            --source src \
             --entry-closure \
             --entry src/app/cli/bootstrap_main.spl \
             --output bin/simple_stage2 \
@@ -252,9 +270,11 @@ jobs:
           echo "Attempting Stage 2 cross-compile for Windows MinGW..."
 
           # Cross-native-build may not be fully supported yet
-          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+          # SIMPLE_PARSE_SHARDING=0: cache-warming shards never complete on
+          # GitHub runners and leak memory that starves the worker (beta.9).
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
             "$SEED" native-build \
-            --source-dir src \
+            --source src \
             --entry-closure \
             --entry src/app/cli/bootstrap_main.spl \
             --output bin/simple_stage2.exe \

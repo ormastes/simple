@@ -1,4 +1,8 @@
 # Native: `U32le/U64le .of(v).to_span()` → `.load(sp,0).value()` does not round-trip (U16 does)
+## Obsolete 2026-09-16 — SUPERSEDED 2026-09-13; root cause tracked in native_cross_module_same_name_methods_collapse file (verified exists)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Filed: 2026-09-13
 - Found by: `scripts/check/check-native-interp-differential.shs` (first census)
@@ -87,3 +91,4 @@ WRONG. Root cause: same-named INSTANCE methods on the six sibling structs in
 correct at every width; `U32le.of(0xDEADBEEF).to_span()` round-trips fine
 natively when no sibling type is in the closure. See
 `native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md`.
+

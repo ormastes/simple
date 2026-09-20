@@ -1,6 +1,8 @@
 # JIT Method-Dispatch Worklist — remaining gaps after 2026-07-29 sweeps
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Derived from `doc/08_tracking/bug/jit_method_dispatch_audit_2026-07-29.md`.
 Already-landed methods are NOT relisted: `count`/`drop`/`entries`/`insert`/
@@ -124,5 +126,3 @@ grep + existing dispatch-arm shapes in
   freshly-built seed (JIT==interp, [jit-addr]) before landing — the worklist was
   inferred from grep, not run.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

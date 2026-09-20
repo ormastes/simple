@@ -1,4 +1,8 @@
 # `SimpleProviderQueryResultV2` wire codec is missing; `os/smf/provider_query_wire.spl` imports nonexistent digest symbols
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: BUGFIX-7 lane while fixing
@@ -73,3 +77,4 @@ describe block (2 examples) is NOT fixed and needs this record's larger repair.
 4. Separately audit and repair `provider_loader.spl` and
    `native_provider_v1.spl`'s missing digest-helper imports — a distinct
    defect from the V2 wire gap, found while tracing this one.
+

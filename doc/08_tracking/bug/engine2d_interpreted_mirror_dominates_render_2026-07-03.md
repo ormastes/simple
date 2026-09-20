@@ -1,5 +1,8 @@
 # Perf: Engine2D per-op interpreted mirror makes every backend equally slow
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-03
 - **Severity:** high (blocks WM-chrome-via-CSS at desktop resolution; goal item)
@@ -26,5 +29,3 @@ shrinks the mirror to 1x1 and reads back from the GPU once per frame.
 2. Then: simple_web_layout_render_html_pixels via Draw IR + Engine2D
    (native), and raise/remove the wm_scene CSS cap.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

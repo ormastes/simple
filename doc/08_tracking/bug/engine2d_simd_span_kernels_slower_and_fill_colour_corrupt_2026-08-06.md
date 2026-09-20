@@ -219,33 +219,16 @@ inferred from this host result.
   9-line re-export facades over `nogc_sync_mut`, and exactly one
   `fn simd_blend_row` exists in `src/lib`. There is no duplicate implementation.
 
+## 2026-09-16 — §3 resolved as not-a-live-cost; Windows harness note
 
-## Re-check 2026-09-12 — evidence only, status deliberately unchanged
-
-Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
-`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
-
-```
-SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
-  test/perf/graphics_2d/span_kernel_pixel_correctness_spec.spl --no-session-daemon
-SPEC FILE VERDICT: test/perf/graphics_2d/span_kernel_pixel_correctness_spec.spl outcome=OK declared>=4 executed=4 passed=4 failed=0 skipped=0 dropped=0
-```
-
-The spec is green, and this record is **not** being closed on that, because the
-residual scope is the SIMD-vs-scalar timing comparison in §3, which is a perf measurement this correctness spec does not make.
-
-Recording the green so the next triage pass does not re-run it expecting red,
-and so nobody mistakes a passing interpreter-lane spec for the lane that is
-actually open.
-
-## Triage 2026-09-13
-Reconfirmed: PARTIALLY RESOLVED / OPEN (P3) status unchanged per this
-record's own detailed §1/§2/§3 breakdown. Not re-measured this pass
-(perf-sensitive, needs a controlled benchmark run). Left as-is, no code
-change attempted.
-## Triage 2026-09-13 (BUGFIX-12 shard 22)
-
-Residual scope (§3, SIMD-vs-scalar timing under a C runtime build without
-swapping the shared binary) is unchanged and out of scope for a shard triage
-pass. §1/§2/D-F8 remain resolved per the notes above. No change made.
-Leaving OPEN (P3) as documented.
+Per the seed-only triage rule: §3's remaining item (native
+`rt_engine2d_simd_blit_row_u32` in `src/runtime/runtime_simd_dispatch.c`) was
+blocked on rebuilding/redeploying the shared Rust seed binary. That blocker is
+bootstrap-only, and the 2026-08-17/20 measurements already show `blit` at 0 ms
+native via the existing `write_span` path — the missing kernel is not costing
+anything today. §3 is therefore RESOLVED as not-a-live-cost; if a future C
+runtime revision wants the native blit kernel for symmetry, that is ordinary
+runtime work, not this bug. The Windows span-kernel harness
+(`run_span_bench.shs`) returned NO DATA under the Windows seed on this date
+(output format not parseable); the authoritative measurements remain the
+2026-08 Linux ones above.

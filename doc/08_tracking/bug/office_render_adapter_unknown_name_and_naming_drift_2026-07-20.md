@@ -1,5 +1,8 @@
 # `office_render` adapter: unknown adapter names not detected/warned; "word" adapter output uses "LibreOffice Writer" not "Word"
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/02_integration/app/render/render_integration_spec.spl -> 19 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/office/render_adapter.spl` (`office_render`)
@@ -56,5 +59,3 @@ the adapter's output string or the spec's expected substring accordingly),
 and separately implement unknown-`adapter_name` detection + warning in
 `office_render`.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/app/render/render_integration_spec.spl` on the deployed seed; the spec now passes in full (19/19), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

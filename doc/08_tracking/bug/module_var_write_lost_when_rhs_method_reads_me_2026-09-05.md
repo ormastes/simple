@@ -1,4 +1,8 @@
 # Module-level `var` write is silently lost when the RHS method reads `me`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-05
 - **Host:** macOS arm64 (Darwin 25.5.0)
@@ -114,3 +118,4 @@ promoted to a regression spec under `test/01_unit/compiler/`.
 - How many other modules with module-level `var` service state are silently
   affected. A census of `^var ` in `src/**/*.spl` followed by
   `<var> = <var>\.` call sites would size it.
+

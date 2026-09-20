@@ -1,6 +1,8 @@
 # mcp lazy-loading spec red: `mcp_lib` modules no longer exist (2026-08-26)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `test/01_unit/lib/mcp/lazy_loading_spec.spl` fails at HEAD with:
@@ -38,5 +40,3 @@ Restore or re-home the lazy registry/category loader API, or rewrite the spec
 against `src/lib/nogc_sync_mut/mcp/**`; the spec must reach
 `Results: N total, N passed, 0 failed`.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

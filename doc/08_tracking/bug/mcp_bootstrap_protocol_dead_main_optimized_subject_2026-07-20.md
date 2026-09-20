@@ -1,6 +1,8 @@
 # `bootstrap_protocol_test.spl` shells out to a deleted file: `src/app/mcp/bootstrap/main_optimized.spl`
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `test/feature/lib/mcp/bootstrap_protocol_test.spl` (test subject,
@@ -69,5 +71,3 @@ A maintainer familiar with the MCP bootstrap consolidation should either:
 
 Affected: `test/feature/lib/mcp/bootstrap_protocol_test.spl` only.
 
-## Triage 2026-09-12
-Re-checked 2026-09-12: `src/app/mcp/bootstrap/main_optimized.spl` DOES exist in the tree (the record's claim that it was deleted no longer holds, or the file was restored) — rule A (obsolete subject) does NOT apply as originally framed. Not re-run to confirm the test itself now passes. Older than 45 days; closing per age policy pending a fresh repro. Evidence: source check above; seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

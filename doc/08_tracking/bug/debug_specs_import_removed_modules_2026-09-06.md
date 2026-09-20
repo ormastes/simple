@@ -1,5 +1,8 @@
 # Two `cli_debug` specs import symbols that never existed anywhere in `src/`
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 - `test/01_unit/app/cli_debug/service_commands_v1_spec.spl` — 3 of 5 examples fail:
@@ -87,5 +90,3 @@ at its line 1 carries the pointer into `todo_db.sdn`. The landed writer is
 decision); whether the orphaned lib-layer writer holds anything worth porting is an open
 question, not a fix.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

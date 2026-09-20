@@ -1,5 +1,9 @@
 # riscv64 in-guest: the guest RESETS while executing a cross-function call
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — RESOLVED 2026-09-02 in body: fixed b655e343cdb, guard RED/GREEN, fault gone; new + blocker tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **RESOLVED 2026-09-02 — this record's own defect is fixed.** The "reset" was
 > never a reset and, once the trap vector landed, was measured as an S-mode
@@ -520,5 +524,3 @@ and its offender count did not move. What changed is entirely inside the row: th
 error from inside the callee's body. The row stays RED until the `+` defect above
 is fixed.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

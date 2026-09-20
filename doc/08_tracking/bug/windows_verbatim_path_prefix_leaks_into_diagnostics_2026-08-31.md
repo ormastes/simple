@@ -1,6 +1,6 @@
 # Windows `\?\` verbatim path prefix leaks into user-facing diagnostics (2026-08-31)
 
-Status: OPEN (Rust seed, cosmetic but user-facing; Windows-only)
+Status: FIXED 2026-09-13 — see "Fix 2026-09-13" below (Rust seed rebuilt and re-run; verbatim prefix and Debug double-escaping both gone).
 
 ## Symptom
 
@@ -83,6 +83,46 @@ backslashes are not double-escaped.
 Cosmetic, but it breaks click-to-open / jump-to-error in every editor that
 parses `--> path:line:col`, on every Windows diagnostic. No effect on
 correctness of compilation.
+
+## Fix 2026-09-13
+
+New display boundary `src/compiler_rust/compiler/src/display_path.rs`
+(`display_path` / `display_path_str`): renders with `Display` semantics and
+strips the Windows verbatim prefix, handling both `\\?\C:\...` and the
+verbatim-UNC form `\\?\UNC\server\share` -> `\\server\share`. It is a *display*
+helper only; the verbatim form must still be what reaches the filesystem,
+because that is what lifts the 260-character `MAX_PATH` limit.
+
+Applied at the four leak sites in
+`src/compiler_rust/compiler/src/pipeline/module_loader.rs`:
+
+- lines 2037, 2089, 2281 — `format!("in {:?}: {e}", path)` -> `format!("in {}: {e}", display_path(&path))`
+- line 962 — `display_parser_hints`'s `  --> {}` arrow, which produced the
+  second quoted symptom (the lint/loader warning path).
+
+Registered as `pub mod display_path;` in `compiler/src/lib.rs`.
+
+### Verification (run, not inferred)
+
+`cargo build --release --bin simple` (2m54s), then the same repro:
+
+```
+before: error: compile failed: parse: in "\\\\?\\C:\\Users\\ormas\\...\\bad.spl": Unexpected token: ...
+after:  error: compile failed: parse: in C:\Users\ormas\...\bad.spl: Unexpected token: ...
+```
+
+Both the verbatim prefix and the Debug double-escaping are gone, and the
+`[INFO] JIT ... module load error:` transport line (`exec_core.rs:1095`) is
+clean too, since it only forwards the string these sites format.
+
+Reproducing + generalization specs: four `#[cfg(test)]` unit tests in
+`display_path.rs` — `strips_windows_verbatim_drive_prefix` (the exact defect),
+plus `strips_windows_verbatim_unc_prefix`, `leaves_ordinary_paths_untouched`
+and `does_not_double_escape_backslashes` (adjacent paths in the same helper).
+`cargo test --release -p simple-compiler --lib display_path` -> 4 passed.
+
+Not covered by this change: any other diagnostic that formats a canonicalized
+path with `{:?}`. The helper now exists, so those are one-line adoptions.
 
 ## Related
 

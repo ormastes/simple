@@ -1,4 +1,8 @@
 # A large module `"""..."""` docstring + subprocess-heavy `it` blocks silently false-greens later assertions
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-08
 **Status:** OPEN, narrowed 2026-08-10 — NOT reproducible on a genuinely
@@ -202,3 +206,4 @@ shape). Root cause remains compiler-internal (SSpec docstring/`it`-block
 interaction with `process_run`) and undiagnosed; reproducing and fixing it
 needs deep interpreter/runner instrumentation well past a shard triage
 budget. No change made. Leaving OPEN as narrowed.
+

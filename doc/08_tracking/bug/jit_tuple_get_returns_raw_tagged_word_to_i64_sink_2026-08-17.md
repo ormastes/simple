@@ -1,4 +1,8 @@
 # JIT: `tuple.get(i)` hands a RAW TAGGED word to an `i64` sink — `5` reads back as `40`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
 **Date:** 2026-08-17
@@ -141,3 +145,8 @@ This also predicts the record's open question about `f64`/struct tuple sinks:
 every non-`ANY` scalar sink is affected, and `u64`/`i32` "passing" in the matrix
 probe is most likely those rows' sinks not being statically typed, not the
 defect being i64-specific. Not measured; stated as a prediction, not a finding.
+
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

@@ -1,5 +1,9 @@
 # SCV wasm availability probe crashed (E-SFFI-001) when build/libspl_wasmtime.so is absent (2026-08-26, FIXED)
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/integration/app/scv_incremental_parse_spec.spl -> 9 passed, 0 failed)
+## Closed 2026-09-16 — FIXED: existence pre-check; spec 2/9 -> 9/9 post-fix evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found by:** W4 + Wave-1 closeout lane. `scv_incremental_parse_spec.spl` went
 9/9 -> 2/9 mid-session with
@@ -26,5 +30,3 @@ possibly-missing path is the same class. `src/lib/scv` callers were swept —
 `wasm_executor.spl` was the only unguarded probe. The runtime-side contract
 fix is filed here as follow-up, not silently normalized.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/integration/app/scv_incremental_parse_spec.spl` on the deployed seed; the spec now passes in full (9/9), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

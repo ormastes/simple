@@ -1,6 +1,8 @@
 # Implicit `self` field READ inside a plain `fn` method is unresolved (JIT + HIR)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
 - Status: OPEN
@@ -70,5 +72,3 @@ every devhub exit path.
 Write `self.kind` explicitly. Not applied here: the scope of the defect is
 compiler-side and a mass rewrite would hide it.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

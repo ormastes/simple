@@ -1,6 +1,8 @@
 # Spec runner contradicts itself on `fn main()`-wrapped specs: verdict green, summary red, exit code constant 1 (2026-08-08)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **STATUS 2026-08-08: FIXED — and the trigger stated below is TOO BROAD.**
 > Root cause and fix:
@@ -258,6 +260,3 @@ well as import lines.
 - `983058c5ff39` — deleted the dead `struct Mailbox` and its phantom facade exports.
 - `e7df6e011e5` — completed the rename across `actor_scheduler.spl`.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

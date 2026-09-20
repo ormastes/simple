@@ -949,8 +949,81 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
 
     #[cfg(not(unix))]
     {
-        let _ = (path, timeout_secs);
-        -1
+        // Windows: LockFileEx on the opened file, mirroring the C runtime
+        // (src/runtime/platform/platform_win.h). The previous stub returned
+        // -1 unconditionally, which made every compiled-code file_lock call
+        // fail on Windows -- in particular the SCV source-inventory
+        // publication lock, whose failure blocked release legs with
+        // SCV-E-ADMISSION git-event-apply:inventory-publication-failed.
+        use windows::Win32::Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileA, LockFileEx, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_SHARE_MODE, LOCK_FILE_FLAGS, LOCKFILE_EXCLUSIVE_LOCK,
+            LOCKFILE_FAIL_IMMEDIATELY, OPEN_ALWAYS,
+        };
+        use windows::Win32::System::IO::OVERLAPPED;
+
+        let handle = match unsafe {
+            CreateFileA(
+                windows::core::PCSTR(path.as_ptr() as *const u8),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_MODE(0x1 | 0x2), /* FILE_SHARE_READ | FILE_SHARE_WRITE */
+                None,
+                OPEN_ALWAYS,
+                FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0),
+                None,
+            )
+        } {
+            Ok(h) if h != INVALID_HANDLE_VALUE => h,
+            _ => return -1,
+        };
+
+        let mut overlapped = OVERLAPPED::default();
+        if timeout_secs <= 0 {
+            // Blocking lock.
+            let locked = unsafe {
+                LockFileEx(
+                    handle,
+                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0),
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut overlapped,
+                )
+            }
+            .is_ok();
+            if locked {
+                return handle.0 as i64;
+            }
+            unsafe { let _ = CloseHandle(handle); };
+            return -1;
+        }
+
+        let timeout = std::time::Duration::from_secs(timeout_secs as u64);
+        let deadline = std::time::Instant::now().checked_add(timeout);
+        loop {
+            let locked = unsafe {
+                LockFileEx(
+                    handle,
+                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0 | LOCKFILE_FAIL_IMMEDIATELY.0),
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut overlapped,
+                )
+            }
+            .is_ok();
+            if locked {
+                return handle.0 as i64;
+            }
+            if deadline.is_none_or(|limit| std::time::Instant::now() >= limit) {
+                unsafe { let _ = CloseHandle(handle); };
+                return -1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -972,8 +1045,18 @@ pub unsafe extern "C" fn rt_file_unlock(handle: i64) -> bool {
 
     #[cfg(not(unix))]
     {
-        let _ = handle;
-        false
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::UnlockFileEx;
+        use windows::Win32::System::IO::OVERLAPPED;
+
+        if handle <= 0 {
+            return false;
+        }
+        let file = HANDLE(handle as *mut core::ffi::c_void);
+        let mut overlapped = OVERLAPPED::default();
+        let unlocked = unsafe { UnlockFileEx(file, 0, u32::MAX, u32::MAX, &mut overlapped) }.is_ok();
+        let closed = unsafe { CloseHandle(file) }.is_ok();
+        unlocked && closed
     }
 }
 

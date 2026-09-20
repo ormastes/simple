@@ -1,6 +1,9 @@
 # D1's src/lib/common/svmg module is not present on shared main, blocking B3 in-tree verification
+## Closed 2026-09-16 — ...ness's 3-vector spot check. ## Resolution (2026-08-07, same day) D1 is landed on `origin/m
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-07
 Found by: Task B3 (cuda_vm per-launch executor,
@@ -93,6 +96,3 @@ condition (`src/lib/common/svmg/` present on `origin/main`) is now met --
 re-run the two commands above against the current tree to get a live
 signal.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

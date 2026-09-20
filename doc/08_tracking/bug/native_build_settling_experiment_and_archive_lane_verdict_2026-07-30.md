@@ -1,6 +1,9 @@
 # Settling experiment + archive-lane final verdict (2026-07-30)
+## Closed 2026-09-16 — ...N_MODE=interpret SIMPLE_BINARY=<resolved> SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1`) — this str
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Assignment: (1) settle whether the 07-29 6-CPU-hour rebuild arc was
 "blind but legitimate" or a real defect, by re-running with
@@ -176,5 +179,3 @@ insufficient to bound the actual worker; future bounded attempts should
 either pass `--timeout` through to the tool itself or explicitly track
 and kill the worker PID, not just the wrapper.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

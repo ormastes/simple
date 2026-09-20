@@ -1,5 +1,8 @@
 # Two bootstrap-seed interpreter bugs (found by Lane H4 pseudo-fs work)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Both reproduce under `src/compiler_rust/target/release/simple run` (the seed
 interpreter); both are worked-around in Lane H4 but should be fixed at the seed.
@@ -36,5 +39,3 @@ Worked around in Lane H4 (pseudo-fs mount adapters landed). Real fixes are seed
 interpreter/codegen changes → gate on `bin/simple build bootstrap`, currently
 blocked by the toolchain redeploy.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

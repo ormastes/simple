@@ -1,5 +1,9 @@
 # Front-end cache HIT restores cost most of a parse (interpreted per-line decode)
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Status FIXED (decoder inlining) with before/after numbers and pinned spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-22  **Status:** FIXED (decoder inlining); native bulk decode still open
 - **Area:** `src/compiler/10.frontend/core/flat_pool_codec.spl` (`flat_pool_dec_*`)
@@ -50,5 +54,3 @@ measured 11.4 s for the i64 half alone) plus a truncated-inner-list case.
 - run11 parse shard 6/8 died silently; its claimed modules were orphaned and
   every HIR child re-parsed them (claims should be reclaimable).
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

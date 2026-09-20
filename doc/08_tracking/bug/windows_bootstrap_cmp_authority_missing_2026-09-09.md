@@ -1,4 +1,8 @@
 # Windows bootstrap admission depends on unavailable `cmp`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-09  
 **Status:** In progress; source fix and focused coverage are present, but the latest focused invocation exposed a test PATH fixture issue; host provisioning and a post-fix bootstrap proof remain open
@@ -35,3 +39,4 @@ this record's own status line still names two outstanding pieces of evidence —
 the applied admitted PATH and one successful post-fix bootstrap admission —
 and neither can be produced here (a bootstrap is already running and this
 session may not start one). Status unchanged.
+

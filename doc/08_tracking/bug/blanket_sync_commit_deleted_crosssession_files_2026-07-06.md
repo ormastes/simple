@@ -1,5 +1,8 @@
 # Blanket "sync working changes" commit deleted another session's files
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` still FAILs — still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Recovered (2026-07-06). 3 of 4 files restored by this record's fix; the 4th
@@ -117,5 +120,3 @@ files on disk in this recovery.
 - `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` —
   companion harness spec restored by a parallel session.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

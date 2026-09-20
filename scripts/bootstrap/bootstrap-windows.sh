@@ -37,7 +37,7 @@ materialized_receipt_dir="${repo_root}/build/bootstrap/materialized-links"
 materialized_receipt="${materialized_receipt_dir}/windows-materialized-links.$$.env"
 umask 077
 export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="${materialized_receipt}"
-sh "${script_dir}/../setup/materialize-symlinks-windows.shs" \
+bash "${script_dir}/../setup/materialize-symlinks-windows.shs" \
   --strict-missing --receipt "${materialized_receipt}" "${repo_root}" || {
   echo "error: required Windows symlink materialization failed; see ${materialized_receipt}" >&2
   exit 1

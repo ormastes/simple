@@ -1,5 +1,8 @@
 # Entry-module top-level val initializers never execute under freestanding native-build cranelift
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -27,5 +30,3 @@ Blocks ring-3 USEROK smoke from using module-level state. Workaround works but n
 ## Next Step
 Implement `__module_init_*` emission and entry-point invocation in freestanding cranelift backend. Cross-reference with `baremetal_entry_closure_class_instantiation_fault_2026-07-06.md` — both bugs share the same root fix.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

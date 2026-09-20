@@ -1,6 +1,8 @@
 # Stage 3 backend segfault after HIR in GPU dynload bootstrap
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -35,6 +37,3 @@ backend crash diagnostics enabled, and repair the pure-Simple compiler before
 retrying bootstrap. Do not substitute the Rust seed or admit the Stage 2 binary
 as a full CLI compiler.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

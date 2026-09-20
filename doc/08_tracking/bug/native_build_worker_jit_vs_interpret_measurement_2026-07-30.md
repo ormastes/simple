@@ -1,6 +1,8 @@
 # native-build worker: JIT vs interpret measurement (2026-07-30)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment: measure the `native_build_worker.spl` compile pipeline under
 `SIMPLE_EXECUTION_MODE=jit` versus the forced-`interpret` default, since
@@ -199,5 +201,3 @@ own compile performance, not the retype's correctness; the entry file
 itself was removed after this pass's runs, consistent with prior
 passes' scratch-file discipline).
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

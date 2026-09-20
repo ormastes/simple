@@ -1,6 +1,10 @@
 # Self-hosted parser has no `Variant = value` enum support — seed-only language feature
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open
 **Found:** 2026-07-27 (bootstrap Stage 4 phase-2 parse, after device.spl entered the CLI closure)
 **Area:** `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` (variant loop, ~:128)
 **Severity:** high — a documented ABI pattern compiles under the seed but not the default toolchain
@@ -46,5 +50,3 @@ explicit-value enums.
   seed/self-hosted divergence family, all detonating at bootstrap Stage 4
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

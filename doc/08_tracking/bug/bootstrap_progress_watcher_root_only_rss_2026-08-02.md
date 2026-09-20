@@ -1,5 +1,9 @@
 # Bootstrap progress watcher reports only wrapper RSS
-**Status:** RESOLVED — "Fixed for future canonical runs" per this record's own Status section; restored 2026-09-13 after a 2026-09-12 generic triage stamp overwrote it.
+## Closed 2026-09-16 — Status Fixed for future canonical runs; tree_* fields added, tests cover
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -43,21 +47,3 @@ That prebuild latency is separately measurable, but source and tool authority
 are admission inputs. It must not be shortened by dropping hashes or snapshots;
 this fix deliberately does not change it.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
-
-## Triage 2026-09-13
-Restored status per this record's own "## Status" section ("Fixed for
-future canonical runs"). Not independently re-run (needs a live bootstrap
-process to observe the RSS watcher in action, out of this lane's
-no-bootstrap constraint). No code change attempted.
-## Re-check 2026-09-13 (BUGFIX-12 shard 22)
-
-Confirmed by content: `tree_rss_kb` is present in
-`scripts/bootstrap/bootstrap-progress-watch.shs` (and its check script
-`check-bootstrap-progress-watch.shs`), matching the "Fix" section above. The
-header's stale "OPEN (unverified 2026-09-12)" line understated the doc's own
-"Fixed for future canonical runs" status.
-
-Status: RESOLVED (2026-09-13) — tree-RSS fields confirmed present by content
-inspection; the fix described above is intact.

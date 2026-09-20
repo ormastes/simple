@@ -1,4 +1,8 @@
 # BUG: Vulkan lane fence-timeout sentinel is structurally unreachable
+## Obsolete 2026-09-16 — duplicate of vulkan_submit_and_wait_fence_blocks_unconditionally_2026-08-07 (same spec example+root cause); that row RESOLVED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Status:** Confirmed defect — NOT a flake. 5/5 identical failures in isolation with an otherwise idle GPU.
 **Date filed:** 2026-08-08
@@ -67,3 +71,4 @@ before changing Rust.
 Per `.claude/rules/testing.md` the spec is correct and **must stay RED** until
 this is fixed. Do not weaken the assertion, mark it pending, or delete the
 fixture.
+

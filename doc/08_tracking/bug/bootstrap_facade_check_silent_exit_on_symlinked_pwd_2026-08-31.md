@@ -1,4 +1,8 @@
 # bootstrap-from-scratch.sh exits 1 silently when invoked from a symlink-aliased PWD
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-31
 - Severity: medium (blocks bootstrap with zero diagnostic output)
@@ -36,3 +40,4 @@ Invoke from the physical path: `cd -P /mnt/data/worktrees/simple-main` first.
 Either canonicalize both sides with `pwd -P` before comparing, or emit a
 typed error line (`bootstrap-policy-error: facade-path-alias-mismatch ...`)
 before returning, per the repo's fail-with-verdict convention.
+

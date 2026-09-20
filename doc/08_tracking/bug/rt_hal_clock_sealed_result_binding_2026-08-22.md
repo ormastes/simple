@@ -1,5 +1,8 @@
 # `rt(hal)` clock sealed-result binding gap
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Current bounded production slice
 
@@ -70,5 +73,3 @@ Compile-time cost is O(manifest bytes) once per tagged declaration (bounded by
 cost, allocation count, and dispatch overhead remain exactly unchanged because
 the new checks emit no hot-path instruction, collection, copy, or lookup.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

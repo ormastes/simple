@@ -1,4 +1,9 @@
 # Interpreter reallocated block-scope shadow names on every loop iteration
+## Closed 2026-09-16 — Status RESOLVED 2026-09-13 with before/after CPU measurements and pinned spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (2026-09-13)
 - Lane: PERF-6, worktree `/home/yoon/dev/simple-perf-6`, base `origin/main` f26970e9d93
@@ -77,3 +82,4 @@ Skipping it needs a fact the capture side cannot establish more cheaply than the
 probe itself, and the one behaviour the probe exists for is real -- see the
 `sem_global_shadow.spl` fixture, where a callee mutates the shadowed global
 mid-block and the post-block read must see the NEW value (`30:9`).
+

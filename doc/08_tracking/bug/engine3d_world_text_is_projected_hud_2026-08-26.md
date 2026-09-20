@@ -1,5 +1,8 @@
 # Engine3D world text is projected HUD material, not complete world text
-**Status:** OPEN (unverified 2026-09-12)
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/lib/gc_async_mut/gpu/engine3d/engine.spl:473-518
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -22,5 +25,3 @@ Implement explicit HUD/screen-label/billboard/world-plane/depth-annotation place
 - Owner: Engine3D adapter lane with text-layout/font-renderer merge owner.
 - Unblock: retained tests prove shared immutable 2D/3D batch identity, scene occlusion and HUD overlay, CPU/device parity, device-origin readback, 100% reachable branch coverage, and cold/warm memory/performance gates.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

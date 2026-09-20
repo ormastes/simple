@@ -1,5 +1,8 @@
 # SimpleOS VFS round-trip blocker 2: 64-bit PCI BAR truncated, and unaligned MMIO reads silently return 0
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Gate: `scripts/check/check-simpleos-vfs-server-roundtrip-ovmf.shs`
@@ -110,5 +113,3 @@ cacheable. QEMU dispatches MMIO by physical address regardless of guest
 cacheability, so this is not the QEMU symptom, but it is a real defect for the
 board-runnable rule and should be `0x9B` (PS|RW|P|PCD|PWT) on hardware.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

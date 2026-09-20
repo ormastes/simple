@@ -1,6 +1,8 @@
 # Pre-existing test-tree divergence record — enterprise-suite landing 2026-08-14
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Required record for the test-tree-divergence scoped-delta escape (vcs.md):
 landing range `425fdcc69c76..<enterprise-suite tip>` passed
@@ -100,6 +102,3 @@ this commit adds three documentation files and touches **zero** `test/` paths
 (`git diff --name-only <base> <tip> | grep -c '^test/'` = 0), so it cannot
 introduce test-tree divergence against any base.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

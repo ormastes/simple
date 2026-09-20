@@ -1,6 +1,8 @@
 # MCP native-build HIR-entry fatal: `.len()` on Option::None from ambiguous `env_get` dispatch
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01 · **Status:** FIXED (`628ac26d38d`) · **Severity:** blocker (made MCP native build unmeasurable)
 
@@ -138,6 +140,3 @@ assignment, mutual recursion through a `_inner` helper, a mutating bool-returnin
 Like the layer-3 `env_get` defect, this only manifests under the full compiler
 closure, which is consistent with the ambiguous-dispatch warnings the run emits.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

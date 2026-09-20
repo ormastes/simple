@@ -1,4 +1,8 @@
 # `crypto.types.text_to_bytes` silently loses to `base_encoding.text_to_bytes` — every digest wrong
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Status: **product mitigated** (crypto auth path); **compiler defect OPEN**
@@ -209,5 +213,3 @@ seed build was attempted (see the note above). The deeper fix remains that an
 explicit `use std.crypto.types.{text_to_bytes}` must bind to *that module's*
 definition regardless of collisions.
 
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/01_unit/lib/nogc_sync_mut/http/auth/digest_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

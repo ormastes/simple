@@ -1,6 +1,6 @@
 # `todo_db.sdn` rows can point at a real line whose comment was reworded to a different topic, defeating literal-text "marker gone" detection
 
-- Status: OPEN (2026-09-12) — found while building `scripts/check/sync-tracking-db-status.shs`; not fixed here (out of scope for that tool)
+- Status: OPEN (2026-09-12) — found while building `scripts/check/sync-tracking-db-status.shs`; not fixed here (out of scope for that tool). Update 2026-09-17: the stable-key merge it calls for now exists in `src/app/todo_scan/main.spl` (see `todo_scan_segfaults_after_db_write_and_renumbers_ids_2026-09-12.md` § Fix 2026-09-17), so rows of this class can be re-verified mechanically by a rescan instead of only by hand.
 - Found: 2026-09-12
 - Component: `doc/08_tracking/todo/todo_db.sdn`, `scripts/check/sync-tracking-db-status.shs`
 - Binary: n/a (pure text/db defect, not a compiler/runtime defect)

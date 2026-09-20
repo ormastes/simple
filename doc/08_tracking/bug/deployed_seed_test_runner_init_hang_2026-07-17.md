@@ -1,8 +1,12 @@
 # Deployed release binary: single-file `simple test` hangs on ALL specs (stale Jul-11 seed)
+## Obsolete 2026-09-16 — stale Jul-11 seed (sha 561767c6615bc013) long replaced per later redeploy records; fresh seed recorded clean
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-17
 **Severity:** high (blocks single-file spec runs repo-wide on the deployed binary)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** OPEN — hypothesis pending fresh-seed confirmation
 
 ## 2026-07-18 native-owner update
 
@@ -61,5 +65,3 @@ lane S63) so the true self-hosted binary can be redeployed.
   `S61_interpreter_stack_overflow_app_io_mod_2026-07-17.md`.
 - Test-runner infra importing the suspect modules — repo-wide grep negative.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

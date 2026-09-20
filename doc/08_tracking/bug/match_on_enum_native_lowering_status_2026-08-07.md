@@ -1,6 +1,8 @@
 # `match` on enum — per-engine status verified 2026-08-07 (partial fix, not fully stale)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** BUG-2026-08-07-enum-match-native-lowering-status
 - **Date:** 2026-08-07
@@ -118,19 +120,4 @@ exempted (fixed) and payload-bearing still carries the fallback reason, which
 that require the interpreter". The doc status is accurate; no change made.
 Note: `compiler/src/codegen/**` and `compiler/src/mir/**` are owned by other
 workers in this pass, so no fix was attempted here.
-
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13 (BUGFIX-10 fanout)
-
-Primary file (`src/compiler_rust/compiler/src/pipeline/execution.rs`) is
-Rust-seed native-codegen (`--native`/LLVM AOT) territory, already correctly
-scoped and documented as fail-closed (safe) rather than silently wrong.
-Out of scope for a pure-Simple bugfix lane. Left OPEN, unchanged.
-## Triage 2026-09-13
-
-Per-engine match-on-enum native lowering status row, seed-side
-(src/compiler_rust/compiler/src/pipeline/execution.rs). Out of
-pure-Simple fix scope. Leaving OPEN.
 

@@ -1,5 +1,8 @@
 # Pure-Simple Vector-Font Docgen Crash — TLDR
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Obsolete 2026-09-16 — verified dupe of pure_simple_spipe_docgen_vector_font_spec_crash_2026-07-11.md
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ```sdn
 docgen_blocker:
@@ -11,5 +14,3 @@ docgen_blocker:
 
 Fix and deploy the pure-Simple owner path; do not substitute Rust-seed manuals or evidence.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

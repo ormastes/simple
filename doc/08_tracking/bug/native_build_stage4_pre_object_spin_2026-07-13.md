@@ -1,6 +1,8 @@
 # Native-build Stage 4 dispatch and strict-link blockers
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -819,6 +821,3 @@ retry was made. The next fix must make the canonical Stage 4 wrapper use the
 same bounded pure-Simple closure path before strict provider/backfill linking;
 it must not re-enter the pre-object whole-tree bootstrap path.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

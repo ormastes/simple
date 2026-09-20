@@ -1,4 +1,9 @@
 # An `after_all` hook's write to a module global is LOST when that global was already mutated inside the same group
+## Closed 2026-09-16 — ...ate:** 2026-08-31 **Status:** FIXED 2026-08-31 (branch `fix/after-all-global-write`). Both
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-31
 **Status:** FIXED 2026-08-31 (branch `fix/after-all-global-write`). Both
@@ -121,3 +126,4 @@ Reproduce spec:
 
 Not the same defect as the mutable-closure-capture bug (R1): the sync machinery
 here exists and runs; it was fed a stale base value.
+

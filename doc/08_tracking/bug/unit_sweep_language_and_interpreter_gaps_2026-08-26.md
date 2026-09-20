@@ -1,6 +1,8 @@
 # Language / interpreter gaps surfaced by the full `test/01_unit` sweep (2026-08-26)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found by the 5-agent sweep-fix campaign (`.spipe/simply_showcase/state.md`).
 These are NOT spec/library typos — each needs a compiler or runtime change.
@@ -211,6 +213,3 @@ slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
     sessions can stall or lose rows. Sweep verdicts should not depend on a
     single shared writable DB file.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

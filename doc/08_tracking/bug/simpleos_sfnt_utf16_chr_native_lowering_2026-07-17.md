@@ -1,6 +1,10 @@
 # SimpleOS SFNT UTF-16 name decoding cannot materialize characters natively
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** Fix implemented; fresh pure bootstrap and QEMU evidence pending
 **Date:** 2026-07-17
 **Owner:** compiler / core-C text runtime
 
@@ -61,5 +65,3 @@ this session.
 - SimpleOS emits no unresolved `i64.chr` warning, registers the pinned font,
   and reaches the taskbar-clock pixel oracle.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

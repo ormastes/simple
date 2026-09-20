@@ -1,5 +1,9 @@
 # Scoped unsafe capability parser owner (2026-08-22)
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/frontend/scoped_unsafe_function_body_parser_spec.spl -> 0 passed, 1 failed, still reproduces)
+## Closed 2026-09-16 — root cause repaired in 763457a1f113; AST regression spec added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -69,5 +73,3 @@ positive evidence for the scoped compiler question, but not an executable or a
 full Stage-4 acceptance result. Logs and `/usr/bin/time -v` receipts are under
 `build/native_probe/mcdc_cycle3_sffi_hosted/`.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/compiler/frontend/scoped_unsafe_function_body_parser_spec.spl` on the deployed seed; 1 of 1 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

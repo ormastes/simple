@@ -1,4 +1,9 @@
 # CLI help/dispatch/table drift — 1 phantom, 24 dead table entries, 44 undocumented
+## Closed 2026-09-16 — Status RESOLVED 2026-08-11; gate 8/8 GREEN, all drift classes closed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-11
 **Status:** RESOLVED 2026-08-11 — see RESOLUTION section at the end
@@ -205,3 +210,4 @@ rewrite `cli_help_alignment_spec.spl` received.
 
 **Status: RESOLVED.** Gate `cli_help_alignment_spec.spl` 8/8 GREEN,
 0 phantoms, 0 dead table entries, 0 undocumented commands.
+

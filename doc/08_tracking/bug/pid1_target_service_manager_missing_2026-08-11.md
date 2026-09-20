@@ -1,4 +1,8 @@
 # Missing target-native PID1 service manager
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Partially resolved — blocks `simple_os_enhance` AC-4 QEMU acceptance
 
@@ -77,3 +81,4 @@ SIMPLEOS_REQUIRE_PID1=1 sh scripts/os/make_os_disk.shs
 
 Then run the repository's RV64/QEMU service lifecycle system scenario once it
 has been added.
+

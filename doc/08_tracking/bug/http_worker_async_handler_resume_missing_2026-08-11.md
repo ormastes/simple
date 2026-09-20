@@ -1,6 +1,8 @@
 # HTTP worker cannot safely resume asynchronous SSR handlers
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Impact
 
@@ -17,5 +19,3 @@ Add a typed async handler lifecycle owned by the existing worker/connection path
 - Live SSR evidence traverses web semantic/layout, emits `DrawIrComposition`, lowers through Engine2D, and captures independent semantic and pixel/readback evidence.
 
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

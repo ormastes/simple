@@ -1,4 +1,9 @@
 # Non-optional return contract (E-SFFI-016) — repo-wide sweep, 2026-08-21
+## Closed 2026-09-16 — status line: classes (a)/(b)/(c) CLOSED, guard green; 10 sites baselined behind separate tracked defect
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** class (a)/(b)/(c) CLOSED (guard green, 10 sites baselined behind an
 unrelated seed bug). Updated 2026-08-21.
@@ -533,3 +538,4 @@ Re-ran `SIMPLE_CACHE_SCOPE=envget <strict-seed> native-build --source src/app
 contract error. Progressed through `load_sources` (958/958 files) and
 `source_closure` (666/666 files) cleanly in ~23s before being killed
 deliberately (probe purpose only, not a full build).
+

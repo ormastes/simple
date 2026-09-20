@@ -1,6 +1,10 @@
 # `bin/simple compile` false-fails any main-less module with a module-level global
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open. **Severity:** verification-lane defect — `run`/`native-build`
 handle the same modules correctly, but single-file compile (the recommended
 syntax/semantic gate) false-fails a large class of library modules.
 
@@ -72,5 +76,3 @@ forcing entry-script synthesis. The written-global `Undefined` should be
 impossible once globals register; the SMF emission error should only remain
 for genuine top-level executable statements.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

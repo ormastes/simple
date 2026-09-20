@@ -1,6 +1,9 @@
 # Stale interpreter-extern-gap baseline blocks every hook-enabled push (2026-09-01)
+## Closed 2026-09-16 — stale baseline rows retired; gate PASS after fix (0 new, 0 stale at 232 checked)
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -67,5 +70,3 @@ check-interpreter-extern-registry-gap: PASS — 232 symbol(s) checked, 0 new, 0 
 The checked count is unchanged at 232 — it counts declared externs, which a
 baseline edit cannot move. A PASS at 229 would have meant something else moved.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

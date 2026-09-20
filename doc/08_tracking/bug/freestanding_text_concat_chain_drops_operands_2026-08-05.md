@@ -1,4 +1,9 @@
 # Freestanding lane: 3+ operand text `+` chain silently drops operands
+## Closed 2026-09-16 — Status FIXED; fix in baremetal rt_any_add heap-tag dispatch + regression tests landed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-05
 - **Lane:** SimpleOS guest, `--target x86_64-unknown-none` (freestanding native
@@ -238,3 +243,4 @@ now correct because the runtime fix covers it).
 `text.index_of` on a substring-slice receiver (documented above) is a
 separate, pre-existing hazard; `find_from` remains the documented-safe
 replacement and was not touched by this fix.
+

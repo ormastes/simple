@@ -1,6 +1,8 @@
 # mcp_failure_prevention_spec pre-existing RED at HEAD (2026-08-26)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `bin/simple test test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl`
@@ -26,5 +28,3 @@ MCP/LSP wrapper interface-cache evidence gate and the NFR evidence script
 (`scripts/check/check-mcp-lsp-nfr-evidence.shs`) must pass on this host, or
 the gates need environment-appropriate timeouts.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

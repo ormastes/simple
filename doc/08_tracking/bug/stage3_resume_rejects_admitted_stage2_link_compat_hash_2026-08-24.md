@@ -1,6 +1,8 @@
 # Stage 3 Resume Rejects Its Admitted Stage 2
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -28,6 +30,3 @@ The admission recorded `build_args_sha256=8b8bb4...`; the old resume reconstruct
 Resume now reads `RUST_LOG`, `LIBRARY_PATH`, and the link-compat digest from the canonical transcript. The producer hash uses the executed option order. `bootstrap_stage3_resume_source_spec.spl` pins both contracts.
 
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

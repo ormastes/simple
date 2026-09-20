@@ -1,8 +1,12 @@
 # Bug: examples/ isolation watchdog deadlocks on >64KB output
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler_rust/driver/src/cli/examples_safety.rs:115-166
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-25  
 **Lane:** L5 (examples safety isolation check)  
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** ROOT CAUSE IDENTIFIED
 
 ## Root Cause
 
@@ -25,5 +29,3 @@ Reference implementation: `examples_safety.rs` branch fix (in progress).
 
 Fix blocks all current example verification runs. High priority for examples lane unblock.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

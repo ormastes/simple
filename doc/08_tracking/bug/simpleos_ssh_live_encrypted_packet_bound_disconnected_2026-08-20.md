@@ -1,4 +1,8 @@
 # SimpleOS live SSH encrypted packet bound is disconnected
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** IMPLEMENTED — admitted-runtime evidence remains release-blocking
 **Owner:** live SSH AES-GCM receive path and canonical socket facade
@@ -70,3 +74,4 @@ reader plus its frame validator. Regression: `ssh_session_shell_spec.spl`
 The closure evidence requirement above (production AES-GCM receive path on an
 admitted self-hosted runtime with a target/QEMU receipt) is unchanged and still
 open.
+

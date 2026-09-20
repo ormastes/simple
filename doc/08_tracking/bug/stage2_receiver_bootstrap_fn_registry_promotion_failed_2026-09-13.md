@@ -1,4 +1,8 @@
 # Stage-2 receiver probe: `bootstrap fn registry promotion failed` on the site-13 gate fixture
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Area: 50.mir transient-scope promotion / Stage-2 admission (receiver probe)
@@ -45,3 +49,4 @@ that BOOT-13 owns. Recorded with the exact command, log path and binary identity
 discriminate the two candidates cheaply (the fixture compiles standalone in ~80 s on this host).
 The first diagnostic step should be to report WHICH of the twelve registries failed to promote —
 `module_lowering.spl:1318` currently discards that.
+

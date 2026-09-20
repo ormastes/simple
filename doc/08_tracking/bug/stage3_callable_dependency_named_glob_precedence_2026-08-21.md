@@ -1,6 +1,8 @@
 # Stage-3 callable dependency named/glob precedence (2026-08-21)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -185,6 +187,3 @@ does not fire: mechanism (2) needs a facade surface that materializes re-exports
 into its declaration arrays, which a plain `use pkg.term.*` chain does not
 create. Building that minimal repro remains open work.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

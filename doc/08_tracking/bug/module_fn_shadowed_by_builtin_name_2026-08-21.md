@@ -1,6 +1,9 @@
 # Module-level `fn` silently shadowed by an interpreter builtin of the same name
+## Closed 2026-09-16 — ..., so the fix belongs in the seed. ## Fix location + exact diff (NOT applied — seed build/d
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-21
 - Status: FIX IMPLEMENTED — VERIFICATION PENDING (deploy pending)
@@ -139,5 +142,3 @@ codegen gate is a no-op for any name absent from the alias table).
 
 Unblock condition: seed rebuild + deploy to `bin/release/<triple>/simple`.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,8 @@
 # `simple check` fails to parse its own entrypoint on every input (2026-09-05)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 OPEN. Blocks the acceptance checkbox
@@ -56,6 +58,3 @@ path's) and why it rejects a colon that the normal parser accepts. Do not
 "fix" `src/app/check/main.spl` by rewriting source the normal parser already
 accepts -- that would move the defect, not repair it.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

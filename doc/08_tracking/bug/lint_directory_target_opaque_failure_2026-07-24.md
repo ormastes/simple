@@ -1,6 +1,9 @@
 # Lint directory targets fail as opaque files
+## Closed 2026-09-16 — source-fixed; directory expansion + overlap dedup; Stage 4 qualification pending
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -45,6 +48,3 @@ W001 and one failed-file summary for the mixed-spelling overlap. This is not
 production qualification: the retained binary predates the fix, and a fresh
 Stage 4 essential-tools run remains required.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

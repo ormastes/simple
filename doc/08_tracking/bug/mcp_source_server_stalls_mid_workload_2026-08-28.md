@@ -1,6 +1,8 @@
 # Bug: source-mode MCP server stalls mid-workload under load (stdio, seed interpreter)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Found:** 2026-08-28, MCP parity lane, while measuring before/after legs
   with `scratchpad/ab/drive2.py` against
@@ -41,5 +43,3 @@
 - **Next:** retry on the natively-built server after the mcp_health redeploy;
   if it reproduces, strace the read loop at the stall point.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

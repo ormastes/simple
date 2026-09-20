@@ -1,6 +1,8 @@
 # Stage 4 CLI utility cwd owner
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -33,6 +35,3 @@ fallback disabled, then exited 30 with empty output. Evidence is retained under
 the repository root has no package manifest; the accepted contract checks the
 documented empty-manifest result plus quoted CSV behavior.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

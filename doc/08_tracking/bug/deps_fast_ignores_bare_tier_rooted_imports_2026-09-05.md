@@ -1,4 +1,9 @@
 # `deps fast`/`deps deep` silently ignore bare tier-rooted imports (fail-open closure)
+## Closed 2026-09-16 — RESOLVED 2026-09-06; scanner.spl step 3b/3c fix; regression spec 10/10 GREEN
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-09-05
 **Status:** RESOLVED 2026-09-06 — fixed in `src/app/deps/scanner.spl` (pure Simple); regression spec `test/01_unit/app/deps/bare_tier_root_imports_spec.spl` (7 examples, 0 failures; sspec score 83/100)
@@ -262,3 +267,4 @@ Spec now 10 examples, 0 failures. Discriminating RED, re-measured because step
 3c's `src/lib` root subsumes step 3b: with every tier branch disabled, 4 of 10
 fail; with step 3c disabled, the 2 dotted-directory examples fail. `deps_tool_spec`
 (17) and `deps_deep_spec` (13) stay green.
+

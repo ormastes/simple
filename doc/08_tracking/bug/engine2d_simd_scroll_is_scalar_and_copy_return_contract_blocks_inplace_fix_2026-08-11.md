@@ -1,5 +1,8 @@
 # Engine2D SIMD scroll is scalar; copy return contract blocks safe in-place fix
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -44,5 +47,3 @@ Introduce one ownership-safe typed in-place contract and use it consistently:
 Until these gates pass, blit/scroll must be reported as scalar-backed and cannot
 support an 8K/80 SIMD claim.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

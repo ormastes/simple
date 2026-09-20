@@ -1,4 +1,8 @@
 # WM Glass QEMU Evidence Contract P1 Gaps — TLDR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open and fail-closed; neither QEMU row is a PASS.
 - x86 still needs a published frozen manifest with no external-ELF bypass,
@@ -31,3 +35,4 @@ wm_glass_qemu:
   committed_source -> frozen_admission -> ordered_events -> frame_capture
   missing_any_gate -> fail_closed
 ```
+

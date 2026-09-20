@@ -1,4 +1,8 @@
 # Bug: extern calls taking `[u8]` reject a genuinely-typed `[u8]` array — "byte array element must be integer, got u8"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-04
 **Severity:** P1 — every extern that marshals bytes through
@@ -6,7 +10,7 @@
 I/O) silently only works when the caller passes an untyped/`[i64]` integer
 array, and rejects the natural, statically-typed `[u8]` value real code
 produces (e.g. any `wire.spl`-style `ByteWriter.to_bytes()` codec output)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** Open — worked around at the call site in
 `src/lib/nogc_sync_mut/game_net/udp_transport.spl`; no interpreter fix yet
 
 ## Summary
@@ -79,6 +83,3 @@ representation) alongside `Value::Int`, so callers do not need to manually
 downgrade a typed byte array to an untyped integer array before any
 byte-taking extern call.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

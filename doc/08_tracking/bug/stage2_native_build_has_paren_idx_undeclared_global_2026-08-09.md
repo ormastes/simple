@@ -1,4 +1,8 @@
 # Stage2 native-build: `has_paren_idx` undeclared global in predicate_parser.spl
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: FIXED
 - Found: 2026-08-08, during the `stage3_vacuous_binary_is_enum_discriminant_garbage_not_a_link_failure_2026-08-08.md` wildcard-arm bisection (side-finding, unrelated to that bug's original symptom)
@@ -98,3 +102,4 @@ than a hard frontend name-resolution error) is a broader fail-open gap — this
 exact bug should have been caught by name resolution at parse/semantic-check
 time regardless of backend. That's tracked separately in the memory entries
 referenced above; not re-litigated in this bug doc.
+

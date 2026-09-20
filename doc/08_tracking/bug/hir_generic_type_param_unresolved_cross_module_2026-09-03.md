@@ -1,6 +1,8 @@
 # HIR: a generic type parameter is treated as a missing named type across modules
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-03
 Compiler: `build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-admitted/simple.exe`
@@ -104,5 +106,7 @@ Same class as
 cited in the materialization source itself (line ~1032). So fixing the HIR half
 may only move a generic-using program's failure to a codegen SEGV.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

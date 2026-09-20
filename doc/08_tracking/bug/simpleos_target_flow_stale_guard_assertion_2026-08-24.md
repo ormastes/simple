@@ -1,4 +1,9 @@
 # SimpleOS target-flow spec searches for a stale guard spelling
+## Closed 2026-09-16 — ... stale guard spelling **Status:** Resolved ## Evidence `test/01_unit/compiler/backend/simp
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved
 
@@ -30,3 +35,4 @@ passing without exercising target construction.
 The assertion now searches for the exact computed `if is_simpleos:` guard and
 the exact x86_64 SimpleOS `LlvmTargetTriple` return. It retains both ordering
 checks plus the behavioral target construction checks.
+

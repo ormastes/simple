@@ -1,4 +1,8 @@
 # Test runner invalid options fell back to full discovery — 2026-07-23
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / FOCUSED BOOTSTRAP CONTRACT PASS / PURE-SIMPLE QUALIFICATION PENDING
 
@@ -19,3 +23,4 @@ early dispatch.
 The focused contract covers unknown and bare options, option tokens swallowed
 as values, empty split/equals values, signed `--timeout -1`, and a valid value
 ending in `=`.
+

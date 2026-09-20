@@ -1,6 +1,8 @@
 # Bug: JIT SIGSEGV calling GameBackend trait methods via `LoopDriver.step`
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-02
 **Component:** Cranelift JIT path (`bin/simple run` / `src/compiler_rust/target/release/simple run`),
@@ -268,5 +270,3 @@ Interim mitigation: the 2026-08-02 determinism fix makes the winner stable;
 divergent-layout pairs above rarely co-load (different tiers/domains), and the
 browser_engine resolver spec pins the engine2d family green (6/6).
 
-## Triage 2026-09-12
-Not re-run in this pass to avoid an uncontrolled SIGSEGV mid-batch; older than 45 days. Closing per age policy — this is a good candidate to re-test individually. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,8 @@
 # seed_interp: flat-nullable `.unwrap()` returns wrong value
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: fix ready, pending seed redeploy
 - Component: Rust seed interpreter (`bin/simple run`, SIMPLE_BOOTSTRAP unset) — actually the seed's default JIT-first execution path (Cranelift codegen), not the AST tree-walking interpreter; `SIMPLE_EXECUTION_MODE=interpret` was already correct before this fix
@@ -131,5 +134,3 @@ For parity test cases requiring Optional `.unwrap()` semantics:
 
 Native-build's handling of flat-nullable `.unwrap()` is correct (verified by `native_text_option_unwrap_pointer_value_2026-07-15.md` which shows native prints `"opt"` as expected). This is a seed-only (Rust interpreter) defect.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

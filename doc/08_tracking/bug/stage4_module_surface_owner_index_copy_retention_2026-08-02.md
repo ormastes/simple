@@ -1,6 +1,9 @@
 # Stage4 module-surface owner-index copy retention
+## Closed 2026-09-16 — ...eir traversal and key-array costs. ## Fix and preserved behavior Visit each category key a
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -62,6 +65,3 @@ procedural, not a quantitative acceptance threshold.
   workers resolve the hard-coded isolated-worktree path `bin/simple`, which is
   absent. No source diagnostic preceded that infrastructure failure.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

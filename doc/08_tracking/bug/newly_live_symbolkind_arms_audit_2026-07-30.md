@@ -1,6 +1,8 @@
 # Audit: `case SymbolKind.X:` / bare-name arms that went from permanently-dead to live after PTR1/PTR2
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-30
 - **Lane:** DEAD1 (mission-critical hardening campaign)
@@ -200,5 +202,3 @@ raise for this specific follow-up: the spec exercises the checker's `.spl` sourc
 interpreter, and the `Results: 9 total, 9 passed, 0 failed` line is the real outcome of that
 execution, not a stale-binary artifact.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

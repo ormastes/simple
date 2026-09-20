@@ -3,7 +3,7 @@
 
 use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
 struct CompilerInventoryRefreshV1:
@@ -89,6 +89,13 @@ fn compiler_inventory_event_push_v1(
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
         return events
+    # The inventory tracks compilable sources only (.spl and simple.sdn
+    # manifests). Release/development checkouts carry tens of thousands of
+    # other files under src/ (vendored C, fonts, docs); admitting the first
+    # one fails apply with event-invalid, and hashing them dominated
+    # cold-init wall time. Filter before touching the file.
+    if not compile_source_inventory_path_valid_v1(normalized):
+        return events
     if operation == "delete":
         return events.push(compile_source_inventory_git_event_v1(
             "delete", normalized, ""))
@@ -129,7 +136,8 @@ fn compiler_inventory_git_events_v1(
     var events: [CompileSourceEventV1] = []
     if cold_init:
         val listed = compiler_inventory_git_lines_v1(
-            root, ["ls-files", "--cached", "--others", "--exclude-standard", "--"] + source_roots)
+            root, ["-c", "core.quotePath=false", "ls-files",
+                "--cached", "--others", "--exclude-standard", "--"] + source_roots)
         if listed == nil:
             return nil
         for path in listed!.split("\n"):
@@ -229,12 +237,31 @@ fn compiler_inventory_refresh_v1(
         root, if cursor.valid: cursor.git_head else: head, source_roots, cold_init)
     if git_events == nil:
         return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    # A cold init that listed NO compilable source is never a legitimate state
+    # for this repository, and publishing it is not survivable: the empty
+    # inventory becomes authoritative at generation 0, and every later publish
+    # of real content is then refused for digest divergence at that same
+    # generation -- a permanent wedge whose only escape is deleting the cache by
+    # hand. Measured 2026-09-18: a `text?` git listing unwrapped to the Option
+    # box on the deployed binary's default lane, `.split` yielded nothing, and
+    # `generation=0 count=0` was published for a tree holding 16,791 `.spl`
+    # files; the same command on a correct binary published 16,797 entries.
+    # Fail closed here and name the remedy instead.
+    # See doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+    if cold_init and git_events!.len() == 0:
+        return compiler_inventory_invalid_v1(
+            "cold-init-listed-no-sources (the source walk returned nothing for " +
+            "this checkout; refusing to publish an empty inventory that would " +
+            "wedge the cache -- verify the binary with " +
+            "scripts/check/check-deployed-binary-optional-unwrap.shs)")
     var inventory = compile_source_inventory_apply_git_events_v1(cache_root, git_events!)
     if not inventory.valid:
         return compiler_inventory_invalid_v1("git-event-apply:" + inventory.reason)
     val journal_path = root + "/.scv/journal/events.log"
     if cursor.valid and cursor.filesystem_rows > 0 and not file_exists(journal_path):
-        return compiler_inventory_invalid_v1("filesystem-event-journal-missing")
+        return compiler_inventory_invalid_v1(
+            "filesystem-event-journal-missing" +
+            " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
     val journal = if file_exists(journal_path): file_read(journal_path) else: ""
     val filesystem_digest = sha256_text(journal)
     val consumed_rows = if cursor.valid: cursor.filesystem_rows else: 0
@@ -242,9 +269,13 @@ fn compiler_inventory_refresh_v1(
         val prefix_digest = compiler_inventory_journal_prefix_digest_v1(
             journal, consumed_rows)
         if prefix_digest == nil:
-            return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
+            return compiler_inventory_invalid_v1(
+                "filesystem-event-journal-truncated" +
+                " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
         if prefix_digest! != cursor.filesystem_digest:
-            return compiler_inventory_invalid_v1("filesystem-event-journal-rewritten")
+            return compiler_inventory_invalid_v1(
+                "filesystem-event-journal-rewritten" +
+                " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
     val filesystem_events = compiler_inventory_filesystem_events_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:

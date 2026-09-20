@@ -1,5 +1,8 @@
 # Simple Web textarea overlay hard stop — TLDR
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Obsolete 2026-09-16 — TLDR duplicate of simple_web_textarea_overlay_review_hard_stop_2026-07-27.md (same commits/symptom)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Status: open and fail-closed; three review cycles are exhausted.
 - Rejected commits: `32063ae68a`, `259c3e07be`, `87a73e9d0d`.
@@ -18,5 +21,3 @@ feature text bytes -> existing facade
 owner inversion or direct rt_* -> fail closed
 ```
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,8 @@
 # Interpreted-lane semantics defects on macOS — present in BOTH deployed and stage4-candidate binaries
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25
 **Area:** compiler / interpreter lane (aarch64-apple-darwin)
@@ -60,5 +62,3 @@ handles; conversely the incumbent breaks plain-nil-return + `??` (prints "nil"
 instead of the default), which the candidate handles. Root-cause in progress in
 the stage4 deploy arc (see memory project_stage4_macos_deploy_ladder_2026-07-25).
 
-## Triage 2026-09-12
-macOS-specific, older than 45 days, no cheap repro on this (Linux) host. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

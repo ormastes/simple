@@ -1,4 +1,8 @@
 # riscv64 in-guest: `hir.functions.values()` yields EMPTY while `.len()` reports non-empty
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: **RESOLVED 2026-09-01.** Row 1 is GREEN in-guest under real OpenSBI v1.4 `-bios fw_payload`. See ROOT CAUSE below.
 - Date: 2026-09-01
@@ -290,3 +294,4 @@ The duplicate-definition arrangement itself is the hazard: two TUs define the
 same runtime entry points, the link silently picks one, and a fix to the other
 looks correct in source review and is inert at runtime. It has now cost two
 sessions on this one function. Deduplicating the boot TUs is a separate change.
+

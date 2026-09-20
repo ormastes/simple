@@ -1,4 +1,8 @@
 # Release refused 2026-09-14 — beta required row `x86_64-unknown-linux-gnu` is `blocked`, and the candidate/release CI route has never succeeded
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Session: `work/release-2026-09-14`, worktree `.claude/worktrees/agent-ab81388b5fde969c4`,
 base `a7a19a52182` (= `origin/main` at start). Host: macOS aarch64.
@@ -350,3 +354,4 @@ reported `Release version-check: PASS` at `1.0.1-beta.1`, confirming the local
 release tooling is healthy and that the bump itself is a small, deferrable step
 once the chain above is open. Landing the version bump now would leave `main`
 claiming a version that can never be tagged, so it was deliberately not done.
+

@@ -3031,11 +3031,32 @@ impl MirLowering:
             #   * NO arm carries a guard -- `case V(x) if cond:` covers V
             #     textually but does not fire when the guard is false, so its
             #     fall-through is reachable and correct.
-            # Non-exhaustive matches keep the placeholder-0 behaviour: the 286
-            # in-tree sites the warn-only choice above was measured against are
-            # untouched by this, which is why this is a runtime trap on
-            # provably-unreachable code and not the compile-time promotion the
-            # TODO defers.
+            # Legality gates shared by BOTH runtime traps below, each removing
+            # a way a legitimate execution could reach the fall-through block:
+            #   * at least one arm discriminant, and every one RESOLVED (>= 0)
+            #     -- a -1 sentinel arm never fires, so a value the programmer
+            #     believed covered would hit a trap that blamed them wrongly;
+            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
+            #     textually but not when the guard is false, and that
+            #     fall-through is reachable and correct (2026-08-24 decision);
+            #   * the enum's variant set is actually known -- otherwise this
+            #     may not be a module-enum match at all (e.g. Option patterns
+            #     on an i64 scrutinee), which the warn-only path above
+            #     deliberately does not touch either.
+            # A contested bare name is NOT a legality gate for the partial
+            # trap the way it is for the total one: a contested name can make
+            # `missing_v` EMPTY vacuously (the index may hold a shorter
+            # foreign variant list), turning a reachable fall-through into a
+            # trap on a valid program. A NON-empty `missing_v` carries no such
+            # vacuity, and the trap fires only if a value actually falls
+            # through -- which under BUG-2026-08-01's accepted semantics
+            # (runtime report primary) is a defect in BOTH of its causes: a
+            # forgotten variant, or a bare-name collision resolving the arms
+            # to another enum. Unlike the compile-time promotion the TODO
+            # above defers (which would fail the build at hundreds of sites),
+            # this is a runtime terminator on the fall-through path only: it
+            # never fails a build and never fires on a match whose arms do
+            # match the value.
             var all_discs_resolved = true
             for dchk in enum_discs:
                 if dchk < 0:
@@ -3044,15 +3065,13 @@ impl MirLowering:
             for arm_g in arms:
                 if arm_g.has_guard:
                     any_guarded = true
-            var total_match_trap_ok = missing_v.len() == 0 and enum_discs.len() > 0
+            var fallthrough_trap_ok = enum_discs.len() > 0 and all_discs_resolved and not any_guarded
             if not self.enum_variant_index.has(enum_name):
-                total_match_trap_ok = false
+                fallthrough_trap_ok = false
+            var total_match_trap_ok = fallthrough_trap_ok and missing_v.len() == 0
             if self.enum_bare_name_collisions.has(enum_name):
                 total_match_trap_ok = false
-            if not all_discs_resolved:
-                total_match_trap_ok = false
-            if any_guarded:
-                total_match_trap_ok = false
+            var partial_match_trap_ok = fallthrough_trap_ok and missing_v.len() > 0
             if total_match_trap_ok:
                 var b_ft = self.builder
                 if not b_ft.current_block_has_explicit_terminator():
@@ -3069,6 +3088,40 @@ impl MirLowering:
                     ))
                     b_ft.emit_call(tpanic_op, [mir_operand_copy(tmsg_local)], MirType.unit())
                     b_ft.terminate_abort(tmsg)
+                self.builder = b_ft
+            elif partial_match_trap_ok:
+                # Runtime fall-through TRAP for a PARTIAL match (2026-09-19):
+                # the deferred half of BUG-2026-08-01-match-fallthrough. A
+                # no-default match whose arms omit at least one variant used
+                # to let the last `next_block` goto merge_block and yield the
+                # placeholder `const 0` -- the silent wrong answer the bug
+                # record deems the defect, on BOTH lanes and both forms
+                # (statement no-op, expression nil/0). The warn-only
+                # diagnostic above does not stop that value; this terminator
+                # does: rt_panic names the enum, the covered arms and the
+                # missing variants, and Abort diverges so control cannot run
+                # on even if rt_panic is stubbed (the two-halves shape
+                # `lower_bootstrap_panic_call` documents, same as the total
+                # trap above). A match WITH a default arm is untouched --
+                # the default is the explicit `case _:` opt-out this message
+                # points at.
+                var b_ft = self.builder
+                if not b_ft.current_block_has_explicit_terminator():
+                    var pmsg = "enum match fell through on '" + enum_name
+                    pmsg = pmsg + "': a value reached this match that matched NONE of the arms."
+                    pmsg = pmsg + " Arms cover: " + covered_txt + "."
+                    if miss_txt != "":
+                        pmsg = pmsg + " Missing: " + miss_txt + "."
+                    pmsg = pmsg + " Falling through would silently yield a placeholder 0;"
+                    pmsg = pmsg + " add 'case _:' to make an intentional no-op explicit."
+                    val pmsg_local = b_ft.new_temp(self.bootstrap_text_type())
+                    b_ft.emit_const(pmsg_local, MirConstValue.Str(pmsg), self.bootstrap_text_type())
+                    val ppanic_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_panic"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+                    ))
+                    b_ft.emit_call(ppanic_op, [mir_operand_copy(pmsg_local)], MirType.unit())
+                    b_ft.terminate_abort(pmsg)
                 self.builder = b_ft
 
         if has_default:

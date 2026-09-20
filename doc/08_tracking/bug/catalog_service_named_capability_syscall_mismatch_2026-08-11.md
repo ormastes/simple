@@ -1,4 +1,8 @@
 # Catalogue service capabilities do not match live syscall requirements
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Partially resolved — named IPC is live; endpoint generations and
 network route authority remain open
@@ -39,3 +43,4 @@ ambient endpoint-access bypass.
 
 This is independent of the missing service payload/driver broker work. It must
 be resolved before any catalogue service can be accepted as capability-confined.
+

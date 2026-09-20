@@ -1,4 +1,9 @@
 # `load_module_with_imports_internal` re-reads a package `__init__.spl` once per unflattened submodule import
+## Closed 2026-09-16 — Status FIXED 2026-09-13; base 29 opens vs candidate 2, cargo tests RED to GREEN
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED (2026-09-13)
 - Area: compiler / seed pipeline module loader (used by `simple lint`'s static
@@ -174,3 +179,4 @@ GREEN (fix applied): `pipeline::module_loader::tests::` 39 passed, 0 failed
 in the neighbouring cache this fix's doc comment compares itself to).
 
 See `RECEIPT_PERF_8.md` for the candidate-binary strace re-measurement.
+

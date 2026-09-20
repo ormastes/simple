@@ -1,4 +1,8 @@
 # Pure-Simple dynamic frontend-to-HIR Tuple crash
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Area:** dynamic frontend/HIR execution
@@ -104,3 +108,4 @@ validation and rejected immutable-StorageBuffer to mutable-GEP escalation. The
 new mutability regression passes; its containing intensive spec reports 38
 passes and two pre-existing failures. The bijection worker's targeted run timed
 out in the existing daemon and remains unverified.
+

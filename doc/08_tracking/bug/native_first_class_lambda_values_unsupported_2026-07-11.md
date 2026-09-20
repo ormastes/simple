@@ -1,4 +1,8 @@
 # BUG: native path — first-class lambda values unsupported (CallIndirect through non-inlined lambda)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIX IMPLEMENTED; STRICT EXECUTION PENDING
 
@@ -36,3 +40,4 @@ non-member. Execution awaits a fresh runnable pure-Simple compiler artifact.
 
 - bdd `it`-block typed block-lambdas return nil in the interpreter test
   runner (same first-class-lambda family, interpreter side).
+

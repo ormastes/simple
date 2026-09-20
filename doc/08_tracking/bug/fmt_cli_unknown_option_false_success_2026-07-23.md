@@ -1,5 +1,9 @@
 # fmt CLI unknown options could succeed
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — Fix landed; 3 focused contracts pass; Stage-4 evidence pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -22,5 +26,3 @@ mutation), and help's zero exit before file work. All three focused contracts
 pass through the temporary bootstrap interpreter; pure-Simple/Stage 4 evidence
 remains pending the fresh deployed runtime.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

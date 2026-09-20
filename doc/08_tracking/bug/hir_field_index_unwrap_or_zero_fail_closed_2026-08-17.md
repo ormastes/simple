@@ -1,4 +1,9 @@
 # Field-index resolution ended in `.unwrap_or(0)` — now fails closed
+## Closed 2026-09-16 — FIXED (Rust seed); zero latent breakage measured on 862-module corpus
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (Rust seed lowering) / stage-3 symptom NOT attributable to this file
 **File:** `src/compiler_rust/compiler/src/hir/lower/expr/access.rs` (was line 291)
@@ -85,3 +90,4 @@ defect above, per `.claude/rules/testing.md` ("a correct spec that fails is a
 legitimate artifact"). A full `bin/simple test` run of the class spec was
 killed at 600s before its body ran (`rc=143`, no `Results:` line) — that run is
 UNVERIFIED, not failed; the table above is direct fixture evidence instead.
+

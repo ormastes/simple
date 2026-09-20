@@ -1,6 +1,8 @@
 # i18n extractor allocation density and unstable auto IDs
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The current extractor allocates 20,495 times and 2,879,182 bytes for 4,096
 explicit messages: about five allocations and 703 bytes allocated per message.
@@ -17,5 +19,3 @@ borrowed spans or interned text through extraction, and compile once into the
 typed catalog schema/IR. The optimized hot extractor must report reduced
 allocations and stable IDs under unrelated source edits.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

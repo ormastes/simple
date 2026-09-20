@@ -1,10 +1,14 @@
 # std.diag dbg_stage() aborts under `bin/simple test` when co-compiled with the browser_engine/host_compositor module graph
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-06
 **Severity:** medium — blocks writing `bin/simple test` specs that prove
 real `dbg_stage()` emission for task #15 remainder item 3 ([browser] stage
 logs); does not affect `bin/simple run` or production behavior.
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/nogc_sync_mut/diag_spec.spl` now PASSes)
+**Status:** OPEN — root cause (bare-name function registry) NOT fixed. As of
 2026-08-01 the original repro no longer reproduces on the Rust seed and the
 facet-on spec coverage is restored, but the name-keyed registry is unchanged and
 still armed; the collision *detector* was widened to public functions and
@@ -440,5 +444,4 @@ widened detector is signal, not a flood.
 - **Promotion to a hard error under a gate** (the rest of item 3) is not done
   and should wait until item 2 lands.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/nogc_sync_mut/diag_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+

@@ -1,4 +1,8 @@
 # `Option<T>` becomes unresolvable when a module using it co-compiles with `provider.spl`'s large backend graph
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-09-05, lane A7 (Caret GUI workbench, `caret_workbench` goal).
 **Status:** worked around in lane code, NOT fixed in the compiler. Filed per
@@ -70,3 +74,4 @@ Isolate why the builtin `Option` type binding is lost specifically when (a)
 `provider.spl`'s import graph is present AND (b) the same file uses `Option<T>`
 for more than one concrete `T`. A fix removes the need for the
 `SessionUiLookup`/`SessionLookup` workaround structs above.
+

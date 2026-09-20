@@ -1,7 +1,11 @@
 # `std.nogc_sync_mut.file_system.file_ops` is a MOCK: `file_exists` is true for any path, reads return "mock file content"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/app/devhub/cmd_git_spec.spl` now PASSes)
+**Status:** OPEN — worked around at one call site, root cause not fixed
 **Severity:** High — a caller that trusts these functions silently processes
 fabricated data with a success exit code.
 **Component:** `src/lib/nogc_sync_mut/file_system/file_ops.spl`
@@ -99,5 +103,3 @@ mock module fails the spec instead of shipping.
 3. Longer term this is the flat name-keyed function registry again; the
    2026-08-09 record is the tracking item for that.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/app/devhub/cmd_git_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

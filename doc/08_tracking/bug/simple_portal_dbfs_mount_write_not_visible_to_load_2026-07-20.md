@@ -1,5 +1,8 @@
 # `simple_portal` DBFS mount: file written via `_write_mount_file` not visible to `portal_content_db_load_from_mount`
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/02_integration/app/simple_portal/simple_portal_content_db_spec.spl -> 5 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `MountTable`/`DbFsDriver` (`src/lib/nogc_sync_mut/fs_driver/mount_table.spl`)
@@ -64,5 +67,3 @@ isn't an obvious test-authoring mistake; treating as a genuine defect in
 the mount/DBFS write-then-read path (or, less likely, a value-semantics gap
 in `me fn` mutation) rather than a stale test.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/app/simple_portal/simple_portal_content_db_spec.spl` on the deployed seed; the spec now passes in full (5/5), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

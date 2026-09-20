@@ -1,10 +1,12 @@
 # Module-level glyph raster cache: `[text]` array-element read is corrupt under native/JIT — lookup never hits its own store
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED (2026-09-13) -- not reproducible; the T11 root-caused repro spec is now green
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-06
 - **Lane:** hosted `bin/simple run` (Cranelift JIT), font rendering
-- Status: CLOSED (2026-09-13) -- see top-line status and Re-check 2026-09-13 below
+- Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
   that held back the uncommitted W4 glyph-raster-cache addition to
   `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`
@@ -232,41 +234,4 @@ replacing the linear `[text]` key-array scan with parallel primitive arrays
 text-array-free key encoding is feasible for this cache's key shape
 (identity+generation+font_size+codepoint+render_config — mostly not
 representable as small integers without a lookup step of its own).
-
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Re-check 2026-09-13 (BUGFIX-10 fanout)
-
-Re-ran the T11 root-caused, sabotage-comparable repro spec on the deployed
-seed:
-
-```
-$ bin/simple test test/01_unit/language/text_array_index_readback_spec.spl
-SPEC FILE VERDICT: ... declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0
-Results: 3 total, 3 passed, 0 failed
-```
-
-3/3 PASS — including "push via a free function is visible to the caller
-(`[text]`)" and the `[i64]` analog, both of which were the two RED examples
-this doc's T11 section left deliberately failing. The
-free-function-push-to-module-global write-back loss on the interpreter lane
-no longer reproduces. Not independently re-tested: the original never-landed
-glyph-raster-cache diff itself (reverted out of the tree per this doc's
-Recommendation, so there is nothing to re-test there) and the JIT lane
-(already documented as unaffected).
-
-- Status: CLOSED (2026-09-13) — not reproducible on `f26970e9d93`; T11's
-  repro spec is green (3/3).
-## Triage 2026-09-13
-
-Root-caused to the interpreter lane (bin/simple test / Rust seed
-tree-walk interpreter): a free function that .push()es onto a
-module-level array does not write back to the caller's view of that
-array. Confirmed this is the Rust seed's interpreter, not the
-pure-Simple 95.interp tree (same binary this worktree deploys). Fix
-needs a codegen/interpreter investigation into module-global
-resolution across free-function calls -- out of pure-Simple scope.
-Existing spec test/01_unit/language/text_array_index_readback_spec.spl
-left RED as designed. Leaving OPEN.
 

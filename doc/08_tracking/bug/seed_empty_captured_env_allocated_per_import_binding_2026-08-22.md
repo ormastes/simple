@@ -1,4 +1,9 @@
 # Seed interpreter allocated a fresh empty `captured_env` for every imported-function binding
+## Closed 2026-09-16 — FIXED 2026-08-22 with measured memory table and pin test
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-22 (seed, `src/compiler_rust/compiler`).
 **Class:** memory retention — O(modules x visible names) materialisation
@@ -45,3 +50,4 @@ Gate row in `scripts/check/check-perf-regression-tests.shs`.
 The filtered env itself is still one `(String, Value)` entry per visible name per importing
 module (48,879 import bindings here); `filter_functions_from_value` also rebuilds imported
 module DICTS per importer. Those are the remaining O(modules x names) terms.
+

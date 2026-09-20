@@ -1,6 +1,170 @@
+## [1.0.0-beta.13] - 2026-09-18
+Tenth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- The SCV entry-closure freeze refused to run: 11 symlinked .spl files under
+  src/ (e.g. src/app/debug/coordinator.spl -> src/lib/nogc_sync_mut/debug/…)
+  cannot pass the no-follow snapshot admission reader, so no source inventory
+  could be admitted (beta.12 windows leg, 83 min into the compile). Replaced
+  the 11 src/ symlinks with copies of their target content; no symlink
+  remains under the admitted source roots. The fail-closed gate stays at full
+  strength (SIMPLE_SCV_FREEZE_FALLBACK was deliberately NOT used).
+  See doc/08_tracking/bug/scv_freeze_refused_symlinked_spl_sources_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.13`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.13`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.12] - 2026-09-18
+Ninth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- CI shipped a STALE seed binary: the cargo cache's prefix restore-key
+  resurrected a target/ dir from older compiler sources, so beta.11's windows
+  leg ran a seed predating the extern fix merged the same day and died on the
+  exact bug it fixed (byte-identical error to beta.10). Release.yml and
+  build-binaries.yml now touch workspace crate roots after every such cache
+  restore, forcing cargo to rebuild the workspace crates (~5 min) while
+  keeping the dependency cache.
+  See doc/08_tracking/bug/ci_cargo_cache_resurrected_stale_seed_beta11_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.12`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.12`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.11] - 2026-09-18
+Eighth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- The interpreted native-build worker died at semantic time with "unknown
+  extern function: rt_file_read_regular_no_follow_last_failure" when
+  typechecking src/lib/nogc_sync_mut/io/file_ops.spl (beta.10 windows-x86_64
+  leg — the first leg to survive the shard-leak OOM fix and reach that
+  module). The bounded no-follow reader twin was in the seed interpreter's
+  extern table; its diagnostic companion was not. Registered it with a
+  thread-local arm recorder mirroring the runtime READ_NF_* codes.
+
+### Release
+- Product version is `1.0.0-beta.11`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.11`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.10] - 2026-09-18
+Seventh corrected beta of the **1.0.0 line**.
+
+### Fixed
+- release windows-x86_64 leg OOM: the parse-shard cache warmer has never
+  completed on a GitHub runner (silent 6-12 min, then "FAILED TIMEOUT") and its
+  leaked multi-GiB child heap stayed alive — the beta.9 worker died with
+  "memory allocation of 65520 bytes failed" 31 s in while the shard and
+  orchestrator hogged the 16 GB runner (run 35285488617). Dead shard children
+  are now killed after a failed wait (parse + HIR), the shard prints a startup
+  heartbeat, and the CI native-build legs set SIMPLE_PARSE_SHARDING=0 so the
+  worker parses in-process (beta.7-proven on this runner).
+  See doc/08_tracking/bug/native_build_shard_child_leak_starves_worker_oom_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.10`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.10`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.9] - 2026-09-17
+Sixth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Parser recovery pass flagged any identifier named `namespace` as the C++
+  mistake unconditionally; the seed-run release compile aborted on
+  action_identity.spl et al (beta.8 windows-x86_64 leg). Now only the
+  declaration shape `namespace <ident>` is flagged.
+- build-binaries Stage 2 legs now set SIMPLE_SCV_INVENTORY_COLD_INIT=1
+  (main was red with compile-event-journal-missing since the SCV gate
+  rollout).
+
+### Release
+- Product version is `1.0.0-beta.9`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.9`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.8] - 2026-09-17
+Fifth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- windows-x86_64 native-build leg OOM: the seed compile exceeded the
+  windows-latest runner under --threads 4 despite --mode dynload
+  (run 35182374321: "memory allocation of 5616 bytes failed" mid-compile).
+  Windows leg now compiles with --threads 2; linux/macOS unchanged.
+- Rust seed cargo builds now echo a progress note: the ~10 min silent
+  bootstrap-profile build looked hung in the Actions UI, and the linux
+  blocking leg was cancelled externally twice in that window (beta.6,
+  beta.7).
+
+### Release
+- Product version is `1.0.0-beta.8`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.8`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.7] - 2026-09-17
+Fourth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Windows seed-runtime SFFI rt_file_lock/rt_file_unlock were unconditional
+  cfg(not(unix)) stubs returning -1/false, so compiled-code file_lock always
+  failed on Windows; SCV inventory publication failed with
+  SCV-E-ADMISSION git-event-apply:inventory-publication-failed, blocking the
+  seed native-build legs. Implemented CreateFileA + LockFileEx, mirroring
+  src/runtime/platform/platform_win.h.
+- Release workflows passed --source-dir src to native-build, which only
+  accepts --source <dir> or positional source dirs; would have failed arg
+  parse on every seed leg after SCV admission. Fixed release.yml and
+  build-binaries.yml.
+
+### Release
+- Product version is `1.0.0-beta.7`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.7`. The 1.0.1 line remains withdrawn.
+
 # Changelog
 
 All notable changes to Simple Language will be documented in this file.
+
+## [1.0.0-beta.5] - 2026-09-16
+Third corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Release runner memory + macOS rustc poisoning (beta.4 losses): direct
+  native-build invocations run `--mode dynload --threads 4` (windows-x86_64
+  OOM in default one-binary mode); macOS cargo-build sites run under
+  `env -u DYLD_LIBRARY_PATH` (brew LLVM 22 poisoned nightly rustc).
+- Main tree ENAMETOOLONG: 78 oversized symlinks (56 in `da8964fe990`, 22 more
+  found later) restored to short targets; CI checkout of main works again.
+- Bootstrap K1 receipt admits seed-built stage2 via transcript binding (#1028).
+- Carried from 1.0.0-beta.3/4: nightly toolchain pin (`rust-toolchain.toml`),
+  SCV cold-init inventory on direct native-build, linux-x86_64 native-build
+  leg, beta channel-blocking contract (linux-x86_64 + windows-x86_64
+  blocking; macOS Tier-2; cross/SimpleOS continue-on-error).
+
+### Release
+- Product version is `1.0.0-beta.5`, projected into all 19 declared version
+  sites (VERSION, simple.sdn manifests, CLI identity, compiler_rust Cargo
+  manifests/lockfile, npm registry packages/server manifests). Ships as tag
+  `v1.0.0-beta.5`; main carries the same content plus the K1 receipt fix.
+  The 1.0.1 line remains withdrawn; 1.0.0 is the only line.
+
+## [1.0.0-beta.6] - 2026-09-16
+Fourth beta of the **1.0.0 line**; supersedes the failed
+`v1.0.0-beta.5` tag run (release-blocking SCV admission bug, fixed below).
+
+### Fixed
+- **SCV cold-init admission rejected every fresh checkout**: the compile
+  source inventory admits only .spl/simple.sdn paths, but the cold-init git
+  walk turned all ~60k files under src/ into events, so apply failed with
+  `git-event-apply:event-invalid` on the first non-source file after ~1.7 h.
+  Producers now filter non-source paths before reading/hashing; cold-init
+  ls-files passes core.quotePath=false; the filesystem-watch translator
+  skips non-source paths. Bug entry:
+  doc/08_tracking/bug/release_scv_cold_init_event_invalid_non_source_paths_2026-09-16.md.
+- Carried from 1.0.0-beta.5: runner memory + macOS rustc poisoning fixes,
+  ENAMETOOLONG healing (78 symlinks), K1 fixes, nightly pin, cold-init
+  opt-in, linux-x86_64 leg, beta channel-blocking contract.
+
+### Release
+- Product version is `1.0.0-beta.6`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.6`. The 1.0.1 line remains withdrawn.
 
 ## [Unreleased]
 
@@ -163,6 +327,58 @@ All notable changes to Simple Language will be documented in this file.
 - **Font/docgen bootstrap hardening** — filter the SPipe docgen entrypoint from
   spec inputs and register interpreter byte-array pointers for runtime font
   loading; a full self-hosted rebuild remains unverified.
+
+## [1.0.0-beta.3] - 2026-09-15
+
+Second corrected beta of the **1.0.0 line**. The `v1.0.0-beta.2` tag is
+superseded without publication: its release run confirmed the macOS toolchain
+blocker below, which must ship in the release workflow itself.
+
+### Fixed
+- **Release macOS legs** — `dtolnay/rust-toolchain@stable` installs a rustc that
+  SIGSEGVs/SIGABRTs at first invocation on the current macOS runner images,
+  which blocked every tag from publishing assets (the `v1.0.1-beta.1` zero-asset
+  release). Release legs now use the repo-standard `@nightly` toolchain,
+  verified green for install + build on `macos-latest` (aarch64) by the
+  `v1.0.0-beta.2` tag run of `rust-bootstrap-multiplatform.yml`. See
+  `doc/08_tracking/bug/release_macos_rustc_crashes_both_runners_2026-09-14.md`.
+
+### Changed
+- **Product version is now `1.0.0-beta.3`**, projected into all 17 declared
+  consumers.
+
+## [1.0.0-beta.2] - 2026-09-15
+
+First corrected beta of the **1.0.0 line**. The previously published
+`1.0.1-beta.1` identity was a numbering mistake — its own changelog entry
+admits it shipped no self-hosted binary — and is **withdrawn by owner
+decision**; the product returns to the 1.0.0 line. Published identity is
+immutable, so `v1.0.1-beta.1` remains in history marked as withdrawn; do not
+use it.
+
+### Changed
+- **Product version is now `1.0.0-beta.2`** (`release/version.sdn`, `channel: beta`),
+  projected into all 17 declared consumers; every current-version consumer now
+  reads `1.0.0-beta.2`.
+- **Bootstrap pin corrected** — `config/bootstrap.sdn` carries `1.0.0-beta.2`.
+
+### Fixed
+- **Windows bootstrap authority check** — the hosted-root mode check required
+  exactly `0500`, which MSYS/Windows `chmod` cannot set on directories, so no
+  Windows host could bootstrap from the `v1.0.1-beta.1` tag. Fixed on this
+  line; see
+  `doc/08_tracking/bug/beta1_tag_cannot_bootstrap_on_windows_2026-09-14.md`.
+- **T32 cmm validation CLI contract** — `t32_cli` and its contract spec agree
+  on the validation entrypoint (`0718c04b`).
+- **DevHub native Windows launch** — launch the admitted runtime natively and
+  preserve native Windows argv verbatim (`3541100b`, `f5dea5d0`).
+- **Release ruleset pins** — canonical ruleset digests re-pinned and live
+  policy parity restored (`00af1358`).
+
+### Superseded
+- `v1.0.1-beta.1` (2026-09-07): version-only cut with no self-hosted binary,
+  zero release assets, and a broken Windows bootstrap. Withdrawn; this release
+  is the correction, per explicit owner decision.
 
 ## [1.0.1-beta.1] - 2026-09-07
 

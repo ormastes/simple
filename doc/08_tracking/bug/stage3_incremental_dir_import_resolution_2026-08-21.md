@@ -1,6 +1,8 @@
 # Stage-3 incremental directory import resolution (2026-08-21)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -31,6 +33,3 @@ symbols remain unresolved after the imported-type cascade is gone, reopen this
 record with the new first-cause log. Do not route fingerprint traversal through
 `std.nogc_sync_mut.io.dir_ops`: its listing implementation shells out to `ls`.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

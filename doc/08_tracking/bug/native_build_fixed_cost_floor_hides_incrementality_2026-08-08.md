@@ -1,6 +1,8 @@
 # `native-build` pays a ~209 s fixed cost per invocation regardless of input size, and emits no reuse receipt
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** native_build_fixed_cost_floor_hides_incrementality_2026-08-08
 - **Date:** 2026-08-08
@@ -104,5 +106,3 @@ arose.
 - `doc/08_tracking/bug/plain_parse_loop_never_checks_par_had_error_silent_swallow_2026-08-08.md`
   — the collect-all-errors half of the same "default build behaviour" campaign
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

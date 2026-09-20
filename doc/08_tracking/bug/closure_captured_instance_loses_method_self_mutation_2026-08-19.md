@@ -1,4 +1,9 @@
 # Closure-captured instance loses `me`-method self-mutation (2026-08-19)
+## Closed 2026-09-16 — Status FIXED in lambda.rs; verified on fixed seed with spec runs
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (Rust interpreter, `interpreter_call/core/lambda.rs`)
 **Family:** 6th interpreter write-back defect (with match-arm read-path, match-expr
@@ -55,3 +60,4 @@ unchanged by this fix.
 Verified 2026-08-19 on the fixed seed: repro green; engine2d_drawing 2/2,
 vulkan_strict 17/17, base_encoding_utf8_guard 5/5, editor_controller 88/92
 (baseline held).
+

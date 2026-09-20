@@ -1,6 +1,10 @@
 # StringBuilder is worse than naive `+` concat in the tree-walk interpreter, and gets worse than O(n^2) as n grows
+## Open 2026-09-16 — needs owner triage
 
-- Status: RESOLVED for the 1-level `self.field.push` shape (re-verified 2026-09-12, see "Re-verification" at end); the deeper shapes are tracked separately. Was: LOCALIZED (2026-08-18) — root cause proven, contained fix attempted and found insufficient; see "Verdict" below
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+- Status: LOCALIZED (2026-08-18) — root cause proven, contained fix attempted and found insufficient; see "Verdict" below
 - Found: 2026-08-18
 - Component: `src/lib/common/string_builder.spl` (`StringBuilder.push`/`.build`),
   interpreter class-method + array-push dispatch
@@ -265,24 +269,3 @@ doc's measured evidence above serving as the timing record instead.
   it bypasses the Simple-level array entirely. Worth trying as the interpreter
   remedy in the follow-up above instead of fixing array-`StringBuilder`.
 
-## Re-verification (2026-09-12)
-
-Both root causes above have since landed on `main` independently of this
-record: cause #2 (the caller-side `self` alias) was removed by the MECALL-OWNED
-change of 2026-08-22 (`interpreter_helpers/patterns.rs`, "args are evaluated
-HERE ... moved into the callee with NO clone left behind"), and cause #1 got an
-ownership-gated in-place path for the `obj.field.<array-mutator>` shape on
-2026-08-21 (`f53687797bd`, `try_field_array_mutation_in_place`). The
-independent-repro harness above (`Bucket.push_one` via `self.items.push(x)`,
-`SIMPLE_EXECUTION_MODE=interpreter`) on the deployed seed
-`bin/release/aarch64-unknown-linux-gnu/simple` (built 2026-09-06 09:59,
-50,093,192 bytes): **n=30000 in 0.13 s** (was 4.66 s). The `StringBuilder`
-re-adoption question is therefore open again on its own merits.
-
-What is NOT fixed by those two changes — and is the same defect one projection
-deeper — is every other non-identifier receiver: `self.inner.xs.push(x)`,
-`rows[i].push(x)`, `self.rows[r].push(x)`, `self.d.insert(k, v)`,
-`self.inner.d[k] = v`, and `arr[i].method()` with a large `arr`. Measured the
-same day at 4x n they scale 10.7–13.3x (quadratic) and two of them exceed 90 s
-at n=80000. Tracked in
-`doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md`.

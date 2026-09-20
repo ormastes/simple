@@ -1,5 +1,8 @@
 # any_audit: dict-literal type value position classified `field` instead of `generic` (pre-existing)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Spec: `test/01_unit/app/any_audit/any_audit_classify_spec.spl`
@@ -13,5 +16,3 @@
   dict-literal `{K: V}` type in value position classifies as `generic`,
   then this spec goes green.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

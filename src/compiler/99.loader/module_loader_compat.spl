@@ -20,7 +20,8 @@ use compiler.loader.loader.module_loader_semantic.{
 }
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
-use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_alloc_rw_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute_wire}
 use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
 use compiler.loader.aspect_lifecycle_gate.{
     AspectLifecycleGateAdmissionV1,
@@ -106,6 +107,30 @@ fn _loader_symbol_type_from_smf(ty: SymbolType) -> LoaderSymbolType:
     match ty:
         case Function: LoaderSymbolType.Function
         case _: LoaderSymbolType.Data
+
+# ============================================================================
+# Relocation value computation (lane A4b, doc/03_plan/compiler/linker/
+# mold_mdsocpp_linker_plan_2026-09-18.md; design doc §4).
+#
+# Extracted from the runtime SMF relocation loop below so the value formula
+# can be driven directly by a spec instead of only through a full
+# compile-load-execute round trip. Converged onto the shared value oracle
+# `smf_reloc_compute_wire` (compiler.backend.linker.gpu_smf.smf_reloc_formulas)
+# -- out-of-range Rel32/PltRel32/GotRel32/Abs32 deltas now REJECT (ok: false
+# -> Err) instead of the loader's previous silent `as i32` truncation
+# (doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md).
+#
+# `s` is the oracle's S: the resolved symbol address for wires 1/2/3/5, and
+# for wire 4 (GotRel32) the address of the per-module GOT slot that HOLDS the
+# symbol's address (S == G) -- never the symbol's own address. The loop below
+# synthesizes that slot before calling this helper for a wire-4 relocation.
+# ============================================================================
+pub fn loader_smf_reloc_value(reloc_type: i32, s: i64, place: i64, addend: i64) -> Result<i64, text>:
+    val computed = smf_reloc_compute_wire(reloc_type as i64, s, addend, place)
+    if computed.ok:
+        Ok(computed.value)
+    else:
+        Err("Relocation value out of range for wire type {reloc_type} (S={s}, A={addend}, P={place})")
 
 struct LoadedSymbol:
     name: text
@@ -1328,6 +1353,44 @@ impl ModuleLoader:
                     case Err(err):
                         return LoadResult.Error(message: err)
                 if relocs.len() > 0:
+                    # Synthesize a per-module GOT for wire-4 (GotRel32) sites
+                    # before patching anything: R_X86_64_GOTPCREL loads
+                    # *through* a GOT slot, so S must be the slot's address,
+                    # never the resolved symbol's own address (design §4;
+                    # doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md).
+                    # One 8-byte RW slot per distinct GOT target, allocated
+                    # once for the whole module. Never freed for the lifetime
+                    # of this loaded module -- same lifetime contract as the
+                    # exec-memory allocations above, which are also never
+                    # freed here.
+                    var got_slot_addr: Dict<text, i64> = {}
+                    var got_target_names: [text] = []
+                    for reloc in relocs:
+                        if reloc.reloc_type == 4 and reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
+                            val got_target_name = ordered_symbols[reloc.symbol_index].name
+                            if not got_slot_addr.has(got_target_name):
+                                got_slot_addr[got_target_name] = 0
+                                got_target_names.push(got_target_name)
+                    if got_target_names.len() > 0:
+                        val got_base = native_alloc_rw_memory(got_target_names.len() as i64 * 8)
+                        if got_base == 0:
+                            return LoadResult.Error(message: "Failed to allocate GOT for GotRel32 relocations")
+                        var got_index = 0i64
+                        for got_target_name in got_target_names:
+                            val slot_addr = got_base + got_index * 8
+                            var got_target_addr = 0i64
+                            if symbols.has(got_target_name):
+                                got_target_addr = symbols[got_target_name].address
+                            else:
+                                if self.global_symbols.has(got_target_name):
+                                    got_target_addr = self.global_symbols[got_target_name][1].address
+                            if got_target_addr == 0:
+                                return LoadResult.Error(message: "Unresolved GOT symbol: {got_target_name}")
+                            unsafe(capabilities: [raw_ptr]):
+                                native_reloc_write_i64(slot_addr, 0, got_target_addr)
+                            got_slot_addr[got_target_name] = slot_addr
+                            got_index = got_index + 1
+
                     for sym_name in symbols.keys():
                         val loaded_sym = symbols[sym_name]
                         val writable = unsafe(capabilities: [raw_ptr]):
@@ -1341,8 +1404,9 @@ impl ModuleLoader:
                             if loaded_sym.address > 0x7FFFFFFFFFFFFFFF - reloc.offset:
                                 return LoadResult.Error(message: "Relocation address overflow at offset {reloc.offset}")
                             var target_addr = 0i64
+                            var target_name = ""
                             if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
-                                val target_name = ordered_symbols[reloc.symbol_index].name
+                                target_name = ordered_symbols[reloc.symbol_index].name
                                 if symbols.has(target_name):
                                     target_addr = symbols[target_name].address
                                 else:
@@ -1350,24 +1414,35 @@ impl ModuleLoader:
                                         target_addr = self.global_symbols[target_name][1].address
                             if target_addr == 0:
                                 return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
-                            match reloc.reloc_type:
-                                1:
-                                    unsafe(capabilities: [raw_ptr]):
-                                        native_reloc_write_i64(loaded_sym.address, reloc.offset, target_addr + reloc.addend)
-                                2:
-                                    unsafe(capabilities: [raw_ptr]):
-                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
-                                3:
-                                    unsafe(capabilities: [raw_ptr]):
-                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
-                                4:
-                                    unsafe(capabilities: [raw_ptr]):
-                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
-                                5:
-                                    unsafe(capabilities: [raw_ptr]):
-                                        native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr + reloc.addend) as i32)
-                                _:
-                                    return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
+                            val place = loaded_sym.address + reloc.offset
+                            var reloc_s = target_addr
+                            if reloc.reloc_type == 4:
+                                if not got_slot_addr.has(target_name):
+                                    return LoadResult.Error(message: "GotRel32 requires GOT synthesis but no slot found for {target_name}")
+                                reloc_s = got_slot_addr[target_name]
+                            val computed = loader_smf_reloc_value(reloc.reloc_type, reloc_s, place, reloc.addend)
+                            match computed:
+                                case Ok(value):
+                                    match reloc.reloc_type:
+                                        1:
+                                            unsafe(capabilities: [raw_ptr]):
+                                                native_reloc_write_i64(loaded_sym.address, reloc.offset, value)
+                                        2:
+                                            unsafe(capabilities: [raw_ptr]):
+                                                native_reloc_write_i32(loaded_sym.address, reloc.offset, value as i32)
+                                        3:
+                                            unsafe(capabilities: [raw_ptr]):
+                                                native_reloc_write_i32(loaded_sym.address, reloc.offset, value as i32)
+                                        4:
+                                            unsafe(capabilities: [raw_ptr]):
+                                                native_reloc_write_i32(loaded_sym.address, reloc.offset, value as i32)
+                                        5:
+                                            unsafe(capabilities: [raw_ptr]):
+                                                native_reloc_write_i32(loaded_sym.address, reloc.offset, value as i32)
+                                        _:
+                                            return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
+                                case Err(message):
+                                    return LoadResult.Error(message: message)
                         val executable = unsafe(capabilities: [raw_ptr]):
                             native_make_executable(loaded_sym.address, loaded_sym.size)
                         if not executable:

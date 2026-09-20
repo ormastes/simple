@@ -1,6 +1,8 @@
 # x86_64 matrix real filesystem execution is not integrated
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The x86_64 repository already contains a real CPL3 execution mechanism:
 
@@ -411,6 +413,3 @@ package-probe entry from silently returning. Static wiring/listing and C syntax
 checks pass; a fresh admitted build and QEMU run are still required, so the row
 remains RED rather than promoted.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

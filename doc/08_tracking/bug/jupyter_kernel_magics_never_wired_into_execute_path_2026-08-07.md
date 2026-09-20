@@ -1,4 +1,9 @@
 # Jupyter kernel: `%mode`/`%%mode`/`%lanes`/`%reset`/... magics are never invoked — every cell always runs on the hardcoded local lane
+## Closed 2026-09-16 — Status FIXED, re-verified 2026-08-17; magics wired into session_execute; 8/8 spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -120,3 +125,4 @@ mode-spec string only in notebook/cell **metadata** (`simple_lane.mode_spec`),
 not as executable `%%mode` magic, and their code cells are plain valid Simple
 source that runs on the default local lane — they are structural fixtures for
 once this bug is fixed, not lane-routing proofs today.
+

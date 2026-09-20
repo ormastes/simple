@@ -1,4 +1,8 @@
 # Aspect weave/join-point specs time out, and the runner reports it as a vacuous green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > ## CORRECTIONS (2026-08-18, later the same day)
 >
@@ -31,7 +35,7 @@
 
 **Date:** 2026-08-18
 **Lane:** aspect dynload + startup perf
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/semantics/aspect_join_point_spec.spl` now PASSes)
+**Status:** OPEN — reproduced, not fixed
 **Binary:** `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
 (Rust seed, `59546088 2026-08-18 07:53:39.517227740 +0000`)
 
@@ -305,5 +309,3 @@ own `extern` declarations (1 today), not the 85 symbols that arrive through the
 `--entry-closure` transitive graph; and its wiring half is a static check on
 driver source, not a link proof.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/compiler/semantics/aspect_join_point_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

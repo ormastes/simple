@@ -1,6 +1,8 @@
 # i18n duplicate module coverage identity
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `src/lib/nogc_sync_mut/i18n/bundle.spl` and
 `src/std/nogc_sync_mut/i18n/bundle.spl` are byte-identical production copies.
@@ -14,5 +16,3 @@ This prevents trustworthy aggregate all-owner coverage and creates divergence
 risk. Select one authoritative implementation, convert the other path to a
 thin compatibility re-export, and canonicalize coverage source identities.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,9 @@
 # vk2d_bench hardcoded block reason — FIXED 2026-09-11
+## Closed 2026-09-16 — FIXED 2026-09-11; verdict spec sabotage-proven; real-device run status=pass
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 `test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl` printed
 `status=blocked reason=unconditional-submit-wait` from a hardcoded string
@@ -99,6 +102,3 @@ to this env-var workaround; the underlying "MoltenVK does not survive the JIT
 execution path" gap is separate from this bench's status-literal defect and is
 not further investigated here.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

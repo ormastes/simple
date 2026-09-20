@@ -1,6 +1,8 @@
 # A same-named `val` later in an `it` body poisons the whole body scope — earlier reads return the registration snapshot
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 4 (modernizing `test/03_system/feature/baremetal/module_var_liveness_class_generalization_spec.spl`)
@@ -59,5 +61,3 @@ A pre-shadow read in the repro above returns `500`; then promote the note in
 that spec into a full scenario pair (pre-shadow read = module binding, post-`val`
 read = local) in both the spec and its `test/system` twin.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

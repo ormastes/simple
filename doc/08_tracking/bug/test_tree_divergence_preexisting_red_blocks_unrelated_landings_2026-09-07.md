@@ -1,6 +1,8 @@
 # Pre-existing test-tree-divergence red must not block an unrelated landing — recorded per the scoped-delta escape
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-07
 **Severity:** low — this is a recording obligation, not a new defect; see "What
@@ -4061,6 +4063,3 @@ reduced, or otherwise resolved.** The 3941-entry (full-tree) / 3207-entry
 (delta) pre-existing red remains exactly as red as it was before this commit,
 and remains open work for whoever owns reconciling the duplicate test trees.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

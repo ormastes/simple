@@ -1,4 +1,9 @@
 # Seed interpreter regression: qualified `Span.empty()` dispatches to `empty(shape)`
+## Closed 2026-09-16 — root cause fixed, seed rebuilt; 2026-07-17 runtime repro confirms RESOLVED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** root cause fixed and bootstrap seed rebuilt on 2026-07-16. The
 four missing `core-c-bootstrap` owners now have a source fix plus
@@ -216,3 +221,4 @@ than assigning an unsupported cause. Do not rerun Stage 2 or Stage 3; the next
 lane should preserve their isolated cache and address Stage-4 peak memory and
 phase telemetry before one further full-CLI attempt. Runner admission remains
 pending.
+

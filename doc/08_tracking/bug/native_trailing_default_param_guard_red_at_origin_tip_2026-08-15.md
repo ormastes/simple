@@ -1,4 +1,8 @@
 # check-native-trailing-default-param.shs is RED at origin/main tip (pre-existing)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
 **Status:** PARTIALLY FIXED 2026-08-17 — the guard-shape half of this row (silent exit 1 with no verdict line when the binary is absent) is CLOSED: the guard now prints an ERROR verdict and exits 2, and `SIMPLE_BINARY` is injectable. The native-build half is OPEN and is now tracked by `native_trailing_default_param_guard_three_stage_red_2026-08-17.md` (Cause 2).
@@ -103,3 +107,4 @@ default params. The guard-shape half of this record (verdict-line ERROR
 behavior) is unaffected and still correctly reports a real error rather than
 a silent pass. Left OPEN; no new code change here, cross-referencing the
 blocking defect instead of re-diagnosing it.
+

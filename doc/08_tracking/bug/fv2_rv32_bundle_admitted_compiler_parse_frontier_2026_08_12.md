@@ -1,5 +1,8 @@
 # FV2 RV32 bundle admitted-compiler parse frontier
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,5 +37,3 @@ temporary executable only after rejecting stale-runtime and stub markers.
 3. Execute proof, reachability cover, subtraction mutation, RTL/netlist
    equivalence, and pinned Sail differential jobs over one exact bundle.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

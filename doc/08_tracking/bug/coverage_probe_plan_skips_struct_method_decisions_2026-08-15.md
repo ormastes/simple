@@ -1,4 +1,8 @@
 # Coverage probe plan attributes 0 lines/decisions to executed struct methods
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13
 OPEN, out of scope for this lane: this shard's file column names
@@ -36,3 +40,4 @@ Extend the probe plan/runtime store attribution to struct-method bodies, or
 document the scope limit in the coverage guide. Cross-check whether class
 methods and free functions in the same file attribute correctly (they do in
 sibling modules, e.g. vulkan_present_damage_gate.spl 9/9).
+

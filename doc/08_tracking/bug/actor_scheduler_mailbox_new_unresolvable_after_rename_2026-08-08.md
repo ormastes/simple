@@ -1,4 +1,8 @@
 # actor_scheduler expects the priority-mailbox API; no imported name provides it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
@@ -71,3 +75,4 @@ change runtime behavior.
 `export Mailbox` remains, and `mailbox.spl:76`'s
 `export use ...{MailboxConfig, SendResult, SEND_*}` predates the commit. The
 stated goal — removing the double export — was achieved.
+

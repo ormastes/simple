@@ -1,5 +1,8 @@
 # Parser rejects line continuation after a trailing binary comparison operator
-**Status:** CLOSED (2026-09-13) -- not reproducible; minimal repro now parses and runs correctly (the 2026-09-12 re-verification was a misattribution, see Re-check below)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-04
 - **Area:** compiler/parser (both Rust seed and self-hosted stage binary agree)
@@ -52,49 +55,3 @@ was committed in that style, so some earlier lane accepted or never parsed
 it), or have lint/fmt flag bare trailing-operator continuations at commit
 time so they cannot land unparsed.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/os/compositor/host_gui_event_router_spec.spl` on the deployed seed; 2 of 5 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Re-check 2026-09-13 (BUGFIX-10 fanout) — the 2026-09-12 re-verification was a misattribution
-
-The 2026-09-12 "Triage" entry's evidence (`host_gui_event_router_spec.spl`
-"2 of 5 checks still fail") does NOT test this bug. Independently
-investigated those same 2 failures earlier in this lane's pass (see
-`int_to_u8_to_char_chained_call_nested_dispatch_2026-08-07.md`): both are
-`method 'get_prop' not found on value of type enum in nested call context`
-— a completely different defect (interpreter nested-call dispatcher on enum
-receivers, `doc/08_tracking/bug/interp_enum_method_nested_call_dispatch_2026-06-29.md`),
-with no trailing-comparison-operator parsing involved at all. That row's
-own re-verification command was a stale copy-paste, not an actual test of
-this bug's symptom.
-
-Ran this doc's own minimal repro directly instead:
-
-```
-$ bin/simple run scratchpad/probe_trailing_op.spl
-fn f(a: i64, b: i64) -> bool:
-    if a >
-       b:
-        return true
-    false
-...
-true
-```
-
-Parses and runs correctly — `f(3, 1)` returns `true`, no
-`Unexpected token: expected expression, found Newline`. Also compiled
-`src/lib/common/web/browser_renderer_protocol.spl` (the file the workaround
-was applied to) directly: it fails for a completely unrelated reason
-("cannot compile to standalone SMF: 28 function(s) contain constructs that
-require the interpreter" — a native-AOT capability gap, not a parse error),
-confirming no `Unexpected token`/parse failure there either.
-
-- Status: CLOSED (2026-09-13) — not reproducible on `f26970e9d93`; the
-  named parser defect is gone. The 2026-09-12 entry's "still reproduces"
-  claim rested on an unrelated bug's failures and should be disregarded.
-## Triage 2026-09-13 (BUGFIX-6 lane)
-
-Skipped from this row-order pass: primary file/fix surface is the Rust seed
-(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
-pure-Simple, non-Codex lane within the triage budget. Not reproduced or
-re-diagnosed this pass; left OPEN as-is.

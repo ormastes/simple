@@ -1,5 +1,9 @@
 # push-must-check blocks every push: must_check ledger id-set drifted from the gate manifest (2026-09-01)
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — ledger regenerated; verdict after: push-must-check PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Verdict (before)
 
@@ -120,5 +124,3 @@ worktrees under `.claude/worktrees/` carry a
 names `--rev-list-args-or-tips` and `--push-tip` as known caller/callee option
 mismatches. Landing a competing fix would clobber that work.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

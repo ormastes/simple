@@ -1,4 +1,9 @@
 # if-expression with a constant-false condition binds the DEAD branch's `[]`
+## Closed 2026-09-16 — Status CLOSED 2026-08-17 retired: construct verified correct on both engines, offending call site removed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > ## RETIRED 2026-08-17 by EXECUTION + source (worker W5)
 >
@@ -237,3 +242,4 @@ cranelift JIT, not LLVM native codegen. So:
   again on the LLVM path, file it as a new row against the LLVM backend rather
   than reopening this one — this row's evidence, symptom and call site are all
   specific to a construct that no longer exists.
+

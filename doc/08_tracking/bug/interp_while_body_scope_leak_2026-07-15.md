@@ -1,4 +1,9 @@
 # Interpreter while-body locals leak into enclosing scope
+## Closed 2026-09-16 — Status RESOLVED 2026-09-06: executable proof spec landed and passing
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - status: **RESOLVED 2026-09-06 — executable proof landed.** (Was: "source fixed
   2026-07-15; executable interpreter proof pending a runnable pure-Simple
@@ -69,3 +74,4 @@ fixed          : Files: 1   Passed: 6   Failed: 0
 
 That is also the discrimination evidence for this spec: it is not vacuous, and
 it detected a real regression the first time it was run.
+

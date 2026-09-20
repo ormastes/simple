@@ -1,5 +1,8 @@
 # Bug: pure-Simple detect_os() reads OSTYPE — false negative in non-shell child processes
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-02
 - **Severity:** medium (silently disables Metal/GPU paths)
@@ -29,5 +32,3 @@ mechanism (compile-time target triple constant threaded by the compiler, or
 ## Workaround (current)
 Gates inject `OSTYPE=darwin` into the launched app environment.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

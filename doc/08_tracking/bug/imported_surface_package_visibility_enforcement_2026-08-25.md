@@ -1,6 +1,8 @@
 # Imported surface package visibility is not enforced
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -29,5 +31,3 @@ kind, with same-package, outside-package, alias, and facade tests.
 This needs shared requester-package plumbing across several registration paths;
 it must not be approximated only for crypto callables.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

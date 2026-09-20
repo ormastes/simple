@@ -1,6 +1,9 @@
 # Native provider `.so` routed to the SimpleOS registry
+## Closed 2026-09-16 — ...expose `simple_provider_query_v1`. ## Fix - Add bounded raw-text host runtime entry points
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -38,16 +41,4 @@ result encoder. Its size predicate is tested without allocating a megabyte-size
 fixture, avoiding an interpreter-performance regression in the regression test.
 Do not claim invocation PASS until a fresh bounded session rebuilds the provider
 and runner once with the admitted Pure Simple Stage 2/3 tool.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
-
-## Triage 2026-09-13
-
-Fixed in source per the record; remaining gate is an end-to-end
-rebuild + invocation with an admitted Pure Simple Stage 2/3 tool
-against a real host .so provider — needs a self-hosted build this
-worktree does not have (Rust seed only). Cannot progress verification
-here. Leaving OPEN.
 

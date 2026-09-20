@@ -1,4 +1,8 @@
 # Stage 3 declares `fallback_route=direct` and nothing ever reads it (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -79,3 +83,4 @@ cost a diagnosis cycle.
 - `build/f74logs/stage3-run3.log`, `stage3-run4.log`.
 - Raiser: `src/app/compiler_entrypoint/inventory_events.spl:198-207`.
 - Consumer of the *requested* route: `src/app/cli/bootstrap_main.spl:405-412`.
+

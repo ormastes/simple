@@ -1,6 +1,8 @@
 # Stage 4 delayed explicit-import facade origin loses precedence
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status and claim
 
@@ -64,6 +66,3 @@ Rust-seed interpreter verdict and was reverted so this fix does not absorb an
 unresolved adjacent test-oracle issue. The three-cycle cap is exhausted; no
 broader suite PASS or Stage 4 build is claimed by this isolated lane.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

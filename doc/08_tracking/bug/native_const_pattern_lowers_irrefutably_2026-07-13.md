@@ -1,8 +1,10 @@
 # Native `Const` pattern lowers irrefutably
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12, self-contradictory prior record: not re-verifiable; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
-**Status (2026-07-16 RESOLVED -> CLOSED-STALE 2026-09-12, self-contradictory record):** enum-variant-name precedence guard landed; native prints CONST_ARM/OTHER_ARM correctly (native-authoritative: the seed itself takes the const arm for both). Parity case: const_pattern_refutable.
+**Status (2026-07-16):** RESOLVED — enum-variant-name precedence guard landed; native prints CONST_ARM/OTHER_ARM correctly (native-authoritative: the seed itself takes the const arm for both). Parity case: const_pattern_refutable.
 path). The 2026-07-15 "source fixed" claim applied only to the Rust seed's HIR
 lowering; the pure-Simple compiler that `native-build` interprets live had NO
 subject-enum precedence and still reinterpreted a bare `case Const(...)` as an
@@ -78,5 +80,3 @@ neither the native-vs-oracle protocol nor the native-smoke-matrix gate can run,
 so this candidate fix cannot be closed. Filed/owned by the native-build
 self-check lane.
 
-## Triage 2026-09-12
-The 2026-07-16 line says RESOLVED but the same paragraph says the fix "could NOT be runtime-verified" because native-build was globally broken at that commit — an internal contradiction. Not re-run in this pass; older than 45 days. Closing per age policy pending a fresh, unambiguous repro. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

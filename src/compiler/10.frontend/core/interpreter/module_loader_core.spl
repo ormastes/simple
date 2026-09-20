@@ -14,6 +14,9 @@
 
 use compiler.core.frontend.{core_frontend_parse_isolated, core_frontend_parse_append}
 use compiler.core.ast.{
+    decl_fn,
+    decl_get_body,
+    decl_get_fields,
     decl_get_imports,
     decl_get_name,
     decl_get_ret_type,
@@ -33,6 +36,7 @@ use compiler.core.interpreter.interp_resource_tracker.{
     irt_unload_module
 }
 use std.io_runtime.{env_get_opt, file_read_result}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 var _gc_warning_trace_state: i64 = -1
 
@@ -44,6 +48,7 @@ fn gc_warning_trace_enabled() -> bool:
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
 use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
 use compiler.core.interpreter.eval_decls.{eval_decl}
+use compiler.core.interpreter.env.{env_lookup}
 
 # AST Declaration Tags (from ast.spl)
 val DECL_FN = 1
@@ -58,6 +63,8 @@ val DECL_IMPL = 9
 val DECL_CLI = 13
 val DECL_AOP_ADVICE = 14
 val DECL_ARCH_RULE = 16
+val DECL_LAZY_VAL = 12     # lazy val name = expr (mirrors ast.spl DECL_LAZY_VAL)
+val DECL_TYPE_ALIAS = 17   # type X = Y (mirrors ast.spl DECL_TYPE_ALIAS)
 
 # Helper struct for building CoreDecl (defined in ast_types.spl)
 # Since we can't use generics at runtime, we construct these manually
@@ -165,10 +172,17 @@ fn try_force_any_deferred_for(symbol_name: text) -> i64:
                     continue
             val ok = force_deferred_module(mod_name)
             if ok == 1:
-                # Check if this module provided the symbol
+                # Check if this module provided the symbol. A module global
+                # (DECL_VAL/DECL_VAR initializers run by load_module's
+                # initialization pass) materializes as an environment entry,
+                # not a function/struct table row — without this ack a lazy
+                # import whose first use is a global read force-loads the
+                # module yet still reports the symbol unresolved.
+                # Bug: doc/08_tracking/bug/interp_lazy_import_global_first_use_unmaterialized_2026-07-15.md
                 val fn_decl = func_table_lookup(symbol_name)
                 val struct_decl = struct_table_lookup(symbol_name)
-                if fn_decl >= 0 or struct_decl >= 0:
+                val global_vid = env_lookup(symbol_name)
+                if fn_decl >= 0 or struct_decl >= 0 or global_vid >= 0:
                     return 1
         i = i + 1
     0
@@ -187,6 +201,10 @@ fn module_loader_init():
     deferred_module_set = {}
     _gc_warn_emitted = {}
     _gc_warning_trace_state = -1
+    _use_warning_emitted = {}
+    _module_surface_provided = {}
+    _module_surface_recorded = {}
+    _module_surface_opaque = {}
     module_resolve_cache_reset()
     irt_init()
 
@@ -431,6 +449,7 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
     val exports = extract_module_exports(appended_decls)
     register_module_functions(appended_decls, resolved_path)
     module_mark_loaded(module_name, resolved_path, exports)
+    record_module_surface(resolved_path, appended_decls)
 
     _module_load_depth = _module_load_depth - 1
     1
@@ -509,6 +528,10 @@ fn load_module(module_name: text, current_file: text) -> i64:
     # Mark as loaded
     module_mark_loaded(module_name, resolved_path, exports)
 
+    # Record the provided-name surface for the [use-warning] oracle while the
+    # freshly appended decl range is still in hand.
+    record_module_surface(resolved_path, appended_decls)
+
     # Resolve the snapshotted dependencies after marking this owner so cyclic
     # facades terminate, but before returning success to the importing module.
     var dependency_index: i64 = 0
@@ -565,6 +588,7 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
         val existing_owner_file = module_get_file_path(module_name)
         for existing_imported_name in imported_names:
             func_import_binding_register(current_file, existing_imported_name, existing_owner_file)
+        warn_unprovided_use_names(module_name, existing_owner_file, imported_names, current_file)
         return 1
 
     # Full load FIRST. The requested module's own definitions must win.
@@ -579,6 +603,7 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
         val owner_file = module_get_file_path(module_name)
         for imported_name in imported_names:
             func_import_binding_register(current_file, imported_name, owner_file)
+        warn_unprovided_use_names(module_name, owner_file, imported_names, current_file)
         return 1
 
     # Fallback (module file unresolvable only): if every requested name is
@@ -689,6 +714,157 @@ fn check_gc_family_boundary(importer_path: text, imported_path: text, module_nam
         if gc_warning_trace_enabled():
             print msg
         return
+
+# ===== [use-warning] Oracle: Braced `use` Names vs the Module's Real Surface =====
+#
+# Pure-Simple parity of the seed oracle `warn_unprovided_use_names`
+# (src/compiler_rust/compiler/src/interpreter_module/module_loader.rs). A braced
+# `use m.{A, B}` resolves m and registers its WHOLE surface; the braced names
+# were never checked against what m actually provides, so a nonexistent name —
+# used or unused — left the importing file green and silent (sabotage proof:
+# doc/08_tracking/bug/spec_imports_declared_nowhere_2026-08-04.md §5.2; mechanism:
+# doc/08_tracking/bug/use_list_names_never_checked_2026-08-04.md). Reporting
+# only, never fatal: the seed deliberately keeps this a warning ("making this
+# fatal ... would convert a silent hazard into a mass build break with no
+# migration path"). Silenced by ANY non-empty value of
+# SIMPLE_NO_DEPRECATED_WARNINGS, the same switch the seed honours; an empty
+# value reads as unset through env_get_opt.
+#
+# Visibility: the warning is written to fd 2 AT FIRE TIME and also pushed into
+# eval_warnings. A bare push into eval_warnings would be invisible — that sink
+# has no end-of-run flush (mechanism record, follow-up 2), which is why the
+# seed eprintln's instead of accumulating.
+#
+# The surface is recorded per resolved PATH at load time from the freshly
+# appended decl range, keyed by path like the seed's per-path ProvidedNames
+# cache, so module-cache alias hits (module_alias_loaded) share it. A module
+# whose surface is genuinely unknowable — glob re-exports (`export use m.*`,
+# `export *`, `export m.*`) or a bare `export use {A, B}` that pulls from
+# siblings — is recorded opaque and skipped, exactly like the seed, rather than
+# guessed at.
+
+var _module_surface_provided: {text: bool} = {}
+var _module_surface_recorded: {text: bool} = {}
+var _module_surface_opaque: {text: bool} = {}
+var _use_warning_emitted: {text: bool} = {}
+
+fn use_list_warnings_enabled() -> bool:
+    """True unless SIMPLE_NO_DEPRECATED_WARNINGS is set to a non-empty value.
+
+    Mirrors the seed's `use_list_warnings_enabled` (presence of the variable
+    silences the oracle). env_get_opt reports nil for unset AND empty, so an
+    explicitly-empty value re-enables — a documented, deliberate relaxation of
+    the seed's var_os presence semantics.
+
+    sdoctest:
+        expect(use_list_warnings_enabled()).to_equal(true)
+    """
+    env_get_opt("SIMPLE_NO_DEPRECATED_WARNINGS") == nil
+
+fn record_module_surface(resolved_path: text, decls: [i64]):
+    """Record every name a freshly loaded module provides to importers.
+
+    Surface = fns ∪ extern fns ∪ structs ∪ classes ∪ vals ∪ vars ∪ lazy vals ∪
+    type aliases ∪ cli blocks ∪ enums (plus their variants and in-body members)
+    ∪ impl-block methods ∪ explicit re-export lists (`export a, b`,
+    `export use m.{A, B as C}` — the alias is the importer-facing name). Glob
+    re-export entries (`*`, `m.*`) and bare `export use {..}` (a use-decl with
+    an empty module path) mark the whole module opaque: skipped by the warning
+    pass rather than guessed at. Called from load_module and
+    load_module_register_only while the module's decl range is in hand.
+
+    sdoctest:
+        val uw_path = "spec/doctest/uw_surface.spl"
+        record_module_surface(uw_path, [decl_fn("uw_doctest_real", [], [], 0, [], 0, [], 0)])
+        val uw_mark = eval_warnings.len()
+        warn_unprovided_use_names("uw_doctest_mod", uw_path, ["uw_doctest_real", "uw_doctest_bogus"], "doctest.spl")
+        expect(eval_warnings.len() - uw_mark).to_equal(1)
+        expect(eval_warnings[eval_warnings.len() - 1].contains("uw_doctest_bogus")).to_equal(true)
+    """
+    if resolved_path == "":
+        return
+    _module_surface_recorded[resolved_path] = true
+    var opaque = false
+    for did in decls:
+        val tag = decl_get_tag(did)
+        if tag == DECL_FN or tag == DECL_EXTERN_FN or tag == DECL_STRUCT or tag == DECL_CLASS or tag == DECL_VAL or tag == DECL_VAR or tag == DECL_LAZY_VAL or tag == DECL_TYPE_ALIAS or tag == DECL_CLI or tag == DECL_ENUM:
+            val provided_name = decl_get_name(did)
+            if provided_name != "":
+                _module_surface_provided[resolved_path + "|" + provided_name] = true
+        if tag == DECL_ENUM:
+            # Variants are importable by bare name once the module is loaded.
+            for variant_name in decl_get_fields(did):
+                _module_surface_provided[resolved_path + "|" + variant_name] = true
+            for body_did in decl_get_body(did):
+                val body_name = decl_get_name(body_did)
+                if body_name != "":
+                    _module_surface_provided[resolved_path + "|" + body_name] = true
+        if tag == DECL_IMPL:
+            for method_did in decl_get_body(did):
+                val method_name = decl_get_name(method_did)
+                if method_name != "":
+                    _module_surface_provided[resolved_path + "|" + method_name] = true
+        if tag == DECL_EXPORT:
+            # `export a, b, c` lists and the export half of
+            # `export use m.{A, B as C}` — both recorded as DECL_EXPORT with
+            # items in "name[:alias]" encoding. Only a non-glob alias is an
+            # importer-facing provided name; a glob makes the surface opaque.
+            for item in decl_get_imports(did):
+                if item == "*" or item.ends_with(".*"):
+                    opaque = true
+                else:
+                    val alias_at = item.last_index_of(":")
+                    val provided_item = if alias_at > 0: item.substring(alias_at + 1) else: item
+                    if provided_item != "":
+                        _module_surface_provided[resolved_path + "|" + provided_item] = true
+        if tag == DECL_USE:
+            # Bare `export use {A, B}` parses as a use-decl with an empty module
+            # path; those names pull from siblings, so the surface is
+            # unknowable. Plain `use m.{A, B}` (non-empty path) is an internal
+            # import and contributes nothing to this module's own surface.
+            if decl_get_name(did) == "" and decl_get_imports(did).len() > 0:
+                opaque = true
+    _module_surface_opaque[resolved_path] = opaque
+
+fn warn_unprovided_use_names(module_name: text, resolved_path: text, imported_names: [text], importer: text):
+    """Report each braced `use` name the resolved module does not provide.
+
+    Parity with the seed oracle: warning only (the module's whole surface stays
+    registered and execution continues), deduped per (module path, name,
+    importer), skipped for opaque or unrecorded surfaces and when
+    SIMPLE_NO_DEPRECATED_WARNINGS is set. Every hit is written to fd 2 and
+    pushed into eval_warnings.
+
+    sdoctest:
+        val uw_path2 = "spec/doctest/uw_surface2.spl"
+        record_module_surface(uw_path2, [decl_fn("uw_doctest_real2", [], [], 0, [], 0, [], 0)])
+        val uw_mark2 = eval_warnings.len()
+        warn_unprovided_use_names("uw_doctest_mod2", uw_path2, ["uw_doctest_missing2"], "doctest.spl")
+        warn_unprovided_use_names("uw_doctest_mod2", uw_path2, ["uw_doctest_missing2"], "doctest.spl")
+        expect(eval_warnings.len() - uw_mark2).to_equal(1)
+    """
+    if imported_names.len() == 0:
+        return
+    if resolved_path == "":
+        return
+    if not use_list_warnings_enabled():
+        return
+    if not _module_surface_recorded.has(resolved_path):
+        return
+    if _module_surface_opaque.has(resolved_path) and _module_surface_opaque[resolved_path] == true:
+        return
+    for name in imported_names:
+        if name == "":
+            continue
+        if _module_surface_provided.has(resolved_path + "|" + name) and _module_surface_provided[resolved_path + "|" + name] == true:
+            continue
+        val warn_key = resolved_path + "|" + name + "|" + importer
+        if _use_warning_emitted.has(warn_key):
+            continue
+        _use_warning_emitted[warn_key] = true
+        val msg = "[use-warning] '" + name + "' is named in `use " + module_name + ".{{...}}` but module '" + resolved_path + "' does not provide it (imported from " + importer + ")"
+        eval_warnings.push(msg)
+        eprint(msg)
 
 fn interp_unload_module(module_name: text) -> i64:
     """Selectively unload a module: remove its names from tables.

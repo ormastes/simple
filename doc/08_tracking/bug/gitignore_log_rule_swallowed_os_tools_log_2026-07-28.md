@@ -1,4 +1,9 @@
 # `.gitignore` blanket `log/` rule silently un-tracked `src/os/tools/log/` (2 source files lost from git)
+## Closed 2026-09-16 — Status FIXED 2026-07-28; negation added, files tracked, findings cleared
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-07-28
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` + `src/unit/**` scope)
@@ -109,3 +114,4 @@ allowlist of source directories. Until then, **any** new source directory named
 `log` will be silently dropped from git the moment it is created. A pre-commit
 guard that fails when a tracked directory's sibling `.spl` files are ignored
 would catch the next occurrence.
+

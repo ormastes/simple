@@ -1,4 +1,69 @@
 # BUG: `for ch in <text>:` loop-bound element is corrupted — `char_code_at(0)` always 0, `.len()` segfaults the interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Re-verified 2026-09-13 — seed lanes clean; pure-Simple lane still pending (LEFT OPEN)
+
+**Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is
+filed against the **pure-Simple / self-hosted** lane, which the run recorded
+below does NOT exercise. No self-hosted binary is deployed on this host —
+`bin/release/simple.exe`, `bin/release/x86_64-pc-windows-msvc/simple.exe` and
+`bin/release/x86_64-pc-windows-gnu/simple.exe` all print the Rust
+bootstrap-seed banner. Running the repro through the pure-Simple CLI on the
+seed (`simple run src/app/cli/main.spl -- run <repro>`) emitted only lint
+diagnostics and never executed the program, so that substitute lane does not
+work either. The seed result below therefore shows only that the **seed** does
+not exhibit the defect; it does NOT discharge the pure-Simple fix.
+**This entry stays OPEN pending a deployed self-hosted binary.**
+
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the repro verbatim — the `for ch in <text>:` loop and the indexed
+control loop over the same string, in one program:
+
+```spl
+fn main():
+    val lit = "09:05"
+    var i = 0
+    for ch in lit:
+        val cp = ch.char_code_at(0)
+        print("loop idx={i} cp={cp}")
+        i = i + 1
+    var wi = 0
+    while wi < lit.len():
+        val cp2 = lit.char_code_at(wi)
+        print("indexed idx={wi} cp={cp2}")
+        wi = wi + 1
+```
+
+Seed JIT lane and tree-walk lane produce identical output, and the for-loop
+now agrees with the indexed control exactly:
+
+```
+loop idx=0 cp=48   indexed idx=0 cp=48
+loop idx=1 cp=57   indexed idx=1 cp=57
+loop idx=2 cp=58   indexed idx=2 cp=58
+loop idx=3 cp=48   indexed idx=3 cp=48
+loop idx=4 cp=53   indexed idx=4 cp=53
+```
+
+The reported corruption — `cp=0` for every loop iteration — is gone, and
+`lit.len()` did not segfault the interpreter. The "SOURCE FIXED
+(2026-07-22), rebuilt current-source execution pending" status is discharged
+for these two lanes (measured).
+
+Follow-up left for the owners, not blocking this closure: the indexed-loop
+workaround is still applied at the 6 text-iteration call sites in
+`font_renderer.spl` listed below, and can now be reverted to plain
+`for ch in ...` iteration.
 **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
@@ -268,3 +333,4 @@ use elsewhere in the codebase (`x64_freestanding_char_code_at_dynamic_text.md`'s
 
 ## Triage 2026-09-12
 Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+

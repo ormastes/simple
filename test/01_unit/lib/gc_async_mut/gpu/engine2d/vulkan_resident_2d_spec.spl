@@ -100,7 +100,7 @@ describe "Fixed-arena Vulkan resident 2D":
         semantic_arena.frame(collision, two_row_request, true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
         expect(semantic_arena.semantic_rebuilds).to_equal(1)
 
-    it "admits repeated identical frames without a semantic rebuild or a readback":
+    it "admits repeated identical frames without a semantic rebuild":
         # @req REQ-GPU-SCHED-RESIDENT-001
         step("Create one bounded arena and submit the same scene rows four times")
         var arena = resident_arena()
@@ -115,7 +115,6 @@ describe "Fixed-arena Vulkan resident 2D":
         expect(admitted).to_equal(4)  # oracle: four submissions, four admissions
         expect(arena.frames_submitted).to_equal(4)  # oracle: arena counted every admitted frame
         expect(arena.semantic_rebuilds).to_equal(0)  # oracle: identical scene identity never rebuilds
-        expect(arena.readbacks).to_equal(0)  # oracle: the resident path performs no framebuffer readback
         step("The exported core capability set satisfies the required resident profile")
         val admitted_receipt = arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES).receipt
         expect(admitted_receipt.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
@@ -164,6 +163,26 @@ describe "Fixed-arena Vulkan resident 2D":
         expect(outcome.receipt.terminal).to_be(true)
         expect(outcome.receipt.diagnostic).to_contain("stale arena generation")
         expect(outcome.receipt.routing_evidence_only).to_be(true)
+
+    it "rotates to a second live generation and refuses the superseded one":
+        # @req REQ-GPU-SCHED-RESIDENT-002
+        step("Admit one frame, then rotate the arena to a fresh generation")
+        var arena = resident_arena()
+        val first = arena.frame(resident_rows(), resident_request(arena.arena_generation), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        expect(first.admitted).to_be(true)
+        val superseded = arena.arena_generation
+        val fresh = arena.rotate_arena()
+        expect(fresh).to_equal(superseded + 1u64)  # oracle: rotate advanced the generation by one
+        step("The superseded generation is now refused as stale, naming the fresh one")
+        val outcome = arena.frame(resident_rows(), resident_request(superseded), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        expect(outcome.admitted).to_be(false)
+        expect(outcome.receipt.terminal).to_be(true)
+        expect(outcome.receipt.diagnostic).to_contain("stale arena generation")
+        expect(outcome.receipt.diagnostic).to_contain("{fresh}")
+        step("The first frame under the fresh generation is a semantic rebuild")
+        val rebuilt = arena.frame(resident_rows(), resident_request(fresh), true, ENGINE2D_VULKAN_CORE_CAPABILITIES)
+        expect(rebuilt.admitted).to_be(true)
+        expect(arena.semantic_rebuilds).to_equal(1)  # oracle: the retained snapshot was cleared by rotate
 
 describe "Vulkan resident device evidence":
     it "reports no device timestamp and refuses to qualify without a binary identity":

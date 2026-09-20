@@ -1,6 +1,9 @@
 # SimpleOS WM Fresh Stage-3 Kernel Stops in UEFI Before `_start`
+## Closed 2026-09-16 — ... UEFI Before `_start` ## Status Resolved on 2026-07-24 in `scripts/check/check-simpleos-wm
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -88,6 +91,3 @@ sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 
 Do not reuse the July 20 framebuffer as proof for the current renderer source.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

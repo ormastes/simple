@@ -1,6 +1,8 @@
 # `LspEmitter` / `LspCodeAction` are imported and called but were never implemented
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -90,6 +92,3 @@ from `query_diagnostics` — not from `query_check.spl`. Nothing in `src/` or
 shadowed duplicate. Left in place rather than deleted, because removing a
 ~650-line file needs its own verification pass.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

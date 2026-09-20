@@ -1,8 +1,18 @@
 # Bug: private (`_`-prefixed) functions collide across modules — wrong fn called
 
+## Triage 2026-09-13 — STILL OPEN: mitigation confirmed live, auto-fix still deferred
+- **measured** — the detection diagnostic this entry delivered fires on real runs today.
+  `bin/itf minio health` (Rust seed v1.0.0-rc.1, Windows) emits five
+  `[compiler_cross_module_private_symbol_collision]` warnings, e.g.
+  `public function 'http_put' has 3 co-compiled definitions with 2 differing signatures`;
+  an unrelated probe also surfaced `file_read_text_at` with 2 differing signatures.
+- **inferred** — the diagnostic works as designed, but the per-file mangle auto-fix the
+  entry defers is still unimplemented, so the collision surface remains. Left OPEN
+  (MITIGATED).
+
 - **ID:** compiler_cross_module_private_symbol_collision_2026-06-16
 - **Severity:** P1 (silent wrong-result + SIGSEGV; broad latent surface)
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** MITIGATED — detection diagnostic implemented (option 3). Auto-fix
   (per-file mangle) deferred as a deliberately-scoped effort given measured surface.
 - **Area:** compiler — import loader / module flattening / symbol resolution
 
@@ -357,6 +367,3 @@ single tier:
 (`interp_env_get_name_collision_nil_root_2026-07-26`); this diagnostic now shows it
 is one member of a ~15-name family with the same shape. That family is the natural
 next batch and is a `src/lib/nogc_sync_mut/**` lane, not a crypto lane.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

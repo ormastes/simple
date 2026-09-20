@@ -15,10 +15,16 @@ impl<'a> MirLowerer<'a> {
 
     pub(super) fn is_known_enum_type_for_variant(&self, enum_name: &str, fallback_ty: TypeId) -> bool {
         if let Some(registry) = self.type_registry {
+            // HIR has already resolved this expression in its module/import
+            // scope.  Preserve that answer before consulting the registry's
+            // compatibility bare-name index, which is necessarily last-wins
+            // when two imported modules declare the same enum name.
+            if matches!(registry.get(fallback_ty), Some(crate::hir::HirType::Enum { .. })) {
+                return true;
+            }
             if let Some(type_id) = registry.lookup(enum_name) {
                 return matches!(registry.get(type_id), Some(crate::hir::HirType::Enum { .. }));
             }
-            return matches!(registry.get(fallback_ty), Some(crate::hir::HirType::Enum { .. }));
         }
         false
     }
@@ -31,9 +37,18 @@ impl<'a> MirLowerer<'a> {
     /// specialized, no registry at all). Callers MUST treat `None` as
     /// permissive and keep the previous behavior — only `Some(false)` is a
     /// positive "this enum does not have that name".
-    pub(super) fn enum_declares_variant(&self, enum_name: &str, variant_name: &str) -> Option<bool> {
+    pub(super) fn enum_declares_variant(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        resolved_ty: TypeId,
+    ) -> Option<bool> {
         let registry = self.type_registry?;
-        let type_id = registry.lookup(enum_name)?;
+        let type_id = if matches!(registry.get(resolved_ty), Some(HirType::Enum { .. })) {
+            resolved_ty
+        } else {
+            registry.lookup(enum_name)?
+        };
         match registry.get(type_id) {
             Some(HirType::Enum { variants, .. }) => Some(variants.iter().any(|(name, _)| name == variant_name)),
             _ => None,
@@ -54,12 +69,16 @@ impl<'a> MirLowerer<'a> {
     ///     a `TokenKind` that has no `Integer`) exposes a duplicate enum NAME
     ///     across modules, where the guard resolved the wrong definition.
     /// Truncated so a wide enum cannot flood the log.
-    pub(super) fn declared_variants_hint(&self, enum_name: &str) -> String {
+    pub(super) fn declared_variants_hint(&self, enum_name: &str, resolved_ty: TypeId) -> String {
         const MAX_LISTED: usize = 12;
         let Some(registry) = self.type_registry else {
             return String::new();
         };
-        let Some(type_id) = registry.lookup(enum_name) else {
+        let type_id = if matches!(registry.get(resolved_ty), Some(HirType::Enum { .. })) {
+            resolved_ty
+        } else if let Some(type_id) = registry.lookup(enum_name) {
+            type_id
+        } else {
             return String::new();
         };
         let Some(HirType::Enum { variants, .. }) = registry.get(type_id) else {
@@ -521,7 +540,7 @@ impl<'a> MirLowerer<'a> {
                 // not positively resolve to a concrete enum, so unresolved and
                 // generic-template heads keep the previous permissive path.
                 if is_enum
-                    && self.enum_declares_variant(enum_name, variant_name) == Some(false)
+                    && self.enum_declares_variant(enum_name, variant_name, callee.ty) == Some(false)
                     && !self.global_types.contains_key(name.as_str())
                     && !self.available_functions.contains(name.as_str())
                 {
@@ -529,7 +548,7 @@ impl<'a> MirLowerer<'a> {
                         "unknown variant or method '{}' on enum {}{}",
                         variant_name,
                         enum_name,
-                        self.declared_variants_hint(enum_name)
+                        self.declared_variants_hint(enum_name, callee.ty)
                     )));
                 }
 
@@ -546,7 +565,7 @@ impl<'a> MirLowerer<'a> {
                 // heads (`None`, kept permissive) are unaffected — they
                 // still fabricate exactly as before.
                 let is_declared_static_fn = is_enum
-                    && self.enum_declares_variant(enum_name, variant_name) == Some(false)
+                    && self.enum_declares_variant(enum_name, variant_name, callee.ty) == Some(false)
                     && (self.global_types.contains_key(name.as_str())
                         || self.available_functions.contains(name.as_str()));
 

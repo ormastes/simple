@@ -1,6 +1,9 @@
 # `bin/simple lint` crashes on any non-empty input: array index out of bounds
+## Closed 2026-09-16 — Later session: Bug 2 fixed, lint completes end-to-end; commits landed on origin/main
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-07-30
 
@@ -394,5 +397,3 @@ Both content-verified landed on `origin/main` via
 `git show origin/main:<path> | grep decl_get_tag` /
 `grep -c "decl_get_tag\|expr_get_tag\|stmt_get_tag"` after push.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

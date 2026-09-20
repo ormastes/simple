@@ -1,4 +1,8 @@
 # `me`-method mutation through an OPTION-typed binding is silently discarded
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-04
 **Status:** OPEN (language/runtime defect). Callers must work around it by
@@ -505,3 +509,60 @@ interpreter represents/copies `Optional<Class>` payloads across a mutating
 method call, which is core language-runtime work well outside a single-file,
 <45-minute pure-Simple change. Left OPEN; no code change attempted here.
 The underlying language/runtime defect is a compiler-semantics change (silent discard of `me`-method mutation through an Option-typed binding) beyond this pass's budget. The suggested lint-only follow-up (extend `OPTME001` in `src/compiler/35.semantics/lint/option_me_call.spl` to also flag the optional-typed-FIELD shape, not just local bindings) was considered but not attempted this pass: `OPTME001` is a broadly-run lint rule and widening its pattern risks false positives across the whole tree without careful fixture coverage, which needs its own dedicated pass. Leaving OPEN, no code change made.
+
+
+## Re-measurement 2026-09-18 — still live, and it is one defect with its sibling
+
+Binary: `bin/simple` as redeployed 2026-09-18 (`308de6af84db5c26e2c0`, built from
+`origin/main` that day). Measurements taken on this host before 2026-09-18 17:00
+used a binary with its own silent wrong answers, so earlier rows here are not
+comparable.
+
+```simple
+class Counter:
+    n: i64
+    me bump():
+        self.n = self.n + 1
+
+class Holder:
+    inner: Counter
+
+fn find(c: Counter?) -> i64:
+    if val bound = c:
+        bound.bump()
+        return bound.n
+    -1
+
+fn main() -> i64:
+    var c = Counter(n: 0)
+    val seen = find(Some(c))
+    print "opt_binding_callee_saw={seen}"
+    print "opt_binding_caller_n={c.n}"
+
+    var h = Holder(inner: Counter(n: 10))
+    val f = h.inner
+    f.bump()
+    print "field_binding_local={f.n}"
+    print "field_binding_owner={h.inner.n}"
+    0
+```
+
+| row | interpret | JIT | which is right |
+|---|---|---|---|
+| `opt_binding_caller_n` — `me` mutation through an `Option` binding | **0** (mutation lost) | 1 | JIT; the caller holds the same instance |
+| `field_binding_owner` — class-typed field bound to a local | **10** (snapshot) | 11 | JIT; a class binding aliases |
+
+Both rows still reproduce, and they point the same way: **the interpret lane
+copies a class instance where the JIT lane aliases it**, so a mutation through
+the copy is silently discarded. The two records below were filed separately and
+are one job:
+
+- `me_method_mutation_through_optional_binding_discarded_2026-08-04`
+- `interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10`
+
+Worth noting for whoever takes it: the two engines disagree about aliasing in
+BOTH directions, so a fix cannot simply make one engine imitate the other.
+`packed_array_value_semantics` was the mirror image — the JIT aliased a `[u8]`
+where the language specifies value semantics and the interpreter copied
+correctly (fixed 2026-09-18, PR #1090). Arrays are values and classes are
+references; each engine currently gets one of the two wrong.

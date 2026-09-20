@@ -1,6 +1,8 @@
 # Pre-existing test-tree divergence recorded at PR #235 landing (2026-09-01)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Required by `.claude/rules/vcs.md` — landing on a divergence-delta PASS
 REQUIRES recording the pre-existing offender list. An unrecorded step-over is a
@@ -27,6 +29,3 @@ and removed 2 further orphaned mirror twins. The full offender list is at
 
 The backlog itself remains open and is not addressed here.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

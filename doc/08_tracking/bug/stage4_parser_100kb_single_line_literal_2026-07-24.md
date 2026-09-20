@@ -1,8 +1,12 @@
 # Stage-4 self-hosted parser fails on >100KB single-line string literals — scale-dependent, not a syntax defect
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-24
 **Severity:** high (blocked stage-4 full-CLI build)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** worked around (line split in the one file that hit it); root
 cause in the self-hosted lexer/parser is unfixed
 **Found by:** stage-4 full-CLI build triage (stage2 self-hosted parser, deep
 into the build with the module/heap registry around ~45.8M entries)
@@ -118,6 +122,3 @@ different workloads.
 - `src/app/ui.web/html.spl` — line 118 split into 28 lines (now spans
   118-145).
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

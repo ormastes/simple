@@ -1,5 +1,8 @@
 # Server-data VFS fd binding remains blocked
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The attempted `/srv/data/{web,db}` DBFS syscall binding was reverted after two
 independent static-review cycles. Protected open therefore intentionally keeps
@@ -51,5 +54,3 @@ must be unconditional; failed backend cleanup moves to retained quarantine.
 No tests, builds, SPipe, optimizer, benchmarks, or runtime verification were
 run in this lane.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

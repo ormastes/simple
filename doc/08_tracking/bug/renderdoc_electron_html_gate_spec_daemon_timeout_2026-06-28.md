@@ -1,5 +1,13 @@
 # RenderDoc Electron HTML Gate SSpec Daemon Timeout
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/03_system/check/renderdoc_electron_html_gate_spec.spl -> 7 passed, 5 failed, still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
+- **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
+- **inferred**: every runner-behaviour claim in this entry (example counts, PASS/FAIL bookkeeping, daemon timeouts) is therefore unverifiable here; a green or red from this host would be meaningless either way.
+- **inferred**: left OPEN, not stale — the referenced spec files all still exist.
 
 Date: 2026-06-28
 
@@ -42,5 +50,3 @@ without timing out. Until then, completion claims for the Electron RenderDoc
 gate must rely on direct gate evidence plus this bug note, not repeated SSpec
 reruns.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/03_system/check/renderdoc_electron_html_gate_spec.spl` on the deployed seed; 5 of 12 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,8 @@
 # `exp` app CLI: experiment script execution falls back to usage/help text instead of delegating
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/exp/main.spl` CLI script-delegation path
@@ -39,5 +42,3 @@ Spec left unmodified — could not confirm from source whether the test's
 invocation shape or the CLI's dispatch is out of sync; flagging as a
 genuine gap.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

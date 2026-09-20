@@ -1,5 +1,8 @@
 # SimpleOS Vulkan backend: venus/virtio-gpu is QEMU-only, no board path
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/os/vulkan/board_vulkan_counterpart_plan_spec.spl -> 18 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-06
 **Source:** lane G0, `doc/04_architecture/os/vulkan/simpleos_vulkan_render_backend_plan.md`
@@ -51,5 +54,3 @@ and `.spipe/simpleos-screens-render-lane/state.md:178` already acknowledge a
 board gap in general terms; this file makes the Vulkan-specific instance
 explicit per the board-runnable rule's "say so and file it" requirement.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/os/vulkan/board_vulkan_counterpart_plan_spec.spl` on the deployed seed; the spec now passes in full (18/18), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

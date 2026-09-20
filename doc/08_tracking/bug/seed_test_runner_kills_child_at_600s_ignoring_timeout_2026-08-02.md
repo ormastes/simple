@@ -1,6 +1,8 @@
 # Seed test-runner kills the spec child at ~600s regardless of --timeout
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** high (blocks long system specs) · **Area:** test runner / seed delegation
 
@@ -39,6 +41,3 @@ Run the showcase spec as above on a loaded box (interpreter + contention
 pushes it past 600s); observe exit 255 + `Process timed out` at ~600s while
 the child was still progressing (per-thread utime still advancing).
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

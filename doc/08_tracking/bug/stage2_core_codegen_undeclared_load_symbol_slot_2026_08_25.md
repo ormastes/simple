@@ -1,6 +1,8 @@
 # Stage 2 core_codegen references undeclared load_symbol_slot
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -47,6 +49,3 @@ LLVM correctly rejected as undeclared. The diagnostic now prints only the
 decoded symbol id, and the source-contract regression follows the indexed
 handler signatures including `module_index` and `ir_handle`.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

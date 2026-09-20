@@ -1,4 +1,8 @@
 # Bootstrap Publish Blocked on Windows: Native Symlink Requires SeCreateSymbolicLinkPrivilege
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — environmental, not a code defect. Needs a decision from the
 user; nothing here should be changed without one.
@@ -120,3 +124,4 @@ not a directory — nothing). Two other places read it directly:
    remains buildable/testable on Windows via the immutable generation
    directory; only the mutable compatibility pointer at
    `src/compiler_rust/target/bootstrap` would be unavailable there).
+

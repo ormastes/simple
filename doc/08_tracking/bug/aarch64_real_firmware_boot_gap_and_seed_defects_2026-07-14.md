@@ -1,5 +1,8 @@
 # aarch64 SimpleOS: real-firmware boot gap + 2 seed/driver defects (launch sanity, 2026-07-14)
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl` now PASSes)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found by Lane LAUNCH-OS-AARCH64 doing a real launch sanity check. The aarch64
 kernel boot gate (loader + FS-exec staging) reproduces GREEN
@@ -1235,5 +1238,11 @@ against it). Board-run is therefore BLOCKED, not passed. The EFI half of this
 doc remains superseded by
 `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

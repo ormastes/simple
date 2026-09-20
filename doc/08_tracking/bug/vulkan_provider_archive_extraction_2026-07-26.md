@@ -1,8 +1,11 @@
 # Vulkan Provider Archive Extraction
+## Closed 2026-09-16 — source fixed; focused linker regression 13/13; remaining readback tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
-
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Source fixed. The focused linker regression passes 13/13, and the canonical
 external-provider owner repair has a host-independent archive fixture. A fresh
@@ -63,6 +66,3 @@ implementation remains a separate runtime concern.
 The remaining readback failure is tracked separately in
 `native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

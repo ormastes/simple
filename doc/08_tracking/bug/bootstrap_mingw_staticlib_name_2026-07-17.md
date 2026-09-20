@@ -1,5 +1,9 @@
 # Bootstrap used MSVC staticlib names for MinGW
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — ...acts and then report them missing. ## Fix and prevention The bootstrap archive prefix/suff
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -19,5 +23,3 @@ Cargo naming forms, the override order, and the default.
 No bootstrap/runtime execution is claimed under this session's static-only
 restriction.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

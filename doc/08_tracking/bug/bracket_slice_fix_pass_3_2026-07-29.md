@@ -1,5 +1,9 @@
 # Bracket-slice byte-index survey — fix pass 3 (2026-07-29)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — Fixes landed with PROVED evidence (toml.spl, mqtt x3, kafka x3)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Batch 3, widened hunt per the coordinator's pattern: files mixing bare
 single-index `s[i]` (character-indexed) with a `.len()`/`.length()`-bounded
@@ -210,5 +214,3 @@ guard — matching what's provably verified).
 `kafka/serialization.spl` × 3 (fix), 3 new multi-byte specs. No
 gate/budget files touched.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

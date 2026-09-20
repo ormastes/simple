@@ -1,6 +1,8 @@
 # Stage 3 frontier: one `unresolved name` whose name and location disagree (2026-08-25)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -118,6 +120,3 @@ NOT verified here: why the third importer fails while the other two succeed, and
 whether the 19-line span offset is specific to this diagnostic or general to
 `unresolved name`.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

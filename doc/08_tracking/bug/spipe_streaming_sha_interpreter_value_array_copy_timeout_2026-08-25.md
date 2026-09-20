@@ -1,10 +1,12 @@
 <!-- codex-architecture -->
 # SPipe streaming SHA interpreter verification exceeds budget
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25
 **Status:** Open — `FAIL`; `W4-SRCH-31` is not admitted
-**Re-measured 2026-09-12:** still FAIL, but the "likely copy sites" below are
-ruled out as the cause — see "2026-09-12 measurement".
 
 ## Evidence and reproduction
 
@@ -36,37 +38,6 @@ These are inspection-derived hypotheses requiring profile evidence:
   interpreter, though these buffers are fixed-size;
 - the one-shot `sha256_u8_hex(payload)` oracle may independently dominate, so
   reference and streaming costs must be measured separately.
-
-
-## 2026-09-12 measurement — the cost is linear, and the hypothesised copies are not it
-
-`sha256_u8_hex` timed directly in the interpreter lane on
-`src/compiler_rust/target/release/simple` (51226288 bytes, 2026-09-12 10:01:32,
-built from `origin/main` = `7352f99898c`):
-
-| bytes | corpus build us | hash us |
-|---|---|---|
-| 8,192 | 5,771 | 963,705 |
-| 16,384 | 11,357 | 4,250,840 |
-| 32,768 | 64,725 | 6,033,445 |
-| 65,536 | 163,259 | 5,605,742 |
-
-8x the data costs ~5.8x the time. The 32 KiB row exceeding the 64 KiB row shows
-how contended the host was, so the honest reading is **roughly linear with a very
-high constant factor** — about 85 us per byte at 64 KiB — not a quadratic.
-
-That rules out this record's own "likely copy sites". `_sha256_stream_block_i64(self.partial)`
-and `sha256_process_block(self.words, block)` operate on **fixed-size** buffers —
-eight digest words and one 64-byte block — so they are O(1) per block regardless
-of what the interpreter does with them, and cannot produce the observed cost. A
-whole-payload copy per partition would show up as superlinear growth in the table
-above; it does not.
-
-At 85 us/byte, 1 MiB is roughly 90 seconds for the one-shot oracle **alone**,
-before any streaming partition runs. That accounts for the entire 189-second
-overrun without any aliasing defect. The 180-second diagnostic ceiling is
-therefore not reachable by removing a copy: it needs a native/JIT lane for the
-hash, or a smaller admitted corpus, and this record forbids the latter.
 
 ## Required direction
 
@@ -154,3 +125,4 @@ scenarios, infer RSS, or rerun this attempt unchanged.
 - `doc/03_plan/agent_tasks/spipe_knowledge_compiler.md`
 - `doc/03_plan/sys_test/spipe_knowledge_compiler.md`
 - `test/01_unit/app/spipe_knowledge_provider/provider_streaming_sha256_spec.spl`
+

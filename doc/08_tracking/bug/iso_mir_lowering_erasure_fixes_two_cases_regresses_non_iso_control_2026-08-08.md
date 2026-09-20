@@ -1,4 +1,9 @@
 # `iso` MIR lowering: erasure fixes two use-after-move cases but regresses the non-`iso` control
+## Closed 2026-09-16 — RETRACTED; patch landed 7a8115c6091; spec 4/4 with SIMPLE_MODULE_LIMIT=0
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **ID:** iso_mir_lowering_erasure_fixes_two_cases_regresses_non_iso_control_2026-08-08
 - **Date:** 2026-08-08
@@ -163,3 +168,4 @@ runner can return a confident, well-formed, WRONG verdict rather than failing
 loudly. The repro command originally given in this doc is unsound as written for
 exactly that reason. When a measurement contradicts the structure of the code,
 suspect the harness first.
+

@@ -1,6 +1,8 @@
 # Bug: native-build BuildCache loses all entries on cross-process reload
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (2026-07-16, per record's own Status section — two-build gate PASS)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-16):** RESOLVED — two-build gate PASS. On origin tip
 (eaee86e1e4d, deployed binary, live-interpreted pipeline), a rebuild of an
@@ -77,5 +79,3 @@ Regression gate: build twice with the same compiler binary and require
 Runtime/native execution was not authorized in this session, so the two-build
 cache-hit gate above remains required before closing this bug.
 
-## Triage 2026-09-12
-Reviewed 2026-09-12: record's own status already accurate; added top-level line for gate compliance only. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

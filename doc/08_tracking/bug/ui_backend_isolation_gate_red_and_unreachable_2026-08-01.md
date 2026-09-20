@@ -1,6 +1,8 @@
 # UI backend-isolation gate: red since 2026-07-25, and never executed in CI
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-01
 - **Guard:** `scripts/check/check-ui-backend-isolation.shs`
@@ -214,6 +216,3 @@ Unblock requires the gate to reach `new=0`. Cheapest credible path: resolve
 installed, and it should be installed as a **symlink**, not a copy — the
 guard-wiring ratchet fails copied hooks because they go stale silently.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

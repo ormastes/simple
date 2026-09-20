@@ -1,4 +1,8 @@
 # Native/AOT has no erased by-name method dispatch — and cannot have one without an object-model change
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Status:** OPEN — design note. No code change landed. **No build was verified** (see "What I did NOT verify").
@@ -168,3 +172,4 @@ read on the line after each command; 137/143/144 with no result line is
 awk '/MemAvailable/{print int($2/1048576)"G"}' /proc/meminfo   # wait for >= 40G
 sh scripts/check/check-native-erased-dispatch.shs
 ```
+

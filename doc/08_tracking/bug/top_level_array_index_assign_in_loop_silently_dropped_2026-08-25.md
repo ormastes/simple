@@ -1,4 +1,8 @@
 # Module-level `arr[i] = arr[i] + 1` inside a top-level loop is silently dropped (2026-08-25)
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler_rust/**
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Update 2026-09-13 — re-measured, still OPEN, and MUCH broader than array-index writes
 
@@ -69,3 +73,4 @@ Workaround used there: define the mutation inside a `fn` in the block (`>>> fn f
 ## Reproduce
 `scratchpad` probes `b21b.spl` (top-level, wrong) vs `b21c.spl` (inside fn, right) — 12 lines total.
 Likely area: module-level statement execution path in the seed (`compiler_rust/compiler/src/interpreter*` / JIT `ExecCore::run_file_interpreted_with_args`) treating a module-level `var` collection as a copied temporary inside loop bodies (value-semantics COW alias, cf. `code-style.md` rule on collection aliases).
+

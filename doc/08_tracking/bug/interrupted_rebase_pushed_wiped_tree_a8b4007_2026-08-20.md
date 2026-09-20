@@ -1,6 +1,9 @@
 # Interrupted rebase produced a 3-file tree that was pushed to main (2026-08-20)
+## Closed 2026-09-16 — incident resolved: wiped tree restored and verified (116301 files); rule recorded
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## What happened
 - Landing flow built a clean 3-commit tip `1454b55d778` (116,301 files) on base
@@ -33,5 +36,3 @@ full hook suite hangs >8min on compiler-dependent probes; the fast tree
 guards should be re-run manually on the FINAL sha whenever `--no-verify` is
 used.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

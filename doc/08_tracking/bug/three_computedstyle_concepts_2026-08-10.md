@@ -1,4 +1,8 @@
 # Three unrelated `ComputedStyle` concepts (2026-08-10)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13
 Not a bug requiring a fix -- an architecture-debt tracker ("do NOT add a
@@ -139,3 +143,4 @@ this session has standing to lift unilaterally. Re-verifying it's
 unmerged: (1)+(2) merge into `browser_engine/style/computed.spl` still
 requires explicit sign-off from that lane's owner before a session outside
 this task's stated scope edits it. No merge performed. Status stays OPEN.
+

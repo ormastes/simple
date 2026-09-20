@@ -1,6 +1,8 @@
 # BUG: parameter/variable named `unit` collides with the `Unit` keyword token (seed parser)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (workaround landed; general seed fix pending — see Status section below)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** `interp_unit_param_keyword_collision`
 - **Severity:** P1 (any user code with a `unit` parameter/variable mis-parses or fails lookup)
@@ -49,5 +51,9 @@ as the prior `Slice`/`Flat` fix (2026-06-12, comment ~line 78).
 - **General seed fix: OPEN** — pending user authorization (affects all user code with `unit`).
 - Treat `unit` as effectively reserved until the seed fix lands.
 
-## Triage 2026-09-12
-Reviewed 2026-09-12: the record's own Status section (workaround landed, general seed fix open) is already accurate; added a top-level Status line for gate compliance only, no reclassification. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (still reproduces; fix is inert pending a seed rebuild)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's exact repro (`fn f(unit: text) -> text:` returning bare `unit`) still fails — `parse: Unexpected token: expected identifier, found Newline`, exit non-zero, on both the JIT and the interpreter fallback.
+- **measured**: the source fix IS present at `src/compiler_rust/parser/src/expressions/primary/identifiers.rs:74-80`, carrying its own comment "this source fix is INERT until the seed is rebuilt + bootstrapped" — so the deployed seed simply predates it.
+- Verdict: OPEN. Closing it needs a seed rebuild + bootstrap deploy, which this session must not do (a bootstrap is running concurrently and `src/compiler_rust/**` is off-limits). Treat `unit` as reserved until then.
+

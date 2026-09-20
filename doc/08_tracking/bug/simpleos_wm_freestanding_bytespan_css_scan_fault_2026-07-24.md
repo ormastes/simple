@@ -1,6 +1,8 @@
 # SimpleOS WM Freestanding ByteSpan CSS Scanner Fault
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -140,6 +142,3 @@ proof, canonical hosted WM evidence, and canonical OVMF evidence. Presentation
 evidence must also carry and validate the Web render backend plus the realized
 solid-material SHA-256; configured theme markers alone are insufficient.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

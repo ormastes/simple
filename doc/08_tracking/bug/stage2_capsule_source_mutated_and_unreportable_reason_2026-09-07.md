@@ -1,4 +1,8 @@
 # Stage 2 sanity fails at `native-capsule-source-mutated` on hello world, and the reason is nondeterministically unreportable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ROOT-CAUSED and WORKED AROUND 2026-09-07; the underlying native-codegen field-binding defect is OPEN.
 found alongside it are fixed (see "What was fixed").
@@ -252,3 +256,4 @@ bytes) and different content**, which is the signature of one equal-width field
 (a hex digest) differing — i.e. very likely the SAME field-binding defect class,
 one layer further in (`capsule.capsule_identity`, `capsule.object_path`,
 `fp.size` or `fp.content_hash`). Stage 3 is still not reached.
+

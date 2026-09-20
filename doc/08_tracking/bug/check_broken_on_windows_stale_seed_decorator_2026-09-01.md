@@ -1,5 +1,9 @@
 # `simple check` broken on Windows: stale seed rejects `@always_inline` in its own stdlib (RESOLVED 2026-09-01 by seed redeploy)
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — RESOLVED 2026-09-01 by seed redeploy; before/after fixture evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -78,5 +82,3 @@ which contains the post-fix whitelist literals; `deps/simple.exe` and
   binary redeploy plus two platform-agnostic specs (binary picked by probing
   `bin/simple.exe` then `bin/simple`).
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

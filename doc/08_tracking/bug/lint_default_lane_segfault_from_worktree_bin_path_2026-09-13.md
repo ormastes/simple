@@ -1,4 +1,8 @@
 # `simple lint` segfaults in the default (JIT-attempt) lane when the compiler binary is invoked from a path inside the current working directory's own tree
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 
@@ -98,3 +102,4 @@ blocking regression: `simple lint` is part of the default toolchain
 run to completion in its default lane from a binary deployed and invoked the
 ordinary way (`bin/simple lint <file>`, from repo root, same as every example
 in this repo's own docs).
+

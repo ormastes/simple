@@ -1,4 +1,8 @@
 # Stage-3 bootstrap native-build ignores --jobs/--threads: measured single-core at real 14,340-file scale (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN — **not a new root cause**, a bootstrap-scale confirmation of an
   already-located defect. Handover to a perf lane; the user wants the
@@ -126,3 +130,4 @@ repeating the exact stale-snapshot clobber
 provenance note describes (a docs-sync commit silently reverting a landed fix
 + deleting its record). Nothing in either existing record was edited by this
 lane.
+

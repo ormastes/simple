@@ -1,6 +1,8 @@
 # native-build: cross-function `Result` text-payload match is non-deterministic
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own **Resolved:** 2026-07-15 field)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** high (non-deterministic silent-wrong)
 **Found:** 2026-07-14, errhandling lane
@@ -49,5 +51,3 @@ module (`boomboom41`) in the 40-case gate.
 
 `/tmp/wt_errhandling/` probes; run the same `--entry` build 3× with `--clean`.
 
-## Triage 2026-09-12
-Not independently re-run; formalizing the record's own Resolved field into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

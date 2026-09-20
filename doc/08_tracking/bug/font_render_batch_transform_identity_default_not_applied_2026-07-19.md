@@ -1,5 +1,8 @@
 # BUG: `FontRenderBatch.transform_identity` default field value not applied — reads as empty string, blocking all glyph compositing
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open (2026-07-19, GLYPH-FIX-8 campaign). Root-cause LOCALIZED, not fixed
@@ -229,5 +232,3 @@ Re-add the `[glyphfix8-diag]` print above (temporarily) at
   `_draw_font_batch_cpu_suffix`, `_draw_font_batch_plan` — the compositing
   choke point)
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

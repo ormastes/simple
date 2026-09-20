@@ -1,6 +1,8 @@
 # Git auto-merge silently loses content, with no conflict and no marker
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-07
 - **Severity:** high — landed code is silently deleted; every pre-push guard passes
@@ -258,5 +260,3 @@ on stderr via `run_push_gate`. An advisory verdict is not a pass.
 - A push range `P1..M` re-scans the second parent's side, so pre-existing red
   from older merges re-fires. Acceptable while advisory; see promotion criteria.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

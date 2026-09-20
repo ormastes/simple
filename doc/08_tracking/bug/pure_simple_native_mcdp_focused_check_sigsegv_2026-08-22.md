@@ -1,5 +1,8 @@
 # Pure-Simple native MCDP focused check/test SIGSEGV
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/driver/native_mcdc_transport_spec.spl -> 0 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -120,5 +123,3 @@ four-word environment ABI smoke and focused standalone MCDP check pass.  Until
 then, native MCDP Simple execution and its performance evidence remain
 unverified.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/compiler/driver/native_mcdc_transport_spec.spl` on the deployed seed; the spec now passes in full (0/0), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

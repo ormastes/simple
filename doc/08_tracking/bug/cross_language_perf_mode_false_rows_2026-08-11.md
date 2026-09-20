@@ -1,5 +1,8 @@
 # Cross-language performance harness mode rows are not trustworthy
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Claimed for `compiler_loader_script_crosslang_perf`; no harness fix started.
@@ -10,5 +13,3 @@ The documented `simple run --mode=smf file` and `--mode=interpreter file` forms 
 ## Unblock condition
 Bind each row to a proven execution mode, require an observable checksum, add Rust, fail closed on fallback, and rerun against an admitted self-hosted binary with matching warmups and CPU settings.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

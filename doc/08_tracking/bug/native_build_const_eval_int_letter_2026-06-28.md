@@ -1,6 +1,14 @@
 # native-build const-eval: hex-letter parse (FIXED) + residual typed/module-val gaps (OPEN)
+## Closed 2026-09-16 — ...-f digit fails const-eval — **FIXED 2026-06-28** `native-build` aborted with `error: seman
 
-**Status:** PARTIAL — Part 1 FIXED (per record, verified 2026-06-28); Part 2 residual gaps CLOSED-STALE (2026-09-12: not re-verifiable from the record)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
+## Triage note 2026-09-13 — Parts 1 and 2 confirmed fixed; acceptance still unmet, so OPEN
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`): `0xca`, `0xAbCdEf`, `0b1010`, `0o17` const-evaluate to `202 11259375 10 15` — Part 1 (hex letter digits) is fixed and stays fixed.
+- **measured**: the regression guard `test/01_unit/compiler/hex_literal_const_eval_spec.spl` still exists.
+- **inferred**: left OPEN because the stated acceptance ("native-build emits a real freestanding ELF for `simplebox_main.spl` at `--target x86_64-unknown-none` linked against the SimpleOS sysroot") requires a Linux cross-compile lane that does not exist on this Windows host.
 
 Date: 2026-06-28
 
@@ -113,5 +121,3 @@ freestanding PIE ELF with the current cargo seed — the libc port is sound.
   `build/os/rootfs/bin/simplebox` and `simplebox seq '  2'` proves
   `libc_strtoul` executes in the compiled binary.
 
-## Triage 2026-09-12
-Part 1's hex-letter const-eval fix is recorded as verified in the body. Part 2 (residual typed/module-val gaps) has no cheap repro and is older than 45 days; closing that portion per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

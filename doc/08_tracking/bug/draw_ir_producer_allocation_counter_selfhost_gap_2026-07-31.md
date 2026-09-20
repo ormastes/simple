@@ -1,4 +1,8 @@
 # Draw IR producer allocation counter is unavailable in the self-hosted runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 
@@ -44,3 +48,4 @@ take before/after deltas without a synthetic command-count estimate.
 
 Do not treat RSS, command counts, or modeled mimalloc counters as a substitute:
 they do not identify actual language collection allocations in this workload.
+

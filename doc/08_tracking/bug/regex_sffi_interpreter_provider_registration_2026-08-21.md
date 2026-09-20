@@ -1,4 +1,9 @@
 # Regex SFFI interpreter provider registration gap
+## Closed 2026-09-16 — ...the regex operation itself. ## Resolution evidence - `cargo test --manifest-path src/compi
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-21
 **Status:** Fixed
@@ -41,3 +46,4 @@ regex operation itself.
 - Boolean handle calls borrow their text argument and perform an O(1)
   generation/index lookup under a shared read lock. They do not allocate,
   dynamically resolve a symbol, or perform string-key/hash lookup.
+

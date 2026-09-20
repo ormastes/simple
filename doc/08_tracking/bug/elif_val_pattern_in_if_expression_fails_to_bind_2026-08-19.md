@@ -1,4 +1,8 @@
 # `elif val Some(x) = ...` inside an if-EXPRESSION fails to bind the pattern var (interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** `elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19`
 - Status: OPEN (workaround landed)
@@ -30,3 +34,4 @@ block-local, and never write pattern bindings back.
 - Minimal failing-pre-fix repro spec (from the md_renderer diff shape).
 - Fix in `interpreter/expr/control.rs` elif-branch handling; then revert the
   md_renderer workaround.
+

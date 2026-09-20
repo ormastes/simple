@@ -1,5 +1,8 @@
 # src/compiler_rust/lib/ stdlib-snapshot provenance unknown — 2026-08-28
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found while adjudicating the `check-no-direct-rt.shs` `--roots` widening
 (examples/tools/scripts/test scan roots).
@@ -42,5 +45,3 @@ Whoever owns `src/compiler_rust` build tooling should confirm whether a
 sync step exists (and wire it into this record) or whether this tree needs
 a dedicated drift-detection gate against `src/lib/`.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

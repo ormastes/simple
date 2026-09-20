@@ -1,4 +1,9 @@
 # P-256 ECDH imports a field-arithmetic module that has never existed
+## Closed 2026-09-16 — Status FIXED, re-verified; fe_p256 landed 306aebd15daa, all 11 imported names resolve
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (independent re-verification pass).
@@ -110,3 +115,4 @@ hard error, or add a lint that fails the build on one.** Every instance here
 compiled cleanly, passed every structural push guard, and failed only when a
 spec happened to execute the affected line. In this case that silence hid a
 missing curve implementation behind a live crypto API.
+

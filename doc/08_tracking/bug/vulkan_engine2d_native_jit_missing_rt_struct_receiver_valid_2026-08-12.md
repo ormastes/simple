@@ -1,6 +1,9 @@
 # Vulkan Engine2D native JIT is missing `rt_struct_receiver_valid`
+## Closed 2026-09-16 — Resolved 2026-08-15; panic gone, both integration specs PASS on fixed binary
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -135,6 +138,3 @@ cargo build --release --bin simple   # in src/compiler_rust
 sh scripts/check/check-vulkan-engine2d-readback.shs
 ```
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,6 +1,8 @@
 # Pure-Simple `run` path: the HIR interpreter it reaches has no loop/match/return arms
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-28  **Status:** OPEN (hand-off to compiler/backend owner)
 **Found by:** perf_interp profiling lane (release/2026-08-27 tip `bb87306b64c`)
@@ -65,6 +67,3 @@ to `compiler.core.interpreter.core_interpret`, which does implement them
 `_EvalOps/call_method_eval.spl:931 eval_array_method`). Option (b) is what the
 backend file's own header prescribes.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

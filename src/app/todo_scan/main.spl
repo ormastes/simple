@@ -50,6 +50,7 @@ struct TodoEntry:
     issue: text         # GitHub issue number (optional)
     blocked: text       # Blocked by issues (optional)
     status: text        # open, blocked, in_progress, closed
+    valid: bool         # citation verified at last scan; carried through merges
 
 # ============================================================================
 # Scanner
@@ -134,7 +135,8 @@ fn scan_file(file_path: text, start_id: i64) -> [TodoEntry]:
             line: line_num,
             issue: parsed.issue,
             blocked: parsed.blocked,
-            status: entry_status
+            status: entry_status,
+            valid: true
         ))
         current_id = current_id + 1
     results
@@ -284,6 +286,196 @@ fn should_scan(path: text) -> bool:
     false
 
 # ============================================================================
+# Committed DB merge — stable ids, curated rows survive a rescan
+# ============================================================================
+
+fn _digit_value(c: text) -> i64:
+    "0123456789".index_of(c)
+
+fn _to_i64(s0: text) -> i64:
+    """Parse a non-negative integer; -1 signals invalid. Committed ids and
+    line numbers are never negative, so the sentinel cannot collide."""
+    val s = s0.trim()
+    if s.len() == 0:
+        return -1
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < s.len():
+        val d = _digit_value(s[i:i + 1])
+        if d < 0:
+            return -1
+        n = n * 10 + d
+        i = i + 1
+    n
+
+fn _take_field(rest: text) -> (text, text):
+    """Split one `field, remainder` pair off a committed-db row tail."""
+    val sep = rest.index_of(", ")
+    if sep < 0:
+        return (rest.trim(), "")
+    (rest[0:sep].trim(), rest[sep + 2:])
+
+fn _empty_entry() -> TodoEntry:
+    TodoEntry(id: -1, keyword: "", area: "", priority: "", description: "",
+        file: "", line: -1, issue: "", blocked: "", status: "", valid: false)
+
+fn parse_db_row(line: text) -> TodoEntry:
+    """Parse one committed-db row in the exact shape written by write_todo_db.
+
+    Returns the `_empty_entry()` sentinel (id -1) for the table header, blank
+    lines, and anything that does not match; the reader drops those rows, so a
+    hand-edited or older-format line degrades to being ignored instead of
+    crashing the scan. Descriptions cannot contain a double quote (the writer
+    escapes them), so the first quote after the description start is always
+    its terminator."""
+    val t = line.trim()
+    if t.len() == 0:
+        return _empty_entry()
+    if _digit_value(t[0:1]) < 0:
+        return _empty_entry()
+    val (id_s, r1) = _take_field(t)
+    val id = _to_i64(id_s)
+    if id < 0:
+        return _empty_entry()
+    val (keyword, r2) = _take_field(r1)
+    val (area, r3) = _take_field(r2)
+    val (priority, r4) = _take_field(r3)
+    if not r4.starts_with("\""):
+        return _empty_entry()
+    val desc_body = r4[1:]
+    val desc_end = desc_body.index_of("\"")
+    if desc_end < 0:
+        return _empty_entry()
+    val description = desc_body[0:desc_end]
+    val r5 = desc_body[desc_end + 1:]
+    if not r5.starts_with(", "):
+        return _empty_entry()
+    val (file, r6) = _take_field(r5[2:])
+    val (line_s, r7) = _take_field(r6)
+    val line = _to_i64(line_s)
+    if line < 0:
+        return _empty_entry()
+    val (issue, r8) = _take_field(r7)
+    if not r8.starts_with("\""):
+        return _empty_entry()
+    val blocked_body = r8[1:]
+    val blocked_end = blocked_body.index_of("\"")
+    if blocked_end < 0:
+        return _empty_entry()
+    val blocked = blocked_body[0:blocked_end]
+    val r9 = blocked_body[blocked_end + 1:]
+    if not r9.starts_with(", "):
+        return _empty_entry()
+    val (status, r10) = _take_field(r9[2:])
+    val valid = r10.trim() == "true"
+    TodoEntry(id: id, keyword: keyword, area: area, priority: priority,
+        description: description, file: file, line: line, issue: issue,
+        blocked: blocked, status: status, valid: valid)
+
+fn read_todo_db(path: text) -> [TodoEntry]:
+    var rows: [TodoEntry] = []
+    val content = file_read(path) ?? ""
+    if content.len() == 0:
+        return rows
+    for line in content.split("\n"):
+        val row = parse_db_row(line)
+        if row.id >= 0:
+            rows.push(row)
+    rows
+
+fn _normalize_description(s: text) -> text:
+    """Trim and collapse whitespace runs so incidental hand-edits (double
+    spaces, trailing space) cannot orphan a row from its marker."""
+    var parts: [text] = []
+    for p in s.split(" "):
+        if p.len() > 0:
+            parts.push(p)
+    parts.join(" ")
+
+fn todo_key(file: text, description: text) -> text:
+    """Stable merge identity: file path + normalized description. The line
+    number is deliberately NOT part of the key — markers drift within a file,
+    and the merge re-points the line instead of treating drift as a brand-new
+    todo (the old behavior renumbered every id on each run)."""
+    file.trim() + "\n" + _normalize_description(description)
+
+struct MergeResult:
+    entries: [TodoEntry]
+    carried: i64   # committed rows matched to a live marker
+    added: i64     # live markers with no committed row
+    closed: i64    # committed open rows whose marker vanished
+
+fn merge_entries(existing: [TodoEntry], scanned: [TodoEntry]) -> MergeResult:
+    """Merge a fresh scan with the committed db.
+
+    A committed row whose key matches a live marker keeps its id and every
+    curated field (keyword/area/priority/issue/blocked/status/valid); only
+    file/line are refreshed, so line drift repairs itself. A committed row
+    whose marker vanished is marked `closed` — never deleted, never
+    renumbered; curated non-open rows (blocked/in_progress/closed) are
+    preserved as-is, because a hand-authored row whose text does not appear
+    verbatim in source must survive the scan. A live marker with no committed
+    row is appended with a fresh id past the current max — ids are never
+    reused."""
+    var used: [bool] = []
+    var ui: i64 = 0
+    while ui < scanned.len():
+        used.push(false)
+        ui = ui + 1
+
+    var merged: [TodoEntry] = []
+    var max_id: i64 = -1
+    var carried: i64 = 0
+    var closed_count: i64 = 0
+
+    for row in existing:
+        if row.id > max_id:
+            max_id = row.id
+        val k = todo_key(row.file, row.description)
+        var si: i64 = 0
+        var found: i64 = -1
+        while si < scanned.len() and found < 0:
+            if used[si] == false:
+                if todo_key(scanned[si].file, scanned[si].description) == k:
+                    found = si
+            si = si + 1
+        if found >= 0:
+            used[found] = true
+            carried = carried + 1
+            val s = scanned[found]
+            merged.push(TodoEntry(
+                id: row.id, keyword: row.keyword, area: row.area,
+                priority: row.priority, description: row.description,
+                file: s.file, line: s.line, issue: row.issue,
+                blocked: row.blocked, status: row.status, valid: row.valid))
+        else:
+            var status = row.status
+            if status == "open":
+                status = "closed"
+                closed_count = closed_count + 1
+            merged.push(TodoEntry(
+                id: row.id, keyword: row.keyword, area: row.area,
+                priority: row.priority, description: row.description,
+                file: row.file, line: row.line, issue: row.issue,
+                blocked: row.blocked, status: status, valid: row.valid))
+
+    var added: i64 = 0
+    var si2: i64 = 0
+    while si2 < scanned.len():
+        if used[si2] == false:
+            max_id = max_id + 1
+            added = added + 1
+            val e = scanned[si2]
+            merged.push(TodoEntry(
+                id: max_id, keyword: e.keyword, area: e.area,
+                priority: e.priority, description: e.description,
+                file: e.file, line: e.line, issue: e.issue,
+                blocked: e.blocked, status: e.status, valid: true))
+        si2 = si2 + 1
+
+    MergeResult(entries: merged, carried: carried, added: added, closed: closed_count)
+
+# ============================================================================
 # Output: SDN Database
 # ============================================================================
 
@@ -293,7 +485,8 @@ fn write_todo_db(entries: [TodoEntry], output_path: text):
 
     for entry in entries:
         val desc_escaped = entry.description.replace("\"", "'")
-        lines.push("    {entry.id}, {entry.keyword}, {entry.area}, {entry.priority}, \"{desc_escaped}\", {entry.file}, {entry.line}, {entry.issue}, \"{entry.blocked}\", {entry.status}, true")
+        val valid_text = if entry.valid: "true" else: "false"
+        lines.push("    {entry.id}, {entry.keyword}, {entry.area}, {entry.priority}, \"{desc_escaped}\", {entry.file}, {entry.line}, {entry.issue}, \"{entry.blocked}\", {entry.status}, {valid_text}")
 
     val content = lines.join("\n") + "\n"
     file_write(output_path, content)
@@ -476,10 +669,19 @@ fn main() -> i64:
     # Write outputs
     dir_create_all("{root}/doc/08_tracking/todo")
 
+    # Merge with the committed db: curated rows (statuses, blocked reasons,
+    # closed history) and every existing id must survive the scan. Without
+    # this the db is rebuilt from the fresh scan alone, renumbering every id
+    # and dropping every hand-maintained row.
     val db_path = "{root}/doc/08_tracking/todo/todo_db.sdn"
-    write_todo_db(entries, db_path)
+    var existing: [TodoEntry] = []
+    if file_exists(db_path):
+        existing = read_todo_db(db_path)
+    val merged = merge_entries(existing, entries)
+    write_todo_db(merged.entries, db_path)
     if not as_json:
         print "Database saved to {db_path}"
+        print "Merge: {merged.carried} carried, {merged.added} new, {merged.closed} closed"
 
     val md_path = "{root}/doc/TODO.md"
     write_todo_md(entries, md_path)

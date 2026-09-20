@@ -1,5 +1,8 @@
 # Engine2D blend-span native performance evidence blocked (2026-08-11)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -69,5 +72,3 @@ useful runtime-kernel evidence but does not close item 1 (native-AOT Simple) or
 item 5 (measured full framebuffer). A proposed two-pixel AVX2/NEON bridge was
 about 7x slower on mixed alpha and was reverted.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,5 +1,8 @@
 # `check-any-escape-census.shs` reports a number that describes 40% of its own scope
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed**: 2026-08-21 by agent Y1 (`Any` inventory), cross-checking agent A5/Y2's gate.
 - **Owner**: A5/Y2 (`src/compiler/35.semantics/any_escape/**`,
@@ -292,5 +295,3 @@ Option-related neighbours all green and unchanged: `enum_payload_capture` 7/7,
 `dict_get_option_match` 2/2, `result_unwrap_payload_type_preserved` 3/3,
 `qualified_result_option_no_import` 6/6.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

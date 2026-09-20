@@ -1,6 +1,9 @@
 # Self-hosted parser: block lambda as call argument with dedented closing paren fails
+## Closed 2026-09-16 — RESOLVED 2026-07-17; parser fixed, block lambdas parse; residual MIR gaps loud/tracked separately
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-11 · **Status:** RESOLVED (parser) 2026-07-17 — grammar divergence fixed; residual native-lowering gaps fail loud (see note below).
 **Found:** `simple check` delegation chain investigation. The check worker, when forced
@@ -109,6 +112,3 @@ closure-materialization path; `.filter` with a block lambda reports
 "unresolved method call: filter") — tracked as residual gaps in the tail-value
 doc. Standalone-bound block lambdas compile and run correctly.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

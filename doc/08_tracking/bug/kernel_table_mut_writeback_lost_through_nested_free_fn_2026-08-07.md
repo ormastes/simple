@@ -1,6 +1,8 @@
 # CpuKernelTable `mut` write-back lost through nested free fn / self.field (interpreter)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
@@ -112,17 +114,3 @@ The production restructure in `src/lib/gc_async_mut/gpu/engine2d/backend_softwar
 was left in place — it is correct code either way, and unwinding it is not this
 lane's call.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13
-Reconfirmed via source inspection: the workaround comments/structure at
-`backend_software.spl:75-76,1310-1318,1404` are still present; the
-underlying Rust interpreter argument-write-back defect is untouched and
-out of scope for a src/lib/** lane. Left OPEN, no code change attempted.
-## Triage 2026-09-13 (BUGFIX-12 shard 22)
-
-Root cause is Rust interpreter argument write-back (`function_exec.rs`), out
-of scope for `src/lib`; workaround already in production in
-`backend_software.spl` per the notes above, unchanged at `f26970e9d93`. No
-code change. Leaving OPEN.

@@ -1,6 +1,8 @@
 # Stage 2 Native SSpec Runner Process Crash
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -163,6 +165,3 @@ deployed CLI for the admitted Stage 2/runtime pair, and do not rerun the bounded
 Stage 3 command. Physical Cosmos+ BT-001..BT-006 remains the next production
 gate.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

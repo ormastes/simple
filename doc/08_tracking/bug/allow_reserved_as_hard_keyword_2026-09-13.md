@@ -1,4 +1,9 @@
 # `allow` and `forbid` cannot be used as identifiers — hard keywords the lexer's own comment says are contextual
+## Closed 2026-09-16 — ...pect more sites as the tree grows. ## Fix, and why it is not done here Deleting the `"allo
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: OPEN (2026-09-13)
 - Binary: `/home/yoon/dev/cargo-fulltest/release/simple`, sha256 `4dfdf671742007d30210` (Rust seed built 2026-09-13 16:00)
@@ -79,3 +84,4 @@ than half-applied.
 The pure-Simple lexer (`src/compiler/10.frontend/core/`) has no `"allow"`
 entry, so this is a seed-side divergence: the two front ends disagree about
 whether `allow` is a name.
+

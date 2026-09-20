@@ -1,4 +1,8 @@
 # RISC-V32 hosted Linux contract selects an ELF64 sysroot
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Source fixed fail-closed; hosted RISC-V32 remains unsupported  
 **Component:** compiler/backend target and linker contracts  
@@ -42,3 +46,4 @@ bare-metal target mode for both normal and bootstrap object emission instead
 of collapsing `none-elf` back to the hosted RV32 contract. The gate then requires the flagless default-LLVM
 bare-metal recovery target to emit a nonempty ELF32 RISC-V relocatable object;
 first staged CI execution remains pending.
+

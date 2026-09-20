@@ -1,4 +1,9 @@
 # `cargo test -p simple-driver --features wasm --test wasi_capability_enforcement` never converges — FIXED
+## Closed 2026-09-16 — Status FIXED 2026-08-06; probe.rs restored, repeat build 0 crates, test 16/16
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-06 in `src/compiler_rust/vendor/thiserror/build/probe.rs`
 (file restored — was silently absent, present nowhere in this repo's git
@@ -166,3 +171,4 @@ defect.
 - `src/compiler_rust/vendor/thiserror/build/probe.rs` — restored (was
   missing; content copied verbatim from the intact
   `vendor/thiserror-1.0.69/build/probe.rs` sibling in this repo).
+

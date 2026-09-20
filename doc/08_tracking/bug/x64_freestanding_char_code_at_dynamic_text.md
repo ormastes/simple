@@ -1,6 +1,9 @@
 # BUG: x86_64 freestanding — `char_code_at` mis-decodes on dynamically-built text
+## Closed 2026-09-16 — ...` in `src/os/apps/sshd/sshd.spl`. ## Fix (root) Fix the cranelift lowering of `char_code_a
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 Open. Found 2026-07-12 (Phase 2e Inc 2). Distinct from the frame-depth-sensitive
@@ -41,6 +44,3 @@ LLVM backend path (correct). Add the probe above as a regression gate once fixed
 - `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`
 - `doc/08_tracking/bug/x64_freestanding_rt_string_to_int_stub.md`
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

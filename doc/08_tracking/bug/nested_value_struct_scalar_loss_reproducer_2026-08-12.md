@@ -1,6 +1,8 @@
 # Nested value-struct scalar loss: minimal reproducer audit
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -50,6 +52,3 @@ state) until the first failing shape is found. Only then claim and change the
 pure-Simple constructor/call/return owner. The focused probes above must remain
 green as adjacent regressions.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

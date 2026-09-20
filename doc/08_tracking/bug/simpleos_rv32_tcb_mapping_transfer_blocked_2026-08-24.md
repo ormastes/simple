@@ -1,5 +1,8 @@
 # RV32 TCB mapping transfer remains blocked (2026-08-24)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The canonical TCB now has an appended, opaque slot/generation locator, but no
 present locator is constructed. A reviewed draft tried to bind the existing
@@ -21,5 +24,3 @@ the locator under the exact task lifecycle before teardown. SATP activation is
 also separately owned. Until those are implemented, canonical RV32 dispatch
 must keep the locator absent and process-image readiness false.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

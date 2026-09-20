@@ -9,7 +9,8 @@ asserted in prose:
 - `semantic_rebuilds` stays 0 while an exact retained row snapshot is
   unchanged. A bounded rows-only fold is only a fast prefilter; it is never a
   correctness key.
-- `readbacks` stays 0: no framebuffer is copied back per frame. The separately
+- No framebuffer is copied back per frame: the module keeps no framebuffer
+  readback counter at all, so nothing can silently claim one. The separately
   named proof counter records the single four-byte diagnostic readback.
 
 The retained scene buffer is descriptor-bound to a two-binding SPIR-V checksum
@@ -120,7 +121,6 @@ struct Engine2dVulkanResidentSliceReport:
     frames_requested: i64
     frames_submitted: i64
     semantic_rebuilds: i64
-    readbacks: i64
     session_initialised: bool
     init_error: text
     device_name: text
@@ -174,7 +174,6 @@ class Engine2dVulkanResidentArena:
     arena_generation: u64
     frames_submitted: i64
     semantic_rebuilds: i64
-    readbacks: i64
     last_scene_identity: u64
     last_scene_rows: [u64]
     # One published storage-buffer handle owns the packed scene rows. A larger
@@ -240,7 +239,6 @@ fn engine2d_vulkan_resident_arena(arena_id: u64, slot_count: u32, rows_per_slot:
         arena_generation: 1u64,
         frames_submitted: 0,
         semantic_rebuilds: 0,
-        readbacks: 0,
         last_scene_identity: 0u64,
         last_scene_rows: [],
         device_scene_capacity_rows: rows_per_slot as i64,
@@ -605,6 +603,20 @@ fn _resident_refusal(request: Engine2dGpuEpochRequest, reason_code: u32, store_r
     )
 
 impl Engine2dVulkanResidentArena:
+    me rotate_arena() -> u64:
+        """Rotate the arena to a fresh generation and return the new generation.
+
+        The superseded generation is retired immediately: any request still
+        carrying it is refused as stale by `frame`, which is what lets the
+        stale-generation negative control exercise a second live generation
+        instead of only a never-issued one. The retained scene snapshot is
+        cleared so the first frame under the new generation rebuilds honestly.
+        """
+        self.arena_generation = self.arena_generation + 1u64
+        self.last_scene_identity = 0u64
+        self.last_scene_rows = []
+        self.arena_generation
+
     me frame(scene_rows: [u64], request: Engine2dGpuEpochRequest, session_available: bool, caps: u32) -> Engine2dVulkanResidentFrame:
         """Run one frame through the fixed arena and return its epoch receipt.
 
@@ -651,8 +663,8 @@ impl Engine2dVulkanResidentArena:
             return _resident_refusal(request, DRAW_IR_V3_REASON_DEVICE_FAULT, DRAW_IR_PACKED_REASON_STALE,
                 "taken generation does not match the submitted rows")
         # Release the slot back into the fixed pool. No FRAMEBUFFER readback
-        # happens here or elsewhere in this module, which is why the legacy
-        # `readbacks` counter stays 0. The four-byte proof has its own counter.
+        # happens here or elsewhere in this module, and no counter claims one.
+        # The four-byte proof has its own counter.
         self.store.complete(submission.generation_ref)
         val identity = engine2d_vulkan_resident_scene_identity(scene_rows)
         if self.frames_submitted > 0 and not _engine2d_vulkan_resident_scene_rows_equal(scene_rows, self.last_scene_rows):
@@ -765,7 +777,6 @@ fn _resident_report(frames: i64, arena: Engine2dVulkanResidentArena, session_ini
         frames_requested: frames,
         frames_submitted: arena.frames_submitted,
         semantic_rebuilds: arena.semantic_rebuilds,
-        readbacks: arena.readbacks,
         session_initialised: session_initialised,
         init_error: init_error,
         device_name: device_name,
@@ -803,7 +814,7 @@ fn _resident_report(frames: i64, arena: Engine2dVulkanResidentArena, session_ini
         device_scene_fences: arena.device_scene_fences,
         host_submit_ns: evidence.host_submit_ns,
         host_complete_ns: evidence.host_complete_ns,
-        summary: "frames={arena.frames_submitted}/{frames};rebuilds={arena.semantic_rebuilds};framebuffer_readbacks={arena.readbacks};scene_allocations={arena.device_scene_allocations};scene_uploads={arena.device_scene_uploads};scene_upload_bytes={arena.device_scene_upload_bytes};scene_reuses={arena.device_scene_reuses};scene_releases={arena.device_scene_releases};scene_upload_failures={arena.device_scene_upload_failures};scene_release_failures={arena.device_scene_release_failures};blocking_upload_calls={arena.device_scene_blocking_upload_calls};blocking_submit_calls={arena.blocking_queue_submit_calls};descriptor_binds={arena.device_scene_descriptor_binds};dispatches={arena.device_scene_dispatches};nonblocking_submits={arena.device_scene_nonblocking_submits};fence_waits={arena.device_scene_fence_waits};proof_initializations={arena.device_scene_proof_initializations};proof_init_bytes={arena.device_scene_proof_init_bytes};proof_readbacks={arena.device_scene_proof_readbacks};shader_consumed_at_least_once={arena.device_scene_shader_consumed};submit_failures={submit_failures};device={device_name};qualifies={qualifies};{engine2d_gpu_epoch_receipt_summary(receipt)}"
+        summary: "frames={arena.frames_submitted}/{frames};rebuilds={arena.semantic_rebuilds};scene_allocations={arena.device_scene_allocations};scene_uploads={arena.device_scene_uploads};scene_upload_bytes={arena.device_scene_upload_bytes};scene_reuses={arena.device_scene_reuses};scene_releases={arena.device_scene_releases};scene_upload_failures={arena.device_scene_upload_failures};scene_release_failures={arena.device_scene_release_failures};blocking_upload_calls={arena.device_scene_blocking_upload_calls};blocking_submit_calls={arena.blocking_queue_submit_calls};descriptor_binds={arena.device_scene_descriptor_binds};dispatches={arena.device_scene_dispatches};nonblocking_submits={arena.device_scene_nonblocking_submits};fence_waits={arena.device_scene_fence_waits};proof_initializations={arena.device_scene_proof_initializations};proof_init_bytes={arena.device_scene_proof_init_bytes};proof_readbacks={arena.device_scene_proof_readbacks};shader_consumed_at_least_once={arena.device_scene_shader_consumed};submit_failures={submit_failures};device={device_name};qualifies={qualifies};{engine2d_gpu_epoch_receipt_summary(receipt)}"
     )
 
 fn engine2d_vulkan_resident_slice_run(frames: i64, scene_rows: [u64], caps: u32) -> Engine2dVulkanResidentSliceReport:

@@ -1,6 +1,9 @@
 # native (entry-closure): struct text fields misrender in string interpolation
+## Closed 2026-09-16 — in-body Resolution section: MIR field projection source fix; staged execution pending
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-23  **Status:** SOURCE FIXED; staged execution pending
 - **Severity:** medium — no crash; wrong output when interpolating struct
@@ -45,6 +48,3 @@ FreeBSD, AArch64/RISC-V64 execution, and ARM32/RV32/Windows-ARM64 object gates.
 A focused source contract pins both type-propagation steps. Rebuilt execution
 remains pending.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

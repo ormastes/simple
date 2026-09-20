@@ -1,4 +1,8 @@
 # Three app modules/symbols their specs import exist nowhere in the tree
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-triaged 2026-09-13 — 2 of 3 fixed, 1 repaired here, and a regression the spec was written to prevent has re-appeared
 
@@ -161,3 +165,4 @@ dependencies (`os_parse_log_arg`, `os_log_arg_error`, `os_parse_scenario_arg`,
 `get_scenario`, `build_scenario`, `arch_from_name`, `get_qemu_target`,
 `build_os`, `_export_os_log_mode_inline`, `_restore_os_log_mode_inline`) are
 themselves absent and touch the SimpleOS/QEMU build path.
+

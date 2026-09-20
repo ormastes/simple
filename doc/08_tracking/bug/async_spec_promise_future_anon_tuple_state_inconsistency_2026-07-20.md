@@ -1,4 +1,8 @@
 # async_spec: destructured Future from anon-tuple Promise.new() gives inconsistent poll() results
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -115,5 +119,3 @@ applied locally for clarity; that fix is not present in the committed file.
   `Future.poll()` inconsistency, which still blocks full green even after
   fix (1) is applied.
 
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/01_unit/lib/std/async_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

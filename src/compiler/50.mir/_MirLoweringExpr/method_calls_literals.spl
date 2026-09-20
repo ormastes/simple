@@ -1682,7 +1682,7 @@ impl MirLowering:
             # (mir_lowering_stmts.spl) binds the loop variable's
             # `struct_value_syms` entry from `array_element_struct_syms` keyed
             # on the COLLECTION local -- and only `lower_array_lit`
-            # (literals.spl:97) and the param-array path ever populated that
+            # (in this file) and the param-array path ever populated that
             # map. A `.values()` result never did, so `for f in d.values()`
             # left the loop var with no struct name, `resolve_field_index`
             # (function_lowering.spl:1305) hit its "type unknown" fallback and
@@ -1690,7 +1690,7 @@ impl MirLowering:
             # read `p.a`, and in Stage 2 `func.name` read `func.symbol` as a
             # raw integer while `func.signature` came back nil, so
             # build_signature dereferenced nil -> SIGSEGV on any input.
-            # Mirror literals.spl's registration here.
+            # Mirror lower_array_lit's registration in this file.
             var dict_keys_elem_struct_name = ""
             val dict_keys_recv_type = self.local_mir_type_of(receiver_local)
             # Probe (SIMPLE_TRACE_DICT_ELEM=1) for bug
@@ -2645,10 +2645,22 @@ impl MirLowering:
                 ts_ops = ts_ops.push(mir_operand_copy(ts_recv))
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-ops method={method}\n")
+                # Bug text-split-limit-ignored: `text.split(separator, limit)`
+                # is the only text-special call with a non-text operand. The
+                # runtime ABI requires the separator as a tagged string and the
+                # limit as a RAW i64 (rt_string_split_limit,
+                # src/runtime/runtime_native.c and
+                # src/runtime/simple_core/core_string.spl); tagging every
+                # argument turned the numeric limit into a string handle the
+                # runtime read as a huge integer, so the limit was silently
+                # ignored. (First fixed 2026-08-17, lost in the 2050c046ee3
+                # mega-SCC refactor, re-applied here.)
+                var ts_arg_index = 0
                 for ts_arg in args:
                     val ts_arg_local = self.lower_expr(ts_arg.value)
-                    val ts_arg_tagged = self.ensure_tagged_str(ts_arg_local)
-                    ts_ops = ts_ops.push(mir_operand_copy(ts_arg_tagged))
+                    val ts_arg_ready = if method == "split" and ts_arg_index == 1: ts_arg_local else: self.ensure_tagged_str(ts_arg_local)
+                    ts_ops = ts_ops.push(mir_operand_copy(ts_arg_ready))
+                    ts_arg_index = ts_arg_index + 1
                 val ts_sym = match method:
                     case "split": if args.len() == 2: "rt_string_split_limit" else: "rt_string_split"
                     case "replace": "rt_string_replace"
@@ -3307,7 +3319,7 @@ impl MirLowering:
                     if not conversion_supported:
                         if val conversion_type = self.local_mir_type_of(unresolved_receiver_local):
                             match conversion_type.kind:
-                                case MirTypeKind.Bool | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.U64 | MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+                                case MirTypeKind.Bool | MirTypeKind.Char | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.U64 | MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
                                     conversion_supported = true
                                 case _: ()
                     if conversion_supported:
@@ -3458,6 +3470,16 @@ impl MirLowering:
                             val fold_init_raw = self.lower_expr(args[0].value)
                             return self.lower_array_fold(unresolved_receiver_local, fold_init_raw, fold_lam_op)
 
+                    # Array `get`/`at` are builtin methods without resolver
+                    # symbols. Lower only the exact one-index Array shape;
+                    # other receivers and arities retain the loud unresolved
+                    # diagnostic below. The helper performs signed bounds
+                    # checks before reading and constructs a real Option<T>.
+                    if (method == "get" or method == "at") and args.len() == 1:
+                        val access_index_local = self.lower_expr(args[0].value)
+                        if val access_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(access_index_local)):
+                            return access_result
+
                     # `.first()`/`.last()` have no MethodResolver entry either
                     # (same builtin-Array gap as push/map/filter/fold above),
                     # so they always reach this Unresolved arm and used to
@@ -3472,10 +3494,10 @@ impl MirLowering:
                     # `map`/`filter` above already do when their lambda arg
                     # doesn't match the liftable shape.
                     if method == "first" and args.len() == 0:
-                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false):
+                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, nil):
                             return first_result
                     if method == "last" and args.len() == 0:
-                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true):
+                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true, nil):
                             return last_result
 
                 # Bug #149: `x.push(item)` never resolves via MethodResolver
@@ -4038,9 +4060,14 @@ impl MirLowering:
         var key_type = MirType.i64()
         var value_type = MirType.i64()
         var first_entry = true
-        # Bug #189 sibling (dict LITERAL) -- see the identical copy in
-        # _MirLoweringExpr/literals.spl; these two definitions are duplicates
-        # and must stay in sync.
+        # Bug #189 sibling (dict LITERAL). A struct-valued dict learns its
+        # element struct NAME from exactly one of two places, and a literal hit
+        # neither: `lower_array_lit` records it for arrays, and
+        # `note_container_elem_type` records it at every `d[k] = v` store. A
+        # dict born fully-formed as `{"k": Point(...)}` is never stored into, so
+        # `array_element_struct_syms` stayed empty and the Index read had no
+        # name-keyed provenance to fall back on -- `{"k": P(...)}["k"].y` still
+        # read field 0 (`x`) after the store-side half of #189 was fixed.
         var value_struct_name = ""
         var b_new = self.builder
         val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
@@ -4075,7 +4102,10 @@ impl MirLowering:
                 if first_entry:
                     value_type = self.local_mir_type_of(value_local) ?? value_type
                     first_entry = false
-                # Capture BEFORE box_runtime_value -- see literals.spl.
+                # Capture BEFORE box_runtime_value, mirroring how value_type is
+                # read off the raw local just above: struct construction
+                # registers struct_value_syms on the value local, and boxing
+                # would hand back a different local id.
                 if value_struct_name == "":
                     value_struct_name = self.struct_value_syms.get(value_local.id) ?? ""
                 val boxed_value = self.box_runtime_value(value_local)
@@ -4466,7 +4496,7 @@ impl MirLowering:
         self.builder = b_exit
         acc
 
-    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool) -> LocalId?:
+    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool, access_index: LocalId?) -> LocalId?:
         """Real MIR lowering for `Array.first()`/`.last()` on a runtime
         array, returning a genuine `Option<T>` handle -- mirrors
         `Option.map`'s some/none/merge shape immediately above (the
@@ -4557,7 +4587,7 @@ impl MirLowering:
         # mirrors why `Option.map` above only calls `ensure_option_handle`
         # when `map_value_type != nil` at all.
         val option_type = HirType(kind: HirTypeKind.Optional(elem_hir_type), span: receiver.span)
-        val name_prefix = if want_last: "last" else: "first"
+        val name_prefix = if access_index != nil: "get" else: if want_last: "last" else: "first"
 
         var b_len = self.builder
         val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
@@ -4566,20 +4596,31 @@ impl MirLowering:
 
         var b_split = self.builder
         val zero = b_split.emit_const_int(0)
-        val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+        var selected_index = zero
+        if val requested_index = access_index:
+            selected_index = requested_index
         val some_block = b_split.new_block(Some("{name_prefix}_some"))
         val none_block = b_split.new_block(Some("{name_prefix}_none"))
         val merge_block = b_split.new_block(Some("{name_prefix}_merge"))
         val result_local = b_split.new_temp(MirType.i64())
-        b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
+        if access_index != nil:
+            val upper_block = b_split.new_block(Some("get_upper"))
+            val nonnegative = b_split.emit_binop(MirBinOp.Ge, mir_operand_copy(selected_index), mir_operand_copy(zero), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(nonnegative), upper_block, none_block)
+            b_split.switch_to_block(upper_block)
+            val below_length = b_split.emit_binop(MirBinOp.Lt, mir_operand_copy(selected_index), mir_operand_copy(len_local), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(below_length), some_block, none_block)
+        else:
+            val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
         self.builder = b_split
 
         var b_some = self.builder
         b_some.switch_to_block(some_block)
         self.builder = b_some
         var b_idx = self.builder
-        var idx_local = b_idx.emit_const_int(0)
-        if want_last:
+        var idx_local = selected_index
+        if access_index == nil and want_last:
             val one = b_idx.emit_const_int(1)
             idx_local = b_idx.emit_binop(MirBinOp.Sub, mir_operand_copy(len_local), mir_operand_copy(one), MirType.i64())
         self.builder = b_idx
@@ -4617,12 +4658,24 @@ impl MirLowering:
     me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
         """Lower tuple literal.
 
-        See the sibling definition in _MirLoweringExpr/literals.spl for the
-        full rationale: field types come from the lowered element local's
-        own MIR-registered type (`local_mir_type_of`), not the unreliable
-        `elem.type_` HIR annotation (bug doc
+        Field types are read from the JUST-LOWERED element local's own
+        MIR-registered type (`local_mir_type_of`), NOT from `elem.type_`
+        (the HIR-level type annotation). `elem.type_` is unreliably nil for
+        a tuple literal's non-first elements on this flat-HIR path -- a
+        string or bool element silently defaulted to `MirType.i64()` here,
+        which made `coerce_tuple_to_raw_str` (expr_dispatch.spl) treat the
+        field as a plain number: the string field's raw pointer got
+        rendered as a decimal integer (ASLR-varying) and the bool field
+        printed "1"/"0" instead of "true"/"false" (bug doc
         native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02.md,
-        2026-08-07 mixed-type update)."""
+        2026-08-07 mixed-type update). `local_mir_type_of` is reliable here
+        because every literal-lowering path (StringLit -> Opaque("str"),
+        BoolLit -> emit_const_bool -> MirType.bool(), IntLit -> MirType.i64())
+        already registers the element's real MIR type on its local via
+        `new_temp`/`emit_const` before this loop reads it back. `elem.type_`
+        is kept only as a fallback for elements whose lowering did not
+        register any type (defensive, not expected to trigger for scalar
+        literals)."""
         var operands: [MirOperand] = []
         var types: [MirType] = []
         for elem in elements:

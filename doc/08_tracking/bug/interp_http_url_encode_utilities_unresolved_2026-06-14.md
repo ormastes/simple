@@ -1,6 +1,8 @@
 # interp: url_encode unusable in interpreter — "Cannot resolve module: utilities"
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (2026-09-12, re-verified: repro now runs clean)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - ID: interp_http_url_encode_utilities_unresolved_2026-06-14
 - Severity: P2
@@ -61,5 +63,11 @@ the chain resolves; only the interpreter's module resolver fails.
 2. Drop the deep `utilities` dependency from the `http.url`/`http.common` chain
    so `url_encode` has no unresolvable transitive import.
 
-## Triage 2026-09-12
-Re-verified 2026-09-12: ran the record's own repro (`use std.nogc_sync_mut.http_client.types.{url_encode}` + `url_encode("ops@acme.com")`) via `SIMPLE_LIB=src bin/simple run`; it printed `START` then `ENC=ops%40acme.com` with no "Cannot resolve module: utilities" error. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (reported error gone, a worse failure took its place)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the reported `Cannot resolve module: utilities` warning no longer appears. But the repro still fails, now harder: `use std.nogc_sync_mut.http_client.types.{url_encode}` prints `START` and then **SIGSEGVs** (exit 139) at the call, with no diagnostic.
+- **measured**: `url_encode` does not exist in `src/lib/nogc_sync_mut/http_client/types.spl` at all — that file defines `url_encode_component` (`:44`). Importing the nonexistent name is accepted silently and only crashes at the call. `url_encode_component` from the same module SIGSEGVs identically, so the crash is the module, not the missing name.
+- **measured**: the `gc_async_mut` twin works — `use std.gc_async_mut.http_client.types.{url_encode}` prints `ENC=ops%64acme.com`, exit 0.
+- **measured**, adjacent defect found while verifying and NOT fixed here: that output is wrong. `@` is 0x40, so the correct encoding is `%40`. The cause is that `i64.to_string(radix)` ignores its radix — `val c = 64; c.to_string(16)` and `c.to_string(2)` both print `64`. Five stdlib percent-encoders depend on it (`gc_async_mut/http_client/types.spl:55`, `gc_async_mut/oauth2.spl:230`, `nogc_async_mut/http_client/types.spl:55`, `nogc_async_mut/oauth2.spl:230`, `nogc_sync_mut/oauth2.spl:230`), so every one of them emits decimal where hex is required. Deliberately not patched at the call sites: that would mask a broken primitive across the whole stdlib. Fix belongs in `to_string(radix)`.
+- Verdict: OPEN — the module-resolution half is fixed; a segfault and a wrong-output primitive remain.
+

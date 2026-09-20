@@ -1,4 +1,8 @@
 # Emu (Vt-physics) media backend truncates page word 0 to 8 bits
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-09-01, while building `fw/nvme_multiblock_witness_check.spl`
@@ -43,3 +47,4 @@ owned by another workstream and were not touched.
 case) keeps its word-0 sentinels inside one byte and does its block
 discrimination on words 1 / 255 / 511, which are unaffected. The workaround is
 marked in that file so it is removed rather than forgotten when this is fixed.
+

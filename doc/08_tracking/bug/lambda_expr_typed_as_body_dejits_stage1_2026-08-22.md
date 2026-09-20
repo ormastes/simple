@@ -1,6 +1,9 @@
 # Seed: lambda expression typed as its BODY type de-JITs the whole stage1 closure — 2026-08-22
+## Closed 2026-09-16 — Status FIXED 2026-08-22; lower_lambda registers function type; pins listed
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 FIXED 2026-08-22 (seed, HIR lowering). Commit: see below.
@@ -70,6 +73,3 @@ FILLME
   the closure register in `main`) and
   `lambda_value_has_function_type_not_body_type`.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,6 +1,8 @@
 # Inline-assembly colon form drops operand contracts
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -35,6 +37,3 @@ The grammar fix must be compile-time only. It must not add runtime wrapper
 calls, allocation, lookup, dispatch, or instruction count. Memory clobbers must
 remain compiler barriers without emitting additional hardware instructions.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

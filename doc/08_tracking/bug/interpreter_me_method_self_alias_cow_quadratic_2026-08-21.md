@@ -1,6 +1,9 @@
 # Interpreter: `me` method receiver stays aliased for the whole body, making every `self.<container>` write an O(n) COW clone — 2026-08-21
+## Closed 2026-09-16 — Status FIXED 2026-08-21 with measurements and pin tests
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 FIXED 2026-08-21 (seed, Rust interpreter). Commit: see below.
@@ -102,6 +105,3 @@ is plain per-call interpreter overhead (env setup, arg binding), not cloning.
 - `me_method_receiver_genuinely_aliased_by_another_name_still_copies`
 - `me_method_error_restores_receiver_binding`
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

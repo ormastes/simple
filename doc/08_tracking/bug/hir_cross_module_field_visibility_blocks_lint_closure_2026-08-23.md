@@ -1,6 +1,8 @@
 # Cross-module struct field/constructor visibility blocks the 140-module lint closure at step 2/6
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-08-23 from the monomorphization lane, as a **measured negative
 result**: it is what actually stops a real closure, and it is NOT what the
@@ -92,5 +94,3 @@ compiler source. The conclusion is unaffected: every one of the 1512 errors is
 an HIR visibility/resolution error in files this lane never touched, and the
 build died before monomorphization ran at all.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

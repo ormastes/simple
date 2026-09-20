@@ -1,6 +1,9 @@
 # Headless render history retained every HTML snapshot
+## Closed 2026-09-16 — Fixed 2026-08-21; circular buffer regression verifies count 80/retained 64
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -26,6 +29,3 @@ The focused regression renders 80 times and verifies a cumulative count of 80,
 a retained count of 64, eviction of render 15, and availability of renders 16
 and 79.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

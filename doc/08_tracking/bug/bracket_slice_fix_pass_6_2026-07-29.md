@@ -1,5 +1,9 @@
 # Bracket-slice byte/char index campaign — Pass 6 (2026-07-29)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — bencode decode FIXED, byte-exact both engines; closes last campaign deferral
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Scope (coordinator assignment): the last named deferral — bencode's **decode**
 path (`src/lib/common/encoding/bencode.spl`). Encode side was already fixed in
@@ -119,5 +123,3 @@ with the engine investigation lanes (not this campaign):
 - kafka `bytes_to_int32` tag-box `.get(i)` corruption (pass 3, `list.get(i)`
   returning `value<<3`).
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

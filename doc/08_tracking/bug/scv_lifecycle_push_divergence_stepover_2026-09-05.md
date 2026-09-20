@@ -1,5 +1,8 @@
 # Step-over record: pre-existing test-tree divergence at the Stage 0.5 push
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Range landed:** `e0432cd7be2..db6350534b4` (7 commits, Stage 0.5 source-complete)
@@ -45,5 +48,3 @@ implying coverage.
 
 The divergence backlog itself is not this lane's to fix and is untouched here.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

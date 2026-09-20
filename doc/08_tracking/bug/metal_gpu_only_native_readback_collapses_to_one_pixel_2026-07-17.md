@@ -1,6 +1,8 @@
 # Metal GPU-only native readback collapses to one pixel
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Scope
 
@@ -92,5 +94,3 @@ cycle proves the 1,024-pixel device result and clip oracle.
 4. The focused 8x8 SPipe readback spec asserts full length and clipped pixels
    from the device source on current native macOS.
 
-## Triage 2026-09-12
-macOS/Metal-specific, older than 45 days, no cheap repro on this (Linux) host. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

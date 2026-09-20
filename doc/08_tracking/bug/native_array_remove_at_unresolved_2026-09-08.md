@@ -1,6 +1,8 @@
 # `Array.remove_at` is not a supported native or interpreter operation
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-09-08
 - Severity: P1
@@ -18,5 +20,3 @@ back to the array. It now uses canonical `entries.remove(found)` as a statement.
 Implementing a first-class `remove_at` alias consistently across interpreter,
 MIR, LLVM, Cranelift, and documentation remains a separate language task.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

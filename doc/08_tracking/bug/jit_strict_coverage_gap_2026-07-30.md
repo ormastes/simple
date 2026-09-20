@@ -1,6 +1,9 @@
 # SIMPLE_JIT_STRICT coverage gap (2026-07-30, part 2 of the fail-open fix)
+## Closed 2026-09-16 — rows 2-3 strict tagging fixed with before/after evidence; remaining rows by-design or inherent, tracked elsewhere
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Follow-up to `doc/08_tracking/bug/jit_strict_fail_open_fix_2026-07-30.md`
 (part 1: the tag reached the catch site but nothing else was tagged). This
@@ -246,5 +249,3 @@ Raw probe fixtures: `/tmp/.../scratchpad/probe_hir_unknown_var.spl` (Fixture A),
   transcripts can, because `simple test` forces interpreter mode
   unconditionally (§4a).
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

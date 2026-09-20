@@ -1,5 +1,16 @@
 # Simple DB Perf Native/Server Blockers - 2026-06-21
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: benchmark lane not runnable from this host
+- **measured** — the gate script `scripts/check/check-simple-db-perf-compare.shs` still
+  exists, so this is not a removed-lane stale case.
+- **inferred** — the entry's blockers are a `server mode: unavailable` DB server plus
+  native build work; neither a PostgreSQL comparison server nor a completed self-hosted
+  native build is available on this Windows triage host, and the comparison targets it
+  names are performance goals rather than a reproducible defect. Left OPEN.
 
 Goal: embedded and full/server DB CRUD benchmarks should match or beat SQLite
 and PostgreSQL where comparable.
@@ -93,5 +104,3 @@ Crash-safety note:
 - Do not loop native/release rebuilds while investigating this; run one bounded
   native check at a time and stop on segfault/core-dump/fallback.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,8 @@
 # Interpreter: cross-module struct field-resolution collision with DIFFERENT struct names (Style vs CellStyle)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-04
 **Severity:** high — blocks CARD 16 office GUI; broader instance of the
@@ -293,3 +297,4 @@ remains scheduled as a separate, architecture-sized follow-up.
 concurrent working-copy sweep mid-lane and had to be reapplied; verify the
 rename (`grep -rn 'default_style' <files>`) is still present before
 building on this workaround in a future session.
+

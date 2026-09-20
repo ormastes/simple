@@ -1,6 +1,8 @@
 # `mcpgdb` app MCP server: `ping` now returns JSON-RPC "Method not found" instead of empty result
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/mcpgdb/main.spl` MCP JSON-RPC dispatch
@@ -46,5 +48,3 @@ Spec left unmodified — could not confirm from source whether dropping
 `ping` support was intentional; flagging as a genuine gap rather than
 guessing at a test-side fix.
 
-## Triage 2026-09-12
-Older than 45 days; has a concrete spec (`test/02_integration/app/mcpgdb_log_modes_spec.spl`) but was not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

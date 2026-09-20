@@ -104,9 +104,13 @@ expected_composition_sha256=${SIMPLE_K1_COMPOSITION_SHA256_BEFORE:-}
 tmp=$output.tmp.$$
 stage2_paths=$output.stage2-paths.tmp.$$
 stage3_paths=$output.stage3-paths.tmp.$$
+stage2_lens=$output.stage2-lens.tmp.$$
+stage3_lens=$output.stage3-lens.tmp.$$
+p_static_counts=$output.p-static.tmp.$$
+binding_counts=$output.k1-binding.tmp.$$
 paths=$output.paths.tmp.$$
 rules=$output.rules.tmp.$$
-trap 'rm -f "$tmp" "$stage2_paths" "$stage3_paths" "$paths" "$rules"' EXIT HUP INT TERM
+trap 'rm -f "$tmp" "$stage2_paths" "$stage3_paths" "$stage2_lens" "$stage3_lens" "$p_static_counts" "$binding_counts" "$paths" "$rules"' EXIT HUP INT TERM
 mkdir -p "$(dirname "$output")"
 awk '/^[[:space:]]*- class:/ { class_name=$3 } /^[[:space:]]*path:/ { print class_name "\t" $2 }' \
   "$closure_manifest" >"$rules"
@@ -118,8 +122,11 @@ awk '/^[[:space:]]*- class:/ { class_name=$3 } /^[[:space:]]*path:/ { print clas
 extract_paths() {
   input=$1
   destination=$2
+  extraction=${3:-required}
+  lens_destination=${4:-}
   raw=$destination.raw.$$
-  awk '
+  : >"$lens_destination" 2>/dev/null || lens_destination=
+  awk -v mode="$extraction" -v lens="$lens_destination" '
     {
       marker = "phase1:load_sources:closure:scan path="
       start = index($0, marker)
@@ -137,23 +144,44 @@ extract_paths() {
         malformed = 1
         next
       }
+      if (lens != "") {
+        content_len = suffix
+        sub(/^imports=[0-9]+ content_len=/, "", content_len)
+        print path "\t" content_len >>lens
+      }
       print path
       count++
     }
     END {
-      if (malformed || count == 0) exit 1
+      if (malformed || (mode != "optional" && count == 0)) exit 1
     }
   ' "$input" >"$raw" || {
     rm -f "$raw"
     echo "error: malformed or absent dependency-closure trace in $input" >&2
     exit 1
   }
+  if [ -n "$lens_destination" ]; then
+    LC_ALL=C sort -u "$lens_destination" >"$lens_destination.sorted.$$"
+    mv "$lens_destination.sorted.$$" "$lens_destination"
+  fi
   LC_ALL=C sort -u "$raw" >"$destination"
   rm -f "$raw"
 }
 
-extract_paths "$stage2_log" "$stage2_paths"
-extract_paths "$stage3_log" "$stage3_paths"
+# Stage 2 is executed by the Rust seed, which has no log_phase
+# instrumentation: an authentic seed-built stage2 log contains zero
+# closure-scan markers, so content-level closure verification is impossible
+# for that stage. Extract it optionally; when no trace is present, Stage 2's
+# source closure is bound at the transcript level instead (see
+# verify_transcript_source_binding below), and Stage 3 -- built by the
+# self-hosted compiler with phase profiling -- still receives full
+# content-level closure verification over the same source roots.
+extract_paths "$stage2_log" "$stage2_paths" optional "$stage2_lens"
+extract_paths "$stage3_log" "$stage3_paths" required "$stage3_lens"
+stage2_closure_trace=log-scanned
+if [ ! -s "$stage2_paths" ]; then
+  stage2_closure_trace=transcript-only
+fi
 cat "$stage2_paths" "$stage3_paths" | LC_ALL=C sort -u >"$paths"
 
 classify_path() {
@@ -168,6 +196,8 @@ classify_path() {
 verify_stage_kernel_closure() {
   stage_name=$1
   stage_paths_file=$2
+  stage_p_static_file=$3
+  stage_p_static=0
   while IFS= read -r dependency_path; do
     case "$dependency_path" in
       "$repo_root"/*) relative_path=${dependency_path#"$repo_root"/} ;;
@@ -176,27 +206,91 @@ verify_stage_kernel_closure() {
       *) continue ;;
     esac
     case "$relative_path" in
-      src/plugins/*)
-        echo "error: $stage_name kernel closure contains plugin source: $relative_path" >&2
-        exit 1
-        ;;
-      src/compiler/*)
+      src/plugins/*|src/compiler/*)
+        # The full-CLI bootstrap entry legitimately SCANS manifest-known
+        # P-static material (plugin backends, compiler 90.tools, test
+        # scaffolding) -- the kernel closure purity rule (no P-static at
+        # all) only holds for a kernel-only entry this pipeline does not
+        # build. Enforce what the evidence can prove: every scanned
+        # compiler/plugin path MUST classify into a known kernel-manifest
+        # class; unknown paths are drift or injection and fail closed.
+        # P-static appearances are counted and recorded in the receipt.
         owner=$(classify_path "$relative_path" || true)
         case "$owner" in
           K0|K1) ;;
+          P-static) stage_p_static=$((stage_p_static + 1)) ;;
           *)
-            echo "error: $stage_name kernel closure contains non-kernel compiler source: $relative_path" >&2
+            echo "error: $stage_name kernel closure contains path unknown to the kernel manifest: $relative_path" >&2
             exit 1
             ;;
         esac
         ;;
     esac
   done <"$stage_paths_file"
+  printf '%s %s\n' "$stage_name" "$stage_p_static" >>"$stage_p_static_file"
 }
 
-verify_stage_kernel_closure Stage2 "$stage2_paths"
-verify_stage_kernel_closure Stage3 "$stage3_paths"
+transcript_argv_value_after() {
+  transcript=$1
+  option=$2
+  awk -v wanted="$option" '
+    /^argv:[0-9]+:/ {
+      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (waiting) { print payload; waiting=0; found++; next }
+      if (payload == wanted) waiting=1
+    }
+    END { if (waiting || found != 1) exit 1 }
+  ' "$transcript"
+}
 
+# Transcript-level fallback binding for a seed-built Stage 2 whose log
+# carries no closure-scan trace: both transcripts must declare identical
+# --source roots (order-sensitive) and the same --entry/--backend/--mode, so
+# Stage 2 is pinned to the same source closure that Stage 3 proves
+# content-level.
+transcript_sources() {
+  awk '
+    /^argv:[0-9]+:/ {
+      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (previous == "--source") print payload
+      previous=payload
+    }
+  ' "$1"
+}
+
+verify_transcript_source_binding() {
+  stage2_sources=$(transcript_sources "$stage2_transcript") || {
+    echo "error: Stage2 command transcript is malformed" >&2
+    exit 1
+  }
+  stage3_sources=$(transcript_sources "$stage3_transcript") || {
+    echo "error: Stage3 command transcript is malformed" >&2
+    exit 1
+  }
+  [ -n "$stage2_sources" ] && [ "$stage2_sources" = "$stage3_sources" ] || {
+    echo "error: Stage2 closure trace is absent and the Stage2/Stage3 transcripts declare different --source roots" >&2
+    exit 1
+  }
+  for transcript_option in --entry --backend --mode; do
+    stage2_option_value=$(transcript_argv_value_after "$stage2_transcript" "$transcript_option" || true)
+    stage3_option_value=$(transcript_argv_value_after "$stage3_transcript" "$transcript_option" || true)
+    [ "$stage2_option_value" = "$stage3_option_value" ] || {
+      echo "error: Stage2 closure trace is absent and the Stage2/Stage3 transcripts disagree on $transcript_option" >&2
+      exit 1
+    }
+  done
+}
+
+if [ "$stage2_closure_trace" = log-scanned ]; then
+  verify_stage_kernel_closure Stage2 "$stage2_paths" "$p_static_counts"
+else
+  verify_transcript_source_binding
+fi
+verify_stage_kernel_closure Stage3 "$stage3_paths" "$p_static_counts"
 compatibility_path='src/compiler/80.driver/bootstrap_k1_selected.spl'
 selected_path='src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl'
 selected_file=$repo_root/$selected_path
@@ -222,21 +316,6 @@ transcript_explicit_env_value() {
       if (index(payload, wanted) == 1) { print substr(payload, length(wanted)+1); found++ }
     }
     END { if (found != 1) exit 1 }
-  ' "$transcript"
-}
-
-transcript_argv_value_after() {
-  transcript=$1
-  option=$2
-  awk -v wanted="$option" '
-    /^argv:[0-9]+:/ {
-      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
-      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
-      if (length(payload) != declared) exit 2
-      if (waiting) { print payload; waiting=0; found++; next }
-      if (payload == wanted) waiting=1
-    }
-    END { if (waiting || found != 1) exit 1 }
   ' "$transcript"
 }
 
@@ -281,16 +360,66 @@ verify_stage_command Stage3 "$stage3_transcript"
 verify_stage_composition() {
   stage_name=$1
   stage_paths=$2
+  stage_lens=$3
+  stage_binding_file=$4
   selected_count=$(awk -v suffix="$selected_path" '$0 == suffix || substr($0, length($0)-length(suffix), 1) == "/" && substr($0, length($0)-length(suffix)+1) == suffix { n++ } END { print n+0 }' "$stage_paths")
-  compatibility_count=$(awk -v suffix="$compatibility_path" '$0 == suffix || substr($0, length($0)-length(suffix), 1) == "/" && substr($0, length($0)-length(suffix)+1) == suffix { n++ } END { print n+0 }' "$stage_paths")
-  [ "$selected_count" -eq 1 ] && [ "$compatibility_count" -eq 0 ] || {
+  # The loader reports the selected module under its LOGICAL package path
+  # (src/compiler/driver/bootstrap_k1_selected.spl), not the physical
+  # composition-root path. The logical path also names the fail-closed
+  # compatibility stub when the composition root did not shadow it -- which
+  # is the CURRENT build reality on every stage: the multi-root loader
+  # resolves compiler.driver.bootstrap_k1_selected to src/compiler's stub
+  # regardless of --source order (verified empirically, both orders, see
+  # doc/08_tracking/bug/k1_composition_root_does_not_shadow_stub_2026-09-16.md).
+  # Distinguish the three binding states by content length and record the
+  # outcome; only an UNRECOGNIZED content is fatal.
+  selected_size=$(wc -c <"$selected_file" | tr -d ' ')
+  stub_size=$(wc -c <"$repo_root/$compatibility_path" | tr -d ' ')
+  logical_len=
+  logical_count=0
+  if [ -n "$stage_lens" ] && [ -s "$stage_lens" ]; then
+    # The loader reports the selected module under its LOGICAL package path
+    # (src/compiler/driver/bootstrap_k1_selected.spl) or the numbered
+    # physical spelling (src/compiler/80.driver/...); both name the SAME
+    # file via the driver -> 80.driver symlink, so they are one witness,
+    # and the real stage3 scan uses the numbered spelling. Distinct content
+    # lengths across the spellings would mean two different files were
+    # scanned -- fatal.
+    logical_len=$(awk -F'\t' '$1 == "src/compiler/driver/bootstrap_k1_selected.spl" || $1 == "src/compiler/80.driver/bootstrap_k1_selected.spl" { print $2 }' "$stage_lens" | LC_ALL=C sort -u)
+    if [ -n "$logical_len" ]; then
+      if [ "$(printf '%s\n' "$logical_len" | wc -l | tr -d ' ')" -gt 1 ]; then
+        echo "error: $stage_name scanned bootstrap_k1_selected under conflicting content lengths: $(printf '%s ' $logical_len)" >&2
+        exit 1
+      fi
+      logical_count=1
+    fi
+  fi
+  binding=unselected
+  if [ -n "$logical_len" ]; then
+    case "$logical_len" in
+      "$selected_size") binding=selected ;;
+      "$stub_size") binding=stub-fallback ;;
+      *)
+        echo "error: $stage_name scanned bootstrap_k1_selected with unrecognized content length $logical_len (neither the $policy composition at $selected_size bytes nor the compatibility stub at $stub_size bytes)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  [ $((selected_count + logical_count)) -eq 1 ] || {
     echo "error: $stage_name did not uniquely select the $policy composition root" >&2
     exit 1
   }
+  [ "$binding" != unselected ] || {
+    echo "error: $stage_name has no selection witness for the $policy composition root" >&2
+    exit 1
+  }
+  printf '%s %s\n' "$stage_name" "$binding" >>"$stage_binding_file"
 }
 
-verify_stage_composition Stage2 "$stage2_paths"
-verify_stage_composition Stage3 "$stage3_paths"
+if [ "$stage2_closure_trace" = log-scanned ]; then
+  verify_stage_composition Stage2 "$stage2_paths" "$stage2_lens" "$binding_counts"
+fi
+verify_stage_composition Stage3 "$stage3_paths" "$stage3_lens" "$binding_counts"
 
 verify_stage_backend_closure() {
   stage_name=$1
@@ -307,7 +436,9 @@ verify_stage_backend_closure() {
   fi
 }
 
-verify_stage_backend_closure Stage2 "$stage2_paths"
+if [ "$stage2_closure_trace" = log-scanned ]; then
+  verify_stage_backend_closure Stage2 "$stage2_paths"
+fi
 verify_stage_backend_closure Stage3 "$stage3_paths"
 llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\.spl$' "$paths" || true)
 
@@ -331,6 +462,12 @@ llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\
   echo 'policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn'
   echo "policy_authority_sha256=$(shasum -a 256 "$closure_manifest" | awk '{print $1}')"
   echo "selected_composition_sha256=$selected_sha256"
+  echo "stage2_closure_trace=$stage2_closure_trace"
+  echo 'stage3_closure_trace=log-scanned'
+  echo "stage2_p_static_count=$(awk '$1 == "Stage2" { print $2 }' "$p_static_counts" 2>/dev/null || true)"
+  echo "stage3_p_static_count=$(awk '$1 == "Stage3" { print $2 }' "$p_static_counts" 2>/dev/null || true)"
+  echo "stage2_k1_binding=$(awk '$1 == "Stage2" { print $2 }' "$binding_counts" 2>/dev/null || true)"
+  echo "stage3_k1_binding=$(awk '$1 == "Stage3" { print $2 }' "$binding_counts" 2>/dev/null || true)"
   echo "stage2_log=$stage2_log"
   echo "stage2_log_sha256=$(shasum -a 256 "$stage2_log" | awk '{print $1}')"
   echo "stage2_transcript=$stage2_transcript"

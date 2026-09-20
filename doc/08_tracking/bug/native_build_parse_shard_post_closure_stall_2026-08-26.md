@@ -1,6 +1,8 @@
 # Native-build parse shard stalls after source-closure progress
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -37,6 +39,3 @@ direct parse-shard mode. The owning loop must either converge or fail with a
 specific source/task receipt before the pure-Simple CLI, rendering guest, and
 Vulkan showcase can be admitted.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

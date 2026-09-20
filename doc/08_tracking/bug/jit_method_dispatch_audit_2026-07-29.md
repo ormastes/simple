@@ -1,6 +1,8 @@
 # Bug: Cranelift JIT builtin-method dispatch audit — what's left after the index_of/first/last/pop/... fixes
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-29
 **Component:** `src/compiler_rust/compiler/src/codegen/instr/{calls,closures_structs,methods}.rs`,
@@ -219,5 +221,3 @@ not committed to the repo (scratch, not requested for git).
 **Lambda ABI** still blocked — see jit_lambda_abi_scoping_2026-07-29.md
 (rt_closure_new never declared in the runtime-import table).
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,8 +1,10 @@
 # Vulkan font discovery parse failure: expected comma, found plus
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
-
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Rust seed parser source fixed 2026-07-15; focused regression added, execution
 pending. The pure-Simple parser was already correct: expression casts use
@@ -106,6 +108,3 @@ expression form introduced after the staged compiler was built. Fix the grammar
 if the form is intended Simple syntax; otherwise rewrite only that expression
 and then run one fresh production build/QEMU cycle.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

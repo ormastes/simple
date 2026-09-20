@@ -1,6 +1,8 @@
 # Bug: seed `native-build` of `src/app` segfaults — blocks bootstrap Stage 1
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-06-29
 **Area:** native-build / bootstrap (seed compiler AOT path)
@@ -63,5 +65,3 @@ native-build pipeline (likely codegen/linker stage given `--backend=llvm-lib`).
 Until fixed, binary-level verification of self-hosted compiler changes must use
 an alternate path (e.g. Rust-seed cargo build for resolver parity).
 
-## Triage 2026-09-12
-Re-running a full bootstrap Stage 1 native-build is not a cheap (<=3 min) check; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

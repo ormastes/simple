@@ -1,6 +1,9 @@
 # `semantic: variable LintDiag not found` — lint chain broken by two stale-snapshot clobbers (2026-08-21)
+## Closed 2026-09-16 — Fix section with before/after evidence table; specs 0 failures post-fix
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 With a seed built from `origin/main` `348815b2e42`, any spec that loads the lint
@@ -49,5 +52,3 @@ Both neighbors gained an example that fails on the pre-fix tree, so the defect
 class (a dangling cross-module name surviving a clobber) is now pinned in the
 two files that actually carried it.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

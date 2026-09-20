@@ -1,5 +1,8 @@
 # AOP hart hooks: no in-tree path executes woven advice for lib-module hardware code
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-22
 **Severity:** High (blocks Phase-3 "AOP hart hooks" from being AOP-carried end-to-end)
@@ -122,5 +125,3 @@ All 16 gates pass today: seam behavior (trace/halt-freeze/single-step/resume,
 rv64+rv32) green, weave accounting >0 via bare-name rule, tokenized
 execution-form rule pinned at 0/fail-closed, interp gap printed explicitly.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

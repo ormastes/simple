@@ -1,4 +1,8 @@
 # `Code Idiom & Structural Ratchet Gates` is RED on `main` — blocks every PR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-01
 - Status: OPEN — pre-existing on `main`, NOT caused by any open PR
@@ -73,3 +77,4 @@ using it to clear a red is how a ratchet silently stops ratcheting.
 
 None. This is a CI-configuration/debt record; no source was changed, so Windows
 and Unix behaviour are both unaffected.
+

@@ -395,6 +395,9 @@ pub fn rt_thread_spawn_isolated_with_context(
     let mut local_env = captured_env.clone();
 
     // Bind any additional args to params
+    for param in &params {
+        local_env.mark_local(param.clone());
+    }
     for (i, param) in params.iter().enumerate() {
         if let Some(arg) = args.get(i + 1) {
             local_env.insert(param.clone(), arg.clone());
@@ -461,6 +464,9 @@ pub fn rt_thread_spawn_isolated_with_args_context(
     let mut local_env = captured_env.clone();
 
     // Bind parameters to data arguments
+    for param in &params {
+        local_env.mark_local(param.clone());
+    }
     if !params.is_empty() {
         local_env.insert(params[0].clone(), data1);
     }

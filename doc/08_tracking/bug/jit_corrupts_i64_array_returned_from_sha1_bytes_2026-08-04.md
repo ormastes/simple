@@ -1,4 +1,8 @@
 # JIT returns a tag-corrupted `[i64]` from `sha1_bytes` — floats, `nil` and heap tags inside an i64 list
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -241,3 +245,4 @@ pure-Simple lane. Left OPEN, no code change attempted.
 Root cause is a Rust JIT codegen defect (`src/compiler_rust/compiler/src/codegen/instr/methods.rs`),
 requiring a seed rebuild to fix and verify — out of scope for a pure-Simple
 shard fix. No change made. Leaving OPEN.
+

@@ -1,5 +1,8 @@
 # Gap: deployed bin/simple lacks window externs — game2d wrapper uses gui-feature driver when available
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/03_system/game2d/breakout_window_capture_spec.spl` now PASSes)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Component:** interpreter extern surface (`src/compiler_rust/compiler/src/interpreter_extern/`),
@@ -60,5 +63,3 @@ using the wrapper's gui-feature driver fallback for local evidence. Register
 the `rt_sdl2_*` set in the interpreter only if SDL2 becomes the chosen window
 surface again.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/03_system/game2d/breakout_window_capture_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,8 @@
 # Fork mode (`--fork`) is unreachable on the deployed seed — its SFFI bridge is absent from the binary
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-18 — **Severity:** MEDIUM — **Status:** OPEN
 - **Component:** `src/lib/nogc_sync_mut/test_runner/test_runner_fork.spl`,
@@ -84,5 +87,3 @@ Until all three hold, treat fork mode as source-reviewed and unexercised.
 why COW-fork is crash containment but not the fresh-process-per-unit guarantee
 unstable mode is defined as, and the exact change required.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

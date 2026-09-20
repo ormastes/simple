@@ -1,4 +1,8 @@
 # Spec-run cost: daemon startup pays a full-tree lint pass; content-bound specs pay a separate, larger tax
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Category:** Tooling / test runner
 **Status:** Open (measured, not fixed — this is a measurement record, no production code changed)
@@ -161,3 +165,4 @@ Two distinct, unrelated costs were conflated in the original complaint:
   not a test-runner defect.
 Reporting one number ("specs take 10-25 minutes") without separating these
 two obscures that one has a one-flag fix today and the other does not.
+

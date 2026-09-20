@@ -1,6 +1,8 @@
 # LLM Caret HTTP Attempt Timeout
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -29,6 +31,3 @@ local server that intentionally never completes a response.
 - Claude API, OpenAI, and compatibility-provider system specs use the same
   timeout-capable facade.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

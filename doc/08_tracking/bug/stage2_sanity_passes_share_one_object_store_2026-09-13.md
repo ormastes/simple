@@ -1,4 +1,8 @@
 # Stage-2 sanity's two frontend passes share one object store despite separate `--cache-dir`s
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-6
@@ -45,3 +49,4 @@ on its own though — a gate whose two passes are not actually isolated cannot
 attribute a difference between them to the variable it changed. Either forward
 `--cache-dir` into the in-process driver (or set
 `SIMPLE_NATIVE_BUILD_CACHE_DIR`), or give each pass its own `HOME`.
+

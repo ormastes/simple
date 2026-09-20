@@ -1,6 +1,8 @@
 # Systematic pipeline diff: `run_file_jit` vs the whole-program native-build pipeline (2026-07-30)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Eight JIT-only defects were found this session one at a time, by hand, each
 costing a full investigation. a894's shape analysis found two patterns: (1)
@@ -1827,5 +1829,3 @@ wall: the module compiles in the 48-minute-plus class). Not chased
 further here — out of scope for this pass, which was diagnosis of the
 module-level-`val` framing only, per instruction not to attempt a fix.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

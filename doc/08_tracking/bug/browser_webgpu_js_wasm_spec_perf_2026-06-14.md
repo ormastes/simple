@@ -1,9 +1,12 @@
 # Browser WebGPU JS/WASM System Spec Perf Threshold - 2026-06-14
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` still FAILs — still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-OPEN
+OPEN — re-triaged 2026-09-13, see the note at the end of this file
 
 ## Summary
 
@@ -35,5 +38,9 @@ integration spec while keeping the broad scenario manual intact.
 - Keep `webgpu_js_wasm_simple_spec.spl` as broad end-to-end evidence, but avoid
   adding more expensive setup-heavy cases without splitting.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (perf unmeasurable; the spec no longer loads here)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the 56 s / 126-case figure cannot be re-measured. The spec aborts in 26 s with `declared>=127 executed=0 passed=0 failed=0`, outcome=ERROR — `cannot resolve import 'plugins.backend_wasm.wasm_codegen_adapter' ... module path segment 'plugins' not found` (E1034), and the strict JIT refuses to fall back.
+- **inferred**: the resolver's own help text points at `test/03_system/app/browser/feature\plugins`, a backslash-joined relative path, which suggests a Windows path-separator problem in relative import resolution rather than a genuinely missing module. Not confirmed, and not this bug.
+- Verdict: OPEN. The perf/splitting follow-up is still valid work, but on this host the spec has a harder problem than being slow.
+

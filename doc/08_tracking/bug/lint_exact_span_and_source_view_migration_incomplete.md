@@ -1,6 +1,8 @@
 # Lint exact-span and shared source-view migration is incomplete
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -28,6 +30,3 @@ latency and allocation measurements show no regression.
 Missing spans remain explicit fallbacks. They must never become proof of typed semantics,
 purity, alias safety, or transformation legality.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

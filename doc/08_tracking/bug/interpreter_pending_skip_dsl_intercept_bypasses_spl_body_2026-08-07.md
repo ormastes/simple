@@ -1,6 +1,8 @@
 # Rust seed interpreter intercepts `pending`/`skip_it`/`skip` calls before `.spl` body runs
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -117,9 +119,3 @@ Rust arm once the self-hosted binary is the default tool (the intercept exists
 only because the seed cannot rely on the stdlib spec DSL loading), not to patch
 it now.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13 (BUGFIX-7 lane)
-
-Out of lane: fix surface is the Rust seed interpreter's pending/skip_it/skip DSL interception. No change made.

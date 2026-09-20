@@ -1,6 +1,9 @@
 # System-test source aliases are dangling and duplicate driver embedding
+## Closed 2026-09-16 — ...embedding ## Status Claimed and fixed 2026-08-12. ## Defect The source aliases copied from
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -26,6 +29,3 @@ canonical physical file, making wrapper selection deterministic and unique.
 targets/resolutions and an adjacent two-alias fixture that must yield one
 canonical wrapper.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

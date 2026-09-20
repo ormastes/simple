@@ -1,6 +1,10 @@
 # ByteSpan.equals faults 93x on a boxed integer in a pointer slot (SimpleOS WM guest)
+## Open 2026-09-16 — needs owner triage
 
-- Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+- Status: OPEN — producer located and characterized, fix NOT landed
 - Filed: 2026-07-28
 - Gate: `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
 - Baseline symptom: `reason=guest-render-fault`, `serial_log_bytes=31702`,
@@ -191,5 +195,3 @@ Verify any candidate patch is not a no-op before a lane run:
 
     --emit-archive --target x86_64-unknown-none   # ~6s/module, byte-compare archives
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,8 @@
 # Seed interpreter: `ch.to_i32()` on a for-in-text char parses (yields 0), not codepoint
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-31 · **Status:** OPEN
 **Host:** Windows 11 (MSYS2), seed `bin/simple.exe` (28,291,570 bytes, rebuilt 2026-08-31 from `531942cb`)
@@ -38,6 +40,3 @@ the codepoint, or, minimally, make the Str `to_iNN` family fall back to the
 first codepoint when `len == 1` and numeric parse fails. The second changes
 "a".to_i32() from 0 to 97 — audit callers relying on the 0.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

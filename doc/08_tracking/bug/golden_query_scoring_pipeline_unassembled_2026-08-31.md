@@ -1,6 +1,9 @@
 # Golden query→score pipeline is not yet assembled (P11)
+## Closed 2026-09-16 — same-day update CLOSED via query_exec.spl orchestrator; parity spec all green
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-31 · **Status:** OPEN · **Severity:** informational (scope gap, not a defect)
 
@@ -98,6 +101,3 @@ already disclaims exact parity:
 
 No golden vector was skipped or weakened to reach green.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

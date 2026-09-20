@@ -1,4 +1,9 @@
 # Deployed seed cannot parse current stdlib — every seed-run gate is blind
+## Closed 2026-09-16 — FIXED 2026-08-25 seed-sibling refresh deployed; probe re-confirmed 2026-08-26
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-25
 **Severity:** CRITICAL (not one gate — every tool that runs on the deployed `bin/simple` and touches `std.io_runtime` fails at parse time)
@@ -105,3 +110,4 @@ V=/home/ormastes
 
 Fix still holds; no regression. No change needed to this record beyond this
 confirmation.
+

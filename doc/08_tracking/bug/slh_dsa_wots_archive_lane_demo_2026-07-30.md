@@ -1,6 +1,8 @@
 # `slh_dsa_wots.spl` retype — archive-lane verification demo (2026-07-30)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment (part 2 of 2): re-apply the pass-11 reverted retype
 (`base_2b`/`wots_checksum_digits_p`/`wots_msg_to_digits_p`/128s wrappers,
@@ -107,6 +109,3 @@ unrelated whole-program MIR-lowering gap, and budget the KAT spec run
 without concurrent CPU-heavy jobs competing for cycles.
 
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

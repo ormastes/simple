@@ -1,6 +1,8 @@
 # Native module-level derived `i32` constant is tag-shifted
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Observed:** 2026-07-27 on the pure-Simple Cranelift Stage 3 lane.
 - **Scope:** focused 300-DPI Engine2D font producer probe.
@@ -40,5 +42,3 @@ The source now exposes one atomic mutating `reset_cache_stats_receipt()` call,
 while the remaining compiler defect stays open. This adaptation has not
 received a fourth native run; the three-cycle cap is exhausted.
 
-## Triage 2026-09-12
-Older than 45 days; needs a focused Cranelift native probe, not a trivial <=3 min check. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

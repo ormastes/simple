@@ -1,6 +1,9 @@
 # smtp/send.spl bodyless "forward declarations" shadow the real mime helpers
+## Closed 2026-09-16 — ...only what it needs from `smtp.*`. ## Fix direction Delete the bodyless declarations in all
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-25 · **Severity:** HIGH (every caller of `message_build_simple`/`message_build_html` in all three tiers) · **Status:** FIXED (2026-08-25)
 
@@ -98,6 +101,3 @@ type, `header_from`/`header_content_type` formatting).
   `date_rfc5322_format` stub (reproduced on the HEAD copy of the file,
   line 420 there / 427 now). No new lint findings from this change.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

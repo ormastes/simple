@@ -1,4 +1,8 @@
 # Dict memo `contains_key` under-reporting: what the native lanes actually show (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN — premise of PR #987 PARTLY CORRECTED; the Stage-2 candidate
   cannot answer the question because it SEGVs on any class-with-a-method.
@@ -208,3 +212,4 @@ changed, so the 35 pre-existing macOS reds are unchanged by construction) and a
 of `check-native-interp-differential.shs` is likewise unmeasured: the seed's
 `--mode=dynload` build of the spec did not complete in 25 minutes on this host.
 The six rows are GREEN on the interpreter oracle and **deferred** natively.
+

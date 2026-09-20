@@ -1,4 +1,9 @@
 # Effect inference pass is dead code; STUB-002 falsely marked Fixed
+## Closed 2026-09-16 — RESOLVED 2026-09-06: delete ruling; solver deleted, pinned by runnable census spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** RESOLVED 2026-09-06 — **ruling taken: delete, not implement.** STUB-002
@@ -227,3 +232,4 @@ Retracted: `HirModule.types` is `[text]` (`20.hir/hir_types.spl:45`), is
 constructed empty at every HIR construction site, and has no reader. The
 `module.types.keys()` uses in the VHDL and C backends are `MirModule`, a
 different type. `types: []` is therefore harmless and was left unchanged.
+

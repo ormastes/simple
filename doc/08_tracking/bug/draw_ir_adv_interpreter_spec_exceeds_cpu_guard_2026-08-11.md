@@ -1,5 +1,8 @@
 # DrawIR advanced interpreter spec exceeds CPU guard
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -38,5 +41,3 @@ Its interpreter import/setup still exceeded a 120-second outer timeout. Native
 execution is separately blocked by the runner delegation defect recorded in
 `native_test_runner_delegates_to_rust_seed_despite_simple_binary_2026-08-11.md`.
 
-## Triage 2026-09-12
-Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

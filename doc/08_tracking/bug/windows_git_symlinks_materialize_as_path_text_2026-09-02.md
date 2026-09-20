@@ -1,4 +1,8 @@
 # Windows: 35 tracked symlinks under `src/` materialize as path TEXT and fail to parse
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED 2026-09-02 — see "Investigation and fix 2026-09-02" below.
 Verified by execution on a fresh worktree (`BEFORE_check_rc=1` ->
@@ -174,3 +178,4 @@ this host; stated rather than claimed.
 `TMPDIR` (`core.longpaths` is unset). The guard uses `mktemp -d`, so on a Windows
 host with a long temp path it errors before reaching any symlink. Worked around
 in verification by pointing `TMPDIR` at a short path.
+

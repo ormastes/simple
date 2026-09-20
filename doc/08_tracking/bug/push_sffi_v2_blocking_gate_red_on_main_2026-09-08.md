@@ -1,5 +1,9 @@
 # Blocking SFFI v2 push gate was knowingly red on main
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — ...cking gate itself as honestly red. ## Fix Push dispatch now supplies the committed outgoin
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -19,5 +23,3 @@ require all 46 children to pass.
 Five selftest fixtures cover committed-tree isolation, absent guards,
 unchanged-red admission, and newly-red rejection.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

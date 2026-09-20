@@ -1,5 +1,9 @@
 # SimpleOS C++ aligned-new false success
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Status "Mitigated"; false-success aborts; evidence test passed under strict C
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -42,5 +46,3 @@ Supporting larger C++ alignment requires the same allocator-owned
 aligned-block representation needed by `posix_memalign`; do not widen either
 surface independently.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

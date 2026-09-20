@@ -1,5 +1,9 @@
 # Browser cookie public-suffix validation is missing
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-16 — Resolution 2026-07-26: PSL owner implemented; specs not executed (compiler-blocked)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -45,5 +49,3 @@ PSL version/update provenance.
 Focused specs cover each row, but have not been executed because the tracked
 target compiler failure exhausted its three allowed repair cycles.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

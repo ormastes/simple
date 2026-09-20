@@ -1,4 +1,9 @@
 # `expect(nil).to_equal(false)` passes — `to_equal` disagrees with `==` (2026-09-01)
+## Closed 2026-09-16 — ...the matcher/operator disagreement. ## Fix direction (not yet implemented) `to_equal` shoul
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN. Found while re-baselining `test/03_system/**` genuine failures.
 
@@ -72,3 +77,4 @@ currently-green specs to red — as with the #212 matcher-chain fix, a newly-red
 spec is the fix working, and the underlying oracle should be corrected rather
 than the assertion reverted. Expect the change to need a sweep of the affected
 oracles in the same or an immediately following change.
+

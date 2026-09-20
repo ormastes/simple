@@ -1,6 +1,8 @@
 # `text` has no `.to_bytes()` method, only a free `text_to_bytes()`
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-05
 - **Lane:** `src/compiler_rust/target/debug/simple` (debug Rust seed, built from current source)
@@ -61,6 +63,3 @@ This is a builtin-type method surface, so the fix is not purely a `src/lib`
 edit — `str` method dispatch is resolved in the seed. That is why this is
 filed rather than fixed in the interface lane that found it.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,6 +1,8 @@
 # BUG: `LlvmIRBuilder.emit_module_header()` ignores the triple passed to `create()`
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-09
 - Status: OPEN (P2)
@@ -94,12 +96,3 @@ Not established whether the offset-shift bug affects `datalayout()` specifically
 or only the `env: text?` field named in that bug. If only `env`, the fix above
 is safe and cheap.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13
-Reconfirmed via source inspection: `LlvmIRBuilder.emit_module_header()`
-still ignores the constructor-supplied triple per this record. LLVM
-backend codegen fix, not attempted here (risk of breaking native-build
-across targets without full cross-target verification). Left OPEN (P2), no
-code change attempted.

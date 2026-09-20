@@ -1,6 +1,8 @@
 # `*_log_modes_spec.spl`: nested `bin/simple run <app>/main.spl` subprocess returns empty stdout under `bin/simple test`, but the identical command succeeds run standalone
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` execution of specs that spawn
@@ -93,5 +95,3 @@ different observable symptom).
 Both spec files are correct as written (they reflect real, working CLI
 contracts, confirmed by manual reproduction) and were left unmodified.
 
-## Triage 2026-09-12
-Older than 45 days; affects a whole spec family, not re-run in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

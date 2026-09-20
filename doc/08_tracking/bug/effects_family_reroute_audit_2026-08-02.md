@@ -1,4 +1,8 @@
 # effects_* family: 4 of 8 modules deleted, 4 retained with the reroute proved
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02
 **Status:** Partially resolved — 4 modules deleted, 4 filed here with a measured
@@ -135,3 +139,4 @@ before it. What exists is runtime module-graph evidence:
 829 of 938 lines. Closing them out needs an owner for the `Effect` name (three
 definitions) and for `FunctionEffectInfo` (two), which is a design call, not a
 cleanup.
+

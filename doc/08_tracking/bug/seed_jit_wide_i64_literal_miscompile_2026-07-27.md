@@ -1,4 +1,8 @@
 # Seed JIT miscompiles wide i64 literals (`0x7FFFFFFFFFFFFFFF` → `-1`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane J, while proving the
@@ -94,3 +98,4 @@ MAXI64=9223372036854775807   MAXDEC=9223372036854775807   # jit
 Probe `_scratch/p_int.spl`. `0x8000000000000000` was NOT probed (it is not
 expressible as a positive i64 literal in the probe), so the half of this record
 concerning that specific value is UNTESTED rather than disproven.
+

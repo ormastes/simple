@@ -1,4 +1,8 @@
 # Network stack works; its "e2e" coverage is an illusion, and the spec tree is duplicated 5,591x
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (findings; nothing deleted)
 
@@ -279,3 +283,4 @@ change attempted.
 Still a characterization record, not a point code defect; remedy (rewriting
 illusory specs, deduplicating test/unit vs test/01_unit) is a scoped
 follow-up project out of a shard triage pass. No change made. Leaving OPEN.
+

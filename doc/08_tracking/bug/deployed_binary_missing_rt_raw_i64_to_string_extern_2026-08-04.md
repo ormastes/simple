@@ -1,5 +1,8 @@
 # Deployed macOS binaries reject `rt_raw_i64_to_string` — entire host-compositor spec chain unrunnable
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/01_unit/os/compositor/host_gui_event_router_spec.spl` still FAILs — still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-04
 - **Area:** tooling/deploy (extern registry of BOTH `bin/release/aarch64-apple-darwin-macho/simple` and its `simple_seed` sibling)
@@ -43,5 +46,3 @@ interpreter treat an unknown extern DECLARATION as a load-time warning and only
 fail on CALL (the whole-module-load failure on unknown extern decl is already
 a known defect class, 07-18).
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/os/compositor/host_gui_event_router_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

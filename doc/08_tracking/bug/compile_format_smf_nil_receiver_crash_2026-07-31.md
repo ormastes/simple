@@ -1,4 +1,8 @@
 # `simple compile --format=smf` crashes on nil receiver (2026-07-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found by:** link_manager Lane SMFMAP scout while verifying the byte-parity
 harness for Phase 1.
@@ -34,3 +38,4 @@ emission command as its oracle input; until this crash is fixed the parity
 harness can only cover the native-build/cc route. See
 `.spipe/link_manager/smf_linker_map.md` §5–§6 for the full harness plan and
 risk list.
+

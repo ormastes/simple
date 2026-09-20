@@ -1,6 +1,8 @@
 # Host WM Native-Project External Provider Link Gap — 2026-07-24
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -55,6 +57,3 @@ No fourth host launch is permitted in this session. The next session must
 bootstrap the compiler containing this fix, then run the production host gate
 once. No screenshot or runtime PASS exists yet.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

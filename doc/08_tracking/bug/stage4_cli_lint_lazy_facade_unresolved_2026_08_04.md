@@ -1,6 +1,8 @@
 # Stage 4 CLI lint lazy-facade names are unresolved
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -30,6 +32,3 @@ EasyFix accessors from the types owner. The duplicate EasyFix facade import is
 removed. `stage4_cli_lint_hir_contract.spl` imports and executes the real CLI
 lint handler so native entry-closure lowering must resolve the complete body.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

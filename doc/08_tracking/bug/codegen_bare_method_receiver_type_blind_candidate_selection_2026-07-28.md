@@ -1,9 +1,13 @@
 # Bare-method codegen binds by name-suffix with no receiver-type check
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28
 **Severity:** high — silent wrong-code generation; victims are currently
 discovered by guest page faults, one at a time
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** OPEN (mitigated per-name only)
 **Component:** `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
 (cranelift seed codegen), `compile_method_call_static`
 
@@ -168,5 +172,3 @@ against an archive built with
 - In-file `SAFETY NOTE (Agent δ, 2026-04-13)` documents the ambiguity half,
   which is already loud
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

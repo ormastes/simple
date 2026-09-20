@@ -1,5 +1,8 @@
 # Generic external receipt semantic quarantine
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -65,5 +68,3 @@ inner and outer paths, aliasing, every false semantic field, generic-label-only
 admission, and legacy v1 acceptance. Remove this row from quarantine only after
 the exact valid three-architecture bundle passes that suite.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

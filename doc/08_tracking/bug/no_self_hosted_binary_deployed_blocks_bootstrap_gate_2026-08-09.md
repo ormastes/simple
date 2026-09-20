@@ -1,4 +1,8 @@
 # No self-hosted binary deployed — bootstrap smoke cannot run, stage gate blocked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-09
 **Status:** OPEN
@@ -211,3 +215,4 @@ also still the seed). No self-hosted binary deployed. This is the same
 root-state referenced throughout many other records in this pass. Needs a
 full bootstrap run to deploy a self-hosted binary, out of a single-bug
 budget / this lane's no-bootstrap constraint. Left OPEN, no code change.
+

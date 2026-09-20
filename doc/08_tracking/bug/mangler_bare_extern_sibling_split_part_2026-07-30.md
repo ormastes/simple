@@ -1,6 +1,8 @@
 # Bug: Rust seed mangler emits bare extern for free function shared across sibling split-part modules re-exported through a facade
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-30
 - **Area:** `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`
@@ -187,5 +189,3 @@ many `__init__.spl`-style package facades in the repo and most link fine, so a
 blanket rewrite would be unjustified churn. Not swept in this pass; left for a
 future targeted investigation if it recurs at the link stage.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

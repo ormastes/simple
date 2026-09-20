@@ -1,5 +1,9 @@
 # SimpleOS calendar conversion safety
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Status "Fixed"; repair + focused ASan/UBSan harness evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -21,5 +25,3 @@ its pointers. `gmtime`, `localtime`, and reentrant wrappers reject null and
 out-of-range input. The focused C harness passed with AddressSanitizer and
 UBSan under the SimpleOS header ABI.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

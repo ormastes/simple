@@ -1,5 +1,8 @@
 # Flat entry-closure method aggregate return layout collision
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/03_system/compiler/native_cross_module_class_field_layout_regression_spec.spl` still FAILs — still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -116,5 +119,3 @@ The Vulkan QEMU gate still requires a Stage4 full CLI that passes candidate
 admission and prints `84` for the regression. Provider-delegated bootstrap
 outputs are not substitutes for that evidence.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/03_system/compiler/native_cross_module_class_field_layout_regression_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

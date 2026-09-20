@@ -1,13 +1,9 @@
 # W-MC-RES-001 app-code triage — 2026-08-08
+## Closed 2026-09-16 — in-scope app-side TRUE finding RESOLVED (COUNT 1->0), re-confirmed 2026-08-17
 
-## Triage 2026-09-13
-Confirmed CLOSED for the shard-assigned scope (src/app/debug/remote/dwarf.spl):
-re-ran the doc's own re-verification grep -- the standalone dwarf_load
-forwarder is still gone, line ~116 is still the explanatory comment. Matches
-the doc's own 2026-08-17 ALREADY-FIXED-CLOSED classification exactly. No
-further action.
-
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Scope: all `src/app/` + `src/os/` files containing an `rt_[a-z0-9_]*_(open|create|new|alloc|acquire|copy|clone|load)(` call
 (56 candidate files), each run through the real checker
@@ -108,6 +104,3 @@ that sub-issue remains as the doc describes it. No source changes made (fix
 was already applied in a prior session). Status for the app-side TRUE
 finding: RESOLVED, re-confirmed by source inspection.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,5 +1,8 @@
 # bootstrap-progress.log reports a LIVE, fully-working run as dead
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-03  **Status:** open — real defect, cost ~1h and one wrongly-killed chain
 
@@ -78,5 +81,3 @@ A stall verdict needs a **CPU-time delta over an interval**, not a status field.
 `ps -o time= -p <pid>` sampled twice, 45s apart, settled in one command what the
 monitor got wrong for 155 consecutive samples.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

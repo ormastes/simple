@@ -1,6 +1,8 @@
 # RETRACTED — see jit_option_i64_value3_reads_as_none_2026-07-24.md
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED (retracted 2026-07-24 by its own body; see jit_option_i64_value3_reads_as_none_2026-07-24.md for the real root cause)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-24
 
@@ -19,5 +21,3 @@ FAIL for any spec with **10–99 examples**.
 Full analysis, minimal repro, JIT-vs-interpreter proof, and fix direction:
 **`jit_option_i64_value3_reads_as_none_2026-07-24.md`**.
 
-## Triage 2026-09-12
-Not independently re-run; formalizing the record's own retraction into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

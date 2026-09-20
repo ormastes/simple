@@ -1,5 +1,9 @@
 # SimpleOS epoll_pwait signal-mask false success
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Status "Mitigated"; non-null masks honestly rejected; evidence test passed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -24,5 +28,3 @@ install masks, manage pending delivery, and block on readiness.
 C compilation with SimpleOS headers. It checks rejection of a non-null mask
 and preserved ordinary empty-wait behavior for `NULL`.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

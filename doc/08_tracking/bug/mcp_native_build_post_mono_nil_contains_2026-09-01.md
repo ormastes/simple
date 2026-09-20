@@ -1,6 +1,9 @@
 # MCP native build: `method 'contains' not found on type 'nil'` immediately after monomorphization
+## Closed 2026-09-16 — PINNED AND FIXED 2026-09-02 (ae4ea13e847); blocker cleared, header OPEN superseded
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-01 · **Status:** OPEN · **Severity:** blocker (last thing between the MCP build and MIR lowering)
 
@@ -454,6 +457,3 @@ detached, cmd PID **5016**. Output paths are unchanged (`run4.out` / `run4.err`
 / `run4.rc` in the scratchpad `mcp/` directory listed above), as is the harvest
 recipe.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

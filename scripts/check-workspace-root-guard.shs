@@ -13,6 +13,7 @@ FIX=0
 DRY_RUN=0
 APPLY=0
 PATH_FILE=""
+BASELINE_FILE=""
 QUARANTINE_BASE="build/workspace_quarantine"
 MUTABLE_ROOT_DIRS="build tmp target bootstrap .git .jj"
 
@@ -26,6 +27,9 @@ Options:
   --strict               Report all policy violations, including existing tracked entries.
   --staged               Check only staged added/renamed paths.
   --path-file <file>     Check newline-separated paths from a file.
+  --baseline <file>      Strict audit that fails only on violations NOT grandfathered
+                         in <file> (one "WRG00N:path" key per line; # comments
+                         allowed). Implies --strict. Missing file is an error.
   --self-test            Run parser and path-classification smoke tests.
 
 Lock/unlock print platform-specific commands by default. Use --dry-run explicitly
@@ -269,7 +273,20 @@ list_audit_paths() {
 run_audit() {
     PATHS_FILE="$TMP_DIR/paths.txt"
     list_audit_paths > "$PATHS_FILE"
+    if [ -n "$BASELINE_FILE" ]; then
+        [ -f "$BASELINE_FILE" ] || die "--baseline file not found: $BASELINE_FILE"
+    fi
+    # A baseline replaces the tracked-grandfather waiver rather than adding to
+    # it: the waiver (non-strict) is exactly what made the CI invocation
+    # vacuous -- every candidate path in a CI checkout is tracked, so every
+    # WRG002/WRG003 violation was waived before it was ever reported. Baseline
+    # mode therefore implies strict and then suppresses only the specific
+    # WRG00N:path keys recorded in the baseline file. Anything not listed --
+    # tracked or not -- fails.
     effective_strict="$STRICT"
+    if [ -n "$BASELINE_FILE" ]; then
+        effective_strict=1
+    fi
     awk -v strict="$effective_strict" \
         -v allowed_root_file="$ALLOWED_ROOT_FILE" \
         -v allowed_child_file="$ALLOWED_CHILD_FILE" \
@@ -277,7 +294,19 @@ run_audit() {
         -v manifest_dirs_file="$MANIFEST_DIRS_FILE" \
         -v tracked_file="$TRACKED_FILE" \
         -v ignored_file="$IGNORED_FILE" \
-        -v paths_file="$PATHS_FILE" '
+        -v paths_file="$PATHS_FILE" \
+        -v baseline_file="${BASELINE_FILE:-/dev/null}" \
+        -v known_out="$TMP_DIR/known-violations" \
+        -v stale_out="$TMP_DIR/stale-baseline" '
+        BEGIN {
+            # Load the grandfather set BEFORE the path pass: the baseline file
+            # is listed after the path files, so a FILENAME-gated rule would
+            # only populate known[] after every violation had already fired.
+            while ((getline line < baseline_file) > 0) {
+                if (line !~ /^#/ && line != "") known[line] = 1
+            }
+            close(baseline_file)
+        }
         FILENAME == allowed_root_file { allowed_root[$0] = 1; next }
         FILENAME == allowed_child_file { allowed_child[$0] = 1; next }
         FILENAME == manifest_tree_file { manifest_tree[$0] = 1; next }
@@ -324,7 +353,12 @@ run_audit() {
                 {
                     key = "WRG001:" first
                     if (!seen[key]) {
-                        print "WRG001 root entry is not allowed by FILE.md: " first
+                        if (key in known) {
+                            print "WRG001 (baselined) root entry is not allowed by FILE.md: " first > known_out
+                            seen_known[key] = 1
+                        } else {
+                            print "WRG001 root entry is not allowed by FILE.md: " first
+                        }
                         seen[key] = 1
                     }
                 }
@@ -338,7 +372,12 @@ run_audit() {
                         if (strict == 1 || !tracked[rel]) {
                             key = "WRG003:" rel
                             if (!seen[key]) {
-                                print "WRG003 entry not declared by " parent "/FILE.md: " rel
+                                if (key in known) {
+                                    print "WRG003 (baselined) entry not declared by " parent "/FILE.md: " rel > known_out
+                                    seen_known[key] = 1
+                                } else {
+                                    print "WRG003 entry not declared by " parent "/FILE.md: " rel
+                                }
                                 seen[key] = 1
                             }
                         }
@@ -347,19 +386,44 @@ run_audit() {
                     if (strict == 1 || !tracked[rel]) {
                         key = "WRG002:" rel
                         if (!seen[key]) {
-                            print "WRG002 immediate root child entry is not declared by FILE.md: " rel
+                            if (key in known) {
+                                print "WRG002 (baselined) immediate root child entry is not declared by FILE.md: " rel > known_out
+                                seen_known[key] = 1
+                            } else {
+                                print "WRG002 immediate root child entry is not declared by FILE.md: " rel
+                            }
                             seen[key] = 1
                         }
                     }
                 }
             }
         }
+        END {
+            for (key in known) {
+                if (!(key in seen_known)) print key > stale_out
+            }
+        }
     ' "$ALLOWED_ROOT_FILE" "$ALLOWED_CHILD_FILE" "$MANIFEST_TREE_FILE" "$MANIFEST_DIRS_FILE" "$TRACKED_FILE" "$IGNORED_FILE" "$PATHS_FILE" > "$TMP_DIR/violations"
+
+    if [ -s "$TMP_DIR/known-violations" ]; then
+        kcount="$(wc -l < "$TMP_DIR/known-violations" | tr -d ' ')"
+        echo "workspace-root-guard: $kcount baselined violation(s) grandfathered by ${BASELINE_FILE}:"
+        cat "$TMP_DIR/known-violations"
+    fi
+    if [ -s "$TMP_DIR/stale-baseline" ]; then
+        scount="$(wc -l < "$TMP_DIR/stale-baseline" | tr -d ' ')"
+        echo "workspace-root-guard: note: $scount baseline entr(ies) no longer reproduce (stale; remove to keep the ratchet honest):"
+        cat "$TMP_DIR/stale-baseline"
+    fi
 
     if [ -s "$TMP_DIR/violations" ]; then
         cat "$TMP_DIR/violations"
         count="$(wc -l < "$TMP_DIR/violations" | tr -d ' ')"
-        echo "workspace-root-guard: FAILED with $count violation(s)"
+        if [ -n "$BASELINE_FILE" ]; then
+            echo "workspace-root-guard: FAILED with $count new violation(s) not in baseline"
+        else
+            echo "workspace-root-guard: FAILED with $count violation(s)"
+        fi
         return 1
     fi
     echo "workspace-root-guard: OK"
@@ -570,6 +634,11 @@ while [ "$#" -gt 0 ]; do
             shift
             [ "$#" -gt 0 ] || die "--path-file needs a file"
             PATH_FILE="$1"
+            ;;
+        --baseline)
+            shift
+            [ "$#" -gt 0 ] || die "--baseline needs a file"
+            BASELINE_FILE="$1"
             ;;
         --self-test)
             self_test

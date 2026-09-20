@@ -1,5 +1,8 @@
 # Engine2D BackendProbeResult missing is_hardware/strict_failure_without_fallback (present on 3D counterpart)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -62,5 +65,3 @@ diverges from 3D and the spec needs to target a different/newer type instead.
   campaign's ENV-skip guidance, but the root cause above is a genuine,
   well-defined API gap, not an environment/hardware-availability issue)
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

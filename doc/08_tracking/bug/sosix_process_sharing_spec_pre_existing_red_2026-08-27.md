@@ -1,5 +1,8 @@
 # sosix_process_sharing_spec pre-existing RED — `sosix_dataset_active` not found
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/system/app/os/feature/sosix_process_sharing_spec.spl -> 0 passed, 6 failed, still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Spec: `test/system/app/os/feature/sosix_process_sharing_spec.spl`
@@ -28,5 +31,3 @@ Restore/export `sosix_dataset_active` (and whatever sibling symbols the sealed
 dataset scenarios reference) from the sosix sharing module, or reconcile the
 spec with the module's current API.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/system/app/os/feature/sosix_process_sharing_spec.spl` on the deployed seed; 6 of 6 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

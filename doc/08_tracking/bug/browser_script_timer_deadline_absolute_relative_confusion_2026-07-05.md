@@ -1,5 +1,8 @@
 # Browser script setTimeout/setInterval deadline logic fires timers on first tick regardless of delay
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/browser/script/timer_api_spec.spl` now PASSes)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -22,5 +25,3 @@ A 5000ms `setTimeout` would fire "instantly" on the first call to `ScriptHost.ti
 ## Next Step
 Change `deadline = ms * 1000` to `deadline = rt_time_now_unix_micros() + ms * 1000` in both `set_timeout` and `set_interval`. Add a real-clock test case to `timer_api_spec.spl` that verifies timers do not fire before the deadline when `drain_expired()` is called with a wall-clock time.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/browser/script/timer_api_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

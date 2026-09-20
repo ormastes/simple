@@ -1,6 +1,9 @@
 # Bug: unresolvable relative `import ..` is FATAL in interpret mode, lenient when compiled
+## Closed 2026-09-16 — Status RESOLVED: seed fix landed, module_import_spec 21/0; secondary parse note only
 
-**Status:** RESOLVED (2026-09-12, re-verified: both modes now lenient)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-06-30
 **Severity:** Low — edge case (deprecated `import` syntax + relative path on a
@@ -56,5 +59,3 @@ A secondary seed parse bug was found while fixing the stale paths:
 eager `export … from` load path ("expected Newline after impl block colon,
 found Identifier Iterator").
 
-## Triage 2026-09-12
-Re-verified 2026-09-12: ran the record's own `import .. as parent` repro under both `SIMPLE_EXECUTION_MODE=interpret` and default mode; both printed `relative-parent-ok` with no fatal `Cannot resolve module: ..` error. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

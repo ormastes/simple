@@ -1,4 +1,8 @@
 # RISC-V sidecar-contract anti-seed guard is ineffective against a seed-clobbered `bin/release`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane C)
@@ -72,3 +76,4 @@ evidence-integrity fix into an unrelated lane. Filed for a focused change.
   — the seed-clobbered deploy target this guard fails to catch
 - `doc/08_tracking/bug/seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md`
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
+

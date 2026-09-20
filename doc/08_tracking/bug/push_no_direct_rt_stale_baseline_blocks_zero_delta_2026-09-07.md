@@ -1,5 +1,9 @@
 # Push no-direct-rt stale baseline blocked zero-delta branches
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Fix and evidence: --baseline-rev; selftest 19/19, topic PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -24,5 +28,3 @@ lanes retain their prior semantics.
 - Selftest: 19/19, including unchanged-debt PASS and added-debt FAIL fixtures.
 - SciLib topic: tip 6,313; `origin/main` 6,313; PASS.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

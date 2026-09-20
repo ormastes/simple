@@ -1,4 +1,8 @@
 # Interpreter has no rt_volatile_read/write_* externs — every ivshmem lane untestable under `simple test`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
 **Status:** OPEN
@@ -25,3 +29,4 @@ docstring for the per-line catalogue.
 Register interpreter handlers for the rt_volatile_* family (plain loads/
 stores suffice for hosted mock regions), then extend the executor spec's
 host-gpu waves.
+

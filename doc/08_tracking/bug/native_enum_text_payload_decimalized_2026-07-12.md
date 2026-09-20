@@ -1,8 +1,10 @@
 # Native enum text payload becomes a decimal pointer
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
-**Status (2026-07-15 -> CLOSED-STALE 2026-09-12):** Pure-Simple enum payload typing fix landed. Strict
+**Status (2026-07-15):** Pure-Simple enum payload typing fix landed. Strict
 default-LLVM + explicit-Cranelift callback/match/field-assignment regression added to
 `scripts/check/check-native-seed-parity.shs`; execution awaits a fresh
 pure-Simple compiler binary.
@@ -38,5 +40,3 @@ compiler; do not add UI-local pointer formatting, runtime aliases, or fake
 history events. Add a minimal native regression that constructs a text-bearing
 enum, passes it through a callback, pattern-matches it, and asserts the text.
 
-## Triage 2026-09-12
-The 2026-07-15 status already noted execution awaits a fresh pure-Simple compiler binary; still unexecuted 2 months later. Older than 45 days with no cheap repro re-run; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

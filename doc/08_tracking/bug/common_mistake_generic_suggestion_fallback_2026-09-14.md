@@ -1,4 +1,9 @@
 # 7 of 32 `CommonMistake` variants printed a diagnostic that names no mistake
+## Closed 2026-09-16 — Status FIXED 2026-09-14; 7 suggestion arms added, cargo tests pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED (2026-09-14)
 - Binary at discovery: `d4c0779cef6cf0cc4054` (this lane's prior rebuild, already carrying the JavaNew comparison-operator fix)
@@ -70,3 +75,4 @@ additive, all previously-passing tests still pass unmodified).
   underlying crash is a separate, host-load-related issue, not necessarily
   one of these 7 variants at all. This fix closes the diagnostic-quality gap
   regardless of which variant was actually firing).
+

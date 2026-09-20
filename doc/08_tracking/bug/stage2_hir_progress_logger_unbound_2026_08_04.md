@@ -1,6 +1,9 @@
 # Stage 2 HIR progress logger is unbound
+## Closed 2026-09-16 — ...gress logger is unbound ## Status Resolved on 2026-08-04. ## Reproduction The strict x86 P
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -27,6 +30,3 @@ method and is not replaced by the environment-gated phase logger.
 the helper export, the split-module import, both HIR call sites, and the
 16-module cadence.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

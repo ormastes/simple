@@ -1,5 +1,8 @@
 # Performance Test Failures — Triage Report (05_perf + perf sections)
-**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/05_perf/intensive/http/h3_settings_write_frame_spec.spl -> 10 passed, 0 failed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-18  
 
@@ -189,5 +192,3 @@ Fix the `print_summary` exports/imports affecting 117 tests:
 - **Remaining issues:** 117 print_summary failures (systemic), 1 missing children param, 2 function keyword specs (helper inspection needed)
 - **Note:** NEVER invoked `bin/simple test` per coordinator instruction
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/05_perf/intensive/http/h3_settings_write_frame_spec.spl` on the deployed seed; the spec now passes in full (10/10), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

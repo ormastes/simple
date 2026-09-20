@@ -13,6 +13,7 @@ use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE, HIR_PROF_RIS_SCAN, HIR_PROF_RIS_FIELDS, HIR_PROF_RIS_PROJECT}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -135,16 +136,60 @@ impl HirLowering:
             val fresh_registered_import_memo: {text: bool} = {}
             self.registered_import_memo = fresh_registered_import_memo
             self.registered_import_memo_owner = self.module_filename
+            self.registered_import_memo_keys = []
+            self.registered_import_memo_hash_buckets = []
+            self.registered_import_memo_hash_next = []
+            self.registered_import_memo_hash_mask = 0
         val registered_enum_tag = if materialize_enum: " E" else: " -"
         val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag
-        if self.registered_import_memo.contains_key(registered_key):
+        if self.registered_import_memo_lookup(registered_key):
             self.registered_import_skip_count = self.registered_import_skip_count + 1
             hir_phase_profile_count_imported_symbol_skip()
             return
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
-        self.registered_import_memo[registered_key] = true
+        # The write is UNCONDITIONAL and that is a pinned contract: a MISS
+        # must be cached too (hir_import_registration_cost_spec: "does not
+        # repeat a MISS -- the negative result is cached too"), and the
+        # skip-count oracle pins one descent per distinct tuple. Retry of a
+        # no-op arm is safe: every branch of inner re-checks already_bound
+        # before writing, so a repeat is idempotent.
+        self.registered_import_memo_record(registered_key)
+
+    me registered_import_memo_lookup(key: text) -> bool:
+        """Scalar-chain membership probe for the idempotency memo. Never reads
+        the {text: bool} Dict: contains_key on it mis-reports both ways under
+        Stage-2 native codegen (see the field comment in types.spl)."""
+        if self.registered_import_memo_hash_buckets.len() == 0:
+            return false
+        val bucket = hash_text(key) & self.registered_import_memo_hash_mask
+        var index = self.registered_import_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.registered_import_memo_keys[index] == key:
+                return true
+            index = self.registered_import_memo_hash_next[index]
+        false
+
+    me registered_import_memo_record(key: text):
+        """Append `key` to the scalar memo with incremental hash-chain insert.
+        The legacy Dict is written in lockstep so its len() stays the oracle
+        hir_import_registration_cost_spec pins (memo wipe on begin_module)."""
+        if self.registered_import_memo_hash_buckets.len() == 0:
+            # 4096 buckets: one allocation per importer, chains absorb the
+            # (tens of thousands) key volume of the largest driver modules.
+            val memo_bucket_count: i64 = 4096
+            self.registered_import_memo_hash_mask = memo_bucket_count - 1
+            var fill = 0
+            while fill < memo_bucket_count:
+                self.registered_import_memo_hash_buckets = self.registered_import_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.registered_import_memo_hash_mask
+        self.registered_import_memo_hash_next = self.registered_import_memo_hash_next.push(
+            self.registered_import_memo_hash_buckets[bucket])
+        self.registered_import_memo_hash_buckets[bucket] = self.registered_import_memo_keys.len()
+        self.registered_import_memo_keys = self.registered_import_memo_keys.push(key)
+        self.registered_import_memo[key] = true
 
     me ensure_surface_name_index(imported_mod: ModuleSurface) -> text:
         """NAMEIDX: build the name -> position index of one frozen surface on
@@ -152,7 +197,7 @@ impl HirLowering:
         surface key every probe is prefixed with. Keyed on the frozen
         registry only, so it is shared across importers and never cleared."""
         val surface_key = "{self.module_surfaces.generation} {imported_mod.physical_index}"
-        if not self.name_index_built.contains_key(surface_key):
+        if not self.name_index_built_lookup(surface_key):
             self.name_index_build_count = self.name_index_build_count + 1
             self.index_surface_names(surface_key + " C ", imported_mod.composite_names)
             self.index_surface_names(surface_key + " E ", imported_mod.enum_names)
@@ -160,24 +205,97 @@ impl HirLowering:
             self.index_surface_names(surface_key + " A ", imported_mod.type_alias_names)
             self.index_surface_names(surface_key + " F ", imported_mod.callable_names)
             self.index_surface_names(surface_key + " K ", imported_mod.constant_names)
-            self.name_index_built[surface_key] = true
+            self.name_index_built_record(surface_key)
         surface_key
+
+    me name_index_built_lookup(surface_key: text) -> bool:
+        """Scalar-chain membership probe for the per-surface NAMEIDX built
+        set. Never reads the {text: bool} Dict: contains_key on it
+        mis-reports under Stage-2 native codegen (BOOT-20 2026-09-18, the
+        driver.spl 9h/100%-CPU/flat-RSS wedge)."""
+        if self.name_index_built_buckets.len() == 0:
+            return false
+        val bucket = hash_text(surface_key) & self.name_index_built_mask
+        var index = self.name_index_built_buckets[bucket]
+        while index >= 0:
+            if self.name_index_built_keys[index] == surface_key:
+                return true
+            index = self.name_index_built_next[index]
+        false
+
+    me name_index_built_record(surface_key: text):
+        """Append one built surface key to the scalar chain set; the legacy
+        Dict is written in lockstep for shape compatibility."""
+        if self.name_index_built_buckets.len() == 0:
+            # 1024 buckets: one per frozen surface at most, built once per
+            # lowerer (the set is keyed on the registry generation).
+            val built_bucket_count: i64 = 1024
+            self.name_index_built_mask = built_bucket_count - 1
+            var fill = 0
+            while fill < built_bucket_count:
+                self.name_index_built_buckets = self.name_index_built_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(surface_key) & self.name_index_built_mask
+        self.name_index_built_next = self.name_index_built_next.push(
+            self.name_index_built_buckets[bucket])
+        self.name_index_built_buckets[bucket] = self.name_index_built_keys.len()
+        self.name_index_built_keys = self.name_index_built_keys.push(surface_key)
+        self.name_index_built[surface_key] = true
 
     me index_surface_names(prefix: text, names: [text]):
         var position = 0
         while position < names.len():
             val key = prefix + names[position]
             # First occurrence wins: identical to the linear scan's first hit.
-            if not self.name_index_positions.contains_key(key):
-                self.name_index_positions[key] = position
+            self.name_index_put(key, position)
             position = position + 1
+
+    me name_index_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar NAMEIDX chain table, or -1. Never
+        reads the {text: i64} Dict: contains_key on it mis-reports both ways
+        under Stage-2 native codegen (BOOT-20 2026-09-18, the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        if self.name_index_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.name_index_hash_mask
+        var index = self.name_index_hash_buckets[bucket]
+        while index >= 0:
+            if self.name_index_keys[index] == key:
+                return index
+            index = self.name_index_hash_next[index]
+        -1
+
+    me name_index_put(key: text, position: i64):
+        """First-occurrence-wins insert into the scalar NAMEIDX table. The
+        legacy Dict is written in lockstep so its shape stays spec-visible."""
+        if self.name_index_lookup(key) >= 0:
+            return
+        if self.name_index_hash_buckets.len() == 0:
+            # 4096 buckets, built once per lowerer: the table is keyed on the
+            # frozen registry and never cleared, and chains absorb the full
+            # declaration volume of the stage-3 closure.
+            val index_bucket_count: i64 = 4096
+            self.name_index_hash_mask = index_bucket_count - 1
+            var fill = 0
+            while fill < index_bucket_count:
+                self.name_index_hash_buckets = self.name_index_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.name_index_hash_mask
+        self.name_index_hash_next = self.name_index_hash_next.push(
+            self.name_index_hash_buckets[bucket])
+        self.name_index_hash_buckets[bucket] = self.name_index_keys.len()
+        self.name_index_keys = self.name_index_keys.push(key)
+        self.name_index_positions_values = self.name_index_positions_values.push(position)
+        self.name_index_positions[key] = position
 
     fn surface_name_position(surface_key: text, kind: text, name: text) -> i64:
         """Position of `name` in the `kind` array of the indexed surface, or -1.
-        Bracket read after contains_key: the native-path Dict.get caveat."""
+        Answered from the scalar chain table; the Dict is never consulted
+        (BOOT-20 2026-09-18: the native-path Dict.get caveat)."""
         val key = surface_key + " " + kind + " " + name
-        if self.name_index_positions.contains_key(key):
-            return self.name_index_positions[key]
+        val slot = self.name_index_lookup(key)
+        if slot >= 0:
+            return self.name_index_positions_values[slot]
         -1
 
     me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
@@ -364,6 +482,10 @@ impl HirLowering:
                 val surface_enum = imported_mod.enum_values[enum_position]
                 self.imported_enums[local_name] = hir_surface_enum_to_enum(surface_enum, local_name)
                 self.imported_enum_owners[local_name] = imported_mod.module_name
+                # BOOT-20-robust mirror: the Dict read-back under-reports
+                # under Stage-2 native codegen at scale; the [text] rows list
+                # is the house-verified-safe structure (see types.spl).
+                self.imported_enum_owner_rows.push("{local_name}\u001f{imported_mod.module_name}")
                 self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
         elif trait_position >= 0:
             # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
@@ -484,6 +606,19 @@ impl HirLowering:
             val define_started = hir_phase_profile_now()
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             hir_phase_profile_add(HIR_PROF_RIS_DEFINE, define_started)
+            # Preserve the physical declaration name in the symbol while
+            # retaining local_name as the scope lookup key — the same policy
+            # the composite / enum / trait / type-alias branches apply above.
+            # Without it, an aliased import (`use m.{f as g}`) kept the alias
+            # as the stored/emitted name, so the call site referenced a callee
+            # no module defines (`read_env` vs the real `env_get` definition)
+            # and MIR/LLVM saw an undeclared symbol. Renaming under
+            # `not already_bound` matches the enum branch's guard exactly;
+            # skipped outright when the local name already IS the physical
+            # name (the common glob/selective path — this is a hot
+            # registration path and the rename would be a pure no-op).
+            if not existing_id.is_valid() and local_name != imported_name:
+                self.symbols.rename_symbol(imported_fn_sym, imported_name)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif constant_position >= 0:
             val imported_constant = imported_mod.constant_values[constant_position]
@@ -721,6 +856,14 @@ impl HirLowering:
             # REXMEMO: a new frozen registry can answer every root differently.
             self.reexport_root_memo_index = {}
             self.reexport_root_memo_item = {}
+            # BOOT-20 (2026-09-18): scalar read authority resets with the
+            # Dicts on the same generation guard.
+            self.reexport_root_memo_keys = []
+            self.reexport_root_memo_index_values = []
+            self.reexport_root_memo_item_values = []
+            self.reexport_root_memo_hash_buckets = []
+            self.reexport_root_memo_hash_next = []
+            self.reexport_root_memo_hash_mask = 0
 
         self.reexport_walk_complete = true
         self.reexport_walk_valid = true
@@ -753,11 +896,15 @@ impl HirLowering:
         # is why `glob` grew superlinearly with the closure after d757f7d70d0
         # deleted the array memo (69 s -> 195 s on driver.spl, same 73 roots).
         # Bracket-index read after contains_key: Dict.get() on the self-hosted
-        # native path corrupts/mis-reports present values.
+        # native path corrupts/mis-reports present values. BOOT-20
+        # (2026-09-18): the probe and both payloads now come from the scalar
+        # chain table; the Dicts are kept written in lockstep (driver.spl
+        # 9h/100%-CPU/flat-RSS wedge).
         val memo_key = "{facade_index} {wanted}"
-        if self.reexport_root_memo_index.contains_key(memo_key):
+        val memo_slot = self.reexport_root_memo_lookup(memo_key)
+        if memo_slot >= 0:
             self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
-            val terminal_index: i64 = self.reexport_root_memo_index[memo_key]
+            val terminal_index: i64 = self.reexport_root_memo_index_values[memo_slot]
             if (rt_env_get("SIMPLE_REXMEMO_VERIFY") ?? "") == "1":
                 val verify_state = HirReexportWalkState.fresh()
                 val verify = self.find_reexport_source_walk(facade_index, wanted, 0, verify_state)
@@ -773,7 +920,7 @@ impl HirLowering:
                 found: true,
                 module_index: terminal_index,
                 module_name: self.module_surfaces.surfaces[terminal_index].preferred_registry_name,
-                item_name: self.reexport_root_memo_item[memo_key])
+                item_name: self.reexport_root_memo_item_values[memo_slot])
 
         # Keep recursion state on a fresh explicit carrier. HirLowering fields
         # are shared by nested root queries and native cross-module frame sync
@@ -784,14 +931,51 @@ impl HirLowering:
         self.reexport_walk_complete = state.complete
         self.reexport_walk_valid = state.valid
         if result.found:
-            self.reexport_root_memo_index[memo_key] = result.module_index
-            self.reexport_root_memo_item[memo_key] = result.item_name
+            self.reexport_root_memo_record(memo_key, result.module_index, result.item_name)
         elif state.complete and state.valid:
             # Only a COMPLETE, valid miss is a fact about the registry; a
             # depth-truncated or misaligned walk stays retryable.
-            self.reexport_root_memo_index[memo_key] = -1
-            self.reexport_root_memo_item[memo_key] = ""
+            self.reexport_root_memo_record(memo_key, -1, "")
         result
+
+    me reexport_root_memo_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar REXMEMO chain table, or -1. Never reads
+        the {text: *} Dicts: their contains_key/bracket-read pair corrupts on
+        a hit under Stage-2 native codegen, feeding a garbage item_name
+        straight into register_imported_symbol (BOOT-20 2026-09-18, the
+        driver.spl 9h/100%-CPU/flat-RSS wedge)."""
+        if self.reexport_root_memo_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.reexport_root_memo_hash_mask
+        var index = self.reexport_root_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.reexport_root_memo_keys[index] == key:
+                return index
+            index = self.reexport_root_memo_hash_next[index]
+        -1
+
+    me reexport_root_memo_record(key: text, terminal_index: i64, item_name: text):
+        """Append one root-memo answer to the scalar chain table; the legacy
+        Dicts are written in lockstep so their len()/bracket shape stays the
+        oracle reexport_physical_cache_spec pins."""
+        if self.reexport_root_memo_hash_buckets.len() == 0:
+            # 4096 buckets, built once per registry generation: roots x names
+            # volume in the stage-3 closure, absorbed by the chains.
+            val memo_bucket_count: i64 = 4096
+            self.reexport_root_memo_hash_mask = memo_bucket_count - 1
+            var fill = 0
+            while fill < memo_bucket_count:
+                self.reexport_root_memo_hash_buckets = self.reexport_root_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.reexport_root_memo_hash_mask
+        self.reexport_root_memo_hash_next = self.reexport_root_memo_hash_next.push(
+            self.reexport_root_memo_hash_buckets[bucket])
+        self.reexport_root_memo_hash_buckets[bucket] = self.reexport_root_memo_keys.len()
+        self.reexport_root_memo_keys = self.reexport_root_memo_keys.push(key)
+        self.reexport_root_memo_index_values = self.reexport_root_memo_index_values.push(terminal_index)
+        self.reexport_root_memo_item_values = self.reexport_root_memo_item_values.push(item_name)
+        self.reexport_root_memo_index[key] = terminal_index
+        self.reexport_root_memo_item[key] = item_name
 
 impl HirLowering:
     me try_register_glob_reachable_symbol(name: text, span: Span) -> bool:
@@ -864,7 +1048,7 @@ impl HirLowering:
         # `lookup_or_invalid` guard above returns first. Only the negative is
         # recorded -- a success returns before the memo write.
         val miss_key = "{self.module_surfaces.generation} {importer_index} {name}"
-        if self.glob_reachable_miss_memo.contains_key(miss_key):
+        if self.glob_reachable_miss_memo_lookup(miss_key):
             return false
         self.glob_reachable_scan_count = self.glob_reachable_scan_count + 1
         val importer = self.module_surfaces.surfaces[importer_index]
@@ -902,8 +1086,44 @@ impl HirLowering:
                         if self.symbols.lookup_or_invalid(name).is_valid():
                             return true
             import_idx = import_idx + 1
-        self.glob_reachable_miss_memo[miss_key] = true
+        self.glob_reachable_miss_memo_record(miss_key)
         false
+
+    me glob_reachable_miss_memo_lookup(key: text) -> bool:
+        """Scalar-chain membership probe for the glob-reachable miss memo.
+        Never reads the {text: bool} Dict: contains_key on it mis-reports
+        under Stage-2 native codegen (BOOT-20 2026-09-18, the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        if self.glob_reachable_miss_memo_hash_buckets.len() == 0:
+            return false
+        val bucket = hash_text(key) & self.glob_reachable_miss_memo_hash_mask
+        var index = self.glob_reachable_miss_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.glob_reachable_miss_memo_keys[index] == key:
+                return true
+            index = self.glob_reachable_miss_memo_hash_next[index]
+        false
+
+    me glob_reachable_miss_memo_record(key: text):
+        """Append one completed sweep's negative answer to the scalar chain
+        table; the legacy Dict is written in lockstep for shape compatibility.
+        """
+        if self.glob_reachable_miss_memo_hash_buckets.len() == 0:
+            # 4096 buckets, built once per lowerer: 1.25M probes per stage-1
+            # build land here, and the distinct (generation, importer, name)
+            # volume is in the tens of thousands.
+            val miss_bucket_count: i64 = 4096
+            self.glob_reachable_miss_memo_hash_mask = miss_bucket_count - 1
+            var fill = 0
+            while fill < miss_bucket_count:
+                self.glob_reachable_miss_memo_hash_buckets = self.glob_reachable_miss_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.glob_reachable_miss_memo_hash_mask
+        self.glob_reachable_miss_memo_hash_next = self.glob_reachable_miss_memo_hash_next.push(
+            self.glob_reachable_miss_memo_hash_buckets[bucket])
+        self.glob_reachable_miss_memo_hash_buckets[bucket] = self.glob_reachable_miss_memo_keys.len()
+        self.glob_reachable_miss_memo_keys = self.glob_reachable_miss_memo_keys.push(key)
+        self.glob_reachable_miss_memo[key] = true
 
     me surface_declares_item_indexed(target: ModuleSurface, name: text) -> bool:
         """`hir_module_declares_item` answered from the NAMEIDX per-surface

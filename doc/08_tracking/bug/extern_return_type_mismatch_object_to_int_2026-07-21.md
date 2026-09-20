@@ -1,8 +1,12 @@
 # Extern Call Return Type Mismatch: "object to int"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-21
 **Severity:** P1 (blocks rv64 serial_shell_entry compilation)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** Filed
 **Component:** MIR lowering / Semantic analysis
 
 ## Verbatim Error
@@ -92,5 +96,3 @@ fn test3() -> i64:
 2. Add regression test: function returning extern call result with --emit-object on riscv64
 3. Re-enable rv64 serial_shell_entry helper function pattern after fix
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

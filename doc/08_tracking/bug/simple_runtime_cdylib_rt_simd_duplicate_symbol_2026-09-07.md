@@ -1,4 +1,9 @@
 # `simple-runtime` cdylib fails with 23 `rt_simd_*` duplicate-symbol errors
+## Closed 2026-09-16 — Status "RESOLVED same day"; fix + 5 verification items incl. build/test results
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Filed: 2026-09-07 (regression introduced by PR #493, branch
   `work/stage2-simd-iofile`, commit `f66280e066534701161eb5b67e808554805c1a71`)
@@ -175,3 +180,4 @@ keeps the C definition as the sole provider, unaffected by weak vs strong.
   of the cdylib target — both crates request `runtime-symbol-table` too,
   so plausibly yes, but building those binaries end-to-end was out of this
   task's scope (no full bootstrap).
+

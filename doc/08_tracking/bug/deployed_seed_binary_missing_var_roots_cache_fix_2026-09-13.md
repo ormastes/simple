@@ -1,4 +1,8 @@
 # Deployed seed binary predates `VAR_ROOTS_CACHE`; `variants/__init__.spl` opened 76x per lint run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13) -- fix already landed in source, needs a redeploy
 - Area: compiler / seed module resolution (deployed binary vs source drift)
@@ -109,3 +113,4 @@ redeploy carries). This lane's own private candidate binary
 (`simple-perf-8`'s worktree, built from `d522cc98da2` + this lane's one
 `pipeline::module_loader` commit) already exhibits the fixed behaviour --
 see `RECEIPT_PERF_8.md` for the measured before/after on that candidate.
+

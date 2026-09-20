@@ -1,6 +1,8 @@
 # native-build front end is neither incremental nor parallel (2026-08-21)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 A self-hosted `native-build --entry-closure` stage build spends the bulk of its
@@ -539,5 +541,3 @@ cache should come FIRST, ahead of moving the object-cache lookup earlier:
    the biggest win.
 
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

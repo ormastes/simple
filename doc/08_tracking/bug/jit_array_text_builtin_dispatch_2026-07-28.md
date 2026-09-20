@@ -1,5 +1,61 @@
 # JIT array/text builtin dispatch defects (2026-07-28)
 
+## Re-verified 2026-09-13 — items 4, 5 and the SIGSEGV are FIXED; `any`/`all` still wrong on JIT (left open)
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran every "FILED — not fixed here" item on both lanes in one program:
+
+```spl
+fn dbl(x: i64) -> i64: x * 2
+fn big(x: i64) -> bool: x > 1
+
+fn main():
+    val a = [1, 2, 3]
+    val m = a.map(dbl)
+    print("map={m}")
+    val f = a.filter(big)
+    print("filter={f}")
+    val an = a.any(big)
+    print("any={an}")
+    val al = a.all(big)
+    print("all={al}")
+    val s = "a\nb"
+    val ln = s.lines()
+    print("lines={ln}")
+    val t = "  x  ".strip()
+    print("strip=[{t}]")
+    val e = a.enumerate()
+    print("enum={e}")
+```
+
+| item | seed JIT (`run`) | tree-walk (reference) | verdict |
+|---|---|---|---|
+| 4 `arr.map(...)` | `[2, 4, 6]` | `[2, 4, 6]` | **FIXED** — `rt_array_map` now dispatches |
+| 5 `text.lines()` | `[a, b]` | `[a, b]` | **FIXED** — `rt_string_lines` now dispatches |
+| 6 `filter` SIGSEGV | `[2, 3]`, exit 0 | `[2, 3]` | **FIXED** — no crash, correct result |
+| 6 `any(pred)` | `nil` | `true` | **STILL WRONG** |
+| 6 `all(pred)` | `0` | `false` | **STILL WRONG** |
+| 3 `text.strip()` | `x` | `x` | holds |
+| 2 `arr.enumerate()` | `[(0, 1), (1, 2), (2, 3)]` | same | holds |
+
+So the crash and the two missing runtime functions are gone (measured). What
+remains from item 6 is narrower than filed and worth restating precisely: 
+`any` and `all` no longer ignore the predicate by returning a wrong *boolean*
+— they return a **non-boolean** on the JIT lane. `any` yields `nil` where the
+interpreter yields `true`; `all` yields `0` where the interpreter yields
+`false`. Both are silently truthy/falsy-adjacent values rather than booleans,
+so an `if a.any(pred):` test on the JIT lane is a silent wrong branch.
+
+Entry stays OPEN for that residual only. Items 4 and 5 and the filter SIGSEGV
+can be struck. Not fixed in this pass: the site is
+`src/compiler_rust/**` and a bootstrap was running, which forbids Rust edits.
+
 **Status:** PARTIAL — some items FIXED per record's own "FIXED in this change" section; remainder CLOSED-STALE (2026-09-12: not re-verifiable from the record)
 
 Engine under test: **Cranelift JIT** (`bin/simple run`, `SIMPLE_EXECUTION_MODE=jit`).

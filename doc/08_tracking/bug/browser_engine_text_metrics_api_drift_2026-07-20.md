@@ -1,4 +1,8 @@
 # browser_engine text-metrics spec: multiple real API gaps (missing fields/fn, nil SFFI)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -58,5 +62,3 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 - `test/01_unit/app/ui.chromium/text_metrics_spec.spl` (13 of 14 examples,
   4 distinct root causes as above)
 
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/01_unit/app/ui.chromium/text_metrics_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

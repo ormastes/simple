@@ -1,5 +1,8 @@
 # Rendering/hosted specs red at HEAD on the test-runner interpreter lane
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/02_integration/os/hosted/hosted_external_web_frame_spec.spl -> 1 passed, 3 failed, still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Found via: sspec modernization dual-check sampling of bulk TRC-003 comment edits.
@@ -19,5 +22,3 @@ Left RED per testing rules (correct specs failing document real defects). Same f
 divergence vs the JIT path. Unblock: investigate the interpreter failures for these two
 spec families.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/os/hosted/hosted_external_web_frame_spec.spl` on the deployed seed; 3 of 4 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

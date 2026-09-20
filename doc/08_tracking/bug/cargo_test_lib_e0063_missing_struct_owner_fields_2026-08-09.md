@@ -1,4 +1,9 @@
 # cargo test -p simple-compiler --lib does not compile — 9 × E0063 (2026-08-09)
+## Closed 2026-09-16 — Status FIXED; cargo test --lib compiles, suite runs, touched tests pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Severity:** High (blocked all Rust unit-test verification repo-wide)
@@ -88,3 +93,4 @@ suite is runnable again.
 Consider `#[derive(Default)]` on `ImportMapResult` plus a test-only
 `ModuleImports::empty()` constructor, so a future field addition updates one
 place instead of nine.
+

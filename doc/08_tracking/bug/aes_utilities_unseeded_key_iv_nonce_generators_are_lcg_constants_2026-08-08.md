@@ -1,4 +1,8 @@
 # AES utilities: `generate_aes_key` / `generate_iv` / `generate_nonce` are constant-seeded LCGs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
@@ -161,3 +165,4 @@ as `csprng_bytes(16)` and `generate_nonce` (:306) as `csprng_bytes(16)`.
 `csprng_bytes` (:17) is the /dev/urandom-backed helper documented at :11. The LCG
 survives only as `generate_iv_from_seed` (:326), which now carries an explicit
 DEPRECATED / NOT-CRYPTOGRAPHICALLY-SUITABLE banner and has zero callers. Closing.
+

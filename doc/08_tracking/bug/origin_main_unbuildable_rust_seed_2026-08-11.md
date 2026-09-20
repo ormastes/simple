@@ -1,5 +1,9 @@
 # origin/main unbuildable (Rust seed) — 2026-08-11
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — missing-gate defect fixed: check-seed-builds-push.shs created, selftested, wired into pre-push
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Summary
 `origin/main` was found unbuildable: `cargo build --release --bin simple` in
@@ -54,5 +58,3 @@ The two incomplete changes that caused the actual break are being repaired
 separately (concurrent session, same day). This record is scoped to the
 missing-gate defect and its fix, not the specific compile errors.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

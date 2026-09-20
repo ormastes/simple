@@ -1,4 +1,9 @@
 # JIT does not enforce `val` block scope; the interpreter does
+## Closed 2026-09-16 — Re-check 2026-09-13 CLOSED: filed repro no longer manifests (rc=1 both engines)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN (P1)
 **Filed:** 2026-08-17
@@ -109,3 +114,4 @@ in the original report (loops, nested functions, match arms, `var`) remain
 unchecked. Given the specific filed repro no longer manifests the silent
 `rc=0` symptom, closing this instance; a narrower shape that still leaks
 would need its own report.
+

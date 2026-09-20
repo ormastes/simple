@@ -874,43 +874,56 @@ attributed the row to
 `src/compiler/10.frontend/core/interpreter/eval_calls.spl`; that is a heuristic
 path mapping, and the pure-Simple interpreter was not separately measured here.
 
-## Triage 2026-09-12 — still reproduces, and is now WORSE on the interpreter
+## Re-measurement 2026-09-18 — still open, and the interpreter row has CHANGED
 
-Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+Binary: a seed built from `origin/main` `c8fa65bf714` (2026-09-18), 51,645,288 B,
+sha256 `308de6af84db5c26e2c0`; the same probe on the 2026-09-14 seed answers
+identically, so this is not a one-build artifact.
+
+Probe (`n` is a bare `i64 = 6`, no `index_of` involved):
 
 ```simple
-fn main():
+fn main() -> i64:
     val n = 6
     match n:
-        case Some(i): print("SOME {i}")
-        case _: print("WILDCARD")
-    print(n.unwrap_or(-99))
+        case Some(i):
+            print "B match_Some_arm_taken i=" + i.to_text()
+        case _:
+            print "C wildcard_arm_taken"
+    print "D unwrap_or=" + n.unwrap_or(-99).to_text()
+    if val Some(k) = n:
+        print "E if_val_Some_taken k=" + k.to_text()
+    else:
+        print "F if_val_not_taken"
+    0
 ```
 
-```
-$ SIMPLE_RUST_SEED_WARNING=0 bin/simple run /tmp/b_option.spl
-SOME <value:0x6>
-<value:0x6>
-```
-
-Compared with the record's table, the interpreter's behaviour has changed and the
-defect is now uniform across both consumers rather than engine-divergent:
-
-| expression (`n` is a bare `i64` = 6) | record (2026-07-27, interpreter) | measured 2026-09-12 |
+| row | interpret lane | JIT lane |
 |---|---|---|
-| `match n: Some(i)` | matched neither arm | takes the `Some` arm, binds a **raw tag box** |
-| `n.unwrap_or(-99)` | returned the receiver (`6`) | `<value:0x6>` — the tag box leaks into text |
+| `match n: case Some(i)` | **Some arm taken, binds `6`** | Some arm taken, binds **`<value:0x6>`** |
+| `n.unwrap_or(-99)` | `6` | **`<value:0x6>`** |
+| `if val Some(k) = n` | **taken, binds `6`** | taken, binds **`<value:0x6>`** |
 
-So the interpreter now behaves like the old JIT row: `Some(_)` is accepted on a
-non-Option scrutinee and the payload binds to the undecoded scalar box, which
-`print` renders as `<value:0x6>`. The "interpreter does not match `_`" second
-defect no longer reproduces (the `Some` arm is taken first now), but that is a
-symptom change, not a fix — the type-checking hole is unchanged.
+What changed since the original table, and what did not:
 
-Fix direction (unchanged): reject `Some(_)`/`None` patterns and `.unwrap_or` when
-the scrutinee/receiver type is not an `Option`, instead of coercing the scalar.
+- **Changed:** the interpreter no longer "matches neither arm". It now takes the
+  `Some` arm and binds the raw scalar. The original report's second defect (a
+  `_` wildcard that failed to match) therefore no longer reproduces on this
+  probe — it should not be cited as live without re-measuring.
+- **Unchanged, and still the core defect:** both engines silently ACCEPT
+  `Some(_)`, `if val Some(...)` and `.unwrap_or` on a plain `i64`. No compile
+  error on either lane.
+- **Unchanged:** the two engines still DISAGREE on what gets bound — the raw
+  scalar on the interpret lane, a tag box that stringifies as `<value:0x6>` on
+  the JIT lane. The record's point that fixing one engine alone widens the gap
+  stands.
 
-Not fixable from pure Simple: `bin/simple` is the Rust bootstrap seed, so this is
-the seed's type checker / pattern matcher.
+The fix direction in the section above (reject the pattern at type-check time,
+so the three engines cannot disagree about a program that should not compile)
+is unaffected by this re-measurement.
 
-- Status: OPEN (2026-09-12) — reproduced on 3d120a6f, diagnosed, needs a Rust-seed change
+**Coordination note (2026-09-18):** PR #1077 is open and edits
+`src/compiler/30.types/type_infer/{context,inference_control,inference_expr}.spl`
+for the adjacent dot-question/non-optional-return enforcement in the same HM
+checker. A pattern-side fix should land after it, or be written against its
+tree, rather than underneath it.

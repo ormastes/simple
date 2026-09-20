@@ -1,4 +1,8 @@
 # A `new` identifier after a named-argument `:` still raises the bogus "Common mistake" ERROR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13, found during UNIT-P1 continuation)
 - Binary: `/home/yoon/cargo-unitp1/release/simple`, sha256 `d4c0779cef6cf0cc4054` (this lane's own rebuild, already carries the fix from `932ab196848`)
@@ -77,3 +81,4 @@ That one spec file also fails independently on `spipe_empty_examples`
 unrelated `Undefined("undefined identifier: gf128_mul")` in a sibling module
 reached transitively — so fixing only this issue would not turn that spec
 GREEN by itself.
+

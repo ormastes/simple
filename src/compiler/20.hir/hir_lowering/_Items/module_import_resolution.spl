@@ -19,6 +19,7 @@ use compiler.hir.hir_lowering.hir_phase_profile.{
 }
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -71,6 +72,12 @@ impl HirLowering:
         # elided, and every root still expands its own closure from scratch.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         val prof_glob_started = hir_phase_profile_now()
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true, true)
         hir_phase_profile_add(HIR_PROF_GLOB, prof_glob_started)
@@ -82,7 +89,57 @@ impl HirLowering:
         # implementation details of the sibling that wrote them.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, false, false)
+
+    me glob_expand_memo_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar glob-expansion chain table, or -1.
+        Never reads the {text: i64} Dict: contains_key on it mis-reports
+        under Stage-2 native codegen (BOOT-20 2026-09-18, the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        if self.glob_expand_memo_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.glob_expand_memo_hash_mask
+        var index = self.glob_expand_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.glob_expand_memo_keys[index] == key:
+                return index
+            index = self.glob_expand_memo_hash_next[index]
+        -1
+
+    me glob_expand_memo_record(key: text, depth: i64):
+        """Insert or refresh one (key -> shallowest depth) pair in the scalar
+        glob-expansion table; the legacy Dict is written in lockstep. Unlike
+        the append-only memos this one is refreshed in place: a shallower
+        arrival re-expands and overwrites the depth, exactly as the Dict did.
+        """
+        val existing = self.glob_expand_memo_lookup(key)
+        if existing >= 0:
+            self.glob_expand_memo_values[existing] = depth
+            self.glob_expand_memo[key] = depth
+            return
+        if self.glob_expand_memo_hash_buckets.len() == 0:
+            # 1024 buckets per root expansion; the reachable set of one root
+            # is bounded by the frozen registry size and chains absorb the
+            # cyclic-graph volume.
+            val glob_bucket_count: i64 = 1024
+            self.glob_expand_memo_hash_mask = glob_bucket_count - 1
+            var fill = 0
+            while fill < glob_bucket_count:
+                self.glob_expand_memo_hash_buckets = self.glob_expand_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.glob_expand_memo_hash_mask
+        self.glob_expand_memo_hash_next = self.glob_expand_memo_hash_next.push(
+            self.glob_expand_memo_hash_buckets[bucket])
+        self.glob_expand_memo_hash_buckets[bucket] = self.glob_expand_memo_keys.len()
+        self.glob_expand_memo_keys = self.glob_expand_memo_keys.push(key)
+        self.glob_expand_memo_values = self.glob_expand_memo_values.push(depth)
+        self.glob_expand_memo[key] = depth
 
     me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool, materialize_enums: bool):
         if depth > 8:
@@ -91,13 +148,14 @@ impl HirLowering:
         # hir_lowering/types.spl. Skip only when this key was ALREADY expanded
         # at the same or a shallower depth; a shallower arrival re-expands
         # because it can reach further before the depth cap bites.
-        # Bracket-index read after contains_key: Dict.get() on the self-hosted
-        # native path corrupts/mis-reports present values.
-        if self.glob_expand_memo.contains_key(imported_mod_name):
-            val seen_depth: i64 = self.glob_expand_memo[imported_mod_name]
+        # BOOT-20 (2026-09-18): answered from the scalar chain table; the
+        # Dict is no longer consulted (native-path Dict.get caveat).
+        val expand_slot = self.glob_expand_memo_lookup(imported_mod_name)
+        if expand_slot >= 0:
+            val seen_depth: i64 = self.glob_expand_memo_values[expand_slot]
             if seen_depth <= depth:
                 return
-        self.glob_expand_memo[imported_mod_name] = depth
+        self.glob_expand_memo_record(imported_mod_name, depth)
         hir_phase_profile_count_glob_expansion()
         var keys = imported_mod.composite_names
         var idx = 0
@@ -251,10 +309,14 @@ impl HirLowering:
         # single-module entry, used by the in-guest riscv64/x86_64 interpreter
         # rows and by any embedder that drives the frontend directly without the
         # module loader — fail with "missing importing module surface" on a
-        # self-contained hello world. The loop below is the ONLY consumer of
-        # `importer_surface`, and it does not execute when there are no imports,
-        # so returning here is exactly semantics-preserving for every module that
-        # does have imports.
+        # self-contained hello world. The import-item rows read below are the
+        # ONLY consumer of the importer's own surface; a module WITH imports
+        # whose own surface is still absent (unit fixtures, single-module
+        # embedders) reads the identical rows from the live parser import
+        # decls instead — the surface rows are a verbatim flatten of
+        # `owner.value.imports` (module_surface_declarations.spl), built in
+        # the same per-import order — so both shapes stay semantics-equal and
+        # only the imported TARGET's surface is load-bearing either way.
         if module.imports.len() == 0:
             return
         # Use the same owner as source discovery and native symbol naming.
@@ -283,9 +345,25 @@ impl HirLowering:
             importer_surface_index = self.surface_index_for_name(
                 hir_pkg_canonical_module_name(module.name))
         if importer_surface_index < 0:
-            self.error("missing importing module surface for {module.name}", Span.empty())
-            return
-        val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+            if (hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                # Cheap insurance for the next lane if this ever resurfaces:
+                # print both tried keys and the registry size so a failed
+                # rebuild names whether the key is genuinely unregistered vs.
+                # a scan miss, instead of being a dead end. See
+                # bootstrap_s3_missing_importing_module_surface_2026-09-14.
+                eprint("[surface-miss] module={module.name} key1={importer_key} key2={hir_pkg_canonical_module_name(module.name)} registry_size={self.module_surfaces.ordered_names.len()}")
+            # NOT a hard error: the per-import item rows are re-derived from
+            # the live parser import decls at the use site below (they are a
+            # verbatim flatten of `owner.value.imports` by construction —
+            # module_surface_declarations.spl). Single-module embedders and
+            # unit fixtures that drive lower_module() without registering the
+            # importing module's own surface used to die here with every
+            # import silently unresolved (regressed the
+            # module_namespace_retained_surface fixture family; see
+            # doc/08_tracking/bug/stage4_env_paths_llvm_undeclared_variables_2026_08_03.md).
+            # The real entry closure is unaffected: every closure module has
+            # a registered importer surface, so this branch never fires there.
+            importer_surface_index = -1
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
@@ -359,8 +437,28 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
-                val item_start = importer_surface.import_item_offsets[import_idx]
-                val item_end = importer_surface.import_item_offsets[import_idx + 1]
+                # Per-import item rows: the frozen importer surface's flattened
+                # copy when the importing module has a registered surface, the
+                # live parser import decls otherwise (identical data and order;
+                # see the note on the importer_surface_index branch above).
+                var item_start = 0
+                var item_end = 0
+                var item_names: [text] = []
+                var item_aliases: [text] = []
+                var item_has_alias: [bool] = []
+                if importer_surface_index >= 0:
+                    val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+                    item_start = importer_surface.import_item_offsets[import_idx]
+                    item_end = importer_surface.import_item_offsets[import_idx + 1]
+                    item_names = importer_surface.import_item_names
+                    item_aliases = importer_surface.import_item_aliases
+                    item_has_alias = importer_surface.import_item_has_alias
+                else:
+                    for import_item in imp.items:
+                        item_names = item_names.push(import_item.name)
+                        item_aliases = item_aliases.push(import_item.alias)
+                        item_has_alias = item_has_alias.push(import_item.has_alias)
+                    item_end = item_names.len()
                 if item_start == item_end:
                     self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
@@ -380,9 +478,9 @@ impl HirLowering:
                 else:
                     var item_idx = item_start
                     while item_idx < item_end:
-                        val item_name = importer_surface.import_item_names[item_idx]
-                        val local_name = if importer_surface.import_item_has_alias[item_idx]:
-                            importer_surface.import_item_aliases[item_idx]
+                        val item_name = item_names[item_idx]
+                        val local_name = if item_has_alias[item_idx]:
+                            item_aliases[item_idx]
                         else: item_name
                         self.register_imported_symbol(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
                         item_idx = item_idx + 1

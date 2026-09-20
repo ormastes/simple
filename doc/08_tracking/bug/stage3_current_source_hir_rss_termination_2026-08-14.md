@@ -1,4 +1,8 @@
 # Current-source Stage 3 terminates after unbounded HIR build RSS growth
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Date: 2026-08-14
@@ -1273,3 +1277,4 @@ Stage 2 and a canonical Stage 3, neither of which exists in this worktree.
 Out of lane: verification needs "one future canonical build" (a full Stage 3
 bootstrap run to measure RSS), which this lane does not run (no bootstrap per
 the fan-out brief). No change made.
+

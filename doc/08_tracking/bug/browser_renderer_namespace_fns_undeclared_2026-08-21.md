@@ -1,5 +1,8 @@
 # browser_renderer_apply_namespaces / browser_renderer_drop_privileges never implemented
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 PARTIALLY RESOLVED (deferred, not implemented) — bd6ba8faae7 makes the selfcheck fail loudly at compile time via #ifndef SPL_HAS_BROWSER_RENDERER_NAMESPACES / #error instead of silently referencing undeclared functions, so check-c-runtime-compiles-push.shs no longer false-passes. This is a defer-with-visible-guard, not a fix: browser_renderer_apply_namespaces()/browser_renderer_drop_privileges() are still unimplemented in runtime_process.c. OPEN: implement both functions and define SPL_HAS_BROWSER_RENDERER_NAMESPACES.
@@ -64,5 +67,7 @@ drop, since dropping privileges first would remove the `CAP_SYS_ADMIN` needed
 for the namespace call). Then define `SPL_HAS_BROWSER_RENDERER_NAMESPACES` and
 re-verify.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: linux-lane** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

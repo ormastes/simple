@@ -1,6 +1,10 @@
 # S61: Interpreter Stack Overflow on app.io.mod Imports
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** Open  
 **Defect Type:** Interpreter module loader / missing cycle detection  
 **Severity:** Critical (blocks direct imports of app.io.mod)  
 **Affects:** BOTH deployed pure-Simple self-hosted binary (2026-07-11) AND Rust seed bootstrap  
@@ -160,5 +164,3 @@ doc's theory (in-flight cycle tracking, lane S64) is held un-landed: plausible
 defense-in-depth, but its motivating bug is unconfirmed and it is unverifiable
 until redeploy.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,9 @@
 # `child died by signal` in the compiler/app reruns: confirmed host-load artifact, not a defect
+## Closed 2026-09-16 — investigated: host-load artifact not a defect; isolated reruns pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: INVESTIGATED — root cause confirmed for this session's occurrences; not a code fix (there is nothing to fix)
 - Binary: `/home/yoon/cargo-unitp1/release/simple`, sha256 `d4c0779cef6cf0cc4054`
@@ -61,3 +66,4 @@ this lane's receipts is a load artifact. The FIRST session's `hir` sweep
 concurrently with two other sweeps, so that occurrence is not explained by
 this finding and stays open/untriaged. Each new report should still be
 sampled for individual reproduction before being written off as load noise.
+

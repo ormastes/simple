@@ -1,6 +1,8 @@
 # Full blast radius of merge e274cd33719 (share-history worktree merge clobber)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31. Extends the boot-lane audit (record
 `merge_e274cd33719_clobbered_x86_64_boot_lane_sources_2026-08-31.md`, which was
@@ -393,5 +395,3 @@ generation. Each needs a both-directions diff by a human/owning lane.
   priority M files, ~29k test/+doc/ paths, and the 10,189 A files (an added
   file can also resurrect stale content).
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

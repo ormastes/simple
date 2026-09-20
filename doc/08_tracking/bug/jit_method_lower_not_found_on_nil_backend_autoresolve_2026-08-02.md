@@ -1,6 +1,9 @@
 # JIT: "method lower not found on nil" during engine2d backend auto-resolution
+## Closed 2026-09-16 — fixed at .spl call sites, verified both engines; residual tracked in jit_game2d bug
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT method dispatch / engine2d backend resolve
 
@@ -76,22 +79,3 @@ Fixed at the .spl call sites (nil-guard + typed-route shutdown guard);
 underlying JIT missing-vtable duck-dispatch defect remains open (tracked by
 jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13
-Reconfirmed: Cranelift JIT method dispatch during engine2d backend
-auto-resolution, Rust-seed codegen defect. Out of scope for a pure-Simple
-lane. Left OPEN, no code change attempted.
-## Re-check 2026-09-13 (BUGFIX-12 shard 22)
-
-Confirmed by content: both `src/lib/nogc_sync_mut/env/platform.spl` and
-`src/lib/nogc_async_mut/env/platform.spl` still carry the `== nil` guards
-before `.lower()` in `detect_os()`/`detect_arch()`, matching the fix above.
-The residual JIT missing-vtable duck-dispatch defect is out of scope (tracked
-separately by `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02`).
-
-Status: RESOLVED (2026-09-13) — the `.spl`-side fix (nil-guard +
-typed-route shutdown guard) this doc describes is confirmed intact by
-content; nothing actionable remains here outside the separately-tracked
-JIT vtable defect.

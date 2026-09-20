@@ -1,0 +1,52 @@
+# Probe for bootstrap_stage2_backend_object_path_status_2026_09_08.
+# Reads a fixture back through the public
+# `std.nogc_sync_mut.io.file_read_regular_no_follow_bounded` wrapper -- the exact
+# lib boundary the Stage 2 AOT driver crosses when it reads the backend's
+# diagnostic file -- and prints machine-checkable markers. Markers are printed
+# bare (no interpolated operands) so a corrupt payload cannot silence them on
+# the native lane.
+#
+# Inputs arrive through the environment (PROBE_FIXTURE, PROBE_MISSING), not
+# argv: `fn main(args: [text])` binds argv only on the native lane while the
+# seed `run` lane calls main with no arguments, and the `sys_get_args()` prelude
+# resolves only on the interpret lane -- env vars resolve on BOTH.
+# PROBE_MISSING empty/unset skips the missing-file check: the seed interpreter
+# never registered `rt_file_read_regular_no_follow_last_failure`, which the
+# wrapper's failure-name helper calls on the Err arm, and unknown externs are
+# fatal there -- so the Err arm cannot run on the interpret lane at all.
+
+use std.nogc_sync_mut.io.{file_read_regular_no_follow_bounded, file_atomic_write}
+
+# Declared directly rather than imported: the native lane's hir resolves bare
+# externs (registered on both lanes) but not every lib facade re-export.
+@unsafe(reason: "raw nullable environment-read ABI; nil means unset", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+
+fn probe_env_or(name: text, default_value: text) -> text:
+    var value: text? = nil
+    unsafe(capabilities: [ffi]):
+        value = rt_env_get(name)
+    value ?? default_value
+
+fn main():
+    val path = probe_env_or("PROBE_FIXTURE", "")
+    val missing = probe_env_or("PROBE_MISSING", "")
+    if path == "":
+        print "PROBE-NO-FIXTURE"
+        return
+    if not file_atomic_write(path, "AOT object destination already exists"):
+        print "PROBE-WRITE-FAILED"
+        return
+    match file_read_regular_no_follow_bounded(path, 4096):
+        case Ok(content):
+            print "PROBE-OK len={content.len()}"
+            print "PROBE-CONTENT [{content}]"
+        case Err(e):
+            print "PROBE-ERR"
+            print "PROBE-ERR-DETAIL [{e}]"
+    if missing != "":
+        match file_read_regular_no_follow_bounded(missing, 4096):
+            case Ok(content):
+                print "PROBE-MISSING-UNEXPECTED-OK len={content.len()}"
+            case Err(_):
+                print "PROBE-MISSING-ERR"

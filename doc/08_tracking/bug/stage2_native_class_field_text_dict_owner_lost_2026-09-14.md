@@ -1,4 +1,8 @@
 # Stage-2 native codegen: `imported enum has no declaration owner` on a plain single-hop import
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-14)
 - Lane: BOOT-20 (`work/bootstrap-s3-2-2026-09-14`)
@@ -170,3 +174,231 @@ table, not a native-buggy class field`), `work/bootstrap-s3-2-2026-09-14`.
 - `doc/07_guide/language/dict_native_pitfalls.md` — existing truth table;
   this bug is a new row (class-field `text`-valued bracket-read garbage on a
   hit), not yet added there pending wider confirmation.
+
+
+## Addendum 2026-09-17 (bootstrap-unblock lane, do not overwrite)
+
+Full-bootstrap chain13 reached Stage 3 with this class live. Findings:
+
+- Repro harness: run the chain-admitted stage2 binary
+  (`.simple/storage/build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple`)
+  with the exact stage3 env replayed from
+  `.simple/storage/build/bootstrap/stage3/aarch64-unknown-linux-gnu/stage3-command.transcript`
+  (source the explicit-env lines; point the four cache/profile paths at a
+  scratch dir). Plain hand-picked env passes (884/884); the exact env
+  reproduces 36 `imported enum has no declaration owner` + `unresolved type`
+  fatals + a terminal SIGSEGV. `MALLOC_ARENA_MAX=2`/`MALLOC_TRIM_THRESHOLD_=0`
+  are NOT the trigger (failures persist with them unset) — the exposing
+  variable is elsewhere in the engine env (candidates: SIMPLE_BOOTSTRAP_STAGE3,
+  SIMPLE_STAGE3_STREAMING_SURFACES, SIMPLE_PACKAGE_INDEX_COLD_INIT,
+  SIMPLE_NATIVE_ARENA_DECLS; not yet bisected further).
+- Fixed and merged (PR #1052): the enum-owner read via a parallel `[text]`
+  rows mirror (house-safe structure) — 36/36 owner errors eliminated; the
+  legacy dict path never engaged in verification.
+- Remaining: `unresolved type: SccPublicationOwnershipV1 /
+  DemandCompileCountersV1 / DemandCompileExecutionV1 / RouteCapabilityScope`
+  attributed to driver.spl / driver_aot_output.spl / driver_pipeline.spl
+  (spans empty). These route through glob imports
+  (`use compiler.driver.driver_pipeline_execution.*`) whose re-export chase
+  walks `self.module_surfaces.surfaces` — a HirLowering class-field subject to
+  the documented "native cross-module frame sync can restore an older visit
+  snapshot" hazard (module_import_registration.spl:783). The root memo
+  (`reexport_root_memo_index`) is also a HirLowering field and negative
+  results are memoized permanently per generation.
+- `SIMPLE_REXMEMO_VERIFY=1` (the in-code memo self-check) SEGFAULTS under the
+  exact env — evidence the walk/recursion itself is corrupted, not just the
+  memo.
+- Candidate fix (UNVERIFIED, stashed in the bootstrap-lane session, NOT
+  merged): `module_surface_export_origin_index_position` in
+  module_surface_types.spl — its scalar-array scan fallback was unreachable
+  (`index_by_name.len() >= 0` is always true); made the dict fast path
+  validated + scan-on-miss. Did not cure the unresolved-type class (the
+  failing routes are not origin-index arms) and the verify run segfaulted
+  before a clean measurement.
+- Localization knobs that exist and work: SIMPLE_HIR_ENUM_OWNER_TRACE=1,
+  SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1, SIMPLE_BOOTSTRAP_DIAG=1
+  (`[reexport-chase] mod=... wanted=... imports=N exports=M found=F`),
+  SIMPLE_REXMEMO_VERIFY=1 (crashes).
+
+### Addendum 2026-09-17 (second pass) — env-bisect results and mechanism analysis
+
+Falsified as the exposing trigger, each with a full exact-env replay minus one
+variable (25-min runs):
+- `MALLOC_ARENA_MAX=2` / `MALLOC_TRIM_THRESHOLD_=0` unset: same fatals + SIGSEGV.
+- `SIMPLE_STAGE3_STREAMING_SURFACES` unset: still fails; the failing TYPE SET
+  CHANGES with the perturbation (BuildLinkState / BuildProgressState vs the
+  original SccPublicationOwnershipV1 / DemandCompileExecutionV1 /
+  RouteCapabilityScope). A failure set that shifts with heap layout/timing
+  perturbation is the signature of reading uninitialized or stale memory, not
+  of one wrong branch.
+
+Mechanism analysis (from reading the walk + registry code):
+- The unresolved types route through glob imports whose re-export chase walks
+  `self.module_surfaces.surfaces` (a HirLowering class field). The code
+  documents the hazard itself (module_import_registration.spl:783): HirLowering
+  fields are shared by nested root queries and "native cross-module frame sync
+  can restore an older visit snapshot after a nested call returns". If a late
+  surface registration is reverted by such a restore, the generation guard
+  (read from the same restored field) cannot detect the loss, and memoized
+  negatives become permanent -- self-consistent within the stale snapshot.
+- The per-surface route arrays are populated before streaming release and the
+  code asserts "promoted field owners remain valid"; the SoA promotion path
+  (driver_source_pipeline_parsing.spl) is the right place to audit first for
+  any array that still aliases released per-file records.
+- `SIMPLE_REXMEMO_VERIFY=1` (the memo self-check) SIGSEGVs under the exact env,
+  so the walk itself cannot currently be trusted to re-verify its own cache.
+
+Conclusion: the remaining stage3 blocker is a native-codegen memory-safety
+defect (stale/uninitialized reads under nested calls) in the pure-Simple
+compiler, larger than the dict-membership class fixed in PR #1052. The
+house-documented mitigations (fresh carriers, accessor-only fields, scalar
+mirrors) are the right pattern for any further source hardening; a codegen fix
+needs the BOOT-20 owner lane.
+
+## 2026-09-17 follow-up: full-chain reproduction + origin-index hardening (branch fix/boot20-surface-index)
+
+Full bootstrap chain on current main (all prior workarounds in place:
+02d5b7c1405 enum-owner-via-symbol-table, 12902e1c65b surface-index linear scan,
+#1052 rows mirror, #1044 receiver/closure-context): Stage 2 PASS (890/890),
+Stage 3 FAIL exit 1. Failure signature CHANGED from the 36-error enum-owner
+slice to a broad builtin-name collapse:
+- 15,876 `unresolved type` + 15,538 `unresolved name` (capped ~10/file),
+  dominated by `text` (4,085), `i64`, `bool`, `Option`, `Dict`, `Result` and
+  the int widths -- i.e. the prelude itself stops resolving across most of
+  the closure, plus genuine receipt types (SccPublicationOwnershipV1,
+  DemandCompile*V1, RouteCapabilityScope) in 80.driver.
+- 15,361 `[hir-reexport-chase-unresolved]` receipts: the re-export chase
+  returns not-found for names the facades genuinely route. `local=` is bare
+  (`text local=text`, 4,085x) for misses and qualified
+  (`local=lib.nogc_sync_mut.io_runtime::Option`, 171x) for the
+  terminal-register path -- the two populations are distinct.
+
+New defect sites confirmed (all the documented `{text:*}` class-field Dict
+class), fixed on this branch:
+1. `module_surface_export_origin_index_position` (module_surface_types.spl):
+   the `index_by_name.len() >= 0` gate is constant-true, so the Dict path ran
+   unconditionally and the scalar-array fallback was DEAD CODE. A false
+   contains_key negative returned -1 (origin arm of the chase misses). Fixed:
+   scan the retained `names` array; Dict no longer consulted.
+2. `module_surface_export_origin_index_put` (same file): slot lookup was
+   `index_by_name.contains_key` + bracket-read. False negative -> duplicate
+   `names` entry; false positive -> `owner_modules[garbage]` OOB write. Fixed:
+   locate the slot by scanning `names`; arrays are the authority.
+3. Sibling-inference predicate (module_surface_export_index.spl:573) read
+   `owner.export_origins.contains_key(source_name)` (the `{text:
+   ModuleSurfaceExportOrigin}` class-field Dict). Fixed: reuse the hardened
+   position scan.
+
+Seed-interpreter spec validation of the three edits: origin/chase/surface
+specs PASS (export_origin_layered_facade, bare_export_facade_chain_reexport,
+hir_package_dependency_scan_memo 7/7, standalone_module 2/2,
+hir_lowering_items_surface_completeness, imported_enum_owner_native_workaround);
+the four FAILs (explicit_import_beats_glob_reexport,
+hir_unresolved_name_import_reachability, module_surface_index_allocation_guard
+0/2, resolve_import_symbols 1/32) are pre-existing on clean main (A/B via
+stash confirmed) -- not regressions.
+
+Remaining suspects if Stage 3 still fails after this slice (from static
+reading, in order of likelihood):
+- `reexport_root_memo_item` (`{text: text}`) is read UNGUARDED at
+  module_import_registration.spl:780 after an index-dict hit; corruption-on-hit
+  feeds a garbage `item_name` straight into `register_imported_symbol`. The
+  index dict (`{text: i64}`) false-NEGATIVES per the surface-index finding, so
+  it is retry-safe; the item dict is not.
+- `surface_decl_owner_indices` (module_lowering.spl:427) ambient-probe
+  `surface_decl_owners` `{text: [i64]}` contains_key -> `[]` on a false
+  miss, failing the unique-owner check for names like `Option`.
+- `SIMPLE_REXMEMO_VERIFY=1` SIGSEGV under the exact env (documented above)
+  still blocks memo self-verification.
+
+---
+
+## BOOT-20 session addendum 2026-09-18 — five merged mitigation slices and the unresolved driver.spl wedge
+
+### Merged work (all in main via PR, ruleset relax/restore admin merges)
+
+| Slice | PR | What it fixed |
+|---|---|---|
+| 1 | #1059 | `surface_index_for_name` stopped trusting the per-instance `{text: i64}` Dict cache; ~190/832 module surfaces failed their own "missing importing module surface" check under stage2-native, cascading thousands of unresolved-name fatals |
+| 2 | #1059 | Export-origin scalar authority: dead constant-true gate made the scalar fallback unreachable; `put` slot lookup + sibling-inference `contains_key` hardened; `build_surface_decl_index` reads frozen arrays + new scalar pair mirror (cured `unresolved name: error` / `cli_current_exe_path`) |
+| 3 | #1062 | `surface_decl_owner_indices` probe ran per unbound name in every body (module_import_registration.spl:563) — slice 2's linear scan made driver.spl HIR ~27x slower; converted to scalar hash chains (O(1) avg) |
+| 4 | #1071 | RISDONE registration memo gate (`{text: bool}` contains_key at module_import_registration.spl:140) → scalar hash chains; unconditional-write contract preserved (negative caching pinned by spec); `begin_module` resets scalars (pre-seeded-owner hazard) |
+| 5 | #1081 | ALL remaining `{text: *}` membership Dicts on the driver.spl path: name_index built+positions, REXMEMO index+item, glob_expand, explicit_dep target/item, dep_tail, payload_origin_miss, glob_reachable_miss, surface_package_name |
+
+Infra: #1070 fixed review-admission.yml's shallow-checkout silent merge-base death (`--deepen=500` + labeled failures; bug doc: `review_admission_shallow_merge_base_silent_fail_2026-09-17.md`).
+
+### Wedge characterization (survives slice 5)
+
+Full-bootstrap stage3 (aarch64, qemu-user) reaches `phase3:hir:imports` of
+`src/compiler/80.driver/driver.spl` (the 826-module closure, module ~2) and
+spins: 100% userspace CPU, RSS flat at ~40GB, stdout frozen (block-buffered),
+deterministic across v2 (9h+), v3 (9h+), v4 (95 min), v5 diagnostic (~67+ min
+and killed). The seed interpreter compiles the identical closure without any
+pathology, so the defect is stage2-NATIVE codegen specific. A plain replay of
+the exact stage3 command with fresh caches reproduces it (no chain needed).
+
+Ruled out by slice 5's total hardening: a membership-Dict probe spin
+(corrupted contains_key/chain cycling) — every `{text: *}` membership Dict on
+the import path now answers from scalar hash chains, and the wedge persists
+unchanged.
+
+### Remaining suspects and recommended next steps (codegen lane)
+
+The root cause is stage2-native codegen miscompiling SOME structure access on
+the driver.spl import path. With membership Dicts excluded, prime candidates:
+
+1. **Array/vector element access on class-field arrays** — e.g.
+   `composite_values[position]`/`enum_values[position]` returning a garbage
+   element whose `fields`/`variants` array length is corrupt, spinning a
+   field-materialization loop. (Sibling defect
+   `stage2_native_method_scoped_dict_field_write_segfaults_2026-09-14.md`
+   documents class-field writes corrupting adjacent storage.)
+2. **The symbol table entries** (`self.symbols.*`) — irreducible without a
+   redesign; a corrupted `HirSymbol` payload could feed any loop.
+3. **Import-item list corruption** (parser-produced arrays held in class
+   fields).
+
+Recommended approach (needs the codegen lane, not more source hardening):
+- Differential: dump the seed-vs-stage2native HIR registry state for the
+  first 3 imports of driver.spl; first divergence localizes the corruption.
+- Instrumented stage2: add a SIGPROF/interval sampler to the compiler's own
+  runtime (the `-g` gdb route was tried; TCG stub is single-session and
+  slows emulation ~3-10x, making it impractical: >3h to reach the wedge).
+- `SIMPLE_REXMEMO_VERIFY=1` segfault under the exact env (documented above)
+  blocks memo self-verification and is itself a signal: the verify path
+  re-walks registries whose native layout the exact env corrupts.
+
+### Status
+
+Main is strictly better: five real defect fixes merged (stage2 sanity and
+admission now pass; slices 1-4 each fixed verifiable stage3 errors), plus the
+review-admission infra fix. The full stage3 native build of the compiler
+closure remains blocked by the wedge above. Chain evidence: stage2 PASS +
+admitted on every run including v5; stage3 never passes driver.spl.
+
+### Differential result 2026-09-18 — seed completes the full stage3 closure; the wedge is compiler-binary-specific
+
+Running the EXACT stage3 replay command (same sources — main @ slice 5,
+same env, fresh caches, 4 threads) with the two compiler binaries:
+
+- **Rust seed** (`src/compiler_rust/target/bootstrap/simple`, x86-64 host):
+  full closure build **PASS in 380.2s** (341.8s compile + 38.4s link,
+  884 modules, 0 failed, rc=0). Output binary:
+  `/tmp/boot20-int/diag-scratch/simple` (148MB, aarch64) — a fresh
+  seed-built stage3-equivalent compiler from current sources.
+- **Stage2-admitted** (aarch64, qemu-user): wedges in `driver.spl` HIR
+  imports (100% CPU, flat ~40GB RSS) as characterized above.
+
+Same sources, same flags, same environment variables — the only difference
+is the compiler binary. This closes the localization loop: the defect is in
+the stage2-NATIVE-COMPILED COMPILER'S OWN EXECUTION (its generated
+codegen/runtime state during HIR), not in any source the closure shares. The
+seed-built binary also serves as an unblocking asset for tooling lanes that
+merely need a current-compiler build (it is NOT a bootstrap-ladder
+substitute — provenance policy requires stage3 to be built by the admitted
+stage2).
+
+The next diagnostic step remains the instrumented stage2 (SIGPROF sampler)
+or a seed-vs-native registry-state differential inside the wedged process;
+the qemu `-g` route was attempted twice and is impractical (single-session
+stub; >3h to reach the wedge under TCG).

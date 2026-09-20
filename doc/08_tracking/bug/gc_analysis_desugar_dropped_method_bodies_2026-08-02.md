@@ -1,7 +1,11 @@
 # gc_analysis: desugaring dropped method bodies, whole subsystem is non-executable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-02
-- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
+- Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
   `BarrierAnalysis.analyze()`, fixed 2026-08-08) are now executable and
   covered; `mod.spl` (`RootAnalysis.create`/`BarrierAnalysis.create` TAB-named
@@ -367,22 +371,3 @@ unimplemented.
   — corpus census; `PASS_ONLY` is one of the two example classes safe to act on
   without re-review, and this is the highest-value instance of it.
 
-
-## Re-check 2026-09-12
-
-Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
-`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
-
-```
-SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
-  test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl --no-session-daemon
-SPEC FILE VERDICT: test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl outcome=OK declared>=39 executed=39 passed=39 failed=0 skipped=0 dropped=0
-```
-
-Every example in the spec this record names as its reproduction passes. Scope
-of the claim, stated plainly: the re-check exercised **that spec only**, on the
-**deployed seed** on **aarch64**. It did not re-measure any other lane (native
-LLVM / self-hosted binary / other architecture), and it did not audit whether
-the spec's assertions still cover the original symptom as tightly as when the
-record was written. If a residual lane is known to be uncovered, reopen with
-the lane named rather than relying on this line.

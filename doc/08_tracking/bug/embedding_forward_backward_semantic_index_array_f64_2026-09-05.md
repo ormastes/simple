@@ -1,5 +1,8 @@
 # Embedding.forward/backward undrivable on the interpreter: "cannot index array with type f64"
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 3 (modernizing `test/01_unit/lib/gc_async_mut/embedding_spec.spl`)
@@ -46,5 +49,3 @@ and the two renamed scenarios in
 `test/01_unit/lib/gc_async_mut/embedding_spec.spl` (and its `test/unit` twin)
 can be pointed back at them.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

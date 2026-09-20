@@ -1,4 +1,9 @@
 # `layout_schema_errors` missing overlap/duplicate-name checks and never wired into generation
+## Closed 2026-09-16 — RESOLVED 2026-08-18; overlap/duplicate checks + fail-closed wiring; 20 examples green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED 2026-08-18
 - Found: 2026-08-18 (goal 4 evidence-hardening pass over the binary SSpec suites)
@@ -82,3 +87,4 @@ Not fixed here — this record exists so the gap is tracked instead of
 silently accepted; the adversarial specs above assert the CURRENT (unsafe)
 behavior deliberately, so a future fix will need those specific assertions
 updated to their corrected form.
+

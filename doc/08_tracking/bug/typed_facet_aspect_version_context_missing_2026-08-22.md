@@ -1,6 +1,8 @@
 # Typed facet parser lacks authoritative aspect-version context
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/99.loader/pack_file_snapshot.spl
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -76,6 +78,3 @@ driver must never take provider IDs, concrete/interface/method IDs, ABI/layout
 hashes, capability, or sidecar facts from source declarations or recompute
 them from HIR as a substitute.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

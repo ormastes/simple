@@ -1,12 +1,8 @@
 # Vulkan 8K strict-JIT retained host-buffer sample crash
+## Open 2026-09-16 — needs owner triage
 
-## Triage 2026-09-13
-OPEN, out of scope for this lane: needs a real (or pinned lavapipe) Vulkan
-compute device plus SIMPLE_JIT_STRICT=1 8K retained-buffer harness to
-reproduce -- GPU-hardware-gated, not a stdlib fix. Left OPEN.
-
-
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-12
 
@@ -163,6 +159,3 @@ This Darwin ARM host enumerates Apple M4 through MoltenVK, not lavapipe. The
 focused owner and strict-JIT evidence can run here, but no 8K lavapipe or NVIDIA
 receipt is claimed; the full 7680x4320 capacity rerun remains pending.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,6 +1,8 @@
 # Interpreter: `match` on an `Option<Enum>` value directly fires no arm
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-06
 - Status (re-measured 2026-09-06, **both halves**, and the old header was
@@ -176,21 +178,3 @@ Results: 7 total, 7 passed, 0 failed          # rc=0
 `match` on an `Option<Enum>` value now fires the correct arm. Closing as
 already fixed; no source change was made by this lane.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13
-Re-ran the record's own fixture on `bin/simple` = Rust seed
-`bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared
-main worktree), sha256 `3d120a6f9ab5`: unchanged, line 4 still
-`FALLTHROUGH`. Rust seed interpreter fix, out of scope. The pure-Simple
-interpreter half remains correctly RESOLVED per this record's own
-2026-09-06 finding. Left OPEN for the Rust seed half, no code change.
-## Triage 2026-09-13 (BUGFIX-12 shard 22)
-
-Confirmed by content: `match_enum_variant_pattern`
-(`src/compiler/10.frontend/core/interpreter/eval.spl:1136`) still has the
-Option::Some/None unwrap-before-tag-compare fix, matching the "Fix landed"
-section above. Pure-Simple interpreter side stays RESOLVED; the Rust-seed
-side is a separate, still-open, out-of-scope defect per the re-measurement
-above. No change made.

@@ -1,6 +1,8 @@
 # Web frame-reuse verification gaps
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -32,6 +34,3 @@ matching revision-only reply accepted; stale/missing revision rejected; exact
 full/reuse IPC bytes counted; unchanged frame sends no DrawIR/images. These are
 mechanism receipts only—8K/80 additionally requires the campaign matrix row.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,4 +1,8 @@
 # Interpreter does not link FD-ownership private module globals
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open  
 **Date:** 2026-08-12  
@@ -55,3 +59,4 @@ bin/simple test test/01_unit/os/sosix/fd_ownership_spec.spl --mode=interpreter
 Acceptance requires `3 examples, 0 failures` and no `variable ... not found`
 diagnostic. Do not broaden to the SOSIX or whole repository suite until this
 single spec passes.
+

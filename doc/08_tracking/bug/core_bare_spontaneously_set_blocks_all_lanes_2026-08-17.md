@@ -1,5 +1,8 @@
 # `core.bare = true` appears spontaneously on the shared `.git/config`, blocking every lane
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-08-17. **Status** MITIGATED (self-healing in the pre-push hook);
 **root cause OPEN** — the writer is unidentified.
@@ -103,5 +106,3 @@ find the writer — candidates worth checking are jj/`sj` invocations from other
 worktrees, and any tooling that runs `git config` against this repo's
 `.git` from outside it.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

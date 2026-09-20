@@ -1,6 +1,8 @@
 # `native-build` scoping + fail-open readthrough (2026-07-30)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment: read `native_build_worker.spl` and the CLI arg plumbing that
 invokes it to answer definitively why the pass-13/14 archive-lane attempts
@@ -328,5 +330,3 @@ small** — with two caveats now on record:
    pass's own citations (matches the one invocation shape proven to work
    for all 6 real callers) rather than introducing a new mechanism.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

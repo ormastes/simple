@@ -1,6 +1,9 @@
 # native-build: top-level script `.len()` const-folds to 0 (no `fn main`)
+## Closed 2026-09-16 — in-body Resolved 2026-07-15; parity gate case verified PASS
 
-**Status:** RESOLVED (per record's own **Resolved:** 2026-07-15, triage-confirmed 2026-07-17)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Severity:** high (silent-wrong)
 **Found:** 2026-07-14, exprdispatch2 lane
@@ -48,5 +51,3 @@ case and reports `toplevel_array_len ... PASS` in the 39-case gate.
 `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry t.spl -o out --clean`
 with a brace-less top-level `[..]; .len()`; compare to `bin/simple run t.spl`.
 
-## Triage 2026-09-12
-Not independently re-run; formalizing the record's own Resolved field into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

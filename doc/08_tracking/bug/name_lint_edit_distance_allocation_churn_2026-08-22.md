@@ -1,6 +1,9 @@
 # NAME001 bounded edit-distance allocation churn
+## Closed 2026-09-16 — ...ance allocation churn ## Status Resolved structurally with a three-row fixed-band implemen
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -33,6 +36,3 @@ matrix storage is `O(limit)` per comparison, replacing `O(K^2)` cells,
 one-byte substring temporaries, and cumulative row allocation. Exact runtime
 and allocation measurements remain unavailable under the no-verify direction.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

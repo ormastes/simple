@@ -1,5 +1,8 @@
 # FAT32 transactional mount owner is blocked on device and operation ownership
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN / three unsafe drafts reverted
 - Scope: production kernel FAT32 mount publication and teardown
@@ -119,5 +122,3 @@ not make caller-supplied block I/O authenticated.
    duplicate mount, rollback, copied session aliases, stale generations,
    capability gating, flush failure, and successful remount.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,8 @@
 # jit-module-drop fence: 43% NOT MEASURED, and its own gap breakdown was mislabelled
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-18
 - **Fence:** `scripts/check/check-no-jit-module-drop.shs`
@@ -108,5 +110,3 @@ remainder. Specs:
 A package-aware probe is required. Not started here; the coverage number and its
 cause breakdown are now honest, which is the precondition for fixing it.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

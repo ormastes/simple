@@ -1,4 +1,8 @@
 # command_dispatch: two migrated app dispatch targets missing on disk (2026-08-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — real drift, deliberately left RED in the spec.
 
@@ -25,3 +29,4 @@ check `src/app/cli` dispatch tables before "fixing" by deletion).
 
 Per `.claude/rules/testing.md`: a correct spec that fails is a legitimate
 artifact; do not weaken the assertion or mark it pending.
+

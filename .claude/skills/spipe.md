@@ -3077,3 +3077,13 @@ Design/plan: `doc/05_design/infra/sspec/binary_reference_stacked_design.md`,
 line-cited semantics, domain recipes (protocol/cipher/checksum/register), and
 pitfalls (fixed 64-bit hex rendering, no endianness conversion in
 `field_extract`): `doc/07_guide/infra/sspec/binary_sspec_usage.md`.
+
+## Running spipe through a local LLM (caret + slang)
+
+A local GGUF model loaded via slang can drive the spipe flow itself through
+caret's TUI agent loop (bash/read/write tools): point `--workspace` at an
+isolated worktree, `--dangerously-allow-all` with that sandbox underneath,
+and prompt it to read this skill, run `bin/simple test <area>`, fix, and
+re-run — never to git commit. Full setup (model root, shim build, tmux
+headless recipe, prompt pattern):
+`doc/07_guide/app/llm/local_llm_slang_caret_setup.md`.

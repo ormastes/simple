@@ -1,4 +1,8 @@
 # Binding a nested-array element to a `var` copies it; writes through that binding are silently lost
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Status:** OPEN
@@ -85,3 +89,4 @@ Related prior art: `.claude/memory/interp_receiver_var_and_nested_push_bugs.md`
 records a same-family receiver/nested-push defect, so this is likely one instance
 of a class rather than an isolated case — check whether one root cause covers
 both before fixing only this shape.
+

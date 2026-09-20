@@ -1,5 +1,8 @@
 # bootstrap_main selected the core-C runtime for compiler-provider imports
-**Status:** OPEN (unverified 2026-09-12)
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. scripts/check/check-bootstrap-main-provider-symbols.shs INVE
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Evidence
 
@@ -27,5 +30,3 @@ and compiles zero compiler sources; this Rust provider selection is diagnostic
 bootstrap evidence, not an admitted pure-Simple Stage-3 receipt or production
 PASS.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

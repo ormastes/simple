@@ -1,5 +1,9 @@
 # Bootstrap Stage 3 module-surface placeholder nil trap (2026-08-01)
-**Status:** OPEN (unverified 2026-09-12)
+## Closed 2026-09-16 — Root cause confirmed fixed; fresh Stage 3 no longer traps at original boundary
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -100,5 +104,3 @@ the pipeline. Those errors are a separate Stage-3 closure/import-surface
 frontier and remain recorded in the session handoff. Final evidence is in
 `build/bootstrap/stage4-spdev-current/manual-stage3-cycle3/stage3-cycle3.log`.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

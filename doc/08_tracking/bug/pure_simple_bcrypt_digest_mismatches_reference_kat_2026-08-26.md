@@ -1,6 +1,8 @@
 # pure-Simple bcrypt digest mismatches reference KAT (2026-08-26)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `src/os/crypto/bcrypt.spl` `bcrypt_hash` produces structurally valid $2a$04$
@@ -35,6 +37,3 @@ Fix the eksblowfish/Blowfish core in `src/os/crypto/bcrypt.spl` until the two
 KAT scenarios in `test/01_unit/lib/crypto/bcrypt_kat_spec.spl` pass byte-exact
 against the reference values above.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

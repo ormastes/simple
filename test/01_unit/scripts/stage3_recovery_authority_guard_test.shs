@@ -120,22 +120,89 @@ source_sha=$(bootstrap_stage3_hash_file "$source_snapshot")
 sanity="$stage3_dir/stage2-sanity.env"
 empty_sha=$(printf '' | bootstrap_stage3_hash_stream)
 version=$(bootstrap_stage3_canonical_version "$fixture")
-cat >"$sanity" <<EOF
-schema=simple-bootstrap-sanity-evidence-v1
-status=pass
-candidate_sha256_before=$parent_sha
-version_status=0
-version_output=simple-bootstrap $version
-version_expected=$version
-version_expect_status=0
-version_match_status=0
-unsupported_status=1
-unsupported_output_sha256=$empty_sha
-frontend_smoke_status=0
-frontend_smoke_bootstrap_mode_status=0
-frontend_smoke_output_sha256=$empty_sha
-candidate_sha256_after=$parent_sha
-EOF
+sanity_driver_log="$sanity.frontend-driver.log"
+: >"$sanity_driver_log"
+for fixture_mode in 0 1; do
+  fixture_mode_log="$sanity.frontend-bootstrap-$fixture_mode.log"
+  for fixture_probe in p2_add stage2_mir_retention stage2_module_path_naming \
+    hello_world_positional; do
+    case "$fixture_probe" in
+      p2_add) fixture_probe_log=$fixture_mode_log ;;
+      *) fixture_probe_log=$fixture_mode_log.$(printf '%s' "$fixture_probe" | tr _ -) ;;
+    esac
+    printf 'probe=%s mode=%s\n' "$fixture_probe" "$fixture_mode" \
+      >"$fixture_probe_log"
+    fixture_probe_sha=$(bootstrap_stage3_hash_file "$fixture_probe_log")
+    {
+      echo schema=simple-bounded-process-log-v1
+      echo status=complete
+      echo reason=child-exit
+      echo raw_status=0
+      echo max_bytes=4194304
+      # `$(( ))` normalises wc's output: BSD/macOS `wc -c <f` right-pads its
+      # count and the verifier requires `^[0-9]+$` on bytes_captured.
+      echo bytes_captured="$(( $(wc -c <"$fixture_probe_log") ))"
+      echo timeout_seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}"
+      echo term_grace_seconds=1
+      echo combined_stream=stdout-stderr
+      echo process_group=setsid
+      echo artifact_limit=none
+      echo log_leaf="${fixture_probe_log##*/}"
+      echo log_sha256="$fixture_probe_sha"
+    } >"$fixture_probe_log.bounded.env"
+  done
+  {
+    echo schema=simple-candidate-frontend-status-v2
+    echo result=pass
+    echo probe=complete
+    echo raw_status=0
+    echo bootstrap_mode="$fixture_mode"
+    echo backend=cranelift
+    echo log_path="$fixture_mode_log"
+    for fixture_probe in p2_add stage2_mir_retention stage2_module_path_naming \
+      hello_world_positional; do
+      case "$fixture_probe" in
+        p2_add) fixture_probe_log=$fixture_mode_log ;;
+        *) fixture_probe_log=$fixture_mode_log.$(printf '%s' "$fixture_probe" | tr _ -) ;;
+      esac
+      echo "${fixture_probe}_log_path=$fixture_probe_log"
+      echo "${fixture_probe}_log_sha256=$(bootstrap_stage3_hash_file "$fixture_probe_log")"
+      echo "${fixture_probe}_collector_receipt_path=$fixture_probe_log.bounded.env"
+      echo "${fixture_probe}_collector_receipt_sha256=$(bootstrap_stage3_hash_file "$fixture_probe_log.bounded.env")"
+      echo "${fixture_probe}_raw_status=0"
+    done
+  } >"$sanity.frontend-bootstrap-$fixture_mode.status.env"
+done
+{
+  echo schema=simple-bootstrap-sanity-evidence-v1
+  echo status=pass
+  echo candidate_sha256_before=$parent_sha
+  echo version_status=0
+  echo "version_output=simple-bootstrap $version"
+  echo version_expected=$version
+  echo version_expect_status=0
+  echo version_match_status=0
+  echo unsupported_status=1
+  echo unsupported_output_sha256=$empty_sha
+  echo frontend_smoke_status=0
+  echo frontend_smoke_backend=cranelift
+  echo frontend_smoke_bootstrap_mode_status=0
+  echo frontend_smoke_bootstrap0_raw_status=0
+  echo frontend_smoke_bootstrap0_log_path="$sanity.frontend-bootstrap-0.log"
+  echo frontend_smoke_bootstrap0_log_sha256="$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-0.log")"
+  echo frontend_smoke_bootstrap0_status_path="$sanity.frontend-bootstrap-0.status.env"
+  echo frontend_smoke_bootstrap0_status_sha256="$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-0.status.env")"
+  echo frontend_smoke_bootstrap1_ran=true
+  echo frontend_smoke_bootstrap1_raw_status=0
+  echo frontend_smoke_bootstrap1_log_path="$sanity.frontend-bootstrap-1.log"
+  echo frontend_smoke_bootstrap1_log_sha256="$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-1.log")"
+  echo frontend_smoke_bootstrap1_status_path="$sanity.frontend-bootstrap-1.status.env"
+  echo frontend_smoke_bootstrap1_status_sha256="$(bootstrap_stage3_hash_file "$sanity.frontend-bootstrap-1.status.env")"
+  echo frontend_smoke_output_sha256="$(bootstrap_stage3_hash_file "$sanity_driver_log")"
+  echo frontend_smoke_driver_log_path="$sanity_driver_log"
+  echo frontend_smoke_driver_log_sha256="$(bootstrap_stage3_hash_file "$sanity_driver_log")"
+  echo candidate_sha256_after=$parent_sha
+} >"$sanity"
 receiver_log="$stage3_dir/stage2-receiver.log"
 printf 'receiver pass\n' >"$receiver_log"
 receiver="$stage3_dir/stage2-receiver.env"
@@ -156,6 +223,7 @@ stage3_cache="$stage3_dir/stage3-native-cache"
 bootstrap_stage3_write_command_transcript \
   "$transcript" "$fixture" "$stage3_dir/stage2-home" \
   "$stage3_dir/stage2-tmp" "$tool_path" \
+  SIMPLE_LLVM_BIN= LLVM_SYS_180_PREFIX= PATH="$tool_path" \
   RUST_LOG=error LIBRARY_PATH= SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent \
   SIMPLE_BOOTSTRAP=1 SIMPLE_ABI_POLICY=v1 \
   SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn \
@@ -192,8 +260,11 @@ admission="$admitted_dir/admission.env"
 SIMPLE_ABI_POLICY=v1
 export SIMPLE_ABI_POLICY
 bootstrap_stage3_write_stage2_admission_receipt \
-  "$admission" "$admitted" "$source_snapshot" "$runtime_snapshot" \
-  "$tool_snapshot" "$stage2_args_sha" "$sanity" "$receiver" "$fixture"
+  "$admission" "$admission" "$admitted" "$admitted" \
+  "$source_snapshot" "$source_snapshot" "$runtime_snapshot" "$runtime_snapshot" \
+  "$runtime" "$runtime" "$tool_snapshot" "$tool_snapshot" \
+  "$stage2_args_sha" "$sanity" "$sanity" "$stage3_dir" \
+  "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$fixture"
 admission_sha=$(bootstrap_stage3_hash_file "$admission")
 parent_sanity="$stage2_dir/stage2-sanity.receipt"
 parent_provenance="$stage2_dir/stage2-provenance.receipt"
@@ -220,7 +291,7 @@ closure_sha_seed=$(printf 'planner closure\n' | bootstrap_stage3_hash_stream)
 runtime_sha=$(bootstrap_stage3_hash_file "$runtime_snapshot")
 cache_scope=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha_seed" | \
   bootstrap_stage3_hash_stream)
-planner_dir="$fixture/build/bootstrap/admission/$cache_scope"
+planner_dir="$output/admission/$cache_scope"
 mkdir -p "$planner_dir"
 cp "$runtime_snapshot" "$planner_dir/runtime.snapshot"
 printf 'planner closure\n' >"$planner_dir/planner-source-closure.snapshot"
@@ -385,6 +456,28 @@ mv "$admitted" "$tmp/admitted"
 run_guard 1 refused required-stage2-authority-file-missing
 mv "$tmp/produced" "$produced"
 mv "$tmp/admitted" "$admitted"
+
+# A genuinely invalid Stage 2 admission receipt (recorded candidate digest no
+# longer matches the admitted candidate) must refuse with stage2-admission-invalid
+# -- proving the preflight now evaluates the receipt instead of refusing this
+# scenario unconditionally on the stale 9-argument call. The parent receipts'
+# recorded admission digest follows the mutated receipt so the case reaches the
+# admission verifier rather than tripping parent-admission-digest-stale.
+cp "$admission" "$tmp/admission"
+cp "$parent_sanity" "$tmp/parent-sanity-current"
+cp "$parent_provenance" "$tmp/parent-provenance-current"
+sed 's/^candidate_sha256=.*/candidate_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' \
+  "$tmp/admission" >"$tmp/admission-invalid"
+mv "$tmp/admission-invalid" "$admission"
+invalid_admission_sha=$(bootstrap_stage3_hash_file "$admission")
+sed "s/^admission_receipt_sha256=.*/admission_receipt_sha256=$invalid_admission_sha/" \
+  "$tmp/parent-sanity-current" >"$parent_sanity"
+sed "s/^admission_receipt_sha256=.*/admission_receipt_sha256=$invalid_admission_sha/" \
+  "$tmp/parent-provenance-current" >"$parent_provenance"
+run_guard 1 refused stage2-admission-invalid
+mv "$tmp/admission" "$admission"
+cp "$tmp/parent-sanity-current" "$parent_sanity"
+cp "$tmp/parent-provenance-current" "$parent_provenance"
 
 set +e
 "$guard" --source-root="$fixture" --output-dir="$output" \

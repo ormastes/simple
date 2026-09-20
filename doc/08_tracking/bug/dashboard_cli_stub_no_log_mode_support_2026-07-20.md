@@ -1,5 +1,8 @@
 # dashboard app CLI is a no-op stub; `dashboard_log_modes_spec.spl` tests removed functionality
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/02_integration/app/dashboard_log_modes_spec.spl` still FAILs — still reproduces)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/dashboard/main.spl`
@@ -61,5 +64,3 @@ expectations. Left the spec file unmodified per the "never rewrite an
 assertion to force green" rule — deciding which of these two paths is
 correct requires product/ownership context beyond this triage pass.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/02_integration/app/dashboard_log_modes_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

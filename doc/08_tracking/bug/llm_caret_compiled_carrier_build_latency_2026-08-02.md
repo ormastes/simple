@@ -1,6 +1,8 @@
 # BUG: LLM Caret compiled carrier cannot be produced within bounded build time
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** `llm_caret_compiled_carrier_build_latency`
 - **Severity:** P1 (blocks production compiled database/plugin carriers)
@@ -120,26 +122,4 @@ imported database methods were unresolved, lowered to const-zero placeholders,
 and caused a nil-receiver crash (exit 132, Task #145). Owner-module free
 façades now replace open/startup/query/close plus map/join rendering. Their
 closure contract test exits 0; the three-cycle guard prevented another compile.
-
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13 (BUGFIX-10 fanout)
-
-Extensive multi-session investigation already on record (build-latency
-blocker closed, current blocker is unresolved built-in method symbols at
-link time plus generic-monomorphization gaps in native closure
-construction). Reproducing requires long native-build runs
-(`SIMPLE_TIMEOUT_SECONDS=120` bounded builds, previously timing out) on a
-shared, loaded host — not attempted here to avoid tying up host capacity
-for a row whose real blocker (native codegen link-time symbol resolution)
-is compiler-backend work exceeding a single row's budget regardless. Left
-OPEN, unchanged.
-## Triage 2026-09-13
-
-Native-build performance investigation requiring profiling of
-frontend/module-loading and entry-closure construction, plus a
-native-build run this shared host cannot safely absorb (other rows
-this session saw native-build hit 2GB allocation failures). Out of
-budget. Leaving OPEN.
 

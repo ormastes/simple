@@ -1,6 +1,8 @@
 # MIR-to-LLVM bootstrap debug changes translation semantics
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -22,5 +24,3 @@ Translate the same MIR module with diagnostics off and on. Require identical
 LLVM IR after removing diagnostic output, and require the same function count
 and body sources in both runs.
 
-## Triage 2026-09-12
-No status line existed; older than 45 days with no cheap repro (requires diffing LLVM IR with SIMPLE_BOOTSTRAP_DEBUG on/off on the SimpleOS filesystem compiler). Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

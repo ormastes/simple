@@ -1,6 +1,11 @@
 # simple check src/lib continues after interrupt
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Triage note 2026-09-13 — left OPEN: fix blocked by the concurrent bootstrap
+- **inferred**: the remedy named in this entry lands in `src/compiler/**` and/or `src/compiler_rust/**`. A bootstrap is running concurrently in this workspace, so editing either tree would desync it; no repair was attempted.
+- **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
+- **inferred**: `bin/simple` on this host is the Rust seed (v1.0.0-rc.1), not the self-hosted binary; and `bin/simple test` is broken here (a trivial spec returns a false `outer-bound-timeout`), so neither arm of a verification is available.
+
+Status: guarded in source, pending release-binary verification
 Severity: P2 resource/runaway
 Date: 2026-06-27
 
@@ -36,6 +41,3 @@ Added cooperative checks of the existing `simple_compiler::interpreter::is_inter
 ## Follow-Up
 
 After the release binary is rebuilt, verify with a long directory check in an interactive shell by sending SIGINT during the file loop. Do not rerun this as an unattended broad check in Codex.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

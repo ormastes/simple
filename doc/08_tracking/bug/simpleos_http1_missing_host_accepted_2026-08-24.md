@@ -1,6 +1,9 @@
 # SimpleOS HTTP/1.1 missing Host accepted
+## Closed 2026-09-16 — ...request-target consistency. ## Resolution state Implemented, unverified. `Http1RequestFram
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Finding
 
@@ -26,6 +29,3 @@ missing, empty, mixed-case, HTTP/1.0, and duplicate cases. No tests, builds, or
 runtime verification were run in this phase; keep this record open until that
 focused spec passes with an admitted Pure-Simple runtime.
 
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

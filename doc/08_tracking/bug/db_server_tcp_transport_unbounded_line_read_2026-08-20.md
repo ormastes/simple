@@ -1,7 +1,11 @@
 # DB server TCP transport buffers an unbounded request line before the byte bound is checked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-20
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/nogc_sync_mut/database/server/db_server_hardening_spec.spl` now PASSes)
+**Status:** OPEN
 **Severity:** Medium (remote memory-exhaustion vector on the production transport)
 **Component:** `std.database.server` transport
 
@@ -44,5 +48,3 @@ Regression spec should drive a >8192-byte no-newline payload against
   Those bound state growth from WELL-FORMED frames; this bug is the byte-level
   gap below them.
 
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/nogc_sync_mut/database/server/db_server_hardening_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

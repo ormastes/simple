@@ -1,5 +1,8 @@
 # `use M` vs `use M.{x}`: two independent defects, not one (2026-08-31)
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Investigates the convergence of PR #182's `Dict` cluster ("`use M` compiles clean
 but `use M.{x}` fails — they build different closures") and PR #183's R2/R3
@@ -143,5 +146,3 @@ loaders, filed rather than "fixed" without a repro.
 ## Not done
 No test, assertion or gate was weakened, skipped or deleted. No Rust changed.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

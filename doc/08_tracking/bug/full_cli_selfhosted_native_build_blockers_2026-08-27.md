@@ -1,5 +1,8 @@
 # Full-CLI self-hosted `bin/simple` native build: two concrete backend blockers
-**Status:** OPEN (unverified 2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Blocks: deploying a self-hosted full CLI, which is the documented unblock for
@@ -98,5 +101,3 @@ explicitly unsafe (silent misbehavior) — not a fix.
    `bin/release/x86_64-unknown-linux-gnu/simple` (+ `linux-x86_64` launch
    path), verify `--version` shows no seed banner.
 
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

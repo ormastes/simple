@@ -1,6 +1,9 @@
 # kafka crc32_table() 64-of-256 entries fix (2026-07-30)
+## Closed 2026-09-16 — fixed same pass; full 256-entry table regenerated; zlib-verified both engines
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Flagged (not fixed) in the pass-10 seed root-cause doc as a separate,
 pre-existing bug found while verifying the `serialization.spl` list-typed
@@ -91,5 +94,3 @@ retype (pass 10, `serialization.spl`) and this fix are now both landed;
 (the larger untyped-`list` sites in kafka) remain open per the pass-9
 census fix order.
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

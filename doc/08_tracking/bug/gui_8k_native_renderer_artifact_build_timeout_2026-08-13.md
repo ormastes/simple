@@ -1,6 +1,8 @@
 # GUI 8K dynamic-render evidence is blocked by native renderer artifact build time
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Id:** gui_8k_native_renderer_artifact_build_timeout_2026-08-13
 - Status: OPEN (P1)
@@ -101,9 +103,3 @@ artifact build cannot succeed while that holds, and re-attempting these
 benchmarks before it is fixed would only re-derive the same blocker. Detail:
 `doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-13 (BUGFIX-7 lane)
-
-Out of lane: blocked on a native renderer artifact build (GUI/8K), heavy build not attempted on this shared host. No change made.

@@ -1,6 +1,8 @@
 # native-build: MIR lowering has no `to_u8` or `join` — the typed crypto path cannot be built natively
+## Open 2026-09-16 — needs owner triage
 
-**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **STATUS 2026-08-08 (later): `to_u8` family FIXED+VERIFIED, `join` FIXED+VERIFIED.
 > Open siblings: `slice`, `merge` (declined, see below), plus one fail-open defect
@@ -180,5 +182,3 @@ shared error string is a red herring. (The 3,629 figure was deliberately not re-
 a Stage-3 run costs >1200s and the discriminating evidence above is cheaper and
 sharper.)
 
-## Triage 2026-09-12
-Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

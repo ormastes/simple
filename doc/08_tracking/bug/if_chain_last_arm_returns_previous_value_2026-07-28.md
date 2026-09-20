@@ -1,4 +1,8 @@
 # A statement-leading `-`/`+` at the same indent is silently glued to the previous line
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-07-28 · **Lane:** IFCHAIN · **Severity:** critical (silent wrong arithmetic)
 **Status:** OPEN (parser fix deferred) — **interim guard LANDED**: lint `LEADOP001`
@@ -251,3 +255,4 @@ Row A / B′ show the seed's **JIT dumps core** when the function falls through
 with no tail expression, while the interpreter reports
 `method 'to_text' not found on type 'nil'`. The nil-return is the shared bug; the
 core dump is a separate JIT robustness defect on nil-returning `i64` functions.
+

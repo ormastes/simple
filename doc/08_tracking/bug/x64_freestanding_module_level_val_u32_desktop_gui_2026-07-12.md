@@ -1,6 +1,10 @@
 # BUG: freestanding native-build silently corrupts a module-level `val: u32` read inside `spl_start()` (desktop GUI entry)
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open
 **Severity:** medium (silent corruption, not a crash -- easy to miss; blocks refactoring magic-number literals into named constants for baremetal entry files)
 **Component:** native-build freestanding codegen (`--target x86_64-unknown-none --backend cranelift`), `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl`
 **Found:** 2026-07-12, while making the SimpleOS desktop GUI scanout resolution a named constant instead of a literal
@@ -86,6 +90,3 @@ scope here (no rebuild, no QEMU/board boot per this pass's constraints).
 Left open; do not close this doc from the module-init link-stage fix landed
 in the other two docs.
 
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

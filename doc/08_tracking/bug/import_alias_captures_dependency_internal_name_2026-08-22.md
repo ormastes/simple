@@ -1,6 +1,8 @@
 # Import alias captures dependency internal name
+## Open 2026-09-16 — needs owner triage
 
-**Status:** OPEN (unverified 2026-09-12)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Importing `read_file_text as rt_file_read_text` from `std.io_runtime` causes
 the imported module's internal `file_read` path to resolve recursively through
@@ -29,5 +31,3 @@ Until resolver ownership is fixed and tested across interpreter/JIT/native,
 callers use the canonical exported name directly. Raw SFFI exports must not be
 restored as a workaround.
 
-## Triage 2026-09-12
-No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

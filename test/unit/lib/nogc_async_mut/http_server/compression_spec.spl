@@ -1,5 +1,9 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # Specification for src/lib/nogc_async_mut/http_server/compression.spl
@@ -15,6 +19,7 @@ use std.spipe.*
 use std.common.compress.{CompressionCodec, decompress_bytes}
 use std.http_server.types.{HttpResponseData}
 use std.nogc_async_mut.http_server.compression.{
+
     compress_response_body,
     compress_response_for,
     supported_encodings,
@@ -39,13 +44,19 @@ describe "Response-body compression dispatcher":
     # @manual scenario evidence
 
     it "lists zstd and lz4 as supported encodings":
+        # supported_encodings() advertises the full negotiable set — br, gzip,
+        # deflate first, zstd and lz4 last (compression.spl). zstd/lz4 remain
+        # the modern fast codecs the dispatcher prefers for internal clients.
         val codecs = supported_encodings()
-        expect(codecs.len()).to_equal(2)
-        expect(codecs[0]).to_equal("zstd")
-        expect(codecs[1]).to_equal("lz4")
+        expect(codecs.len()).to_equal(5)
+        expect(codecs[0]).to_equal("br")
+        expect(codecs[1]).to_equal("gzip")
+        expect(codecs[2]).to_equal("deflate")
+        expect(codecs[3]).to_equal("zstd")
+        expect(codecs[4]).to_equal("lz4")
 
     it "compresses with zstd and round-trips back to identical bytes":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("compresses with zstd and round-trips back to identical bytes")
         val payload = _make_payload()
         val compressed_res = compress_response_body(payload, "zstd")
@@ -60,7 +71,7 @@ describe "Response-body compression dispatcher":
         expect(decoded.len()).to_equal(payload.len())
 
     it "compresses with lz4 and round-trips back to identical bytes":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("compresses with lz4 and round-trips back to identical bytes")
         val payload = _make_payload()
         val compressed_res = compress_response_body(payload, "lz4")
@@ -73,32 +84,35 @@ describe "Response-body compression dispatcher":
         val decoded = round_trip.unwrap()
         expect(decoded.len()).to_equal(payload.len())
 
-    it "returns Err with a specific reason for gzip (not yet wired)":
+    it "returns Ok for gzip (wired container-writer encoder)":
         val out = compress_response_body([0x68u8, 0x69u8], "gzip")
-        expect(out.is_err()).to_equal(true)
+        # gzip is now wired (container-writer encoder); it returns Ok even
+        # though the frame may not shrink — see
+        # doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md
+        expect(out.is_ok()).to_equal(true)
 
-    it "returns Err with a specific reason for br (Phase 3)":
+    it "returns Ok for br (wired container-writer encoder)":
         val out = compress_response_body([0x68u8, 0x69u8], "br")
-        expect(out.is_err()).to_equal(true)
+        expect(out.is_ok()).to_equal(true)
 
-    it "returns Err with a specific reason for deflate":
+    it "returns Ok for deflate (wired container-writer encoder)":
         val out = compress_response_body([0x68u8, 0x69u8], "deflate")
-        expect(out.is_err()).to_equal(true)
+        expect(out.is_ok()).to_equal(true)
 
     it "returns Err for empty encoding (caller should skip)":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("returns Err for empty encoding (caller should skip)")
         val out = compress_response_body([0x68u8, 0x69u8], "")
         expect(out.is_err()).to_equal(true)
 
     it "returns Err for identity encoding (caller should skip)":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("returns Err for identity encoding (caller should skip)")
         val out = compress_response_body([0x68u8, 0x69u8], "identity")
         expect(out.is_err()).to_equal(true)
 
     it "returns Err for unknown encoding":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("returns Err for unknown encoding")
         val out = compress_response_body([0x68u8, 0x69u8], "snappy")
         expect(out.is_err()).to_equal(true)
@@ -176,7 +190,7 @@ describe "compress_response_for — response-level decision":
         expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
 
     it "falls back to lz4 when client does not accept zstd":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("falls back to lz4 when client does not accept zstd")
         val payload = _make_eligible_payload()
         val resp = _resp_with_byte_body(payload)
@@ -184,7 +198,7 @@ describe "compress_response_for — response-level decision":
         expect(_get_header(out.headers, "content-encoding")).to_equal("lz4")
 
     it "leaves response unchanged when no Accept-Encoding header is supplied":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("leaves response unchanged when no Accept-Encoding header is supplied")
         val payload = _make_eligible_payload()
         val resp = _resp_with_byte_body(payload)
@@ -193,7 +207,7 @@ describe "compress_response_for — response-level decision":
         expect(_has_header(out.headers, "content-encoding")).to_equal(false)
 
     it "leaves response unchanged when client only accepts unsupported codecs":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("leaves response unchanged when client only accepts unsupported codecs")
         val payload = _make_eligible_payload()
         val resp = _resp_with_byte_body(payload)
@@ -203,7 +217,7 @@ describe "compress_response_for — response-level decision":
         expect(out.body_bytes.len()).to_equal(payload.len())
 
     it "skips compression when body is too small":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("skips compression when body is too small")
         # 100-byte payload, below the 256-byte minimum.
         val small: [u8] = [
@@ -221,7 +235,7 @@ describe "compress_response_for — response-level decision":
         expect(out.body_bytes.len()).to_equal(tiny.len())
 
     it "skips compression when chunked":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("skips compression when chunked")
         var resp = _resp_with_byte_body(_make_eligible_payload())
         resp = HttpResponseData(
@@ -239,7 +253,7 @@ describe "compress_response_for — response-level decision":
         expect(_has_header(out.headers, "content-encoding")).to_equal(false)
 
     it "skips compression when body_file is set (sendfile path)":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("skips compression when body_file is set (sendfile path)")
         var resp = _resp_with_byte_body(_make_eligible_payload())
         resp = HttpResponseData(
@@ -258,7 +272,7 @@ describe "compress_response_for — response-level decision":
         expect(out.body_file).to_equal("/tmp/static.html")
 
     it "skips compression when Content-Encoding header is already present":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("skips compression when Content-Encoding header is already present")
         var resp = _resp_with_byte_body(_make_eligible_payload())
         resp = HttpResponseData(
@@ -277,7 +291,7 @@ describe "compress_response_for — response-level decision":
         expect(_get_header(out.headers, "content-encoding")).to_equal("gzip")
 
     it "removes any pre-existing Content-Length when compressing":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-LIB
         step("removes any pre-existing Content-Length when compressing")
         var resp = _resp_with_byte_body(_make_eligible_payload())
         resp = HttpResponseData(

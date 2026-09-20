@@ -52,3 +52,42 @@ Note this is a *different* defect from the one named in
 ("replace its text-growing hash in the hot path"), which is about the DrawIR
 v3 packed generation store, not this route key. Both want the same missing
 ingredient.
+
+## 2026-09-16 — re-measured on Windows seed; still open, cost down ~30x
+
+`test/05_perf/web_render_chrome/web_draw_ir_route_key_cost_spec.spl` PASS
+(interpreter mode), current medians: small=10,030 us / medium=37,406 us /
+large=152,459 us, encoded bytes unchanged (30,571 / 121,514 / 485,835). The
+July baseline on the Rust dev interpreter was 317 ms / 1.27 s / 4.94 s, so the
+serializer itself is ~30x cheaper now and the per-frame tax is far smaller than
+when this was filed. The structural issue stands, however: DrawIrComposition
+still carries no generation/revision counter, so any memo of the route key
+remains unsound as the type stands. Row stays open for the generation-counter
+design change; the 2026-09-16 numbers are the new baseline.
+
+## 2026-09-16 — RESOLVED: the whole-scene-per-frame key no longer exists
+
+Re-verification against current main:
+
+1. The route key was redesigned. `_web_draw_ir_key` /
+   `web_draw_ir_route_key` (simple_web_layout_engine2d_fast.spl) build the key
+   from document identity (composition_id + scene_key + backend_target),
+   extent, the parked-engine owner token, backend name, and the four
+   SIMPLE_*_UPLOAD/READBACK env knobs. There is no `draw_ir_to_sdn` and no
+   `sha256_text` on the route path; the docstring records that keying on
+   `composition.generation` was tried and reverted because it re-armed the
+   sampler on every scroll/animation tick. Retained-pixel reuse is gated
+   exactly instead, by `_web_draw_ir_cached_frame_reusable` (producer
+   generation + parked owner token + extent).
+2. The render-session side is memoized: `SimpleWebRenderSession.composition_checksum()`
+   only recomputes `sha256_text(draw_ir_to_sdn(...))` when
+   `counters.composition_revision` actually changes.
+3. Cost spec PASS on this host with ~30x cheaper numbers (see the perf doc's
+   2026-09-16 entry).
+4. Design specs exist: `web_draw_ir_route_key_generation_independence_spec.spl`
+   and `web_draw_ir_route_key_rearm_axes_spec.spl`. Under the Windows seed
+   each has one failing example asserting seed-wired counters (expected 6 and
+   10, observed 0 — the pixel-compare and re-sample counters are not
+   incremented on the seed path). Per the seed-only triage rule that redness
+   is a seed-instrumentation gap, not a route-key defect, and does not block
+   this perf resolution.

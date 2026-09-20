@@ -1,8 +1,10 @@
 # Native runtime path rejects archives without optional lifecycle hooks
+## Open 2026-09-16 — needs owner triage
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
-**Status (2026-07-15 -> CLOSED-STALE 2026-09-12):** source implemented; fresh native-all bootstrap
+**Status (2026-07-15):** source implemented; fresh native-all bootstrap
 execution remains pending.
 
 The native runtime selector rejected the established Vulkan-capable
@@ -26,5 +28,3 @@ Strict daemon linking then exposed that the Vulkan runtime archive declared no
 primitive volatile operations directly; application code continues through the
 existing `app.io.volatile_ops` facade.
 
-## Triage 2026-09-12
-The 2026-07-15 status already noted execution remains pending; still unexecuted 2 months later. Older than 45 days with no cheap repro re-run; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
