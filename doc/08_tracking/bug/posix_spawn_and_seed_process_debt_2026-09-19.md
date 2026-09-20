@@ -180,3 +180,18 @@ call in the interpreted context; needs a dedicated lane).
 Workaround: export `SIMPLE_POSIX_SHELL=C:/dev/tool/Git/usr/bin/sh.exe`
 (explicit-override first in the discovery order) — makes the facade
 deterministic. Suite runners should set it.
+
+## Final spawn-class verification (2026-09-20 refail wave)
+
+546 spawn-class specs rerun against the fully fixed stack (rebuilt checked-in
+bin/simple.exe with 0b28248caa3 + run-arg filter exemption + re-entrant
+rt_file_lock + MCP ping). Results: the entire 24-file log_modes cluster
+(12 apps x both zones) now PASSES — including env_log_modes 6/6, which
+needed the env-delete bool check (1b72f466bf5) and the re-entrant lock.
+329 residual FAILs remain in the class, dominated by per-app oracle drift
+and env/hardware gates; the log_modes fixes landed in: verify (wire shared
+log options), snpm (help exit 0), release/replay/spec_gen/spec_coverage/
+slang_pack (stale pins + fixture path), qualify_ignore (driver ate --fix
+after `run <script>` — filter_internal_flags now exempts run), watch
+(MSYS2_ARG_CONV_EXCL=--path= preserves POSIX path args), mcpgdb/serial_mcp
+(shared mcp_sdk ping answer).
