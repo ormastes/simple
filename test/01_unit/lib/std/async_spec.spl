@@ -20,6 +20,10 @@ file when it depended on the real module. The doubles model the identical
 state machine (ready/pending polling, single-completion promises,
 FIFO-with-priority scheduling), so a passing suite documents the intended
 contract even where the production module cannot yet be imported here.
+Exception: the `Promise<T> (production std.async.promise)` section below
+imports the real promise module (aliased) and pins the shared-state
+registry contract — destructured future sees completion, repeated polls
+agree — against production code.
 ## Verification guidance and troubleshooting
 A failure names the exact state transition that broke (e.g. an executor
 that does not drain its task count to zero after `run()`, or a promise that
@@ -48,8 +52,9 @@ class AsyncState:
 # embedded class field (destructuring a Promise.new() pair therefore polled
 # inconsistently). Each future/promise state lives in this module-level
 # registry keyed by id; copies of Future/Promise stay interchangeable and
-# poll consistently. Mirrors the module-level registry idiom documented in
-# test/01_unit/lib/nogc_async_mut/promise_spec.spl.
+# poll consistently. Mirrors the production shared-state registry in
+# src/lib/nogc_async_mut/async/future.spl, which backs std.async.promise
+# pairs identically (pinned against the real module below).
 var _async_states: [AsyncState] = []
 
 fn _state_register(ready: bool, value: i64) -> i64:
@@ -451,6 +456,79 @@ describe "Promise<T>":
         expect(future.poll().unwrap()).to_equal(55)  # oracle: the promise was completed with value 55
         expect(future.poll().unwrap()).to_equal(55)  # oracle: repeated polls return the same value
         expect(future.is_ready()).to_equal(true)
+
+# ============================================================================
+# Production Promise Tests (std.async.promise shared-state registry)
+# ============================================================================
+
+# The doubles above model the production state machine; the examples below
+# pin the same contract against the real std.async.promise implementation,
+# whose shared-state registry backs each future/promise pair so a Future
+# destructured from Promise.new() polls the cell its Promise completes.
+# Imported under an alias because this file's doubles own the bare
+# Future/Promise/Poll names.
+use std.async.promise.{Promise as ProductionPromise}
+
+# @manual_section: async-promise-production
+describe "Promise<T> (production std.async.promise)":
+    it "destructured production future sees completion through the shared registry":
+        # @req REQ-ASYNC-PROMISE-004
+        # @capture(statistics): production pair ready state before/after completion and resolved value
+        step("Complete a production promise with value 33 and observe its destructured future")
+        val (prod_future, prod_promise) = ProductionPromise<i64>.new()
+        expect(prod_future.is_ready()).to_equal(false)
+        expect(prod_promise.is_completed()).to_equal(false)
+        expect(prod_promise.complete(33)).to_equal(true)
+        expect(prod_future.is_ready()).to_equal(true)
+        val poll1 = prod_future.poll()
+        expect(poll1.is_ready()).to_equal(true)
+        expect(poll1.unwrap()).to_equal(33)  # oracle: the promise was completed with value 33
+
+    it "polls the production future consistently across repeated polls":
+        # @req REQ-ASYNC-PROMISE-004
+        # @capture(statistics): readiness and value stability across back-to-back production polls
+        step("Complete a production promise, then poll the destructured future repeatedly")
+        val (prod_future, prod_promise) = ProductionPromise<i64>.new()
+        expect(prod_promise.complete(55)).to_equal(true)
+        expect(prod_future.is_ready()).to_equal(true)
+        val poll_a = prod_future.poll()
+        val poll_b = prod_future.poll()
+        expect(poll_a.is_ready()).to_equal(true)
+        expect(poll_b.is_ready()).to_equal(true)
+        expect(poll_a.unwrap()).to_equal(55)  # oracle: the promise was completed with value 55
+        expect(poll_b.unwrap()).to_equal(55)  # oracle: repeated polls return the same value
+        expect(prod_future.is_ready()).to_equal(true)
+
+    it "rejects completing the production promise twice and keeps the first value":
+        # @req REQ-ASYNC-PROMISE-003
+        # @capture(statistics): completion results and retained value for a double completion attempt
+        step("Complete a production promise, then attempt to complete it again")
+        val (prod_future, prod_promise) = ProductionPromise<i64>.new()
+        expect(prod_promise.complete(11)).to_equal(true)
+        expect(prod_promise.complete(22)).to_equal(false)
+        expect(prod_promise.is_completed()).to_equal(true)
+        val poll1 = prod_future.poll()
+        expect(poll1.unwrap()).to_equal(11)  # oracle: the first completion value is retained
+
+    it "production promise copies agree through the registry":
+        # @req REQ-ASYNC-PROMISE-002
+        # @capture(statistics): completed flags across a copy made before completion
+        step("Copy a production promise before completing it, then complete the copy")
+        val (prod_future, prod_promise) = ProductionPromise<i64>.new()
+        val earlier_copy = prod_promise
+        expect(earlier_copy.complete(77)).to_equal(true)
+        expect(prod_promise.is_completed()).to_equal(true)  # oracle: the registry is the source of truth, so copies agree
+        expect(prod_promise.complete(88)).to_equal(false)
+        val poll1 = prod_future.poll()
+        expect(poll1.unwrap()).to_equal(77)  # oracle: the copy completed the pair with value 77
+
+    it "production future polls pending before completion":
+        # @req REQ-ASYNC-PROMISE-001
+        # @capture(statistics): pending state of a fresh production future
+        step("Poll a fresh production future before its promise completes")
+        val (prod_future, _) = ProductionPromise<i64>.new()
+        val poll1 = prod_future.poll()
+        expect(poll1.is_pending()).to_equal(true)
 
 # ============================================================================
 # Task Tests

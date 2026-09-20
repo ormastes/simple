@@ -9,6 +9,51 @@ use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 fn _future_time_now_ms() -> i64:
     current_time_ms()
 
+# ================================================================
+# Shared-State Registry
+# ================================================================
+# Simple has value semantics — assignment, construction, and anon-tuple
+# destructuring all copy — so two handles cannot observe one mutable object
+# through an embedded class field. A Future destructured from
+# Promise.new() must poll the same state its Promise completes, so each
+# promise/future pair is backed by a cell in this module-level registry
+# keyed by id; copies of Future/Promise stay interchangeable and poll
+# consistently. See doc/08_tracking/bug/
+# async_spec_promise_future_anon_tuple_state_inconsistency_2026-07-20.md.
+# Cells are append-only: copies hold ids, so a completed cell cannot be
+# safely reclaimed.
+
+struct FutureSharedCell:
+    """One promise/future pair's shared state slot."""
+    ready: bool
+    value: Any
+
+var _future_shared_cells: [FutureSharedCell] = []
+
+fn _future_shared_register() -> i64:
+    """Allocate a pending shared-state cell; returns its registry id."""
+    _future_shared_cells = _future_shared_cells.push(FutureSharedCell(ready: false, value: 0))
+    _future_shared_cells.len() - 1
+
+fn _future_shared_is_ready(id: i64) -> bool:
+    """Read a cell's ready flag (the source of truth for completion)."""
+    _future_shared_cells[id].ready
+
+fn _future_shared_read(id: i64) -> Any:
+    """Read a ready cell's value."""
+    _future_shared_cells[id].value
+
+fn _future_shared_try_complete(id: i64, value: Any) -> bool:
+    """Complete a cell once; returns false if already completed."""
+    if _future_shared_cells[id].ready:
+        false
+    else:
+        var cell = _future_shared_cells[id]
+        cell.ready = true
+        cell.value = value
+        _future_shared_cells[id] = cell
+        true
+
 class Future<T>:
     """Represents an asynchronous computation.
 
@@ -26,6 +71,7 @@ class Future<T>:
     """
     state: [u8]  # Legacy opaque-state token retained for compatibility.
     poll_result: Poll<T>
+    shared_id: i64  # >= 0: poll the shared-state registry; -1: fixed poll_result.
 
     static fn from_value(value: T) -> Future<T>:
         """Create future that's immediately ready.
@@ -36,15 +82,26 @@ class Future<T>:
         Returns:
             Completed future
         """
-        Future(state: [], poll_result: Poll.Ready(value))
+        Future(state: [], poll_result: Poll.Ready(value), shared_id: -1)
 
     static fn pending() -> Future<T>:
         """Create future that's pending.
 
+        A standalone pending future never becomes ready by re-polling;
+        see std.async.promise for the completable kind.
+
         Returns:
             Pending future
         """
-        Future(state: [], poll_result: Poll.Pending)
+        Future(state: [], poll_result: Poll.Pending, shared_id: -1)
+
+    static fn from_shared_cell(id: i64) -> Future<T>:
+        """Create a pending future polling shared-state registry cell `id`.
+
+        Used by std.async.promise.Promise.new() so a destructured future
+        polls the same cell its promise completes.
+        """
+        Future(state: [], poll_result: Poll.Pending, shared_id: id)
 
     fn poll() -> Poll<T>:
         """Poll future to check if ready.
@@ -54,7 +111,13 @@ class Future<T>:
 
         Non-blocking operation.
         """
-        self.poll_result
+        if self.shared_id >= 0:
+            if _future_shared_is_ready(self.shared_id):
+                Poll.Ready(_future_shared_read(self.shared_id))
+            else:
+                Poll.Pending
+        else:
+            self.poll_result
 
     fn is_ready() -> bool:
         """Check if future is ready (non-blocking).
@@ -73,7 +136,7 @@ class Future<T>:
         Returns:
             New future with transformed value
         """
-        match self.poll_result:
+        match self.poll():
             case Poll.Ready(value):
                 Future.from_value(f(value))
             case Poll.Pending:
@@ -88,7 +151,7 @@ class Future<T>:
         Returns:
             Chained future
         """
-        match self.poll_result:
+        match self.poll():
             case Poll.Ready(value):
                 f(value)
             case Poll.Pending:

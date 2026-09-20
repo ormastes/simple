@@ -2,13 +2,24 @@
 #
 # A promise allows completing a future with a value.
 
-use std.async.future.{Future}
+use std.async.future.{
+    Future,
+    _future_shared_register,
+    _future_shared_is_ready,
+    _future_shared_try_complete,
+}
 
 class Promise<T>:
     """Write side of a future.
 
     A promise allows completing a future with a value.
     Each promise has an associated future.
+
+    The pair's state lives in the std.async.future shared-state registry:
+    Simple copies on assignment/destructuring, so the future and promise
+    hold a registry cell id instead of an embedded object — a Future
+    destructured from new() polls the same cell its promise completes,
+    and copies of either handle stay consistent.
 
     Example:
         val (future, promise) = Promise<i64>.new()
@@ -20,6 +31,7 @@ class Promise<T>:
         val value = future.poll().unwrap()  # 42
     """
     completed: bool
+    shared_id: i64  # Registry cell backing this pair; -1 = detached from registry.
 
     static fn new() -> (Future<T>, Promise<T>):
         """Create new future-promise pair.
@@ -27,7 +39,8 @@ class Promise<T>:
         Returns:
             (future, promise) tuple
         """
-        (Future.pending<T>(), Promise(completed: false))
+        val id = _future_shared_register()
+        (Future.from_shared_cell<T>(id), Promise(completed: false, shared_id: id))
 
     fn complete(value: T) -> bool:
         """Complete promise with value.
@@ -38,8 +51,11 @@ class Promise<T>:
         Returns:
             true if completed, false if already completed
 
-        Wakes waiting tasks.
+        The registry cell is the source of truth, so every copy of the
+        promise agrees on whether it completed. Wakes waiting tasks.
         """
+        if self.shared_id >= 0:
+            return _future_shared_try_complete(self.shared_id, value)
         if self.completed:
             return false
         self.completed = true
@@ -51,7 +67,10 @@ class Promise<T>:
         Returns:
             true if completed, false otherwise
         """
-        self.completed
+        if self.shared_id >= 0:
+            _future_shared_is_ready(self.shared_id)
+        else:
+            self.completed
 
     me drop():
         """Drop promise (future becomes cancelled if not completed)."""
