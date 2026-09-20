@@ -136,6 +136,23 @@ else
     die "no sha256sum/shasum on PATH — cannot compute file digests"
 fi
 
+# stat portability: GNU coreutils stat (-c) vs BSD stat (-f). macOS ships
+# only the BSD form, where -c is an illegal option — without this probe the
+# manifest died on its first file and check-deployed-closure-dedup blocked
+# every push on macOS (selftest: "stat failed on .../t1/simple").
+# BSD format letters differ: %z size, %i inode, %l hard-link count.
+if stat -c '%s' /dev/null >/dev/null 2>&1; then
+    stat_size()  { stat -c '%s' "$1"; }
+    stat_inode() { stat -c '%i' "$1"; }
+    stat_nlink() { stat -c '%h' "$1"; }
+elif stat -f '%z' /dev/null >/dev/null 2>&1; then
+    stat_size()  { stat -f '%z' "$1"; }
+    stat_inode() { stat -f '%i' "$1"; }
+    stat_nlink() { stat -f '%l' "$1"; }
+else
+    die "no usable stat (neither GNU -c nor BSD -f) — cannot stat files"
+fi
+
 sha256_of() {
     $SHA_TOOL "$1" 2>/dev/null | awk '{print $1}'
 }
@@ -204,9 +221,9 @@ ROWS="$WORK/rows"
 
 while IFS= read -r _abs; do
     _rel=$(printf '%s\n' "$_abs" | sed "s#^$ROOT_ABS/##")
-    _size=$(stat -c '%s' "$_abs" 2>/dev/null) || die "stat failed on $_abs"
-    _inode=$(stat -c '%i' "$_abs" 2>/dev/null) || die "stat failed on $_abs"
-    _nlink=$(stat -c '%h' "$_abs" 2>/dev/null) || die "stat failed on $_abs"
+    _size=$(stat_size "$_abs") || die "stat failed on $_abs"
+    _inode=$(stat_inode "$_abs") || die "stat failed on $_abs"
+    _nlink=$(stat_nlink "$_abs") || die "stat failed on $_abs"
     _sha=$(sha256_of "$_abs")
     [ -n "$_sha" ] || die "sha256 computation failed on $_abs"
     _kind=$(classify_kind "$_rel")
