@@ -1,0 +1,117 @@
+# Internal ELF linker: freestanding static PIE (ET_DYN, no PT_INTERP) — lane A7 slice 2 step 2
+#
+# Position-independent fixtures (test/fixtures/linker/elf/pie_*.o, recipe in
+# RECIPE.md) link into an ET_DYN at base 0 with a PT_DYNAMIC (DT_FLAGS_1 PIE)
+# and no dynamic relocations, so the kernel can load it at any base with no
+# self-relocating startup. Anything that would need an R_*_RELATIVE (a GOT
+# slot, an absolute word) or is not PIC (R_X86_64_32) is a named error.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
+# @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
+
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_PIE}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+val PT_LOAD: i64 = 1
+val PT_DYNAMIC: i64 = 2
+val PT_INTERP: i64 = 3
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+# Program header index of the first p_type match, or -1.
+fn phdr_find(b: [i64], p_type: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        if rd32(b, rd64(b, 32) + i * 56) == p_type:
+            return i
+        i = i + 1
+    -1
+
+fn phdr_field(b: [i64], i: i64, off: i64) -> i64:
+    rd64(b, rd64(b, 32) + i * 56 + off)
+
+fn pie(objs: [[i64]], target: RelocArch) -> Result<[i64], text>:
+    elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [], entry: "_start",
+        target: target, mode: ELF_LINK_STATIC_PIE, interp: ""))
+
+fn pie_or_empty(objs: [[i64]], target: RelocArch) -> [i64]:
+    val r = pie(objs, target)
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn pie_err(objs: [[i64]], target: RelocArch) -> text:
+    val r = pie(objs, target)
+    if r.is_ok():
+        return ""
+    r.unwrap_err()
+
+# DT_FLAGS_1 value in the PT_DYNAMIC array, or -1.
+fn dyn_flags_1(b: [i64]) -> i64:
+    val d = phdr_find(b, PT_DYNAMIC)
+    var o = phdr_field(b, d, 8)
+    val end = o + phdr_field(b, d, 32)
+    while o < end:
+        if rd64(b, o) == 0x6ffffffb:
+            return rd64(b, o + 8)
+        o = o + 16
+    -1
+
+describe "elf_link - static PIE (freestanding, no PT_INTERP)":
+    it "aarch64 -fPIE objects link into ET_DYN at base 0 with PT_DYNAMIC and no PT_INTERP":
+        val b = pie_or_empty([load_fixture("pie_start_a64.o"), load_fixture("pie_lib_a64.o")], RelocArch.AArch64)
+        expect(b.len() > 64).to_equal(true)
+        expect(rd16(b, 16)).to_equal(3)
+        expect(phdr_find(b, PT_INTERP)).to_equal(-1)
+        expect(phdr_find(b, PT_DYNAMIC) >= 0).to_equal(true)
+        expect(phdr_field(b, phdr_find(b, PT_LOAD), 16)).to_equal(0)
+        expect(dyn_flags_1(b)).to_equal(0x08000000)
+
+    it "aarch64 entry is _start at the head of the RX segment":
+        val b = pie_or_empty([load_fixture("pie_start_a64.o"), load_fixture("pie_lib_a64.o")], RelocArch.AArch64)
+        var rx: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = rd64(b, 32) + i * 56
+            if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == 5:
+                rx = rd64(b, p + 16)
+            i = i + 1
+        expect(rd64(b, 24)).to_equal(rx)
+        expect(rx < 0x100000).to_equal(true)
+
+    it "x86_64 -fPIE objects relax GOTPCRELX and link into ET_DYN":
+        val b = pie_or_empty([load_fixture("pie_start_x64.o"), load_fixture("pie_lib_x64.o")], RelocArch.X86_64)
+        expect(b.len() > 64).to_equal(true)
+        expect(rd16(b, 16)).to_equal(3)
+        expect(rd16(b, 18)).to_equal(62)
+        expect(phdr_find(b, PT_INTERP)).to_equal(-1)
+        expect(dyn_flags_1(b)).to_equal(0x08000000)
+
+    it "a GOT slot that needs R_*_RELATIVE is a named error in a static PIE":
+        val e = pie_err([load_fixture("pic_start_a64.o"), load_fixture("pic_lib_a64.o")], RelocArch.AArch64)
+        expect(e.contains("R_*_RELATIVE")).to_equal(true)
+        expect(e.contains("static PIE")).to_equal(true)
+
+    it "a non-PIC absolute relocation (R_X86_64_32) is a named error in a PIE":
+        val e = pie_err([load_fixture("start_x64.o"), load_fixture("lib_x64.o")], RelocArch.X86_64)
+        expect(e.contains("position-independent")).to_equal(true)

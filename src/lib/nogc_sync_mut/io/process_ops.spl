@@ -787,7 +787,7 @@ fn _process_observation_result_error_v1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason)
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, read_file_text_result}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -1662,11 +1662,7 @@ pub fn shell_int(command: text, default: i64) -> i64:
     val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
-        val trimmed = stdout.trim()
-        if trimmed.len() > 0:
-            int(trimmed)
-        else:
-            default
+        _shell_signed_int_or(stdout, default)
     else:
         default
 
@@ -1752,3 +1748,106 @@ fn _process_kill_group(pgid_file: text):
         return
     _process_run_bounded_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)
     _process_run_bounded_raw("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000, 4096)
+
+# ============================================================================
+# App-twin surface parity (ported from src/app/io/process_ops.spl, 2026-09-19)
+# ----------------------------------------------------------------------------
+# The app/io twin of this module was converted to a pure re-export facade so
+# co-compiled duplicate definitions collapse to one owner per name (Class B
+# silent-win misdispatch; see
+# doc/08_tracking/bug/duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md).
+# These definitions are the app twin's public surface that this module did not
+# yet define; bodies are ported verbatim so app.io.process_ops importers
+# observe identical behaviour through the facade.
+# ============================================================================
+
+@unsafe(reason: "raw inherited-stdio process execution; -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
+@unsafe(reason: "raw inherited-stdio child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_spawn_inherit() -> i64
+@unsafe(reason: "raw arbitrary-PID existence probe; false means absent, invalid, or provider failure", capabilities: [ffi])
+extern fn rt_process_exists(pid: i64) -> bool
+@unsafe(reason: "raw timeout process capture; exit_code -1 is the timeout or execution-failure sentinel", capabilities: [ffi])
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _process_run_inherit_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_run_inherit(host_path_native(cmd), args)
+
+fn _process_spawn_inherit_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_inherit()
+
+fn _process_exists_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_exists(pid)
+
+@always_inline
+fn process_run_direct(cmd: text, args: [text]) -> (text, text, i64):
+    # Exact raw-command facade for callers that already own command lookup.
+    # Unlike process_run, this deliberately performs no PATH preflight and
+    # does not acquire the global process governor slot.
+    _process_run_raw(cmd, args)
+
+fn process_run_inherit(cmd: text, args: [text]) -> i64:
+    # Foreground delegation: preserve the caller's stdin/stdout/stderr.
+    _process_run_inherit_raw(cmd, args)
+
+fn process_spawn_inherit() -> i64:
+    # Spawn the canonical MCP wrapper as a transparent stdio child.
+    _process_spawn_inherit_raw()
+
+fn process_exists(pid: i64) -> bool:
+    # Arbitrary-PID probe. This is intentionally distinct from
+    # process_is_running, whose provider contract is owned-child liveness.
+    if pid <= 0:
+        return false
+    _process_exists_raw(pid)
+
+fn process_pid_exists(pid: i64) -> bool:
+    # Uniquely-named twin of process_exists, same semantics (kill(pid,0))
+    # plus a `ps -p` fallback so hosts without /proc still see arbitrary
+    # pids (piped children process_is_running cannot observe).
+    if pid <= 0:
+        return false
+    if _process_exists_raw(pid):
+        return true
+    val probe = process_run("/bin/ps", ["-p", pid.to_text()])
+    probe.2 == 0
+
+@always_inline
+fn process_kill_unchecked(pid: i64) -> bool:
+    # Exact provider semantics for trusted supervisor PID receipts. Unlike
+    # process_kill, this intentionally permits PID 1; never use arbitrary input.
+    _process_kill_raw(pid)
+
+@always_inline
+fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
+    file_read_text_at(path, offset, size)
+
+@always_inline
+fn _read_text_or_empty(path: text) -> text:
+    match read_file_text_result(path):
+        case Ok(content): content
+        case Err(_): ""
+
+fn _process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_timeout(cmd, args, timeout_ms)
+
+fn _shell_signed_int_or(value: text, default: i64) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return default
+    var i = 0
+    for ch in trimmed:
+        if ch >= "0" and ch <= "9":
+            i = i + 1
+            continue
+        if i == 0 and ch == "-":
+            i = i + 1
+            continue
+        return default
+    if trimmed == "-":
+        return default
+    int(trimmed)

@@ -10,14 +10,16 @@
 #       a real symbol table) has no implementation anywhere in the runtime
 #       (grepped `src/compiler_rust/`, `src/runtime/`, every `.rs`/`.c`/
 #       `.cpp` file — only its own `extern fn` declaration matches).
-# Claim 1 below adds a THIRD, live piece of evidence: `SmfWriter.write()`
-# itself is checked here, today, to still return `Ok([])` even with a
-# populated section/symbol — so building a real `.smf` byte artifact isn't
-# possible either. Full route writeup: smf_reader_adapter.spl's header.
+# Claim 1 below USED to pin a third blocker — `SmfWriter.write()` returning
+# `Ok([])`. That blocker is gone: write() (smf_writer.spl:335) now emits real
+# SMF v1.1 bytes (header-trailer layout), so claim 1 now pins the positive
+# fact with a hand-derived byte count. Routes (a)/(b) still hold, so the
+# fixture route stays (c). Full route writeup: smf_reader_adapter.spl header.
 #
 # Claims:
-#   1. WRITE STUB — SmfWriter.write() returns Ok([]) regardless of a
-#      populated section/symbol, confirming route (b) is blocked live.
+#   1. WRITE — SmfWriter.write() emits a real SMF artifact: 3 payload +
+#      64 section entry + 56 symbol entry + 6 string table + 128 header
+#      trailer = 257 bytes for one 3-byte code section and one symbol.
 #   2. ADAPT — a defined writer symbol (size>0), an undefined one (size==0,
 #      section_index==-1), and a zero-size-but-sectioned symbol (size==0,
 #      section_index>=0) map to SmfSymbolInput.defined true/false/true —
@@ -48,11 +50,11 @@ use std.common.structural.identity.entity_id.{entity_ref, entity_ref_equal}
 use std.common.structural.resolve.resolve_types.{ResolutionRecord}
 
 # ----------------------------------------------------------------------------
-# 1. Write stub — live proof route (b) is blocked
+# 1. Write — real SMF bytes (the old Ok([]) stub blocker is gone)
 # ----------------------------------------------------------------------------
 
-describe "SmfWriter.write() route-(b) blocker":
-    it "still returns Ok([]) with a populated section and symbol, today":
+describe "SmfWriter.write() real artifact":
+    it "emits 257 bytes for one 3-byte code section and one symbol":
         var writer = SmfWriter.create()
         val _section = writer.add_code_section("text", [1, 2, 3])
         val _symbol = writer.add_symbol(SmfWriterSymbol(
@@ -68,7 +70,9 @@ describe "SmfWriter.write() route-(b) blocker":
         val result = writer.write()
         match result:
             case Ok(bytes):
-                expect(bytes.len()).to_equal(0)
+                # 3 (payload) + 64 (section entry) + 56 (symbol entry)
+                # + 6 (string table: NUL + "main" + NUL) + 128 (header trailer)
+                expect(bytes.len()).to_equal(257)
             case Err(_e):
                 assert_true(false)
 
