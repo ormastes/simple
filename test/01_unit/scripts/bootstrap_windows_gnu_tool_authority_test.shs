@@ -1,54 +1,207 @@
 #!/bin/sh
-# Behavioral fault injection for target compiler selection; no build admission.
+# Behavioral contract for the Windows Clang bootstrap tool owners.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-gnu-tool-authority.XXXXXX")
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-windows-clang-authority.XXXXXX")
 fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
-case "$fixture" in /*/simple-gnu-tool-authority.*) ;; *) exit 1 ;; esac
+case "$fixture" in /*/simple-windows-clang-authority.*) ;; *) exit 1 ;; esac
 trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
 fixture_shell=$(command -v sh)
 utility_dir=$(CDPATH= cd -- "${fixture_shell%/*}" && pwd -P)
-mkdir "$fixture/tools"
-for tool in cargo rustc gcc gcc-selected clang ld ar ranlib; do
+mkdir "$fixture/tools" "$fixture/selected"
+for tool in cargo rustc clang llvm-ar clang-cl not-clang ar ld ranlib; do
     printf '#!/bin/sh\nprintf "fixture %s version 1\\n"\n' "$tool" >"$fixture/tools/$tool"
     chmod +x "$fixture/tools/$tool"
 done
+cp "$fixture/tools/clang" "$fixture/selected/clang"
+chmod +x "$fixture/selected/clang"
 test_path="$fixture/tools:$utility_dir"
-
-# Delegate ordinary command lookup to a real shell, while making the cc alias
-# absent even on a test host that normally installs one. Actual executable
-# canonicalization, invocation, hashing and snapshot serialization stay live.
-command() {
-    case "$#:${1:-}:${2:-}" in
-        2:-v:cc) return 1 ;;
-        *) "$fixture_shell" -c 'command "$@"' lookup "$@" ;;
-    esac
-}
 bootstrap_stage3_host_platform() { printf '%s\n' x86_64-pc-windows-gnu; }
 bootstrap_stage3_resolve_rust_toolchain() {
     printf 'rustc-path=%s\ncargo-path=%s\n' "$fixture/tools/rustc" "$fixture/tools/cargo"
 }
 
-if ! CC_x86_64_pc_windows_gnu=gcc bootstrap_stage3_tool_authority_snapshot \
-    "$fixture/default.snapshot" "$test_path" "$root"; then
-    echo 'FAIL: Windows GNU snapshot rejected gcc when cc was absent' >&2
-    exit 1
-fi
-grep -F "tool=gcc|requested=$fixture/tools/gcc|" "$fixture/default.snapshot" >/dev/null
-if grep -F 'tool=cc|' "$fixture/default.snapshot" >/dev/null; then
-    echo 'FAIL: Windows GNU snapshot bound the absent cc alias' >&2
-    exit 1
-fi
+# The non-Windows owner remains cc; the Windows policy does not alter it.
+linux_cc=$(bootstrap_stage3_target_c_compiler x86_64-unknown-linux-gnu)
+[ -x "$linux_cc" ]
 
-CC_x86_64_pc_windows_gnu=gcc-selected bootstrap_stage3_tool_authority_snapshot \
-    "$fixture/selected.snapshot" "$test_path" "$root"
-grep -F "tool=gcc-selected|requested=$fixture/tools/gcc-selected|" \
+if ! PATH="$test_path" CC_x86_64_pc_windows_gnu=clang \
+    bootstrap_stage3_tool_authority_snapshot "$fixture/default.snapshot" \
+    "$test_path" "$root"; then
+    echo 'FAIL: Windows GNU snapshot rejected clang' >&2
+    exit 1
+fi
+grep -F "tool=clang|requested=$fixture/tools/clang|" \
+    "$fixture/default.snapshot" >/dev/null
+
+PATH="$test_path" CC_x86_64_pc_windows_gnu="$fixture/selected/clang" \
+    bootstrap_stage3_tool_authority_snapshot "$fixture/selected.snapshot" \
+    "$test_path" "$root"
+grep -F "tool=clang|requested=$fixture/selected/clang|" \
     "$fixture/selected.snapshot" >/dev/null
-if CC_x86_64_pc_windows_gnu=missing-selected bootstrap_stage3_tool_authority_snapshot \
-    "$fixture/missing.snapshot" "$test_path" "$root"; then
-    echo 'FAIL: missing selected compiler silently fell back to gcc' >&2
+if PATH="$test_path" CC_x86_64_pc_windows_gnu=missing-selected \
+    bootstrap_stage3_tool_authority_snapshot "$fixture/missing.snapshot" \
+    "$test_path" "$root"; then
+    echo 'FAIL: missing selected clang silently fell back' >&2
     exit 1
 fi
 [ ! -e "$fixture/missing.snapshot" ]
-printf 'PASS: Windows GNU tool authority binds target gcc and explicit override without cc, rejects a missing selected compiler\n'
+
+# The wrapper binds before fingerprinting, so bare caller inputs normalize to
+# the same values in the pre and post fingerprint phases.
+bootstrap_source="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+awk '
+  /bootstrap_stage3_windows_gnu_cargo_tools "\$\{cc_abs\}"/ && !bind { bind=NR }
+  /seed_inputs_hash pre/ && !pre { pre=NR }
+  END { exit !(bind && pre && bind < pre) }
+' "$bootstrap_source"
+grep -F 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}"' \
+    "$bootstrap_source" >/dev/null
+grep -F 'CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}"' \
+    "$bootstrap_source" >/dev/null
+grep -F 'abi="${SIMPLE_WINDOWS_ABI:-msvc}"' \
+    "$root/scripts/bootstrap/bootstrap-windows.sh" >/dev/null
+awk '
+  /CC=\$\{mingw_cc\}/ && !cc { cc=NR }
+  /if \[ "\$\{full_bootstrap\}" -eq 1 \]/ && !full { full=NR }
+  END { exit !(cc && full && cc < full) }
+' "$bootstrap_source"
+grep -F "SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC" \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs" >/dev/null
+grep -F 'if [ "${os}" != windows ] && [ -n "${sanity_cxx}" ]; then' \
+    "$bootstrap_source" >/dev/null
+if grep -Eq 'bootstrap_windows_cxx_env|mingw_cxx|CXX_x86_64_pc_windows_gnu|CXXFLAGS_x86_64_pc_windows_gnu|clang\+\+' \
+    "$bootstrap_source" "$root/scripts/check/lib/bootstrap-stage3/authority.shs"; then
+    echo 'FAIL: Windows bootstrap retained a C++ tool authority' >&2
+    exit 1
+fi
+
+term_build="$root/src/compiler_rust/lib/build.rs"
+grep -F 'Windows MSVC bootstrap requires clang-cl' "$term_build" >/dev/null
+grep -F 'Windows GNU bootstrap requires clang' "$term_build" >/dev/null
+grep -F '"--target=x86_64-w64-windows-gnu"' "$term_build" >/dev/null
+grep -F 'env::var("CARGO_CFG_TARGET_ENV")' "$term_build" >/dev/null
+grep -F 'if target_env == "msvc"' "$term_build" >/dev/null
+grep -F '} else if target_env == "gnu" {' "$term_build" >/dev/null
+if grep -Fq 'cfg!(target_env' "$term_build"; then
+    echo 'FAIL: term native build selected the Windows ABI from build-script HOST' >&2
+    exit 1
+fi
+mingw_linker_source="$root/src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl"
+grep -F 'val cc = env_get("CC")' "$mingw_linker_source" >/dev/null
+grep -F 'args = args.push("--target=x86_64-w64-windows-gnu")' \
+    "$mingw_linker_source" >/dev/null
+grep -F 'val (link_out, link_err, link_code) = process_run(cc, args)' \
+    "$mingw_linker_source" >/dev/null
+awk '/^fn _link_shared_mingw/, /^# ============================================================================/' \
+    "$mingw_linker_source" >"$fixture/mingw-shared-linker.spl"
+if grep -Fq 'shell(cmd)' "$fixture/mingw-shared-linker.spl"; then
+    echo 'FAIL: Windows GNU shared linker retained shell driver selection' >&2
+    exit 1
+fi
+
+native_project_linker="$root/src/compiler_rust/compiler/src/pipeline/native_project/linker.rs"
+security_registry_source="$root/src/compiler_rust/compiler/src/pipeline/native_project/mod.rs"
+native_project_tools="$root/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
+inline_asm_source="$root/src/compiler_rust/compiler/src/pipeline/native_project/inline_asm_emit.rs"
+grep -F 'fn generated_c_source_compiler' "$native_project_linker" >/dev/null
+grep -F 'target_c_compiler(target)' "$native_project_linker" >/dev/null
+grep -F 'let main_c = temp_dir.join("_main_stub.c")' "$native_project_linker" >/dev/null
+grep -F 'let init_c = temp_dir.join("_init_all.c")' "$native_project_linker" >/dev/null
+grep -F 'let source_path = temp_dir.join("_security_registry_init.c")' \
+    "$security_registry_source" >/dev/null
+grep -F 'fn security_registry_c_source_compiler' "$security_registry_source" >/dev/null
+grep -F 'tools::target_c_compiler(target)' "$security_registry_source" >/dev/null
+grep -F 'fn windows_gnu_target_flag' "$native_project_tools" >/dev/null
+grep -F 'windows_gnu_target_flag(target)' "$native_project_tools" >/dev/null
+grep -F 'windows_gnu_target_flag(effective_target())' "$inline_asm_source" >/dev/null
+if grep -Fq '.cpp' "$native_project_linker" "$security_registry_source" || \
+    grep -Fq 'const_cast' "$native_project_linker" "$security_registry_source"; then
+    echo 'FAIL: generated Windows bootstrap sources retained C++ syntax or extensions' >&2
+    exit 1
+fi
+awk '/pub\(crate\) fn compile_main_stub/, /\/\/\/ Generate a constructor/' \
+    "$native_project_linker" >"$fixture/main-stub-path.rs"
+awk '/pub\(crate\) fn generate_init_caller/, /\/\/\/ Compile C runtime/' \
+    "$native_project_linker" >"$fixture/init-caller-path.rs"
+if grep -Fq 'target_cxx_compiler' "$fixture/main-stub-path.rs" \
+    "$fixture/init-caller-path.rs"; then
+    echo 'FAIL: generated bootstrap C paths retained a direct C++ compiler' >&2
+    exit 1
+fi
+grep -F '#ifdef __cplusplus' "$fixture/main-stub-path.rs" >/dev/null
+grep -F 'extern "C" {' "$fixture/main-stub-path.rs" >/dev/null
+grep -F '#ifdef __cplusplus' "$fixture/init-caller-path.rs" >/dev/null
+grep -F 'extern \"C\" {' "$fixture/init-caller-path.rs" >/dev/null
+grep -F '#ifdef __cplusplus' "$security_registry_source" >/dev/null
+grep -F 'extern "C" {{' "$security_registry_source" >/dev/null
+[ "$(grep -Fc 'cmd.arg("--target=x86_64-w64-windows-gnu")' "$native_project_linker")" -eq 3 ]
+[ "$(grep -Fc 'cmd.arg("--target=x86_64-w64-windows-gnu")' "$security_registry_source")" -eq 1 ]
+
+linkage_probe="$root/test/01_unit/scripts/fixture_bootstrap_c_linkage_probe.c"
+probe_count=0
+for probe_compiler in cc c++; do
+    if ! command -v "$probe_compiler" >/dev/null 2>&1; then
+        continue
+    fi
+    probe_object="$fixture/${probe_compiler}-linkage.o"
+    if [ "$probe_compiler" = c++ ]; then
+        "$probe_compiler" -x c++ -c "$linkage_probe" -o "$probe_object"
+    else
+        "$probe_compiler" -c "$linkage_probe" -o "$probe_object"
+    fi
+    nm -g "$probe_object" >"$probe_object.symbols"
+    grep -Eq '[[:space:]]U[[:space:]]_?spl_main$' "$probe_object.symbols"
+    grep -Eq '[[:space:]]U[[:space:]]_?rt_set_args$' "$probe_object.symbols"
+    grep -Eq '[[:space:]]T[[:space:]]_?__simple_call_module_inits$' "$probe_object.symbols"
+    grep -Eq '[[:space:]]T[[:space:]]_?__module_init_security_registry$' "$probe_object.symbols"
+    probe_count=$((probe_count + 1))
+done
+[ "$probe_count" -gt 0 ]
+
+clang_tools() {
+    PATH="$test_path" \
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=clang \
+    CC_x86_64_pc_windows_gnu=clang \
+    AR_x86_64_pc_windows_gnu=llvm-ar \
+    bootstrap_stage3_windows_gnu_cargo_tools "$fixture/tools/clang"
+}
+pre_tools=$(clang_tools)
+post_tools=$(clang_tools)
+[ "$pre_tools" = "$post_tools" ]
+grep -Fx "linker=$fixture/tools/clang" <<EOF >/dev/null
+$pre_tools
+EOF
+grep -Fx "cc=$fixture/tools/clang" <<EOF >/dev/null
+$pre_tools
+EOF
+grep -Fx "ar=$fixture/tools/llvm-ar" <<EOF >/dev/null
+$pre_tools
+EOF
+
+# Relative paths and non-Clang substitutions must fail closed.
+if (cd "$fixture" && PATH="$test_path" CC_x86_64_pc_windows_gnu=tools/clang \
+    bootstrap_stage3_windows_gnu_cargo_tools tools/clang); then
+    echo 'FAIL: relative Clang override was accepted' >&2
+    exit 1
+fi
+if PATH="$test_path" CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=not-clang \
+    bootstrap_stage3_windows_gnu_cargo_tools "$fixture/tools/clang"; then
+    echo 'FAIL: non-Clang linker was accepted' >&2
+    exit 1
+fi
+if PATH="$test_path" AR_x86_64_pc_windows_gnu=ar \
+    bootstrap_stage3_windows_gnu_cargo_tools "$fixture/tools/clang"; then
+    echo 'FAIL: ar archiver was accepted' >&2
+    exit 1
+fi
+if PATH="$test_path" CC="$fixture/tools/not-clang" \
+    bootstrap_stage3_target_c_compiler x86_64-pc-windows-msvc; then
+    echo 'FAIL: non-Clang MSVC compiler override was accepted' >&2
+    exit 1
+fi
+msvc_cc=$(PATH="$test_path" CC="$fixture/tools/clang-cl" \
+    bootstrap_stage3_target_c_compiler x86_64-pc-windows-msvc)
+[ -n "$msvc_cc" ]
+printf 'PASS: Windows bootstrap binds canonical Clang C tools before fingerprinting, rejects non-Clang and relative substitutions, and preserves non-Windows cc selection\n'
