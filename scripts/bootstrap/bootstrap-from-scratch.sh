@@ -3546,6 +3546,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit 1
     }
     echo "Stage 2 admitted; stopping before Stage 3 as requested."
+    bootstrap_verdict "ADMITTED: stage=stage2 exit=0 signal=none reason=stop-after-stage2"
     exit 0
   fi
 
