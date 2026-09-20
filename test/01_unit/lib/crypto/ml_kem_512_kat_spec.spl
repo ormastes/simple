@@ -26,30 +26,19 @@ use os.crypto.ml_kem.{ml_kem_512_ek_bytes, ml_kem_512_dk_bytes,
     ml_kem_512_ct_bytes, ml_kem_512_ss_bytes,
     ml_kem_keygen_512, ml_kem_encaps_512, ml_kem_decaps_512}
 
-## Operator workflow
-
-# 1. Run `bin/simple test test/01_unit/lib/crypto/ml_kem_512_kat_spec.spl`.
-# 2. Every scenario must pass; a failure is a regression in the
-#    behavior under test.
-
-## Compatibility and limitations
-
-# Covers the interpreter and native lanes for the constructs
-# asserted here; platform-specific behavior is out of scope.
-
 describe "ML-KEM-512 size invariants (FIPS 203 §8 Table 3)":
 
     it "ITEM-1a ek = 800 bytes":
-        ml_kem_512_ek_bytes().to_equal(800)
+        expect(ml_kem_512_ek_bytes()).to_equal(800)
 
     it "ITEM-1b dk = 1632 bytes":
-        ml_kem_512_dk_bytes().to_equal(1632)
+        expect(ml_kem_512_dk_bytes()).to_equal(1632)
 
     it "ITEM-1c ciphertext = 768 bytes":
-        ml_kem_512_ct_bytes().to_equal(768)
+        expect(ml_kem_512_ct_bytes()).to_equal(768)
 
     it "ITEM-1d shared secret = 32 bytes":
-        ml_kem_512_ss_bytes().to_equal(32)
+        expect(ml_kem_512_ss_bytes()).to_equal(32)
 
     it "string predicates and slicing":
         step("Verify: string predicates and slicing")
@@ -60,28 +49,63 @@ describe "ML-KEM-512 size invariants (FIPS 203 §8 Table 3)":
         expect("abc".slice(0, 2)).to_equal("ab")
 
     it "ITEM-2a k = 2":
-        ml_kem_k_512().to_equal(2)
+        expect(ml_kem_k_512()).to_equal(2)
 
     it "ITEM-2b η1 = 3":
-        ml_kem_eta1_512().to_equal(3)
+        expect(ml_kem_eta1_512()).to_equal(3)
 
     it "ITEM-2c η2 = 2":
-        ml_kem_eta2_512().to_equal(2)
+        expect(ml_kem_eta2_512()).to_equal(2)
 
     it "ITEM-2d du = 10":
-        ml_kem_du_512().to_equal(10)
+        expect(ml_kem_du_512()).to_equal(10)
 
     it "ITEM-2e dv = 4":
-        ml_kem_dv_512().to_equal(4)
+        expect(ml_kem_dv_512()).to_equal(4)
 
     it "ITEM-2f q = 3329 (shared)":
-        ml_kem_q().to_equal(3329)
+        expect(ml_kem_q()).to_equal(3329)
+
+# ----------------------------------------------------------------------------
+# Top-level deterministic round-trip harness (runs at module load).
+#
+# d = z = m = 0^32. A load-time crash surfaces as an error rather than a
+# silent green; the it-block below records the outcome flag.
+# ----------------------------------------------------------------------------
+
+fn _zeros32() -> list:
+    var out = []
+    var i = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _bytes_eq_i64(a: list, b: list) -> i64:
+    if a.len() != b.len():
+        return 0
+    var i = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return 0
+        i = i + 1
+    1
+
+val _ml_kem_512_keypair = ml_kem_keygen_512(_zeros32(), _zeros32())
+val _ml_kem_512_ek = _ml_kem_512_keypair[0]
+val _ml_kem_512_dk = _ml_kem_512_keypair[1]
+val _ml_kem_512_encaps = ml_kem_encaps_512(_ml_kem_512_ek, _zeros32())
+val _ml_kem_512_ss_enc = _ml_kem_512_encaps[0]
+val _ml_kem_512_ct = _ml_kem_512_encaps[1]
+val _ml_kem_512_ss_dec = ml_kem_decaps_512(_ml_kem_512_dk, _ml_kem_512_ct)
+
+val ml_kem_512_round_trip_ok = _bytes_eq_i64(_ml_kem_512_ss_enc, _ml_kem_512_ss_dec)
 
 describe "ML-KEM-512 deterministic round-trip (top-level harness)":
 
     it "ITEM-3 KeyGen + Encaps + Decaps round-trip with d = z = m = 0^32":
-        # The actual round-trip computation runs at file load via
-        # `ml_kem_512_round_trip_check()`. This `it` block records the
+        # The actual round-trip computation runs at file load via the
+        # top-level harness above. This `it` block records the
         # outcome flag; if loading succeeded with a wrong shared secret,
         # the flag is 0 and this assertion fails.
-        ml_kem_512_round_trip_ok.to_equal(1)
+        expect(ml_kem_512_round_trip_ok).to_equal(1)
