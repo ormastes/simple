@@ -92,3 +92,79 @@ of the C1 review), matching both lld paths for the legal one-past-the-end
 label; only `off > size` diverges, and only by being louder. Reversing it, if
 lld-identical behaviour is ever required, is a one-line clamp to the last
 piece in `elf_merge_piece_off`.
+
+## `--gc-sections`: `.eh_frame` is retained where lld collects (2026-09-19)
+
+**We keep MORE than ld.lld does, deliberately.** This is a recorded divergence,
+not a silent one.
+
+`ld.lld` models `--gc-sections` liveness per FDE: it collects a function
+section and drops that function's FDE from `.eh_frame` with it. This linker has
+no per-FDE liveness, so until 2026-09-19 `elf_gc_reject` REFUSED any input
+carrying `.eh_frame` — correct, but it made `--gc-sections` unusable on real
+compiler output, and once `native_direct_platform_flags` was folded into the
+internal route (which asks for `--gc-sections`) it blocked every internal link.
+
+The fix is the safe SUBSET of lld's optimisation: `.eh_frame`, `.eh_frame.*`,
+`.eh_frame_hdr` and `SHT_X86_64_UNWIND` are unconditional roots in
+`elf_gc_is_root`. Being a root means their relocations are followed, so every
+function an FDE describes stays live — which is the point: an FDE whose target
+had been collected would carry a dangling pc-begin relocation. Retaining a
+section lld would have dropped makes the image larger, never wrong.
+
+### Read this before assuming `--gc-sections` removes dead CODE
+
+**On real compiler output, code GC is effectively OFF. Only data is collected.**
+
+`.eh_frame` is an unconditional root and a root's relocations are followed.
+clang and gcc default to `-fasynchronous-unwind-tables`, so on this platform
+EVERY function gets an FDE, and every FDE relocation points at its function's
+section. Following them marks every function live. The result is correct and
+safe — nothing that is reachable is dropped, and no FDE can dangle — but a
+reader who sees "`--gc-sections` supported" and expects unreferenced functions
+to disappear will be wrong. They do not. `.data.*`/`.rodata.*` sections that
+nothing references ARE still collected, which is where the measured 4824 B ->
+4424 B on the fixture comes from.
+
+The fixture's `never_called_fn` survives for exactly this reason, and that is
+the +32 B delta below — it is one instance of the general rule, not a corner
+case. Recovering code GC needs real per-FDE liveness (parse `.eh_frame` CIEs
+and FDEs, drop the FDEs of collected sections, then rebuild the section);
+until then, treat `--gc-sections` on this engine as a data-only collector.
+
+**Unexercised path:** the `SHT_X86_64_UNWIND` arm of `elf_gc_is_root` has no
+coverage — this host is aarch64, where unwind data is the ordinary
+`.eh_frame` section. It is there for x86_64 correctness and is untested.
+
+Checked, not assumed: `.init_array`, `.fini_array`, `.preinit_array`,
+`SHT_NOTE`, `SHF_GNU_RETAIN` and the `.init`/`.fini`/`.ctors`/`.dtors`/`.jcr`
+families were ALREADY roots before this change, and `.gcc_except_table` is
+reached through the `.eh_frame` relocations now that `.eh_frame` is live. None
+of them was ever rejected for this reason.
+
+**Not widened:** `SHT_GROUP` (COMDAT) and `SHF_LINK_ORDER` remain named
+refusals. A spec asserts the reject strings for both are still present and that
+the per-FDE one is gone.
+
+### Measured delta vs `ld.lld --gc-sections`
+
+Fixture `test/fixtures/linker/elf/gc_ehframe_a64.o` (`-O1 -fPIC -fexceptions
+-ffunction-sections -fdata-sections`), one unreferenced `never_called_fn`,
+aarch64 PIE, `-z now -z relro --gc-sections`, same CRT and `-lc`:
+
+| section | ld.lld | internal:elf | delta |
+|---|---|---|---|
+| `.text` | 112 B | 128 B | **+16 B (+14.3%)** |
+| `.eh_frame` | 104 B | 120 B | **+16 B** |
+
+**+32 B total**, exactly `never_called_fn` and its FDE: the one section lld
+collects and we retain. `nm` confirms it — absent from lld's output, present in
+ours.
+
+Whole-file size is NOT the divergence measure and points the other way (lld
+4776 B vs internal 4424 B), because lld also emits `.eh_frame_hdr`, a build-id
+note and `.hash`, none of which this engine produces
+(`INTERNAL_ELF_UNPRODUCIBLE_FLAGS`, recorded separately).
+
+GC still does real work with the root in place: the same object links to
+4824 B with GC off and 4424 B with GC on, and runs (exit 42).

@@ -658,6 +658,15 @@ case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   1) stage3_cold_init_env="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
   *) echo "error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1" >&2; exit 1 ;;
 esac
+# Opt-in self-hosted link for the Stage 3 recompile.  `SIMPLE_STAGE3_LINKER=
+# internal` sets SIMPLE_LINKER=internal for THIS child only, routing its final
+# link through the pure-Simple internal ELF engine.  Computed once by
+# bootstrap_stage3_linker_env (scripts/check/lib/bootstrap-stage3/authority.shs,
+# which owns the validation and the rationale) and word-split into both the
+# args hash and the transcribed invocation, so the two cannot diverge and the
+# knob lands in the Stage 3 provenance receipt when it is on.  Unset => empty
+# => the pinned argv and every existing admission receipt are byte-identical.
+stage3_linker_env=$(bootstrap_stage3_linker_env) || exit 1
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -668,7 +677,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
-  ${stage3_mc_env} ${stage3_cold_init_env} \
+  ${stage3_mc_env} ${stage3_cold_init_env} ${stage3_linker_env} \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
   "SIMPLE_COMPILER_PHASE_PROFILE=1" \
   "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
@@ -698,7 +707,7 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_FRONTEND_CACHE=0 \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
   SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_PACKAGE_INDEX_COLD_INIT=1 ${stage3_mc_env} \
-  ${stage3_cold_init_env} \
+  ${stage3_cold_init_env} ${stage3_linker_env} \
   SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
   SIMPLE_COMPILER_PHASE_PROFILE=1 \
   SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \

@@ -20,7 +20,7 @@
 use std.spec.step
 use std.spec.*
 
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, internal_link_native}
 use compiler.backend.linker.smf_writer.{SmfWriter}
 use std.io_runtime.{file_read_bytes, file_write_bytes, shell, getpid}
 
@@ -48,14 +48,22 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
     # Host requirement: aarch64 Linux with glibc (crt_discovery finds
     # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them) -- same requirement
     # as link_engine_external_spec.spl's internal-engine specs.
-    it "links a Linux aarch64 ELF object internally and the output runs":
+    it "links a Linux aarch64 ELF object internally, hardened, and the output runs":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
-        step("SIMPLE_LINKER=internal routes link_to_native to the internal ELF engine end to end")
+        step("SIMPLE_LINKER=internal routes link_to_native to the internal ELF engine end to end, carrying the platform flags")
         with_env("SIMPLE_LINKER", "internal", fn():
             val out = "{TMP}_hello"
             val cfg = NativeLinkConfig.default()
             val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            # Default config now carries the platform producer's flags, so
+            # this is a HARDENED link: DT_BIND_NOW from `-z now`, and
+            # `--gc-sections` applied with `.eh_frame` retained as an
+            # unconditional root (gc_sections.spl).
             expect(result.is_ok()).to_equal(true)
+            # Full flag word: "NOW" alone is already in the BIND_NOW line.
+            val dyn = shell("readelf -dW '{out}'")
+            expect(dyn.stdout).to_contain("BIND_NOW")
+            expect(dyn.stdout).to_contain("Flags: NOW PIE")
             val run = shell("'{out}'")
             expect(run.exit_code).to_equal(42)
             expect(run.stdout).to_equal("hi from libc\n")
@@ -85,6 +93,33 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
                 "{TMP}_libs_out", cfg)
             expect(result.is_err()).to_equal(true)
             expect(result.unwrap_err()).to_contain("unsupported config field 'strip_output'")
+        )
+
+    it "rejects a config field the internal engine would silently ignore (extra_flags), naming it":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("SIMPLE_LINKER=internal + extra_flags -> named 'unsupported config field' error, not a silent drop")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.extra_flags = ["-Wl,-z,now"]
+            val result = link_to_native(
+                ["test/fixtures/linker/elf/hello_libc_a64.o"],
+                "/tmp/native_linking_internal_spec_flags_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("unsupported config field 'extra_flags'")
+        )
+
+    it "now HONOURS config.libraries, and refuses one it cannot resolve by name":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("libraries left this rejection list when the route started resolving them; an unresolvable -l is still a named Err, never a drop")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["definitely_not_a_library_xyz"]
+            val result = link_to_native(
+                ["test/fixtures/linker/elf/hello_libc_a64.o"],
+                "{TMP}_libs_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err().contains("unsupported config field")).to_equal(false)
+            expect(result.unwrap_err()).to_contain("definitely_not_a_library_xyz")
         )
 
     it "SIMPLE_LINKER unset still resolves through the external path unchanged":
@@ -215,16 +250,26 @@ describe "native_linking - internal engine and the real bootstrap link config":
             expect(run.exit_code).to_equal(42)
         )
 
-    it "still rejects a real runtime_path by name":
+    it "HONOURS a real runtime_path, and an empty one is a hard error naming the provider":
         # @req REQ-LINKER-F1-INTERNAL-BOOTSTRAP-CONFIG
-        step("SIMPLE_LINKER=internal + runtime_path=/opt/simple/runtime -> named 'unsupported config field' error")
+        # runtime_path left the rejection list with lane G1, together with the
+        # code that honours it: internal_link_plan folds
+        # native_runtime_archive_link_args, which for a directory holding no
+        # provider emits the `-L <dir> -lsimple_compiler` fallback. So the
+        # failure mode is now the SAME one the external arm has -- ld.lld says
+        # "unable to find library -lsimple_compiler" -- rather than a config
+        # reject. What must never come back is the silent zero-archive success
+        # this route had before either lane, so the assertion is that the
+        # provider is named.
+        step("SIMPLE_LINKER=internal + runtime_path=/opt/simple/runtime -> the runtime provider is looked for and its absence is named, not a config reject")
         with_env("SIMPLE_LINKER", "internal", fn():
             var cfg = NativeLinkConfig.default()
             cfg.runtime_path = "/opt/simple/runtime"
             val result = link_to_native([HELLO_A64_OBJ],
                 "{TMP}_runtime_real_out", cfg)
             expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err()).to_contain("unsupported config field 'runtime_path'")
+            expect(result.unwrap_err().contains("unsupported config field")).to_equal(false)
+            expect(result.unwrap_err()).to_contain("simple_compiler")
         )
 
     it "names retained_symbols as unsupported - the engine has no GC-root input to honour them with":
@@ -291,7 +336,22 @@ describe "native_linking - internal engine DT_NEEDED ORDER (not just the set)":
     # DT_NEEDED set is identical in both link orders.
     it "emits -l libraries before libc, so a shadowing library wins as it does under ld.lld":
         # @req REQ-LINKER-F1-INTERNAL-NEEDED-ORDER
-        step("libraries=[shadowatoi_a64] -> DT_NEEDED order libshadowatoi_a64.so then libc.so.6, and the program exits 42 (libc-first would exit 1)")
+        # CORRECTED when lane G1 landed, against the same oracle this example
+        # names. G1 folds native_link_std_lib_args(linux, "ld"), which BEGINS
+        # with an explicit `-lc`, so on the default route libc is no longer the
+        # implicit copy: it keeps its own argv position ahead of
+        # config.libraries. Measured on this host with the argv the external
+        # arm actually builds --
+        #   ld.lld-23 -pie ... Scrt1.o crti.o main_int_a64.o crtn.o -L<glibc>
+        #     -lc -lpthread -ldl --as-needed -lm --no-as-needed
+        #     -Ltest/fixtures/linker/elf -lshadowatoi_a64
+        # -- ld.lld emits "libc.so.6 libshadowatoi_a64.so" and the program
+        # exits 1. The engine matches both. The pre-G1 expectation
+        # ("libshadowatoi_a64.so libc.so.6", exit 42) described the reduced
+        # argv the internal route used to build, not ld's, which is exactly the
+        # drift G1's translator exists to end. The implicit-libc-last rule is
+        # still live and is pinned directly in the example below.
+        step("libraries=[shadowatoi_a64] on the default route -> the std table's explicit -lc keeps its position, DT_NEEDED libc.so.6 then libshadowatoi_a64.so, exit 1, exactly as ld.lld does with the same argv")
         with_env("SIMPLE_LINKER", "internal", fn():
             val out = "{TMP}_needed_order"
             var cfg = NativeLinkConfig.default()
@@ -299,10 +359,29 @@ describe "native_linking - internal engine DT_NEEDED ORDER (not just the set)":
             cfg.library_paths = ["test/fixtures/linker/elf"]
             expect(link_to_native([INT_A64_OBJ], out, cfg).is_ok()).to_equal(true)
             val order = shell("readelf -dW '{out}' | grep NEEDED | sed -n 's/.*\\[\\(.*\\)\\]/\\1/p' | tr '\\n' ' '")
-            expect(order.stdout.trim()).to_equal("libshadowatoi_a64.so libc.so.6")
+            expect(order.stdout.trim()).to_equal("libc.so.6 libshadowatoi_a64.so")
             val run = shell("LD_LIBRARY_PATH=test/fixtures/linker/elf '{out}'")
-            expect(run.exit_code).to_equal(42)
+            expect(run.exit_code).to_equal(1)
         )
+
+    it "puts the IMPLICIT libc last, so an -l library with no explicit -lc shadows it":
+        # @req REQ-LINKER-F1-INTERNAL-NEEDED-ORDER
+        # Lane F1's rule, given the witness it lost when G1 started folding the
+        # std-lib table onto the default route. Called with a library list that
+        # names no `-lc`, so libc is the engine's own implicit input: it must
+        # go LAST, and the shadowing atoi() must win (exit 42). Seeding the
+        # shared list with libc -- which is what this engine did before F1 --
+        # gives exit 1 here with no other visible difference, since the
+        # DT_NEEDED SET is identical in both orders.
+        step("internal_link_native(libraries=[shadowatoi_a64]) with no -lc folded -> DT_NEEDED libshadowatoi_a64.so then libc.so.6, exit 42")
+        val out = "{TMP}_implicit_libc_last"
+        val linked = internal_link_native("linux", "aarch64", true, [INT_A64_OBJ], out,
+            [], ["shadowatoi_a64"], [], ["test/fixtures/linker/elf"])
+        expect(linked.is_ok()).to_equal(true)
+        val order = shell("readelf -dW '{out}' | grep NEEDED | sed -n 's/.*\\[\\(.*\\)\\]/\\1/p' | tr '\\n' ' '")
+        expect(order.stdout.trim()).to_equal("libshadowatoi_a64.so libc.so.6")
+        val run = shell("LD_LIBRARY_PATH=test/fixtures/linker/elf '{out}'")
+        expect(run.exit_code).to_equal(42)
 
 describe "native_linking - internal engine ld-script member forms and the literal -l: form":
     # Lane F1, round 2. Three member shapes occur in the host libraries this
@@ -404,7 +483,13 @@ describe "native_linking - internal engine ld-script member forms and the litera
         # two. Not contrived: glibc's own libc.so names /lib/<triple>/libc.so.6
         # by absolute path, so a script member plus a `-l` to a local build of
         # the same SONAME produces exactly this shape.
-        step("libraries=[shadowatoi_a64, other_a64] over two -L dirs -> one DT_NEEDED libshadowatoi_a64.so then libc.so.6, as ld.lld emits")
+        # Order and exit CORRECTED with lane G1 for the same reason as the
+        # example above (the std table's explicit `-lc` comes first); measured
+        # with ld.lld-23 on the full argv, which emits
+        # "libc.so.6 libshadowatoi_a64.so" and exits 1. The DEDUP claim this
+        # example exists for is untouched and still discriminates: ONE of the
+        # two same-SONAME aliases appears, which a content-keyed dedup fails.
+        step("libraries=[shadowatoi_a64, other_a64] over two -L dirs -> one entry for the shared SONAME: DT_NEEDED libc.so.6 then libshadowatoi_a64.so, as ld.lld emits")
         with_env("SIMPLE_LINKER", "internal", fn():
             val out = "{TMP}_soname_dedup"
             var cfg = NativeLinkConfig.default()
@@ -412,8 +497,9 @@ describe "native_linking - internal engine ld-script member forms and the litera
             cfg.library_paths = ["test/fixtures/linker/elf", "test/fixtures/linker/elf/soname_alias"]
             expect(link_to_native([INT_A64_OBJ], out, cfg).is_ok()).to_equal(true)
             val order = shell("readelf -dW '{out}' | grep NEEDED | sed -n 's/.*\\[\\(.*\\)\\]/\\1/p' | tr '\\n' ' '")
-            expect(order.stdout.trim()).to_equal("libshadowatoi_a64.so libc.so.6")
-            # First occurrence wins, so the 42 build is the one kept.
+            expect(order.stdout.trim()).to_equal("libc.so.6 libshadowatoi_a64.so")
+            # First occurrence wins, so the shadowatoi build is the one kept --
+            # libc still resolves atoi first, hence exit 1, as under ld.lld.
             val run = shell("LD_LIBRARY_PATH=test/fixtures/linker/elf '{out}'")
-            expect(run.exit_code).to_equal(42)
+            expect(run.exit_code).to_equal(1)
         )

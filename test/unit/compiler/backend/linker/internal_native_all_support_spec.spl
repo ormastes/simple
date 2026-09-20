@@ -1,0 +1,482 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# The internal ELF route must carry the native_all support table.
+#
+# `native_all_gnu_support_args` (native_all_support.spl) is the transitive
+# hosted-link dependency set the Rust seed aggregate archive needs:
+#
+#   -u rt_vulkan_provider_is_available -lstdc++ -lsqlite3 -lz -lzstd
+#   -ltinfo -lffi -lxml2 -lncurses
+#
+# The external argv path applies it (native_linking.spl, the
+# `native_all_gnu_support_args` loop in link_native_unix). The
+# SIMPLE_LINKER=internal branch did not: it called internal_link_native with
+# no libraries and no roots, so every `-l` was dropped and the `-u` root was
+# lost. `rt_vulkan_provider_is_available` is DEFINED in exactly one member of
+# libsimple_native_all.a and REFERENCED by no other member, so without a
+# forced-undefined root the archive fixpoint never extracts that member --
+# a silent drop, which design D4 ("reject, never mask") forbids.
+#
+# Pinned here:
+#   1. the engine grows a `roots` field -- an ld/lld `-u <sym>`: seed the
+#      archive-closure undefined set, and refuse a root nothing defines
+#      (STRICTER than lld, which exits 0; see the bug doc);
+#   2. the wrapper translates the table into (libraries, roots) and REFUSES,
+#      by name, any table entry it cannot honour (the macOS table's `-L` and
+#      `-framework` entries are the live example);
+#   3. the same translation covers `native_link_std_lib_args` (`-lc
+#      -lpthread -ldl --as-needed -lm --no-as-needed`) and `-rpath
+#      <runtime_dir>`, which were the other two silent drops on this route;
+#   4. `-l` resolution follows ld's rule exactly -- `lib<name>.so` then
+#      `lib<name>.a`, error otherwise. It must NOT guess a versioned file: the
+#      earlier longest/lexical heuristic picked `libssl.so.1.1` over
+#      `libssl.so.3` and the resulting DT_NEEDED still looked plausible,
+#      because that name comes from the DSO's own SONAME.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/archive_closure.spl
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl
+
+use std.spec.step
+use std.spec.*
+
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_gnu_support_args}
+use compiler.backend.linker._LinkerWrapper.native_linking.{native_direct_platform_flags, INTERNAL_ELF_UNPRODUCIBLE_FLAGS}
+use compiler.backend.linker._LinkerWrapper.native_linking.{internal_link_plan, internal_resolve_library, internal_absorb_link_args, internal_link_native, InternalLinkPlan}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.linker_wrapper.{link_to_native}
+use std.io_runtime.{file_read_bytes, file_read, shell}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
+
+fn with_internal_linker(block: fn()):
+    val previous = rt_env_get("SIMPLE_LINKER") ?? ""
+    rt_env_set("SIMPLE_LINKER", "internal")
+    block()
+    rt_env_set("SIMPLE_LINKER", previous)
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn start_obj() -> ElfObject:
+    elf_parse_object(load_fixture("start_a64.o")).unwrap()
+
+fn closure_names(roots: [text]) -> [text]:
+    val r = elf_archive_closure([start_obj()], [load_fixture("libchain_a64.a")], roots)
+    var names: [text] = []
+    if r.is_ok():
+        for m in r.unwrap().members:
+            names = names.push(m.name)
+    names
+
+describe "internal ELF engine - ElfLinkRequest.roots is an ld -u":
+    it "without a root the unreferenced archive member stays out":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Baseline: unused_a64.o defines unused_fn, which nothing references, so the fixpoint never takes it")
+        val names = closure_names([])
+        expect(names.len()).to_equal(2)
+        expect(names.contains("unused_a64.o")).to_equal(false)
+
+    it "a root forces the member that defines it out of the archive":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("roots=[unused_fn] seeds the undefined set, exactly as -u rt_vulkan_provider_is_available must for libsimple_native_all.a")
+        val names = closure_names(["unused_fn"])
+        expect(names.contains("unused_a64.o")).to_equal(true)
+        expect(names.len()).to_equal(3)
+
+    it "elf_link threads roots through to the archive fixpoint":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The request field is wired, not just the closure helper: a static link with the root succeeds")
+        val linked = elf_link(ElfLinkRequest(
+            objects: [load_fixture("start_a64.o")],
+            archives: [load_fixture("libchain_a64.a")],
+            shared: [],
+            entry: "_start",
+            target: RelocArch.AArch64,
+            mode: ELF_LINK_STATIC_EXEC,
+            interp: "",
+            roots: ["unused_fn"]))
+        expect(linked.is_ok()).to_equal(true)
+
+    it "refuses a root nothing defines instead of dropping it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("A -u symbol no input defines is a named error, never a silently ignored root (design D4)")
+        val linked = elf_link(ElfLinkRequest(
+            objects: [load_fixture("start_a64.o")],
+            archives: [load_fixture("libchain_a64.a")],
+            shared: [],
+            entry: "_start",
+            target: RelocArch.AArch64,
+            mode: ELF_LINK_STATIC_EXEC,
+            interp: "",
+            roots: ["no_such_symbol_anywhere"]))
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("root symbol not defined")
+        expect(linked.unwrap_err()).to_contain("no_such_symbol_anywhere")
+
+fn empty_plan() -> InternalLinkPlan:
+    InternalLinkPlan(archives: [], libraries: [], as_needed: [], roots: [],
+        lib_dirs: [], runpath: "")
+
+fn absorb_table(inputs: [text], os: text, prefix: text) -> Result<InternalLinkPlan, text>:
+    internal_absorb_link_args(
+        empty_plan(), native_all_gnu_support_args(inputs, os, prefix),
+        "native_all support table")
+
+describe "internal ELF route - native_all support table translation":
+    it "splits the Linux table into libraries and roots":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("-l<name> -> libraries, -u <sym> -> roots; nothing in the table is dropped")
+        val plan = absorb_table(
+            ["build/obj/main.o", "build/runtime/libsimple_native_all.a"], "linux", "")
+        expect(plan.is_ok()).to_equal(true)
+        val p = plan.unwrap()
+        expect(p.roots).to_equal(["rt_vulkan_provider_is_available"])
+        expect(p.libraries).to_equal(
+            ["stdc++", "sqlite3", "z", "zstd", "tinfo", "ffi", "xml2", "ncurses"])
+
+    it "adds nothing when the aggregate archive is not an input":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The table is keyed on libsimple_native_all.a being present, exactly like the external path")
+        val plan = absorb_table(["build/obj/main.o"], "linux", "")
+        expect(plan.is_ok()).to_equal(true)
+        expect(plan.unwrap().libraries.len()).to_equal(0)
+        expect(plan.unwrap().roots.len()).to_equal(0)
+
+    it "refuses by name a table entry the internal engine cannot honour":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The macOS table carries -L and -framework; internal:elf honours neither, so it is a named Err, not a silent drop")
+        val plan = absorb_table(
+            ["build/obj/main.o", "build/runtime/libsimple_native_all.a"], "macos", "/opt/homebrew")
+        expect(plan.is_err()).to_equal(true)
+        expect(plan.unwrap_err()).to_contain("internal engine:")
+        expect(plan.unwrap_err()).to_contain("support table")
+
+val SANDBOX: text = "/tmp/internal_native_all_support_spec"
+
+fn fake_runtime_dir() -> text:
+    """A runtime directory shaped like the bootstrap's: the core-c-bootstrap
+    bundle selects libsimple_compiler_backfill.a + libsimple_native_all.a, and
+    it is the presence of the latter that arms the native_all support table."""
+    val dir = "{SANDBOX}/runtime"
+    shell("mkdir -p '{dir}' && : > '{dir}/libsimple_compiler_backfill.a' && : > '{dir}/libsimple_native_all.a'")
+    dir
+
+describe "internal ELF route - internal_link_plan carries the table":
+    it "turns the runtime bundle plus the table into archives, libraries and roots":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The internal route must see the same support inputs the external argv path assembles: objects + runtime archives")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        val plan = planned.unwrap()
+        expect(plan.archives.len()).to_equal(2)
+        expect(plan.archives[1].ends_with("libsimple_native_all.a")).to_equal(true)
+        expect(plan.roots).to_equal(["rt_vulkan_provider_is_available"])
+        # Order mirrors the external argv: standard libraries first, then the
+        # native_all table, then config.libraries.
+        expect(plan.libraries).to_equal(
+            ["c", "pthread", "dl", "m",
+             "stdc++", "sqlite3", "z", "zstd", "tinfo", "ffi", "xml2", "ncurses"])
+
+    it "honours config.libraries and config.library_paths rather than refusing them":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("These used to be 'unsupported config field'; now they are carried, which is what makes the refusal list honest")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        cfg.libraries = ["m"]
+        cfg.library_paths = ["/opt/simple/lib"]
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        expect(planned.unwrap().libraries.contains("m")).to_equal(true)
+        expect(planned.unwrap().lib_dirs.contains("/opt/simple/lib")).to_equal(true)
+
+describe "internal ELF route - resolving a -l name to a shared object":
+    it "resolves lib<name>.so when it is a real ELF shared object":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("internal:elf takes shared-object BYTES, so every -l has to become a real file on disk")
+        val dir = "{SANDBOX}/libs"
+        shell("mkdir -p '{dir}' && printf '\\177ELF\\002\\001\\001\\000' > '{dir}/libspecfake.so'")
+        val resolved = internal_resolve_library("specfake", [dir])
+        expect(resolved.is_ok()).to_equal(true)
+        expect(resolved.unwrap()[0]).to_equal("{dir}/libspecfake.so")
+
+    it "refuses a GNU linker script whose member resolves nowhere, instead of feeding it to the ELF parser":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("glibc ships text linker scripts under .so names; a script naming a member that does not exist is a named Err, not an ELF parse of the script text")
+        val dir = "{SANDBOX}/script"
+        shell("mkdir -p '{dir}' && printf 'GROUP ( libc.so.6 )\\n' > '{dir}/libspecscript.so'")
+        val resolved = internal_resolve_library("specscript", [dir])
+        expect(resolved.is_err()).to_equal(true)
+        # Lane F1's resolver FOLLOWS a GROUP script (see the "follows a GROUP
+        # linker script" example below), so the refusal here is now about the
+        # member the script names not existing anywhere on the search path --
+        # still a named Err naming the script, never a text file handed to the
+        # ELF parser, which is what this example exists to pin.
+        expect(resolved.unwrap_err()).to_contain("ld-script member")
+        expect(resolved.unwrap_err()).to_contain("libspecscript.so")
+
+    it "refuses an unresolvable -l by name rather than dropping it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("A -l the engine cannot find is a named Err -- dropping it is how the table got lost in the first place")
+        val dir = "{SANDBOX}/empty"
+        shell("mkdir -p '{dir}'")
+        val resolved = internal_resolve_library("specmissing", [dir])
+        expect(resolved.is_err()).to_equal(true)
+        expect(resolved.unwrap_err()).to_contain("internal engine:")
+        expect(resolved.unwrap_err()).to_contain("specmissing")
+
+describe "internal ELF route - ld-faithful -l resolution":
+    it "refuses when the unversioned lib<name>.so/.a is absent instead of guessing a version":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("ld searches lib<name>.so and lib<name>.a and errors when neither exists; picking a versioned file by heuristic got libssl.so.1.1 over libssl.so.3")
+        val dir = "{SANDBOX}/versioned"
+        shell("mkdir -p '{dir}' && printf '\\177ELF\\002\\001\\001\\000' > '{dir}/libspecver.so.1.1' && printf '\\177ELF\\002\\001\\001\\000' > '{dir}/libspecver.so.3'")
+        val resolved = internal_resolve_library("specver", [dir])
+        expect(resolved.is_err()).to_equal(true)
+        expect(resolved.unwrap_err()).to_contain("specver")
+
+    it "follows a GROUP linker script to the file it names":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("glibc ships libm.so/libc.so as GROUP scripts; ld follows them, so -lm must resolve rather than refuse")
+        val dir = "{SANDBOX}/group"
+        shell("mkdir -p '{dir}' && printf '\\177ELF\\002\\001\\001\\000' > '{dir}/libspecgrp.so.6' && printf 'GROUP ( libspecgrp.so.6 AS_NEEDED ( ld.so ) )\\n' > '{dir}/libspecgrp.so'")
+        val resolved = internal_resolve_library("specgrp", [dir])
+        expect(resolved.is_ok()).to_equal(true)
+        expect(resolved.unwrap()[0]).to_equal("{dir}/libspecgrp.so.6")
+
+describe "internal ELF route - std lib args and rpath are carried, not dropped":
+    it "carries -lc/-lpthread/-ldl/-lm and the --as-needed marker":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("native_link_std_lib_args(linux, ld) was dropped entirely by the internal branch; -lm sits inside an --as-needed region")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        val plan = planned.unwrap()
+        expect(plan.libraries.contains("c")).to_equal(true)
+        expect(plan.libraries.contains("pthread")).to_equal(true)
+        expect(plan.libraries.contains("dl")).to_equal(true)
+        expect(plan.libraries.contains("m")).to_equal(true)
+        expect(plan.as_needed.len()).to_equal(plan.libraries.len())
+        expect(plan.as_needed[plan.libraries.index_of("m")]).to_equal(true)
+        expect(plan.as_needed[plan.libraries.index_of("c")]).to_equal(false)
+
+    it "carries -rpath <runtime_dir> instead of dropping it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The external arm emits -rpath runtime_dir next to the runtime archives; the internal route now records it as DT_RUNPATH")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        expect(planned.unwrap().runpath).to_equal(fake_runtime_dir())
+
+describe "internal ELF engine - DT_RUNPATH and --as-needed DT_NEEDED":
+    it "refuses a runpath on a static link, which has no .dynamic to carry it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Reject rather than drop: a static image cannot express DT_RUNPATH")
+        val linked = elf_link(ElfLinkRequest(
+            objects: [load_fixture("start_a64.o")],
+            archives: [load_fixture("libchain_a64.a")],
+            shared: [],
+            entry: "_start",
+            target: RelocArch.AArch64,
+            mode: ELF_LINK_STATIC_EXEC,
+            interp: "",
+            runpath: "/opt/simple/runtime"))
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("runpath")
+
+describe "internal ELF route - as-needed ANDs across occurrences of one name":
+    it "a later non-as-needed occurrence clears an earlier --as-needed one":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("ld.lld records NEEDED when ANY occurrence is non-as-needed, in BOTH orders; first-occurrence-wins withheld it and diverged")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        cfg.libraries = ["m"]
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        val plan = planned.unwrap()
+        # `m` occurs twice: inside the std table's --as-needed region, and
+        # again from config.libraries, which is never as-needed. It collapses
+        # to ONE entry (4 standard + 8 native_all), with the flag ANDed off.
+        expect(plan.libraries.len()).to_equal(12)
+        expect(plan.as_needed.len()).to_equal(12)
+        expect(plan.as_needed[plan.libraries.index_of("m")]).to_equal(false)
+
+    it "an earlier non-as-needed occurrence survives a later --as-needed one":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The reverse order must give the same answer, or the rule is order-dependent rather than an AND")
+        val folded = internal_absorb_link_args(
+            empty_plan(), ["-lbar", "--as-needed", "-lbar", "--no-as-needed"],
+            "order probe")
+        expect(folded.is_ok()).to_equal(true)
+        expect(folded.unwrap().libraries).to_equal(["bar"])
+        expect(folded.unwrap().as_needed).to_equal([false])
+
+    it "keeps as-needed when every occurrence of the name is as-needed":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The flag is only kept when nothing ever asked for an unconditional DT_NEEDED")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = fake_runtime_dir()
+        cfg.runtime_bundle = "core-c-bootstrap"
+        val planned = internal_link_plan(["build/obj/main.o"], cfg, "linux")
+        expect(planned.is_ok()).to_equal(true)
+        val plan = planned.unwrap()
+        expect(plan.as_needed[plan.libraries.index_of("m")]).to_equal(true)
+        expect(plan.as_needed[plan.libraries.index_of("c")]).to_equal(false)
+
+describe "internal ELF route - the runtime provider is demanded, not skipped":
+    it "errors by name when the runtime directory has no provider at all":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The external arm emits `-L <dir> -lsimple_compiler` and lld fails 'unable to find library -lsimple_compiler'; finding 0 archives and linking anyway is a silent success where the real linker refuses")
+        val empty_dir = "{SANDBOX}/runtime_empty"
+        shell("mkdir -p '{empty_dir}' && rm -f '{empty_dir}'/*")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = empty_dir
+        with_internal_linker(fn():
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{SANDBOX}/runtime_empty_out", cfg)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("simple_compiler")
+        )
+
+    it "links when that same directory carries the provider the external arm names":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("With libsimple_compiler.a present the auto bundle selects it as an archive input and no -lsimple_compiler is emitted, so the link proceeds")
+        val filled_dir = "{SANDBOX}/runtime_filled"
+        shell("mkdir -p '{filled_dir}' && rm -f '{filled_dir}'/*.a && ar rc '{filled_dir}/libsimple_compiler.a'")
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = filled_dir
+        with_internal_linker(fn():
+            val result = link_to_native([HELLO_A64_OBJ],
+                "{SANDBOX}/runtime_filled_out", cfg)
+            expect(result.is_ok()).to_equal(true)
+        )
+
+describe "internal ELF route - the hardening flags reach the output binary":
+    it "-z now becomes DT_BIND_NOW and DF_1_NOW":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("native_direct_platform_flags asks for `-z now`; dropping it shipped a binary with lazy binding where the external route hardens it")
+        val out = "{SANDBOX}/bind_now_out"
+        val linked = internal_link_native("linux", "aarch64", true,
+            [HELLO_A64_OBJ], out, [], [], [], [], [], "", false, true)
+        expect(linked.is_ok()).to_equal(true)
+        # `to_contain("NOW")` would be satisfied by the BIND_NOW line above,
+        # leaving DF_1_NOW unpinned -- assert the whole flag word.
+        val dyn = shell("readelf -dW '{out}'")
+        expect(dyn.stdout).to_contain("BIND_NOW")
+        expect(dyn.stdout).to_contain("Flags: NOW PIE")
+        val run = shell("'{out}'")
+        expect(run.exit_code).to_equal(42)
+
+    it "--gc-sections reaches the request instead of being dropped":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The other half of the same producer. Engine-side GC behaviour is pinned by elf_gc_sections_spec; what was missing here was the flag ever arriving")
+        val folded = internal_absorb_link_args(
+            empty_plan(),
+            native_direct_platform_flags("linux", "internal", false),
+            "direct platform flags")
+        expect(folded.is_ok()).to_equal(true)
+        expect(folded.unwrap().gc_sections).to_equal(true)
+        expect(folded.unwrap().bind_now).to_equal(true)
+
+    it "the internal flag set is the lld set minus icf minus the unproducible three":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Pushing a probe flag onto the result only tests absorb; the property that matters is that the SHARED list reaches the route, reduced by exactly the declared exclusions")
+        val lld_flags = native_direct_platform_flags("linux", "lld", false)
+        val internal_flags = native_direct_platform_flags("linux", "internal", false)
+        var expected: [text] = []
+        for flag in lld_flags:
+            if flag == "--icf=all":
+                continue
+            if INTERNAL_ELF_UNPRODUCIBLE_FLAGS.contains(flag):
+                continue
+            expected = expected.push(flag)
+        expect(internal_flags).to_equal(expected)
+        # And the reduction is not vacuous in either direction.
+        expect(internal_flags.len() < lld_flags.len()).to_equal(true)
+        expect(internal_flags.contains("--gc-sections")).to_equal(true)
+        expect(internal_flags.contains("--icf=all")).to_equal(false)
+
+    it "refuses a flag the producer grows that the engine cannot honour":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Drift probe: a NEW flag added to the shared producer must be refused by name, not linked clean -- that is what makes folding the producer meaningful")
+        val folded = internal_absorb_link_args(
+            empty_plan(),
+            native_direct_platform_flags("linux", "internal", false).push("--g1probe-flag"),
+            "direct platform flags")
+        expect(folded.is_err()).to_equal(true)
+        expect(folded.unwrap_err()).to_contain("--g1probe-flag")
+        expect(folded.unwrap_err()).to_contain("refused rather than ignored")
+
+    it "each subtracted flag is one absorb would refuse, not one it silently accepts":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Subtraction is only safe while the translator would REFUSE these. If absorb ever learns one, the subtraction would silently withhold it instead -- this row fails the day that happens")
+        for flag in INTERNAL_ELF_UNPRODUCIBLE_FLAGS:
+            val folded = internal_absorb_link_args(empty_plan(), [flag], "subtraction probe")
+            expect(folded.is_err()).to_equal(true)
+            expect(folded.unwrap_err()).to_contain(flag)
+
+describe "internal ELF route - --gc-sections works on input carrying .eh_frame":
+    it "links and runs an object with .eh_frame instead of refusing it":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Honouring --gc-sections made elf_gc_reject refuse every real object; .eh_frame is now an unconditional root, which is the safe subset of lld's per-FDE liveness")
+        val out = "{SANDBOX}/gc_ehframe_out"
+        val linked = internal_link_native("linux", "aarch64", true,
+            ["test/fixtures/linker/elf/gc_ehframe_a64.o"], out,
+            [], [], [], [], [], "", true, true)
+        expect(linked.is_ok()).to_equal(true)
+        val run = shell("'{out}'")
+        expect(run.exit_code).to_equal(42)
+
+    it "retains .eh_frame while still collecting what nothing reaches":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("Retaining a section lld might drop only makes the image larger; the GC must still do real work, or 'honoured' would mean 'ignored'")
+        val out_on = "{SANDBOX}/gc_ehframe_on"
+        val out_off = "{SANDBOX}/gc_ehframe_off"
+        val on = internal_link_native("linux", "aarch64", true,
+            ["test/fixtures/linker/elf/gc_ehframe_a64.o"], out_on,
+            [], [], [], [], [], "", true, true)
+        val off = internal_link_native("linux", "aarch64", true,
+            ["test/fixtures/linker/elf/gc_ehframe_a64.o"], out_off,
+            [], [], [], [], [], "", false, true)
+        expect(on.is_ok()).to_equal(true)
+        expect(off.is_ok()).to_equal(true)
+        val sections = shell("readelf -SW '{out_on}'")
+        expect(sections.stdout).to_contain(".eh_frame")
+        # GC with the unwind root still collects unreferenced sections, so the
+        # image is strictly smaller than the same link with GC off.
+        val smaller = shell("test $(stat -c%s '{out_on}') -lt $(stat -c%s '{out_off}')")
+        expect(smaller.exit_code).to_equal(0)
+
+    it "still refuses the cases that genuinely are unmodelled":
+        # @req REQ-LINKER-INTERNAL-NATIVE-ALL-SUPPORT
+        step("The retention subset must not widen: SHT_GROUP and SHF_LINK_ORDER stay named refusals")
+        val source = file_read("src/compiler/70.backend/linker/elf/gc_sections.spl")
+        expect(source.contains("does not model SHT_GROUP")).to_equal(true)
+        expect(source.contains("does not model SHF_LINK_ORDER")).to_equal(true)
+        expect(source.contains("does not model per-FDE")).to_equal(false)

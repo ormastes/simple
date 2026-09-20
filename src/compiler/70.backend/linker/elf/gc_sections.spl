@@ -74,8 +74,15 @@ fn elf_gc_reject(objects: [ElfObject]) -> text:
                 return "object {oi}: gc_sections does not model SHT_GROUP (COMDAT) membership"
             if sec.sh_flags & SHF_ALLOC_G != 0:
                 val name = elf_section_name(obj, si)
-                if name == ".eh_frame" or name.starts_with(".eh_frame.") or sec.sh_type == SHT_X86_64_UNWIND_G:
-                    return "object {oi}: gc_sections does not model per-FDE .eh_frame liveness (section {name})"
+                # `.eh_frame` is NOT rejected any more. ld.lld models liveness
+                # per FDE and drops the FDEs whose function was collected; this
+                # linker cannot, so it takes the safe SUBSET of that
+                # optimisation -- see elf_gc_is_root, which makes the section an
+                # unconditional root. Retaining a section lld might have dropped
+                # makes the image larger, never wrong, whereas refusing the link
+                # outright made --gc-sections unusable on any real compiler
+                # output. The divergence is recorded, not silent:
+                # doc/08_tracking/bug/elf_relro_gc_parity_advisories_2026-09-19.md
                 if sec.sh_flags & SHF_LINK_ORDER_G != 0:
                     return "object {oi}: gc_sections does not model SHF_LINK_ORDER (section {name})"
             si = si + 1
@@ -83,14 +90,34 @@ fn elf_gc_reject(objects: [ElfObject]) -> text:
     ""
 
 fn elf_gc_is_root(obj: ElfObject, si: i64) -> bool:
-    """ld.lld MarkLive.cpp `isReserved`, restricted to allocatable sections."""
+    """ld.lld MarkLive.cpp `isReserved`, restricted to allocatable sections,
+    PLUS unwind data as an unconditional root.
+
+    `.eh_frame`/`.eh_frame.*` and SHT_X86_64_UNWIND are roots here because this
+    linker has no per-FDE liveness. Being a root means its relocations are
+    followed, so every function an FDE describes stays live too -- that is the
+    point: an FDE whose target section had been collected would carry a
+    dangling pc-begin relocation. The cost is a larger image than lld's, which
+    is the conservative direction; the benefit is that --gc-sections works at
+    all on output that carries unwind tables, i.e. all real compiler output.
+    Sections no FDE references (data, functions from objects with no unwind
+    info) are still collected normally.
+
+    `.init_array`/`.fini_array`/`.preinit_array`/SHT_NOTE/SHF_GNU_RETAIN and
+    the `.init`/`.fini`/`.ctors`/`.dtors`/`.jcr` families were ALREADY roots
+    before this change -- checked, not assumed -- so none of them was ever
+    rejected or collected for the same reason `.eh_frame` was."""
     val sec = obj.sections[si]
     if sec.sh_type == SHT_INIT_ARRAY_G or sec.sh_type == SHT_FINI_ARRAY_G or
             sec.sh_type == SHT_PREINIT_ARRAY_G or sec.sh_type == SHT_NOTE_G:
         return true
     if sec.sh_flags & SHF_GNU_RETAIN_G != 0:
         return true
+    if sec.sh_type == SHT_X86_64_UNWIND_G:
+        return true
     val n = elf_section_name(obj, si)
+    if n == ".eh_frame" or n.starts_with(".eh_frame.") or n == ".eh_frame_hdr":
+        return true
     n.starts_with(".init") or n.starts_with(".fini") or n.starts_with(".ctors") or
         n.starts_with(".dtors") or n.starts_with(".jcr")
 
@@ -111,8 +138,13 @@ fn elf_gc_def(objects: [ElfObject], res: SymResolution, oi: i64, sym_idx: i64) -
         return none
     ElfGcDef(obj: oi, sec: sym.st_shndx)
 
-fn elf_gc_live(objects: [ElfObject], res: SymResolution, entry: text) -> Result<[[bool]], text>:
-    """Allocatable sections reachable from the roots; Err for anything unmodelled."""
+fn elf_gc_live(objects: [ElfObject], res: SymResolution, entry: text,
+        roots: [text] = []) -> Result<[[bool]], text>:
+    """Allocatable sections reachable from the roots; Err for anything unmodelled.
+
+    `roots` are ld/lld `-u <sym>` forced-undefined symbols. They are liveness
+    roots as well as archive-extraction seeds -- extracting a member and then
+    garbage-collecting its only section would drop the symbol again."""
     val reject = elf_gc_reject(objects)
     if reject != "":
         return Err(reject)
@@ -146,6 +178,17 @@ fn elf_gc_live(objects: [ElfObject], res: SymResolution, entry: text) -> Result<
         live[e.obj_idx][e.section_idx] = true
         wl_o = wl_o.push(e.obj_idx)
         wl_s = wl_s.push(e.section_idx)
+    for root in roots:
+        if root == "" or not res.defined.has(root):
+            continue
+        val rd = res.defined[root]
+        if rd.section_idx < 0 or rd.section_idx >= SHN_LORESERVE_G:
+            continue
+        if live[rd.obj_idx][rd.section_idx]:
+            continue
+        live[rd.obj_idx][rd.section_idx] = true
+        wl_o = wl_o.push(rd.obj_idx)
+        wl_s = wl_s.push(rd.section_idx)
     var head: i64 = 0
     while head < wl_o.len():
         val o = wl_o[head]

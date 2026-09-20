@@ -26,8 +26,14 @@
 # through the .init_array root). Both linked images still run (exit 42).
 #
 # Anything the mark pass does not model is a named error, never a silent keep
-# or drop: per-FDE .eh_frame liveness, SHT_GROUP (COMDAT) membership and
-# SHF_LINK_ORDER dependencies.
+# or drop: SHT_GROUP (COMDAT) membership and SHF_LINK_ORDER dependencies.
+#
+# `.eh_frame` is the ONE case that moved from "named error" to "unconditional
+# root" (2026-09-19). Refusing it was correct and unusable: no real compiler
+# output links without unwind tables. Retaining the whole section is the safe
+# subset of lld's per-FDE liveness -- larger image, never wrong -- and the
+# divergence is measured in
+# doc/08_tracking/bug/elf_relro_gc_parity_advisories_2026-09-19.md.
 #
 # @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
 
@@ -165,18 +171,26 @@ describe "elf_link - --gc-sections (mark from roots)":
         expect(run_image(n, "/tmp/elf_gc_sections_spec_nogc")).to_equal(42)
         expect(g.len() < n.len()).to_equal(true)
 
-    it "an allocatable .eh_frame is a named error under gc_sections (no per-FDE liveness)":
+    it "an allocatable .eh_frame is RETAINED under gc_sections, not refused":
+        # Was: a named error, because there is no per-FDE liveness. Refusing
+        # was correct but made --gc-sections unusable on any real compiler
+        # output, and blocked every internal-engine link once the platform
+        # flags were folded into that route. `.eh_frame` is now an
+        # unconditional root (elf_gc_is_root): the safe SUBSET of lld's
+        # optimisation, since being a root keeps every function an FDE
+        # describes live and so leaves no dangling pc-begin relocation.
+        # Measured divergence (+32 B on the fixture, one dead function lld
+        # collects and we keep):
+        # doc/08_tracking/bug/elf_relro_gc_parity_advisories_2026-09-19.md
         val objs = [load_path("{GLIBC}/crt1.o"), load_path("{GLIBC}/crti.o"),
             load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
         val r = elf_link(ElfLinkRequest(objects: objs, archives: [],
             shared: [file_read_bytes("{GLIBC}/libc.so.6")], entry: "_start",
             target: RelocArch.AArch64, mode: ELF_LINK_DYNAMIC_PIE,
             interp: "/lib/ld-linux-aarch64.so.1", gc_sections: true))
-        expect(r.is_err()).to_equal(true)
-        expect(r.unwrap_err().contains(".eh_frame")).to_equal(true)
-        expect(r.unwrap_err().contains("gc_sections")).to_equal(true)
+        expect(r.is_ok()).to_equal(true)
 
-    it "the same inputs link without gc_sections (the reject is the gc pass, not the inputs)":
+    it "the same inputs link without gc_sections too":
         val objs = [load_path("{GLIBC}/crt1.o"), load_path("{GLIBC}/crti.o"),
             load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
         val r = elf_link(ElfLinkRequest(objects: objs, archives: [],

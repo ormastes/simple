@@ -287,3 +287,94 @@ Headline numbers (`elf_link` only, aarch64 seed interpreter): synthetic
 0.39 s -> 0.22 s, all outputs byte-identical and still running (exit 42).
 Harness: `sh scripts/perf/bench-elf-link.shs`. Full record:
 `doc/10_metrics/compiler/linker/internal_elf_engine_perf_2026-09-19.md`.
+
+## internal:elf route now carries the native_all table (2026-09-19)
+
+`SIMPLE_LINKER=internal` routes `link_native_unix` to the pure-Simple ELF
+engine. Until this date that branch called `internal_link_native` with no
+archives, no libraries and no roots, while the external argv path a few lines
+below applies `native_all_gnu_support_args` and `config.libraries` — so the
+whole support table was dropped on the internal route.
+
+Traps worth knowing:
+
+- `-u rt_vulkan_provider_is_available` is NOT decoration. The symbol is
+  defined in exactly one member of `libsimple_native_all.a` and referenced by
+  no other member, so without a forced-undefined root the archive fixpoint
+  drops that member. `ElfLinkRequest.roots` is that root list; it seeds
+  `elf_archive_closure` and is a `--gc-sections` liveness root, and a root
+  nothing defines is `Err("root symbol not defined: …")`.
+- `retained_symbols` does NOT fire on a bootstrap link — it comes only from
+  `SIMPLE_LINK_OBJECTS` (`llvm_native_link_stage4_projection.spl:40`), which
+  no bootstrap script sets. Do not spend time on it.
+- Removing a field from `internal_unsupported_config_field` is only legitimate
+  together with the code that honours it (design D4: reject, never mask).
+  `libraries`/`library_paths`/`runtime_path`/`runtime_bundle` left the list
+  when `internal_link_plan` started honouring them; `extra_flags`,
+  `retained_symbols`, `strip_output`, `debug` stay.
+- `internal_link_plan` FOLDS the external arm's own arg lists
+  (`native_runtime_archive_link_args`, `native_link_std_lib_args`,
+  `native_all_gnu_support_args`, `config.libraries`) through one translator.
+  Do not re-derive what they contain: four separate "matches the external
+  path" claims on this route were false because it did, the worst being an
+  empty runtime directory linking successfully while the external arm emits
+  `-L <dir> -lsimple_compiler` and lld fails "unable to find library".
+- BOTH entry points must go through `internal_link_plan`: `link_native_unix`'s
+  internal arm AND `link_engine_external.link_request_internal`. Calling
+  `internal_link_native` with its defaults drops every support table on that
+  route while the docstring still claims one shared implementation.
+- `--as-needed` is the AND over ALL occurrences of a name, not
+  first-occurrence-wins: ld records DT_NEEDED when any occurrence is outside an
+  as-needed region, in either order.
+- `-l` search order is crt.lib_dirs then config.library_paths, matching the
+  external arm's `-L` order. ld takes the first directory with a match, so
+  reversing them can select a different file for the same `-l`.
+- `native_direct_platform_flags` is folded too, and is the one producer whose
+  absence was visible in the SHIPPED BINARY (no DT_BIND_NOW, no section GC).
+  `--gc-sections` -> `gc_sections`, `-z now` -> `bind_now` (DT_BIND_NOW +
+  DF_1_NOW), `-z relro` is the existing PT_GNU_RELRO path. Three flags the
+  engine cannot produce (`--eh-frame-hdr`, `--build-id`, `--hash-style=gnu`)
+  are SUBTRACTED from the one shared list via
+  `INTERNAL_ELF_UNPRODUCIBLE_FLAGS`, never given the internal route a list of
+  its own -- a separate list would silently withhold every future flag,
+  whereas subtraction means a new flag still arrives and is refused by name.
+- `--gc-sections` on this engine is a DATA-ONLY collector on real input.
+  `.eh_frame` is an unconditional GC root and a root's relocations are
+  followed; with clang's default `-fasynchronous-unwind-tables` every function
+  has an FDE, so every function stays live. Correct and safe (no dangling FDE
+  possible), but do not tell anyone dead code is removed — it is not. Recovering
+  code GC needs real per-FDE liveness. The `SHT_X86_64_UNWIND` root arm is
+  untested on this aarch64 host.
+- `-l` resolution follows ld's search rule (`lib<name>.so`, then `lib<name>.a`,
+  then error) with ONE stated limit: a GROUP linker script resolves to its
+  first readable ELF member, and a `-l<name>` member inside a script is not
+  re-resolved (the `-lgcc_s` gap in the tracking record). Details: `lib<name>.so`, then `lib<name>.a`,
+  then error. Never guess a versioned file — a longest/lexical heuristic picks
+  `libssl.so.1.1` over `libssl.so.3`, and the resulting DT_NEEDED still looks
+  right because that name comes from the DSO's own SONAME. On a usr-merged
+  glibc, `libc.so`/`libm.so` are GROUP linker SCRIPTS (followed, with
+  absolute member paths), and `libpthread.a`/`libdl.a` are empty stub ARCHIVES
+  with no `.so` at all — route those to the archive fixpoint, not the DSO list.
+  Dedupe shared objects on BASENAME: `-lc` resolves to `/lib/<triple>/libc.so.6`
+  while the CRT probe found `/usr/lib/<triple>/libc.so.6` — same file, two paths.
+- `native_link_std_lib_args` and `-rpath <runtime_dir>` were the other two
+  silent drops on the internal route. `-rpath` is now `ElfLinkRequest.runpath`
+  -> DT_RUNPATH (dynamic modes only; a runpath on a static link is an Err),
+  and `--as-needed` is `shared_as_needed`, a per-library flag that withholds
+  DT_NEEDED until an import actually binds. Default false everywhere =
+  `--no-as-needed` = the pre-existing behaviour.
+- `ld.lld` has no built-in library search path, so `-l` resolution uses
+  `crt.lib_dirs` (crt dir + gcc lib dirs) — the same set the external direct-ld
+  arm emits as `-L`. `libstdc++` lives in the gcc dir, not in
+  `/usr/lib/<triple>`.
+- The knob cannot complete a RESUME yet: `manifest-verify.shs:665-701`
+  rebuilds the Stage 3 hash from a hard-coded env list with no `SIMPLE_LINKER`
+  (nor `stage3_mc_env`/`cold_init_env`), so a knob-ON resume dies at
+  `resume-stage3-from-admitted.sh:915`. Fails closed; fix all three together.
+- Still blocked on COMDAT dedup, TLS and multiple-definition handling once the
+  373 MB aggregate archive is actually fed in:
+  `doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md`.
+
+Stage 3 opts in with `SIMPLE_STAGE3_LINKER=internal`
+(`bootstrap_stage3_linker_env`, `scripts/check/lib/bootstrap-stage3/authority.shs`);
+default off, and Stage 2 stays on the external linker.

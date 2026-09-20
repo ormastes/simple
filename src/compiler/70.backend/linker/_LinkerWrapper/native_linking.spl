@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_read_nullable, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, file_read_nullable, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_read, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, list_dir}
 use std.string_core.{text_to_bytes}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
@@ -304,10 +304,20 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         val unsupported_field = internal_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
+        # The runtime archives and the native_all support table the EXTERNAL
+        # argv path applies further down (native_all_gnu_support_args, and the
+        # config.libraries loop after it). The internal branch used to pass
+        # neither, which dropped `-u rt_vulkan_provider_is_available` and the
+        # eight `-l`s silently -- the exact masking design D4 forbids.
+        val planned = internal_link_plan(object_files, config, os)
+        if planned.is_err():
+            return Err(planned.unwrap_err())
+        val plan = planned.unwrap()
         if trace:
-            print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine"
-        return internal_link_native_libs(os, arch, config.pie, object_files, output,
-            config.libraries, config.library_paths)
+            print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine ({plan.archives.len()} archive(s), {plan.libraries.len()} library(ies), {plan.roots.len()} root(s))"
+        return internal_link_native(os, arch, config.pie, object_files, output,
+            plan.archives, plan.libraries, plan.roots, plan.lib_dirs,
+            plan.as_needed, plan.runpath, plan.gc_sections, plan.bind_now)
 
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
@@ -521,23 +531,26 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
 #
-# `libraries` and `library_paths` were on this list until lane F1 and are not
-# any more: they are HONOURED now (internal_resolve_library below). Linking the
-# real `simple` binary needs library search names -- its own DT_NEEDED set is
-# libm/libgcc_s/libc -- so rejecting them made the self-host link unreachable
-# by construction rather than by a missing capability.
-# `runtime_path == "none"` is NOT a reject: it is the documented sentinel for
-# "skip the runtime library entirely, the LLVM pipeline supplies the runtime
-# objects directly" (see link_native_unix's runtime_dir handling above), and it
-# is the literal value the real bootstrap stage link passes
-# (llvm_native_link_orchestrator's NativeLinkConfig has `runtime_path: "none"`).
-# There is nothing for the engine to honour, so rejecting it was a false
-# reject that stopped the internal route at the one call site that matters.
+# `libraries`, `library_paths`, `runtime_path` and `runtime_bundle` used to be
+# listed here and are NOT any more -- internal_link_plan below now honours all
+# four (libraries resolve to real shared objects through internal_resolve_library,
+# library_paths join the search path, the runtime bundle selects the static
+# archives). Removing a field from this list is only legitimate together with
+# the code that honours it; the rule is "reject what you cannot do", not
+# "reject whatever is inconvenient".
+#
+# Two reasons the list had to shrink, kept here because both were real bugs:
+#   * linking the real `simple` binary needs library search names -- its own
+#     DT_NEEDED set is libm/libgcc_s/libc -- so rejecting `libraries` made the
+#     self-host link unreachable by construction, not by a missing capability;
+#   * `runtime_path == "none"` is the documented sentinel for "skip the runtime
+#     library entirely, the LLVM pipeline supplies the runtime objects
+#     directly" (see link_native_unix's runtime_dir handling above, and
+#     internal_link_plan's own `!= "none"` guard). It is the literal value the
+#     real bootstrap stage link passes (llvm_native_link_orchestrator's
+#     NativeLinkConfig has `runtime_path: "none"`), so rejecting it was a false
+#     reject that stopped the internal route at the one call site that matters.
 fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
-    if config.runtime_path != "" and config.runtime_path != "none":
-        return "runtime_path"
-    if config.runtime_bundle != "":
-        return "runtime_bundle"
     if config.extra_flags.len() > 0:
         return "extra_flags"
     if config.retained_symbols.len() > 0:
@@ -784,6 +797,195 @@ fn internal_resolve_library_depth(name: text, dirs: [text], depth: i64) -> Resul
             return Ok([a])
     Err("internal engine: unresolved library '{name}' (searched {dirs.join(\", \")})")
 
+struct InternalLinkPlan:
+    """Everything the internal ELF engine needs beyond the object files, in the
+    same shape the external argv path builds it."""
+    archives: [text]    # static archives: the selected runtime bundle
+    libraries: [text]   # `-l` names: std libs, the native_all table, config.libraries
+    as_needed: [bool]   # parallel to libraries: inside an `--as-needed` region?
+    roots: [text]       # `-u` symbols from the native_all table
+    lib_dirs: [text]    # extra search dirs: config.library_paths (`-L`)
+    runpath: text       # `-rpath <runtime_dir>` -> DT_RUNPATH
+    gc_sections: bool = false   # `--gc-sections`
+    bind_now: bool = false      # `-z now` -> DT_BIND_NOW + DF_1_NOW
+
+pub fn internal_absorb_link_args(plan: InternalLinkPlan, args: [text],
+        origin: text) -> Result<InternalLinkPlan, text>:
+    """Fold one external-path arg list into the plan, or name the first entry
+    the internal engine cannot express.
+
+    Every arg list on the internal route is folded through here --
+    native_runtime_archive_link_args, native_link_std_lib_args,
+    native_all_gnu_support_args and config.libraries -- and both callers of
+    the route (the only two callers of internal_link_native) reach it through
+    `internal_link_plan` (`link_native_unix`'s internal arm and
+    `link_engine_external.link_request_internal`). So the tables cannot drift
+    apart or be dropped independently; dropping the std-lib list silently is
+    the same defect class this route already had for the native_all table,
+    and calling `internal_link_native` WITHOUT the plan reintroduces it."""
+    var libraries = plan.libraries
+    var as_needed = plan.as_needed
+    var roots = plan.roots
+    var archives = plan.archives
+    var lib_dirs = plan.lib_dirs
+    var runpath = plan.runpath
+    var gc_sections = plan.gc_sections
+    var bind_now = plan.bind_now
+    var region_as_needed = false
+    var i: i64 = 0
+    while i < args.len():
+        val tok = args[i]
+        if tok == "-L":
+            # First occurrence wins, which is ld's effective search order; a
+            # repeated -L would change nothing and only slow resolution.
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-L' with no directory after it")
+            if not lib_dirs.contains(args[i + 1]):
+                lib_dirs = lib_dirs.push(args[i + 1])
+            i = i + 2
+            continue
+        if tok == "--gc-sections":
+            gc_sections = true
+            i = i + 1
+            continue
+        if tok == "-z":
+            # `-z relro` is already how this engine lays out an image: the
+            # PT_GNU_RELRO segment is emitted whenever an input carries the
+            # `.relro_padding` section (elf_exec_writer.spl, lane C1), so the
+            # flag asks for behaviour that is on. `-z now` sets DT_BIND_NOW.
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-z' with no keyword after it")
+            val keyword = args[i + 1]
+            if keyword == "now":
+                bind_now = true
+            elif keyword != "relro":
+                return Err("internal engine: unsupported {origin} entry '-z {keyword}' (internal:elf implements only '-z now' and '-z relro')")
+            i = i + 2
+            continue
+        if tok == "-rpath":
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-rpath' with no directory after it")
+            runpath = args[i + 1]
+            i = i + 2
+            continue
+        if not tok.starts_with("-"):
+            # A bare path is an archive input. The external arm repeats
+            # archives[0] after the pair (native_runtime_archive_link_args'
+            # rescan_core_pair) because ld resolves archives in command order;
+            # this engine's archive fixpoint iterates to closure over all
+            # archives at once, so the repeat is SUBSUMED, not dropped -- and
+            # re-reading a 373 MB archive would cost real time. Deduped here
+            # for that reason, which is a deliberate, stated divergence.
+            if not archives.contains(tok):
+                archives = archives.push(tok)
+            i = i + 1
+            continue
+        if tok == "--as-needed":
+            region_as_needed = true
+            i = i + 1
+            continue
+        if tok == "--no-as-needed":
+            region_as_needed = false
+            i = i + 1
+            continue
+        if tok == "-u":
+            if i + 1 >= args.len():
+                return Err("internal engine: {origin} '-u' with no symbol after it")
+            roots = roots.push(args[i + 1])
+            i = i + 2
+            continue
+        if tok.starts_with("-l") and tok.len() > 2:
+            val lib_name = tok.substring(2, tok.len())
+            # ld records DT_NEEDED when ANY occurrence of a name is outside an
+            # --as-needed region, in either order, so the flag is the AND over
+            # occurrences -- NOT first-occurrence-wins, which made the answer
+            # depend on the order the tables happen to be folded in.
+            val existing = libraries.index_of(lib_name)
+            if existing >= 0:
+                as_needed[existing] = as_needed[existing] and region_as_needed
+            else:
+                libraries = libraries.push(lib_name)
+                as_needed = as_needed.push(region_as_needed)
+            i = i + 1
+            continue
+        return Err("internal engine: unsupported {origin} entry '{tok}' (internal:elf honours '-u <sym>', '-l<name>', '-L <dir>', '-rpath <dir>', '-z now', '-z relro', '--gc-sections', '--as-needed', '--no-as-needed' and bare archive paths; everything else is refused rather than ignored)")
+    Ok(InternalLinkPlan(archives: archives, libraries: libraries,
+        as_needed: as_needed, roots: roots, lib_dirs: lib_dirs,
+        runpath: runpath, gc_sections: gc_sections, bind_now: bind_now))
+
+pub fn internal_link_plan(object_files: [text], config: NativeLinkConfig,
+        os: text) -> Result<InternalLinkPlan, text>:
+    """Assemble the internal engine's inputs by folding the SAME arg lists
+    link_native_unix's external arm hands to ld -- not by reimplementing what
+    they contain.
+
+    That distinction is the point. Four separate "matches the external path"
+    claims on this route turned out to be false because the internal branch
+    re-derived a subset by hand; the worst was the runtime provider, where the
+    external arm emits `-L <dir> -lsimple_compiler` (and lld then fails with
+    "unable to find library -lsimple_compiler") while this route found zero
+    archives and linked successfully. The three producers below are the exact
+    functions the external arm calls, in its order; anything in their output
+    that internal:elf cannot express is a named Err from
+    internal_absorb_link_args, never a drop.
+
+    One deliberate divergence, stated in internal_absorb_link_args: the
+    external arm's repeat of archives[0] is subsumed by the archive fixpoint."""
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    var lib_dirs: [text] = []
+    for dir in config.library_paths:
+        lib_dirs = lib_dirs.push(dir)
+    var plan = InternalLinkPlan(archives: [], libraries: [], as_needed: [],
+        roots: [], lib_dirs: lib_dirs, runpath: "")
+    # The hardening/optimisation flags the external direct-ld arm passes. This
+    # producer was the LAST one still unfolded, and unlike the others its
+    # absence was visible in the shipped binary: the internal route emitted no
+    # DT_BIND_NOW and ran no section GC while the external route hardened the
+    # same inputs. `--icf=all` is keyed on the resolved linker being mold/lld,
+    # so the internal engine does not receive it.
+    plan = internal_absorb_link_args(
+        plan, native_direct_platform_flags(os, "internal", config.strip_output),
+        "direct platform flags")?
+    var runtime_archives: [text] = []
+    if runtime_dir != "" and runtime_dir != "none":
+        runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+        val selection_error = native_runtime_provider_selection_error_for(
+            runtime_dir, config.runtime_bundle,
+            file_exists(runtime_dir + "/libsimple_compiler.a"),
+            file_exists(runtime_dir + "/libsimple_compiler_backfill.a"),
+            file_exists(runtime_dir + "/libsimple_native_all.a"))
+        if selection_error != "":
+            return Err("internal engine: {selection_error}")
+        # Produces the archive paths, the rescan repeat, and either
+        # `-rpath <dir>` or the `-L <dir> -lsimple_compiler` fallback that
+        # makes an empty runtime directory a hard error rather than a silent
+        # zero-archive success.
+        plan = internal_absorb_link_args(
+            plan,
+            native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, false, true, true),
+            "runtime provider arguments")?
+    var support_inputs = object_files
+    for archive in plan.archives:
+        support_inputs = support_inputs.push(archive)
+    # Order mirrors link_native_unix's argv: std libs, then the native_all
+    # support table, then the caller's own libraries.
+    plan = internal_absorb_link_args(plan, native_link_std_lib_args(os, "ld"),
+        "standard-library table")?
+    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    plan = internal_absorb_link_args(
+        plan, native_all_gnu_support_args(support_inputs, os, brew_prefix),
+        "native_all support table")?
+    # config.libraries is a plain `-l` list with no --as-needed region, folded
+    # through the same translator so the AND-over-occurrences rule applies to
+    # it too rather than being re-implemented here.
+    var config_args: [text] = []
+    for lib in config.libraries:
+        config_args = config_args.push("-l" + lib)
+    internal_absorb_link_args(plan, config_args, "config.libraries")
+
 fn internal_link_native_read_i64(path: text) -> [i64]:
     """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
     val raw = file_read_bytes(path)
@@ -794,13 +996,10 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
         i = i + 1
     out
 
-fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text) -> Result:
-    """internal_link_native_libs with no library search names (kept so callers
-    that have no `libraries`/`library_paths` to pass read unchanged)."""
-    internal_link_native_libs(os, arch, pie, object_files, output, [], [])
-
-fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [text], output: text,
-        libraries: [text], library_paths: [text]) -> Result:
+fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text,
+        extra_archives: [text] = [], libraries: [text] = [], roots: [text] = [],
+        extra_lib_dirs: [text] = [], as_needed: [bool] = [], runpath: text = "",
+        gc_sections: bool = false, bind_now: bool = false) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -846,27 +1045,60 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     val nonshared = "{libdir}/libc_nonshared.a"
     if file_exists(nonshared):
         archives = archives.push(internal_link_native_read_i64(nonshared))
-    # Library SEARCH names (NativeLinkConfig.libraries / library_paths), lane
-    # F1. Resolved in caller -L order, then the crt libdir -- that trailing
-    # default is an ld.bfd-style implicit search directory that ld.lld does
-    # NOT have (see internal_library_search_dirs) -- and then
-    # classified by what the file actually IS, not by its extension: ar magic
-    # goes to the archive fixpoint, ET_DYN to the shared-input set. An input
-    # that is neither is a named error, never a silently dropped -l.
+    for archive in extra_archives:
+        if not file_exists(archive):
+            return Err("internal engine: archive {archive} cannot be read")
+        archives = archives.push(internal_link_native_read_i64(archive))
+    # `-l` search path. crt.lib_dirs (the crt directory plus the gcc lib dirs,
+    # lane G1) comes first, in the SAME ORDER the external direct-ld arm emits
+    # its `-L` flags; ld.lld has no built-in search path, which is why
+    # crt.lib_dirs is what makes `-lstdc++` resolvable at all. Then the
+    # caller's `-L` directories and the trailing crt libdir, both from lane
+    # F1's internal_library_search_dirs -- that trailing default is an
+    # ld.bfd-style implicit search directory ld.lld does NOT have, and is
+    # stated there rather than described as plain ld parity. Order is not
+    # cosmetic: ld takes the first directory that has a match.
+    var search_dirs: [text] = []
+    for dir in crt.lib_dirs:
+        if not search_dirs.contains(dir):
+            search_dirs = search_dirs.push(dir)
+    for dir in internal_library_search_dirs(extra_lib_dirs, libdir):
+        if not search_dirs.contains(dir):
+            search_dirs = search_dirs.push(dir)
+    # Every `-l` is resolved the way ld resolves it (lane F1
+    # internal_resolve_library: `lib<name>.so` before `lib<name>.a`, a `.so`
+    # that is a GNU ld script followed to its GROUP/AS_NEEDED members, the
+    # `-l:<file>` literal form, recursion depth-bounded) and then classified by
+    # what the file actually IS, not by its extension: ar magic goes to the
+    # archive fixpoint, ELF to the shared-input set. An input that is neither
+    # is a named error, never a silently dropped `-l`.
+    #
     # Shared inputs are de-duplicated by DT_SONAME (internal_shared_dedup_key),
     # which is the key ld itself uses. Never by path: the implicit libc is
     # "{libdir}/libc.so.6" while libc.so's GROUP() names
     # "/lib/<triple>/libc.so.6" -- textually different, the same file, and
     # `libraries=["c"]` recorded TWO DT_NEEDED libc.so.6 entries because of it
-    # (this engine writes one per shared input) where ld.lld emits one.
-    # Never by content either: two DIFFERENT files can share a SONAME, and
-    # keying on the digest then recorded two entries where ld records one.
-    # Both measured on this host before their respective fixes.
-    var extra_shared: [[u8]] = []
-    var shared_keys: [text] = []
-    for libname in libraries:
-        val resolved = internal_resolve_library(libname,
-            internal_library_search_dirs(library_paths, libdir))
+    # (this engine writes one per shared input) where ld.lld emits one. Never
+    # by basename either, which is only USUALLY the SONAME: two different
+    # libraries reached through two search directories can share a file name
+    # (test/fixtures/linker/elf/soname_alias) and a basename key collapses
+    # them. Never by content: two DIFFERENT files can share a SONAME, and a
+    # digest key then recorded two entries where ld records one. All three
+    # measured on this host before their respective fixes.
+    #
+    # `--as-needed` (lane G1) rides alongside as a parallel array. A name that
+    # resolves to a file already seen ANDs the two flags, for the same reason
+    # internal_absorb_link_args ANDs across occurrences of one name: ld records
+    # DT_NEEDED when ANY occurrence is outside an --as-needed region.
+    var shared_objects: [[u8]] = []
+    var shared_as_needed: [bool] = []
+    var seen_shared: [text] = []
+    var lib_i: i64 = 0
+    while lib_i < libraries.len():
+        val libname = libraries[lib_i]
+        val want_as_needed = lib_i < as_needed.len() and as_needed[lib_i]
+        lib_i = lib_i + 1
+        val resolved = internal_resolve_library(libname, search_dirs)
         if resolved.is_err():
             return Err(resolved.unwrap_err())
         for path in resolved.unwrap():
@@ -875,9 +1107,13 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
                 archives = archives.push(internal_link_native_read_i64(path))
             elif raw.len() >= 4 and raw[0] == 0x7f and raw[1] == 0x45 and raw[2] == 0x4c and raw[3] == 0x46:
                 val key = internal_shared_dedup_key(path, raw)
-                if not shared_keys.contains(key):
-                    shared_keys = shared_keys.push(key)
-                    extra_shared = extra_shared.push(raw)
+                val seen_at = seen_shared.index_of(key)
+                if seen_at >= 0:
+                    shared_as_needed[seen_at] = shared_as_needed[seen_at] and want_as_needed
+                else:
+                    seen_shared = seen_shared.push(key)
+                    shared_objects = shared_objects.push(raw)
+                    shared_as_needed = shared_as_needed.push(want_as_needed)
             else:
                 return Err("internal engine: library '{libname}' resolved to {path}, which is neither an ar archive nor an ELF file")
     var target_arch = RelocArch.X86_64
@@ -886,28 +1122,35 @@ fn internal_link_native_libs(os: text, arch: text, pie: bool, object_files: [tex
     var mode = ELF_LINK_DYNAMIC_EXEC
     if pie:
         mode = ELF_LINK_DYNAMIC_PIE
-    # ld's order: the `-l` libraries FIRST, the implicit libc LAST. DT_NEEDED
+    # ld's order: the `-l` libraries FIRST, the IMPLICIT libc LAST. DT_NEEDED
     # order is load-bearing, not cosmetic -- the dynamic loader resolves a
     # symbol from the first DT_NEEDED entry that defines it -- so seeding this
-    # list with libc silently beat any `-l` library that shadows a libc
-    # symbol. Measured before the fix: a library whose atoi() returns 42 lost
-    # to libc's and the program exited 1, where ld.lld with the equivalent
-    # argv exits 42. The old parity claim compared the DT_NEEDED SET, which is
-    # identical in both orders, and therefore could not see this.
+    # list with libc silently beat any `-l` library that shadows a libc symbol.
+    # The old parity claim compared the DT_NEEDED SET, which is identical in
+    # both orders, and therefore could not see this.
     #
-    # De-duplication keeps the FIRST occurrence and keys on DT_SONAME, which
-    # is what ld keys on (internal_shared_dedup_key). An explicit `-lc` keeps
-    # its own position in the caller's order and it is the implicit copy that
-    # is dropped, so `libraries=["c","m"]` yields libc,libm exactly as ld.lld
-    # does rather than libm,libc.
-    var shared_inputs: [[u8]] = []
-    for so in extra_shared:
-        shared_inputs = shared_inputs.push(so)
+    # An EXPLICIT `-lc` keeps its own position in the caller's order and it is
+    # the implicit copy that is dropped, so `libraries=["c","m"]` yields
+    # libc,libm exactly as ld.lld does rather than libm,libc. Since lane G1
+    # folds native_link_std_lib_args, which on linux/ld begins with `-lc`, the
+    # default route now takes that branch: libc lands at DT_NEEDED position 0
+    # because the external argv puts it there, which is what ld.lld measurably
+    # does with the same argv (see native_linking_internal_spec).
+    #
+    # Whichever branch it arrives by, libc's DT_NEEDED is unconditional: the
+    # engine always needs it, so an `--as-needed -lc` must not be able to
+    # withhold it.
     val libc_raw = file_read_bytes(libc)
-    if not shared_keys.contains(internal_shared_dedup_key(libc, libc_raw)):
-        shared_inputs = shared_inputs.push(libc_raw)
-    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_inputs,
-        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
+    val libc_at = seen_shared.index_of(internal_shared_dedup_key(libc, libc_raw))
+    if libc_at >= 0:
+        shared_as_needed[libc_at] = false
+    else:
+        shared_objects = shared_objects.push(libc_raw)
+        shared_as_needed = shared_as_needed.push(false)
+    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared_objects,
+        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
+        roots: roots, runpath: runpath, shared_as_needed: shared_as_needed,
+        gc_sections: gc_sections, bind_now: bind_now))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
     # `Array + ByteArray` repacks the image to [u8] in one runtime copy; the
@@ -1422,6 +1665,29 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
     # Explicit, not a bare tail expression — see native_runtime_provider_selection_error_for.
     return ""
 
+# Flags the linux/freebsd line below asks for that internal:elf CANNOT
+# produce. Each one is a real engine gap with a record, not a preference:
+#   --eh-frame-hdr   no .eh_frame_hdr / PT_GNU_EH_FRAME
+#                    (elf_exec_writer.spl: "Not produced: PT_TLS, PT_GNU_EH_FRAME")
+#   --build-id       no .note.gnu.build-id
+#   --hash-style=gnu the engine emits BOTH .hash and .gnu.hash; gnu-only is
+#                    a different output, so claiming it would be a lie
+# doc/08_tracking/bug/internal_elf_route_blocked_on_comdat_tls_muldefs_2026-09-19.md
+#
+# They are SUBTRACTED from the one shared list rather than the internal route
+# getting a hand-written list of its own. That matters: a flag added to the
+# shared list below still reaches the internal route, where
+# internal_absorb_link_args refuses it by name if the engine cannot honour it.
+# A separate list would silently withhold every future flag instead.
+pub val INTERNAL_ELF_UNPRODUCIBLE_FLAGS: [text] = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu"]
+
+fn native_flags_without(flags: [text], excluded: [text]) -> [text]:
+    var kept: [text] = []
+    for flag in flags:
+        if not excluded.contains(flag):
+            kept = kept.push(flag)
+    kept
+
 pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
         var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
@@ -1429,6 +1695,8 @@ pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: b
         if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
         elif linker_type == "gold": flags.push("--icf=safe")
         if strip_output: flags.push("--strip-all")
+        if linker_type == "internal":
+            return native_flags_without(flags, INTERNAL_ELF_UNPRODUCIBLE_FLAGS)
         return flags
     if os == "macos" or os == "darwin":
         var flags = ["-dead_strip"]

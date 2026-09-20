@@ -587,6 +587,40 @@ bootstrap_stage3_diagnostic_env() {
     done
 }
 
+# Opt-in self-hosted link for the Stage 3 recompile (2026-09-19, lane G1).
+#
+# `SIMPLE_STAGE3_LINKER=internal` emits `SIMPLE_LINKER=internal`, which routes
+# the Stage 3 child's final link through the pure-Simple internal ELF engine
+# (native_linking.link_native_unix -> internal_link_native) instead of
+# ld.lld/mold.  Exactly the shape of bootstrap_stage3_diagnostic_env above and
+# of stage3_mc_env in the two bootstrap scripts:
+#
+#   * the Stage 3 child runs under `env -i`, so an ambient `SIMPLE_LINKER`
+#     export never reaches it -- the variable must be threaded explicitly;
+#   * the value is computed ONCE and word-split into BOTH the Stage 3 args
+#     hash and the transcribed invocation, so the two can never disagree and
+#     the knob is recorded in the Stage 3 provenance receipt (the command
+#     transcript records the env list verbatim, and the value folds into
+#     stage3_build_args_sha256 / BSTAGE3_STAGE3_ARGS_SHA256) whenever it is on;
+#   * unset => empty => both uses expand to nothing and reproduce the pinned
+#     argv byte-for-byte, so every existing Stage 2 admission receipt and
+#     Stage 3 args hash is unchanged.  DEFAULT OFF is the whole point.
+#
+# Stage 2 is deliberately NOT touched: its env feeds stage2_build_args_sha256,
+# which resume-stage3-from-admitted.sh compares against the recorded admission
+# ("build_args_sha256 mismatch"), so a Stage 2 env change would invalidate
+# every existing admission.  Decision C, doc: stage 2 external, stage 3 self.
+bootstrap_stage3_linker_env() {
+    case "${SIMPLE_STAGE3_LINKER-}" in
+        '') ;;
+        internal) printf 'SIMPLE_LINKER=internal\n' ;;
+        *)
+            echo "bootstrap-stage3-error: SIMPLE_STAGE3_LINKER must be unset or exactly 'internal'" >&2
+            return 1
+            ;;
+    esac
+}
+
 # Return one canonical absolute path and reject a symlinked leaf.  pwd -P
 # resolves every parent component, so comparing a recorded path with this value
 # also rejects aliases through symlinked directories.

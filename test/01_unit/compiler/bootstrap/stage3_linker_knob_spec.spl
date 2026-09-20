@@ -1,0 +1,118 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# SIMPLE_STAGE3_LINKER=internal -- the opt-in knob that routes the Stage 3
+# link through the pure-Simple internal ELF engine (Fable decision C,
+# 2026-09-19: Stage 2 stays on the external linker, Stage 3 links itself).
+#
+# The Stage 3 child runs under `env -i`
+# (bootstrap-stage3/command-snapshot.shs bootstrap_stage3_run_transcribed), so
+# an ambient `SIMPLE_LINKER` export NEVER reaches it -- the variable has to be
+# threaded explicitly, exactly like `stage3_mc_env`
+# (SIMPLE_STAGE3_MISSION_CRITICAL) and `stage3_cold_init_env`. This spec pins
+# the three properties that make that threading safe:
+#
+#   1. the helper itself: unset -> empty (DEFAULT OFF), `internal` ->
+#      `SIMPLE_LINKER=internal`, anything else -> fail closed, never a silent
+#      "no knob" that would look like a plain external-linker run;
+#   2. both bootstrap scripts expand `${stage3_linker_env}` in BOTH Stage 3
+#      sites -- the args-hash computation and the transcribed invocation --
+#      because a value in one and not the other would make the recorded
+#      Stage 3 args hash disagree with the argv actually executed, and because
+#      the transcript IS where the knob gets recorded in the Stage 3
+#      provenance receipt when it is on;
+# NOT AN EXECUTION PROOF, deliberately. The threading rows below assert
+# OCCURRENCE COUNTS in the script text; they do not run a bootstrap. A real
+# Stage 3 build is hours and needs a clean lane, so the execution evidence for
+# this knob lives outside the suite: with the knob set, `SIMPLE_LINKER=
+# internal` appears in the transcribed invocation's env vector BEFORE the `--`
+# separator (i.e. as an assignment for the child, not an argv token), and with
+# it unset it does not appear at all. Do not read a green run here as proof
+# that a Stage 3 link actually used the internal engine.
+#
+#   3. Stage 2 is untouched. Stage 2's env feeds `stage2_build_args_sha256`,
+#      which resume-stage3-from-admitted.sh compares against the recorded
+#      admission (`bootstrap-stage3-admission-mismatch: build_args_sha256`);
+#      adding anything there would invalidate every existing admission
+#      receipt. Unset therefore has to reproduce the pinned argv byte-for-byte.
+#
+# @cover scripts/check/lib/bootstrap-stage3/authority.shs
+# @cover scripts/bootstrap/bootstrap-from-scratch.sh
+# @cover scripts/bootstrap/resume-stage3-from-admitted.sh
+
+use std.spec.step
+use std.spec.*
+
+use std.io_runtime.{shell, file_read}
+
+val AUTHORITY: text = "scripts/check/lib/bootstrap-stage3/authority.shs"
+val SCRATCH: text = "scripts/bootstrap/bootstrap-from-scratch.sh"
+val RESUME: text = "scripts/bootstrap/resume-stage3-from-admitted.sh"
+
+fn run_knob(assignment: text) -> ShellResult:
+    """Invoke the real helper out of the real authority library, with the knob
+    set exactly as a caller would set it (empty `assignment` = unset)."""
+    shell("{assignment} sh -c '. {AUTHORITY}; bootstrap_stage3_linker_env'")
+
+fn occurrences(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+# `{...}` is Simple string interpolation, so the shell expansion this spec is
+# looking for has to escape its opening brace.
+fn expansion() -> text:
+    "$" + "\{stage3_linker_env}"
+
+describe "SIMPLE_STAGE3_LINKER knob - bootstrap_stage3_linker_env":
+    it "defaults OFF: unset emits nothing and succeeds":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("No SIMPLE_STAGE3_LINKER -> empty env fragment, exit 0, so every existing Stage 3 args hash is byte-identical")
+        val result = run_knob("")
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout.trim()).to_equal("")
+
+    it "maps internal to exactly SIMPLE_LINKER=internal":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("SIMPLE_STAGE3_LINKER=internal -> the one env assignment the Stage 3 child needs to route its link internally")
+        val result = run_knob("SIMPLE_STAGE3_LINKER=internal")
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout.trim()).to_equal("SIMPLE_LINKER=internal")
+
+    it "fails closed on any other value instead of silently linking externally":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("SIMPLE_STAGE3_LINKER=lld -> non-zero exit and a named error, never an empty fragment that reads as 'knob off'")
+        val result = run_knob("SIMPLE_STAGE3_LINKER=lld")
+        expect(result.exit_code == 0).to_equal(false)
+
+describe "SIMPLE_STAGE3_LINKER knob - threading into the two bootstrap scripts":
+    it "bootstrap-from-scratch.sh threads the fragment into both Stage 3 sites":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("One computation, two expansions: the Stage 3 args hash and the transcribed Stage 3 invocation cannot diverge")
+        val text = file_read(SCRATCH)
+        expect(occurrences(text, "stage3_linker_env=$(bootstrap_stage3_linker_env)")).to_equal(1)
+        expect(occurrences(text, expansion())).to_equal(2)
+
+    it "resume-stage3-from-admitted.sh threads the fragment into both Stage 3 sites":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("Same one-computation/two-expansion shape on the resume path, whose child also runs under env -i")
+        val text = file_read(RESUME)
+        expect(occurrences(text, "stage3_linker_env=$(bootstrap_stage3_linker_env)")).to_equal(1)
+        expect(occurrences(text, expansion())).to_equal(2)
+
+    it "leaves the Stage 2 build-args block free of any linker knob":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("Stage 2's env feeds stage2_build_args_sha256, compared against the recorded admission -- nothing may be added there")
+        val block = shell(
+            "sed -n '/^  stage2_build_args_sha256=\\$(/,/^  )$/p' {SCRATCH}")
+        expect(block.exit_code).to_equal(0)
+        expect(block.stdout.len() > 0).to_equal(true)
+        expect(block.stdout.contains("SIMPLE_LINKER")).to_equal(false)
+        expect(block.stdout.contains("stage3_linker_env")).to_equal(false)
+
+    it "keeps SIMPLE_LINKER out of the Stage 2 canonical env-name allowlist":
+        # @req REQ-BOOTSTRAP-STAGE3-LINKER-KNOB
+        step("bootstrap_stage3_stage2_canonical_env_names is the Stage 2 vector the resume path rebuilds its hash from")
+        val names = shell(
+            "sh -c '. {AUTHORITY}; bootstrap_stage3_stage2_canonical_env_names x86_64-unknown-linux-gnu'")
+        expect(names.stdout.len() > 0).to_equal(true)
+        expect(names.stdout.contains("SIMPLE_LINKER")).to_equal(false)
