@@ -9972,17 +9972,44 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     return rc;
 }
 
+#if defined(_WIN32)
+/* rt_widen_long_path_rc is defined later in this file (twin of runtime.c's
+ * copy, same name, see that definition's comment); forward-declare it here so
+ * the fsync worker above that point can use it too. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path);
+#endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* Same fix as runtime.c's rt_fsync_path twin: fopen()+fflush() is both
+     * MAX_PATH-capped (ANSI/narrow-CRT) and not actually durable (fflush()
+     * only empties the CRT's userspace buffer). Use CreateFileW (widened,
+     * extended-length-prefixed) + FlushFileBuffers, falling back to
+     * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
+     * required for FlushFileBuffers to succeed. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (wide_path) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        free(wide_path);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = 0;
+    return ok ? 1 : 0;
+#else
     FILE* file = fopen(path, "rb");
     if (!file) return 0;
-#ifdef _WIN32
-    int ok = fflush(file) == 0;
-#else
     int ok = fsync(fileno(file)) == 0;
-#endif
     fclose(file);
     return ok ? 1 : 0;
+#endif
 }
 SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
@@ -13774,7 +13801,17 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
     if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes);
+    /* CreateDirectoryA is an ANSI entry point capped at MAX_PATH; `parent`
+     * (the bootstrap cache root) is routinely already close to that limit, so
+     * appending "<prefix>-<32hex>" can push `path` over it. Reuse
+     * rt_widen_long_path_rc (defined earlier in this file, already used by
+     * rt_file_read_regular_no_follow_bounded) rather than the later-defined
+     * spl_widen_long_path, so no forward declaration is needed. Twin of the
+     * same fix in runtime.c's rt_secure_temp_dir. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    BOOL created = wide_path ? CreateDirectoryW(wide_path, &attributes)
+                             : CreateDirectoryA(path, &attributes);
+    free(wide_path);
     LocalFree(descriptor); FreeLibrary(advapi);
     if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else

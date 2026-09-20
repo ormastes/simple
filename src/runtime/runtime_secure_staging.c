@@ -103,9 +103,21 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_SECURE_PATH_MAX];
     if (!secure_copy_path(path_ptr, path_len, path, sizeof(path))) return 0;
 #if defined(_WIN32)
-    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                              FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Same bug class as rt_file_create_excl above: CreateFileA is an ANSI
+     * entry point capped at MAX_PATH. Prefer the wide, extended-length-
+     * prefixed call so a bootstrap-length path is not silently rejected;
+     * fall back to the ANSI call only when the path cannot be widened. */
+    HANDLE file = INVALID_HANDLE_VALUE;
+    wchar_t wide_path[32768];
+    if (spl_secure_widen_long_path(path, wide_path)) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    }
     if (file == INVALID_HANDLE_VALUE) return 0;
     int ok = FlushFileBuffers(file);
     if (!CloseHandle(file)) ok = 0;

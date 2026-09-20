@@ -2050,18 +2050,44 @@ int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
 /* C-internal fsync worker: takes a genuine NUL-terminated C string. The rt_*
  * entry points below convert the compiler's (ptr, len) `text` pair into one of
  * these before calling it, so the conversion lives in exactly one place and
- * C-internal callers do not have to fake a pair. */
+ * C-internal callers do not have to fake a pair. rt_widen_long_path_rc
+ * (defined above) supplies the wide, extended-length-prefixed path. */
 static int rt_fsync_path(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* fopen()+fflush() was doubly wrong on Windows: fopen() is an ANSI/
+     * narrow-CRT entry point capped at MAX_PATH (260 chars) -- the same bug
+     * class as rt_file_create_excl below, and a bootstrap generation path
+     * routinely exceeds it -- and fflush() only empties the CRT's userspace
+     * buffer, it gives no OS-level durability guarantee at all. Use the wide,
+     * extended-length-prefixed CreateFileW + FlushFileBuffers pair instead,
+     * exactly like rt_file_create_excl's fix; fall back to the ANSI
+     * CreateFileA + FlushFileBuffers pair only when the path cannot be
+     * widened. GENERIC_WRITE is required for FlushFileBuffers to succeed
+     * (Windows refuses it on a read-only handle with ERROR_ACCESS_DENIED). */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (wide_path) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        free(wide_path);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = 0;
+    return ok ? 1 : 0;
+#else
     FILE* file = fopen(path, "rb");
     if (!file) return 0;
-#ifdef _WIN32
-    int ok = fflush(file) == 0;
-#else
     int ok = fsync(fileno(file)) == 0;
-#endif
     fclose(file);
     return ok ? 1 : 0;
+#endif
 }
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
@@ -2780,7 +2806,16 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
         if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0);
     }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes);
+    /* CreateDirectoryA is an ANSI entry point capped at MAX_PATH; `parent`
+     * (the bootstrap cache root) is routinely already close to that limit, so
+     * appending "<prefix>-<32hex>" can push `path` over it. Same fix as
+     * rt_file_publish_noreplace below: prefer the widened, extended-length-
+     * prefixed call, falling back to the ANSI call only when widening fails.
+     * Twin of the same fix in runtime_secure_staging.c's rt_secure_temp_dir. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    BOOL created = wide_path ? CreateDirectoryW(wide_path, &attributes)
+                             : CreateDirectoryA(path, &attributes);
+    free(wide_path);
     LocalFree(descriptor); FreeLibrary(advapi);
     if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
