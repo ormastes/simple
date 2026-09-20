@@ -273,6 +273,30 @@ fn parse_child_run(args: [text]) -> ChildRun:
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "test file not found")
     ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "")
 
+fn _shell_safe_child_binary_path(p: text) -> text:
+    """Publish SIMPLE_TEST_BINARY in a form a POSIX shell can execute.
+
+    On Windows, `rt_path_absolute` (via `find_simple_binary`) answers the
+    verbatim `\\\\?\\C:\\...` extended-length form with backslash separators.
+    Many specs forward SIMPLE_TEST_BINARY verbatim into
+    `process_run("sh", ["-c", "... " + bin + " run ..."])` (see
+    test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl and
+    its siblings). An unquoted backslash inside a `sh -c` command string is an
+    escape character, so `\\?\D:\wk-f1\bin\simple.exe` is silently corrupted
+    into `?D:wk-f1binsimple.exe` -- "command not found", read back by the spec
+    as an empty probe result rather than a real failure. Strip the prefix and
+    flip separators, the same idiom already used for this exact Windows
+    spelling in storage_roots/resolver.spl's `_strip_extended_length_prefix`
+    and compiler_entrypoint/admission.spl -- both docstrings on that path type
+    give the contract this rewrite relies on. A no-op on POSIX paths.
+    """
+    var out = p.replace("\\", "/")
+    if out.starts_with("//?/UNC/"):
+        return "//" + out.substring(8)
+    if out.starts_with("//?/"):
+        return out.substring(4)
+    out
+
 fn find_simple_binary() -> text:
     # Use the same cross-platform current-executable authority as the CLI.
     # This covers macOS without /proc and makes SIMPLE_BINARY a strict identity
@@ -1076,7 +1100,7 @@ fn main() -> i64:
     # this spec. Preserve an explicit caller override; otherwise publish the
     # resolved child authority instead of making specs guess `bin/simple`.
     if (env_get("SIMPLE_TEST_BINARY") ?? "") == "":
-        env_set("SIMPLE_TEST_BINARY", binary)
+        env_set("SIMPLE_TEST_BINARY", _shell_safe_child_binary_path(binary))
     # Evidence must be self-describing: name the binary that executes the spec.
     print "child binary: {binary}"
     val timeout_ms = run.timeout_secs * 1000
