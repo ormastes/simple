@@ -390,6 +390,15 @@ and the `check-stage-binaries-runnable.shs` guard that is honestly RED), and it
 is orthogonal to this change in both directions. What IS verified for the AOT
 lane is admission at `compile`; end-to-end execution has to wait for that defect.
 
+### Deployed 2026-09-19 15:40 KST
+
+The JIT-lowering and AOT-gate halves reached `bin/simple` in the 15:40 redeploy,
+alongside the separate collision fix. Before/after shas, the full verification
+list, and the rollback path are recorded once in
+`nested_fn_name_collision_across_scopes_2026-09-19.md` rather than duplicated
+here. The "Not deployed" note at the end of this record described the state on
+the day the lowering landed and is kept for that history.
+
 ### Guard
 
 `scripts/check/check-nested-fn-jit-lowering.shs` — four shapes through
