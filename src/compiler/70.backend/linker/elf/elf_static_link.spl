@@ -1,0 +1,1112 @@
+# Internal ELF linker driver — lane A7 slices 1 and 2.
+#
+# elf_link: ET_REL objects (+ ar archives, + shared objects) -> ELF image bytes
+# in one of four modes (reloc_scan ELF_LINK_*):
+#   STATIC_EXEC  ET_EXEC at 0x400000, no .dynamic                  (slice 1)
+#   STATIC_PIE   ET_DYN at 0, PT_DYNAMIC, no PT_INTERP; code must need no
+#                dynamic relocation (there is no self-relocating startup)
+#   DYNAMIC_EXEC ET_EXEC + PT_INTERP + DT_NEEDED, PLT/GOT against shared libs
+#   DYNAMIC_PIE  ET_DYN  + PT_INTERP + DT_NEEDED + R_*_RELATIVE
+# elf_static_link(objects, archives, entry, target) keeps the slice-1 API.
+#
+# Phases (design §5, mold order): parse (elf_parser, elf/shared_object) ->
+# archive closure fixpoint (elf/archive_closure) -> resolve (sym_resolver:
+# strong duplicate = error; shared-library exports bind what objects leave
+# undefined) -> undefined check -> place input sections into named output
+# sections -> scan relocations (elf/reloc_scan: GOT/PLT/dynamic relocs) ->
+# size synthetic sections (elf/synthetic_sections) -> layout
+# (elf/elf_exec_writer) -> relocate (reloc_engine encoders; any reject = error)
+# -> build synthetic contents -> write.
+#
+# Limits (reported as errors, never silently degraded):
+#   - targets: x86_64 and aarch64; x86_64 dynamic outputs only via
+#     elf_link_structural (structural parity with ld.lld, never executed here)
+#   - no TLS, no COMMON, no copy relocations / canonical PLTs, no text relocs,
+#     no section GC, no COMDAT dedup, no symbol versioning
+#     (unversioned references bind to the library's default version)
+#   - single-threaded; no StageReceipts yet
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding, elf_symbol_type,
+    elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
+    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS, SHT_NOTE
+}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
+use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
+use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
+use compiler.backend.linker.elf.reloc_scan.{
+    ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
+    elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
+    ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
+    SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
+    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX
+}
+use compiler.backend.linker.elf.synthetic_sections.{
+    ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64,
+    elf_rela_entry, elf_sym_entry, elf_build_dynstr, elf_build_dynsym, elf_hash_size, elf_build_hash,
+    elf_gnu_hash_size, elf_build_gnu_hash,
+    elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
+    elf_build_plt_x64, elf_build_gotplt_x64,
+    elf_build_dynamic, elf_build_interp,
+    DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
+    DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
+    DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
+    DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE,
+    SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
+    GOTPLT_RESERVED
+}
+use compiler.backend.linker.elf.elf_exec_writer.{
+    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image,
+    ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
+}
+use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_bytes, write_u32_le, write_u64_le}
+
+val ELF_STATIC_BASE: i64 = 0x400000
+val SHN_ABS: i64 = 0xfff1
+val SHN_COMMON: i64 = 0xfff2
+val SHN_LORESERVE: i64 = 0xff00
+val SHF_TLS: i64 = 0x400
+val SHT_INIT_ARRAY: i64 = 14
+val SHT_FINI_ARRAY: i64 = 15
+val SHT_PREINIT_ARRAY: i64 = 16
+val SHT_X86_64_UNWIND: i64 = 0x70000001
+val ET_EXEC_T: i64 = 2
+val ET_DYN_T: i64 = 3
+val SHT_SYMTAB_L: i64 = 2
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ElfLinkRequest:
+    objects: [[i64]]      # ET_REL bytes, in command-line order
+    archives: [[i64]]     # ar archives (fixpoint closure)
+    shared: [[u8]]        # ET_DYN shared objects (dynamic modes only)
+    entry: text
+    target: RelocArch
+    mode: i64             # ELF_LINK_*
+    interp: text          # PT_INTERP path (dynamic modes only)
+
+struct ElfStaticInputs:
+    """Every selected input object with per-section placement."""
+    objects: [ElfObject]
+    sec_out: [[i64]]      # [obj][sec] -> index into outs, -1 = not placed
+    sec_off: [[i64]]      # [obj][sec] -> offset inside that output section
+    outs: [ElfOutSec]     # input-backed output sections, first-appearance order
+
+struct ElfLinkCtx:
+    inputs: ElfStaticInputs
+    res: SymResolution
+    libs: [ElfSharedLib]
+    target: RelocArch
+    mode: i64
+
+# ============================================================================
+# Target
+# ============================================================================
+
+fn elf_static_machine(target: RelocArch) -> Result<i64, text>:
+    match target:
+        case X86_64:
+            Ok(EM_X86_64)
+        case AArch64:
+            Ok(EM_AARCH64)
+        case _:
+            Err("elf_static_link: slice 1 supports only x86_64 and aarch64 targets")
+
+fn elf_static_page(target: RelocArch) -> i64:
+    # ld.lld's default max-page-size: 64 KiB on aarch64 (64K-page kernels), 4 KiB on x86_64.
+    match target:
+        case AArch64:
+            0x10000
+        case _:
+            0x1000
+
+# ============================================================================
+# Input classification and placement
+# ============================================================================
+
+fn elf_out_name(name: text, sh_type: i64, sh_flags: i64) -> Result<text, text>:
+    """Output section an allocatable input section goes to (ld.lld's default rules)."""
+    if sh_flags & SHF_TLS != 0:
+        return Err("section {name}: TLS (SHF_TLS) is unsupported")
+    if sh_type == SHT_NOTE:
+        return Ok(name)
+    if sh_type == SHT_INIT_ARRAY:
+        return Ok(".init_array")
+    if sh_type == SHT_FINI_ARRAY:
+        return Ok(".fini_array")
+    if sh_type == SHT_PREINIT_ARRAY:
+        return Ok(".preinit_array")
+    if sh_type == SHT_X86_64_UNWIND:
+        return Ok(".eh_frame")
+    if sh_type != SHT_PROGBITS and sh_type != SHT_NOBITS:
+        return Err("section {name}: unsupported allocatable section type {sh_type}")
+    if sh_flags & SHF_EXECINSTR != 0:
+        if name == ".init" or name == ".fini":
+            return Ok(name)
+        return Ok(".text")
+    if sh_flags & SHF_WRITE != 0:
+        if sh_type == SHT_NOBITS:
+            return Ok(".bss")
+        if name.starts_with(".data.rel.ro"):
+            return Ok(".data.rel.ro")
+        return Ok(".data")
+    if name == ".eh_frame":
+        return Ok(".eh_frame")
+    Ok(".rodata")
+
+fn elf_seg_of(sh_flags: i64) -> i64:
+    if sh_flags & SHF_EXECINSTR != 0:
+        return ELF_SEG_RX
+    if sh_flags & SHF_WRITE != 0:
+        return ELF_SEG_RW
+    ELF_SEG_R
+
+fn elf_find_out(outs: [ElfOutSec], name: text) -> i64:
+    var i: i64 = 0
+    while i < outs.len():
+        if outs[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
+    """Assign every allocatable input section to a named output section + offset."""
+    var outs: [ElfOutSec] = []
+    var sec_out: [[i64]] = []
+    var sec_off: [[i64]] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var idxs: [i64] = []
+        var offs: [i64] = []
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_flags & SHF_ALLOC == 0:
+                idxs = idxs.push(-1)
+                offs = offs.push(0)
+            else:
+                val oname = elf_out_name(elf_section_name(obj, si), sec.sh_type, sec.sh_flags)
+                if oname.is_err():
+                    return Err("object {oi}: {oname.unwrap_err()}")
+                val name = oname.unwrap()
+                var al = elf_section_addralign(obj, si)
+                if al < 1:
+                    al = 1
+                var k = elf_find_out(outs, name)
+                if k < 0:
+                    var st = sec.sh_type
+                    if st == SHT_X86_64_UNWIND:
+                        st = SHT_PROGBITS_E
+                    outs = outs.push(elf_out_sec(name, st, sec.sh_flags & (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR),
+                        1, 0, elf_seg_of(sec.sh_flags)))
+                    k = outs.len() - 1
+                val o = outs[k]
+                val at = align_up(o.size, al)
+                var nal = o.align
+                if al > nal:
+                    nal = al
+                outs[k] = elf_out_sec(o.name, o.sh_type, o.sh_flags, nal, at + sec.sh_size, o.seg)
+                idxs = idxs.push(k)
+                offs = offs.push(at)
+            si = si + 1
+        sec_out = sec_out.push(idxs)
+        sec_off = sec_off.push(offs)
+        oi = oi + 1
+    Ok(ElfStaticInputs(objects: objects, sec_out: sec_out, sec_off: sec_off, outs: outs))
+
+fn elf_static_contents(inputs: ElfStaticInputs) -> [[i64]]:
+    """Concatenate input section bytes per input-backed output section."""
+    var out: [[i64]] = []
+    var k: i64 = 0
+    while k < inputs.outs.len():
+        var buf: [i64] = []
+        if inputs.outs[k].sh_type != SHT_NOBITS_E:
+            var oi: i64 = 0
+            while oi < inputs.objects.len():
+                val obj = inputs.objects[oi]
+                var si: i64 = 0
+                while si < obj.sections.len():
+                    if inputs.sec_out[oi][si] == k:
+                        val sec = obj.sections[si]
+                        buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
+                        # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                        var bi: i64 = 0
+                        while bi < sec.sh_size:
+                            buf = buf.push(obj.raw[sec.sh_addr + bi] as i64)
+                            bi = bi + 1
+                    si = si + 1
+                oi = oi + 1
+            buf = write_zeros(buf, inputs.outs[k].size - buf.len())
+        out = out.push(buf)
+        k = k + 1
+    out
+
+# ============================================================================
+# Output section order
+# ============================================================================
+
+fn elf_out_rank(s: ElfOutSec) -> i64:
+    val n = s.name
+    if s.seg == ELF_SEG_R:
+        if n == ".interp":
+            return 0
+        if s.sh_type == 7:
+            return 1
+        if n == ".dynsym":
+            return 2
+        if n == ".gnu.hash":
+            return 3
+        if n == ".hash":
+            return 3
+        if n == ".dynstr":
+            return 4
+        if n == ".rela.dyn":
+            return 5
+        if n == ".rela.plt":
+            return 6
+        if n == ".rodata":
+            return 7
+        if n == ".eh_frame":
+            return 8
+        return 9
+    if s.seg == ELF_SEG_RX:
+        if n == ".text":
+            return 20
+        if n == ".init":
+            return 21
+        if n == ".fini":
+            return 22
+        if n == ".plt":
+            return 23
+        return 24
+    if s.sh_type == SHT_NOBITS_E:
+        return 40
+    if n == ".preinit_array":
+        return 30
+    if n == ".init_array":
+        return 31
+    if n == ".fini_array":
+        return 32
+    if n == ".data.rel.ro":
+        return 33
+    if n == ".dynamic":
+        return 34
+    if n == ".got":
+        return 35
+    if n == ".data":
+        return 36
+    if n == ".got.plt":
+        return 37
+    38
+
+fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:
+    """Stable insertion sort by elf_out_rank."""
+    var out: [ElfOutSec] = []
+    for s in secs:
+        val r = elf_out_rank(s)
+        var pos = out.len()
+        while pos > 0 and elf_out_rank(out[pos - 1]) > r:
+            pos = pos - 1
+        var next: [ElfOutSec] = []
+        var i: i64 = 0
+        while i < out.len():
+            if i == pos:
+                next = next.push(s)
+            next = next.push(out[i])
+            i = i + 1
+        if pos == out.len():
+            next = next.push(s)
+        out = next
+    out
+
+# ============================================================================
+# Symbols
+# ============================================================================
+
+fn elf_is_synth(name: text) -> bool:
+    name == "_DYNAMIC" or name == "__ehdr_start" or name == "__executable_start" or
+        name == "__init_array_start" or name == "__init_array_end" or
+        name == "__fini_array_start" or name == "__fini_array_end" or
+        name == "__preinit_array_start" or name == "__preinit_array_end"
+
+fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>:
+    if name == "__ehdr_start" or name == "__executable_start":
+        return Ok(base)
+    if name == "_DYNAMIC":
+        val d = elf_exec_find(plan, ".dynamic")
+        if d < 0:
+            return Err("undefined symbol: _DYNAMIC (output has no .dynamic)")
+        return Ok(plan.vaddrs[d])
+    var sec = ".init_array"
+    if name.starts_with("__fini_array"):
+        sec = ".fini_array"
+    else if name.starts_with("__preinit_array"):
+        sec = ".preinit_array"
+    val k = elf_exec_find(plan, sec)
+    if k < 0:
+        return Ok(0)
+    if name.ends_with("_end"):
+        return Ok(plan.vaddrs[k] + plan.secs[k].size)
+    Ok(plan.vaddrs[k])
+
+fn elf_lib_export(libs: [ElfSharedLib], name: text) -> i64:
+    """STT_* type of the first shared library exporting name, or -1."""
+    for l in libs:
+        if l.exports.has(name):
+            return l.exports[name]
+    -1
+
+fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text>:
+    """Resolve relocation symbol (oi, sym_idx) to its SYMREF_* kind (placement fields zero)."""
+    if sym_idx == 0:
+        return Ok(elf_ref(oi, 0, SYMREF_ABS, "", "", 0, false))
+    val obj = ctx.inputs.objects[oi]
+    if sym_idx >= obj.symbols.len():
+        return Err("object {oi}: relocation symbol index {sym_idx} out of range")
+    val sym = obj.symbols[sym_idx]
+    val bind = elf_symbol_binding(sym)
+    if sym.st_shndx == SHN_COMMON:
+        return Err("symbol {sym.name}: SHN_COMMON is unsupported (compile with -fno-common)")
+    if bind != STB_LOCAL and sym.name != "":
+        val weak = bind == STB_WEAK
+        if ctx.res.defined.has(sym.name):
+            if ctx.res.defined[sym.name].section_idx == SHN_ABS:
+                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, sym.name, 0, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, weak))
+        if elf_is_synth(sym.name):
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, weak))
+        val t = elf_lib_export(ctx.libs, sym.name)
+        if t >= 0:
+            return Ok(elf_ref(oi, sym_idx, SYMREF_IMPORT, sym.name, sym.name, t, weak))
+        if weak:
+            return Ok(elf_ref(oi, sym_idx, SYMREF_WEAK_ZERO, sym.name, sym.name, 0, weak))
+        return Err("undefined symbol: {sym.name}")
+    if sym.st_shndx == SHN_ABS or sym.st_shndx == SHN_UNDEF:
+        return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "{oi}#{sym_idx}", 0, false))
+    if sym.st_shndx >= SHN_LORESERVE:
+        return Err("symbol {sym.name}: reserved section index {sym.st_shndx} unsupported")
+    Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "{oi}#{sym_idx}", 0, false))
+
+# reason: positional ElfScanRef seed (placement fields are filled by the caller)
+fn elf_ref(oi: i64, sym_idx: i64, kind: i64, name: text, key: text, stype: i64, weak: bool) -> ElfScanRef:
+    ElfScanRef(oi: oi, sym_idx: sym_idx, out_sec: -1, out_off: 0, writable: false, rtype: 0,
+        rclass: RC_NONE, kind: kind, key: key, name: name, stype: stype, weak: weak, addend: 0, relax: false)
+
+struct ElfLayout:
+    plan: ElfExecPlan
+    in_to_plan: [i64]     # input-backed output index -> plan index
+    base: i64
+
+fn elf_in_vaddr(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
+    """Output vaddr of input section (oi, si), or -1 when it was not placed."""
+    if si < 0 or si >= ctx.inputs.sec_out[oi].len():
+        return -1
+    val k = ctx.inputs.sec_out[oi][si]
+    if k < 0:
+        return -1
+    lay.plan.vaddrs[lay.in_to_plan[k]] + ctx.inputs.sec_off[oi][si]
+
+fn elf_entry_addr(ctx: ElfLinkCtx, lay: ElfLayout, e: SymEntry) -> Result<i64, text>:
+    if e.section_idx == SHN_ABS:
+        return Ok(e.offset)
+    val base = elf_in_vaddr(ctx, lay, e.obj_idx, e.section_idx)
+    if base < 0:
+        return Err("symbol {e.name} is defined in a non-allocatable section")
+    Ok(base + e.offset)
+
+fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, text>:
+    """Link-time value S of a DEFINED / ABS / WEAK_ZERO reference (imports: 0)."""
+    if r.kind == SYMREF_IMPORT or r.kind == SYMREF_WEAK_ZERO or r.sym_idx == 0:
+        return Ok(0)
+    val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
+    if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
+        if ctx.res.defined.has(sym.name):
+            return elf_entry_addr(ctx, lay, ctx.res.defined[sym.name])
+        return elf_synth_addr(lay.plan, lay.base, sym.name)
+    if sym.st_shndx == SHN_ABS:
+        return Ok(sym.st_value)
+    if sym.st_shndx == SHN_UNDEF:
+        return Ok(0)
+    val base = elf_in_vaddr(ctx, lay, r.oi, sym.st_shndx)
+    if base < 0:
+        return Err("local symbol '{sym.name}' refers to a non-allocatable section {sym.st_shndx}")
+    Ok(base + sym.st_value)
+
+# ============================================================================
+# Checks
+# ============================================================================
+
+fn elf_static_undefined(objects: [ElfObject], res: SymResolution, libs: [ElfSharedLib]) -> [text]:
+    """Strong (STB_GLOBAL) undefined references with no definition anywhere."""
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    for obj in objects:
+        for sym in obj.symbols:
+            if sym.name != "" and sym.st_shndx == SHN_UNDEF and elf_symbol_binding(sym) == STB_GLOBAL:
+                if not res.defined.has(sym.name) and not elf_is_synth(sym.name) and elf_lib_export(libs, sym.name) < 0 and not seen.has(sym.name):
+                    seen[sym.name] = true
+                    out = out.push(sym.name)
+    out
+
+fn elf_static_join(items: [text]) -> text:
+    var s = ""
+    var i: i64 = 0
+    while i < items.len():
+        if i > 0:
+            s = s + "; "
+        s = s + items[i]
+        i = i + 1
+    s
+
+# ============================================================================
+# Relocation refs
+# ============================================================================
+
+fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], text>:
+    """Resolve every relocation that lands in an allocatable section."""
+    val inputs = ctx.inputs
+    var refs: [ElfScanRef] = []
+    var oi: i64 = 0
+    while oi < inputs.objects.len():
+        val obj = inputs.objects[oi]
+        for r in obj.relocations:
+            val tsec = r.target_section_idx
+            if tsec < 0 or tsec >= inputs.sec_out[oi].len():
+                return Err("object {oi}: relocation targets section index {tsec} out of range (malformed sh_info)")
+            val k = inputs.sec_out[oi][tsec]
+            if k < 0:
+                # relocation against a non-allocatable section (e.g. debug info): not emitted
+                continue
+            val o = inputs.outs[k]
+            val rtype = elf_reloc_type(r)
+            if o.sh_type == SHT_NOBITS_E:
+                return Err("object {oi}: relocation type {rtype} targets a NOBITS section")
+            val seed = elf_symref(ctx, oi, elf_reloc_sym(r))?
+            val place = inputs.sec_off[oi][tsec] + r.r_offset
+            val rclass = elf_reloc_class(ctx.target, rtype)
+            # only a symbol DEFINED in this link may relax: undefined-weak and SHN_ABS keep
+            # their constant GOT slot (a relaxed lea would yield load base in a PIE)
+            val relax = rclass == RC_GOT_RELAX and seed.kind == SYMREF_DEFINED and r.r_offset >= 2 and elf_x86_can_relax(contents[k], place)
+            refs = refs.push(ElfScanRef(oi: oi, sym_idx: seed.sym_idx, out_sec: k, out_off: place,
+                writable: o.sh_flags & SHF_WRITE != 0, rtype: rtype, rclass: rclass, kind: seed.kind,
+                key: seed.key, name: seed.name, stype: seed.stype, weak: seed.weak,
+                addend: r.r_addend, relax: relax))
+        oi = oi + 1
+    Ok(refs)
+
+# ============================================================================
+# Synthetic section list
+# ============================================================================
+
+fn elf_has_def(ctx: ElfLinkCtx, name: text) -> bool:
+    ctx.res.defined.has(name)
+
+struct ElfDynAddrs:
+    """Addresses the .dynamic tag list refers to (all 0 while only sizing)."""
+    dynsym: i64
+    dynstr: i64
+    hash: i64
+    gnu_hash: i64
+    rela_dyn: i64
+    rela_plt: i64
+    gotplt: i64
+    init: i64
+    fini: i64
+    init_array: i64
+    fini_array: i64
+    preinit_array: i64
+
+# reason: positional .dynamic inputs (context, scan, sizes, addresses)
+fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i64], a: ElfDynAddrs, arrays: [i64]) -> [[i64]]:
+    """n_rela = [.rela.dyn entries, of which RELATIVE];
+    arrays = [init_array size, fini_array size, preinit_array size] (-1 = absent)."""
+    val n_rela_dyn = n_rela[0]
+    var t: [[i64]] = []
+    val dynamic = elf_mode_dynamic(ctx.mode)
+    if dynamic:
+        for l in ctx.libs:
+            t = t.push([DT_NEEDED, dynstr.offsets[l.soname]])
+        t = t.push([DT_DEBUG, 0])
+        if elf_has_def(ctx, "_init"):
+            t = t.push([DT_INIT, a.init])
+        if elf_has_def(ctx, "_fini"):
+            t = t.push([DT_FINI, a.fini])
+    if arrays[2] >= 0:
+        t = t.push([DT_PREINIT_ARRAY, a.preinit_array])
+        t = t.push([DT_PREINIT_ARRAYSZ, arrays[2]])
+    if arrays[0] >= 0:
+        t = t.push([DT_INIT_ARRAY, a.init_array])
+        t = t.push([DT_INIT_ARRAYSZ, arrays[0]])
+    if arrays[1] >= 0:
+        t = t.push([DT_FINI_ARRAY, a.fini_array])
+        t = t.push([DT_FINI_ARRAYSZ, arrays[1]])
+    if dynamic:
+        t = t.push([DT_GNU_HASH, a.gnu_hash])
+        t = t.push([DT_HASH, a.hash])
+        t = t.push([DT_STRTAB, a.dynstr])
+        t = t.push([DT_SYMTAB, a.dynsym])
+        t = t.push([DT_STRSZ, dynstr.data.len()])
+        t = t.push([DT_SYMENT, 24])
+    if n_rela_dyn > 0:
+        t = t.push([DT_RELA, a.rela_dyn])
+        t = t.push([DT_RELASZ, n_rela_dyn * 24])
+        t = t.push([DT_RELAENT, 24])
+        if n_rela[1] > 0:
+            t = t.push([DT_RELACOUNT, n_rela[1]])
+    if sc.plt_names.len() > 0:
+        t = t.push([DT_JMPREL, a.rela_plt])
+        t = t.push([DT_PLTRELSZ, sc.plt_names.len() * 24])
+        t = t.push([DT_PLTGOT, a.gotplt])
+        t = t.push([DT_PLTREL, DT_RELA])
+    if elf_mode_pie(ctx.mode):
+        t = t.push([DT_FLAGS_1, DF_1_PIE])
+    t
+
+fn elf_plan_addr(plan: ElfExecPlan, name: text) -> i64:
+    val k = elf_exec_find(plan, name)
+    if k < 0:
+        return 0
+    plan.vaddrs[k]
+
+fn elf_array_size(ins: [ElfOutSec], name: text) -> i64:
+    val k = elf_find_out(ins, name)
+    if k < 0:
+        return -1
+    ins[k].size
+
+fn elf_sec_with(s: ElfOutSec, entsize: i64, link: text, info: i64) -> ElfOutSec:
+    ElfOutSec(name: s.name, sh_type: s.sh_type, sh_flags: s.sh_flags, align: s.align, size: s.size,
+        entsize: entsize, link: link, info: info, seg: s.seg)
+
+# ============================================================================
+# .symtab / .strtab
+# ============================================================================
+
+struct ElfSymtabOut:
+    symtab: [i64]
+    strtab: [i64]
+    first_global: i64
+
+struct ElfSymRows:
+    """Parallel Elf64_Sym columns, in output order."""
+    names: [text]
+    info: [i64]
+    other: [i64]
+    shndx: [i64]
+    value: [i64]
+    size: [i64]
+
+# reason: positional Elf64_Sym columns
+fn elf_sym_row(rows: ElfSymRows, name: text, info: i64, other: i64, shndx: i64, value: i64, size: i64) -> ElfSymRows:
+    ElfSymRows(names: rows.names.push(name), info: rows.info.push(info), other: rows.other.push(other),
+        shndx: rows.shndx.push(shndx), value: rows.value.push(value), size: rows.size.push(size))
+
+fn elf_out_shndx(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
+    """Output section header index holding input section (oi, si), or -1."""
+    if si < 0 or si >= ctx.inputs.sec_out[oi].len():
+        return -1
+    val k = ctx.inputs.sec_out[oi][si]
+    if k < 0:
+        return -1
+    lay.in_to_plan[k] + 1
+
+fn elf_sym_hidden(sym: ElfSymbol) -> bool:
+    val v = sym.st_other & 3
+    v == 1 or v == 2   # STV_INTERNAL / STV_HIDDEN: ld.lld demotes these to STB_LOCAL
+
+fn elf_is_definer(ctx: ElfLinkCtx, oi: i64, sym: ElfSymbol) -> bool:
+    sym.st_shndx != SHN_UNDEF and ctx.res.defined.has(sym.name) and ctx.res.defined[sym.name].obj_idx == oi
+
+fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
+    """Header index of the section a linker-defined symbol points into, or -1."""
+    if name == "__ehdr_start" or name == "__executable_start":
+        return 1
+    var sec = ".init_array"
+    if name == "_DYNAMIC":
+        sec = ".dynamic"
+    else if name.starts_with("__fini_array"):
+        sec = ".fini_array"
+    else if name.starts_with("__preinit_array"):
+        sec = ".preinit_array"
+    val k = elf_exec_find(plan, sec)
+    if k < 0:
+        return -1
+    k + 1
+
+fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, text>:
+    """ld.lld's .symtab shape: null, then per input file its locals (STT_SECTION
+    dropped; symbols in non-allocated sections dropped — they have no output
+    section here) followed by the hidden globals it defines (demoted to LOCAL),
+    then referenced linker-defined symbols (LOCAL, hidden), then every other
+    global in first-reference order (imports and unresolved weak refs as UND)."""
+    val objs = ctx.inputs.objects
+    var rows = ElfSymRows(names: [""], info: [0], other: [0], shndx: [0], value: [0], size: [0])
+    var order: [text] = []
+    var seen: {text: bool} = {}
+    var all_weak: {text: bool} = {}
+    var ref_type: {text: i64} = {}
+    var demoted: {text: bool} = {}
+    var oi: i64 = 0
+    while oi < objs.len():
+        val obj = objs[oi]
+        var si: i64 = 1
+        while si < obj.symbols.len():
+            val sym = obj.symbols[si]
+            val bind = elf_symbol_binding(sym)
+            val typ = elf_symbol_type(sym)
+            if bind == STB_LOCAL:
+                if typ != STT_SECTION and sym.name != "":
+                    if sym.st_shndx == SHN_ABS:
+                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, SHN_ABS, sym.st_value, sym.st_size)
+                    else if sym.st_shndx != SHN_UNDEF and sym.st_shndx < SHN_LORESERVE:
+                        val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
+                        if sh > 0:
+                            rows = elf_sym_row(rows, sym.name, typ, sym.st_other, sh,
+                                elf_in_vaddr(ctx, lay, oi, sym.st_shndx) + sym.st_value, sym.st_size)
+            else if sym.name != "":
+                if not seen.has(sym.name):
+                    seen[sym.name] = true
+                    order = order.push(sym.name)
+                    all_weak[sym.name] = true
+                    ref_type[sym.name] = typ
+                if bind != STB_WEAK:
+                    all_weak[sym.name] = false
+                if elf_sym_hidden(sym) and elf_is_definer(ctx, oi, sym):
+                    val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
+                    if sh > 0 or sym.st_shndx == SHN_ABS:
+                        demoted[sym.name] = true
+                        val v = elf_entry_addr(ctx, lay, ctx.res.defined[sym.name])?
+                        var shn = sh
+                        if sym.st_shndx == SHN_ABS:
+                            shn = SHN_ABS
+                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn, v, sym.st_size)
+            si = si + 1
+        oi = oi + 1
+    for n in order:
+        if elf_is_synth(n) and not ctx.res.defined.has(n):
+            val sh = elf_synth_shndx(lay.plan, n)
+            if sh > 0:
+                rows = elf_sym_row(rows, n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n)?, 0)
+                demoted[n] = true
+    # ld.lld defines _DYNAMIC (hidden) whenever there is a .dynamic, referenced or not
+    val dyn = elf_exec_find(lay.plan, ".dynamic")
+    if dyn >= 0 and not demoted.has("_DYNAMIC") and not ctx.res.defined.has("_DYNAMIC"):
+        rows = elf_sym_row(rows, "_DYNAMIC", 0, 2, dyn + 1, lay.plan.vaddrs[dyn], 0)
+    val first_global = rows.names.len()
+    for n in order:
+        if demoted.has(n) or elf_is_synth(n):
+            continue
+        if ctx.res.defined.has(n):
+            val e = ctx.res.defined[n]
+            var def_sym = objs[e.obj_idx].symbols[0]
+            for s in objs[e.obj_idx].symbols:
+                if s.name == n and s.st_shndx != SHN_UNDEF and elf_symbol_binding(s) != STB_LOCAL:
+                    def_sym = s
+            var sh = SHN_ABS
+            if e.section_idx != SHN_ABS:
+                sh = elf_out_shndx(ctx, lay, e.obj_idx, e.section_idx)
+            if sh > 0:
+                val info = (elf_symbol_binding(def_sym) << 4) | elf_symbol_type(def_sym)
+                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh, elf_entry_addr(ctx, lay, e)?, def_sym.st_size)
+        else:
+            var bind = STB_GLOBAL
+            if all_weak[n]:
+                bind = STB_WEAK
+            var typ = elf_lib_export(ctx.libs, n)
+            if typ == 10:
+                typ = 2  # STT_GNU_IFUNC is referenced as a plain STT_FUNC
+            if typ < 0:
+                typ = ref_type[n]
+            rows = elf_sym_row(rows, n, (bind << 4) | typ, 0, SHN_UNDEF, 0, 0)
+    val strtab = elf_build_dynstr(rows.names)
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < rows.names.len():
+        var name_off: i64 = 0
+        if rows.names[i] != "":
+            name_off = strtab.offsets[rows.names[i]]
+        b = elf_sym_entry(b, name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i])
+        i = i + 1
+    Ok(ElfSymtabOut(symtab: b, strtab: strtab.data, first_global: first_global))
+
+fn elf_rd_le(b: [i64], o: i64, n: i64) -> i64:
+    var v: i64 = 0
+    var i = n - 1
+    while i >= 0:
+        v = (v << 8) | (b[o + i] & 0xff)
+        i = i - 1
+    v
+
+fn elf_put_le(b: [i64], o: i64, n: i64, v: i64) -> [i64]:
+    var out = b
+    var i: i64 = 0
+    while i < n:
+        out[o + i] = (v >> (i * 8)) & 0xff
+        i = i + 1
+    out
+
+fn elf_append_symtab(image: [i64], st: ElfSymtabOut) -> Result<[i64], text>:
+    """Append non-allocated .symtab + .strtab to a written image.
+
+    Interim until elf_exec_writer has a non-allocated section kind (lane B1
+    owns the writer): elf_exec_plan loads every section it is given, so the
+    tables are added after serialization instead. Every existing section
+    header is kept byte-for-byte (their sh_name offsets stay valid: the new
+    .shstrtab is the old one plus two names); the old .shstrtab bytes, which
+    are the last file data, are replaced by .symtab, .strtab, .shstrtab and
+    the header table grows by two entries (e_shstrndx is unchanged)."""
+    val shoff = elf_rd_le(image, 0x28, 8)
+    val shnum = elf_rd_le(image, 0x3c, 2)
+    val shstrndx = elf_rd_le(image, 0x3e, 2)
+    val ssh = shoff + shstrndx * 64
+    val old_off = elf_rd_le(image, ssh + 24, 8)
+    val old_size = elf_rd_le(image, ssh + 32, 8)
+    var i: i64 = 1
+    while i < shnum:
+        val h = shoff + i * 64
+        if i != shstrndx and elf_rd_le(image, h + 4, 4) != SHT_NOBITS_E and elf_rd_le(image, h + 24, 8) + elf_rd_le(image, h + 32, 8) > old_off:
+            return Err("internal: section header {i} has file data after .shstrtab; cannot append .symtab")
+        i = i + 1
+    var b: [i64] = []
+    i = 0
+    while i < old_off:
+        b = b.push(image[i])
+        i = i + 1
+    val sym_off = align_up(b.len(), 8)
+    b = write_zeros(b, sym_off - b.len())
+    b = write_bytes(b, st.symtab)
+    val str_off = b.len()
+    b = write_bytes(b, st.strtab)
+    val shstr_off = b.len()
+    i = 0
+    while i < old_size:
+        b = b.push(image[old_off + i])
+        i = i + 1
+    for ch in ".symtab".bytes():
+        b = b.push(ch as i64)
+    b = b.push(0)
+    for ch in ".strtab".bytes():
+        b = b.push(ch as i64)
+    b = b.push(0)
+    val new_shoff = align_up(b.len(), 8)
+    b = write_zeros(b, new_shoff - b.len())
+    i = 0
+    while i < shnum * 64:
+        b = b.push(image[shoff + i])
+        i = i + 1
+    val nssh = new_shoff + shstrndx * 64
+    b = elf_put_le(b, nssh + 24, 8, shstr_off)
+    b = elf_put_le(b, nssh + 32, 8, old_size + 16)
+    # .symtab: sh_link = .strtab (index shnum + 1), sh_info = first global
+    b = write_u32_le(b, old_size)
+    b = write_u32_le(b, SHT_SYMTAB_L)
+    b = write_u64_le(b, 0)
+    b = write_u64_le(b, 0)
+    b = write_u64_le(b, sym_off)
+    b = write_u64_le(b, st.symtab.len())
+    b = write_u32_le(b, shnum + 1)
+    b = write_u32_le(b, st.first_global)
+    b = write_u64_le(b, 8)
+    b = write_u64_le(b, 24)
+    # .strtab
+    b = write_u32_le(b, old_size + 8)
+    b = write_u32_le(b, SHT_STRTAB_E)
+    b = write_u64_le(b, 0)
+    b = write_u64_le(b, 0)
+    b = write_u64_le(b, str_off)
+    b = write_u64_le(b, st.strtab.len())
+    b = write_u32_le(b, 0)
+    b = write_u32_le(b, 0)
+    b = write_u64_le(b, 1)
+    b = write_u64_le(b, 0)
+    b = elf_put_le(b, 0x28, 8, new_shoff)
+    Ok(elf_put_le(b, 0x3c, 2, shnum + 2))
+
+# ============================================================================
+# Entry points
+# ============================================================================
+
+fn elf_static_link(objects: [[i64]], archives: [[i64]], entry: text, target: RelocArch) -> Result<[i64], text>:
+    """Link ET_REL objects (+ archives) into a static ET_EXEC; Err on any link error."""
+    elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [], entry: entry,
+        target: target, mode: ELF_LINK_STATIC_EXEC, interp: ""))
+
+fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
+    """Link per req.mode; Err on any link error (never a partial image)."""
+    elf_link_mode(req, false)
+
+fn elf_link_structural(req: ElfLinkRequest) -> Result<[i64], text>:
+    """elf_link that also admits x86_64 dynamic outputs. Those are validated only
+    structurally against ld.lld (readelf -l -S -d -r, PLT disassembly): the build
+    host has no x86_64 ld.so to execute them, so elf_link keeps them behind a
+    named UnsupportedFeature. For specs and parity tooling, not production links."""
+    elf_link_mode(req, true)
+
+fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
+    val target = req.target
+    val machine = elf_static_machine(target)?
+    val mode = req.mode
+    val dynamic = elf_mode_dynamic(mode)
+    val pie = elf_mode_pie(mode)
+    if dynamic and not elf_target_is_a64(target) and not structural:
+        return Err("UnsupportedFeature: x86_64 dynamic linking has no execution proof on this build host (no x86_64 glibc / ld-linux-x86-64.so.2); it is validated structurally against ld.lld only (elf_link_structural)")
+    if not dynamic and req.shared.len() > 0:
+        return Err("shared objects given to a static link")
+    if dynamic and req.interp == "":
+        return Err("dynamic link needs an interpreter path (PT_INTERP)")
+
+    var roots: [ElfObject] = []
+    var i: i64 = 0
+    while i < req.objects.len():
+        val parsed = elf_parse_object(req.objects[i])
+        if parsed.is_err():
+            return Err("object {i}: {parsed.unwrap_err()}")
+        val obj = parsed.unwrap()
+        if obj.header.e_type != ET_REL:
+            return Err("object {i}: not a relocatable object (e_type {obj.header.e_type})")
+        if obj.header.e_machine != machine:
+            return Err("object {i}: e_machine {obj.header.e_machine} does not match target {machine}")
+        roots = roots.push(obj)
+        i = i + 1
+
+    var libs: [ElfSharedLib] = []
+    i = 0
+    while i < req.shared.len():
+        val lib = elf_parse_shared(req.shared[i])
+        if lib.is_err():
+            return Err("shared object {i}: {lib.unwrap_err()}")
+        val l = lib.unwrap()
+        if l.machine != machine:
+            return Err("shared object {l.soname}: e_machine {l.machine} does not match target {machine}")
+        libs = libs.push(l)
+        i = i + 1
+
+    val closure = elf_archive_closure(roots, req.archives)?
+    var all = roots
+    for m in closure.members:
+        if m.obj.header.e_machine != machine:
+            return Err("archive member {m.name}: e_machine {m.obj.header.e_machine} does not match target {machine}")
+        all = all.push(m.obj)
+
+    val res = sym_resolve_objects(all)
+    if res.errors.len() > 0:
+        return Err(elf_static_join(res.errors))
+    val undef = elf_static_undefined(all, res, libs)
+    if undef.len() > 0:
+        return Err("undefined symbol: " + elf_static_join(undef))
+    if not res.defined.has(req.entry):
+        return Err("entry symbol not defined: {req.entry}")
+
+    val inputs = elf_static_place(all)?
+    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode)
+    var contents = elf_static_contents(inputs)
+    val refs = elf_collect_refs(ctx, contents)?
+    val sc = elf_reloc_scan(refs, target, mode)?
+
+    # --- synthetic section sizes (content comes after layout) ---
+    val a64 = elf_target_is_a64(target)
+    val nplt = sc.plt_names.len()
+    var n_got_rel: i64 = 0      # GOT slots needing RELATIVE (PIE, defined)
+    var n_got_glob: i64 = 0     # GOT slots needing GLOB_DAT (imports)
+    for j in sc.got_ref:
+        if refs[j].kind == SYMREF_IMPORT:
+            n_got_glob = n_got_glob + 1
+        else if pie and refs[j].kind == SYMREF_DEFINED:
+            n_got_rel = n_got_rel + 1
+    val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + sc.sym_abs.len()
+    val n_rela = [n_rela_dyn, sc.relative.len() + n_got_rel]
+    var strnames: [text] = []
+    for l in libs:
+        strnames = strnames.push(l.soname)
+    for n in sc.imports:
+        strnames = strnames.push(n)
+    val dynstr0 = elf_build_dynstr(strnames)
+    val arrays = [elf_array_size(inputs.outs, ".init_array"), elf_array_size(inputs.outs, ".fini_array"),
+        elf_array_size(inputs.outs, ".preinit_array")]
+    val zero = ElfDynAddrs(dynsym: 0, dynstr: 0, hash: 0, gnu_hash: 0, rela_dyn: 0, rela_plt: 0, gotplt: 0,
+        init: 0, fini: 0, init_array: 0, fini_array: 0, preinit_array: 0)
+    val ntags = elf_dynamic_tags(ctx, sc, dynstr0, n_rela, zero, arrays).len() + 1
+
+    var secs: [ElfOutSec] = []
+    for o in inputs.outs:
+        secs = secs.push(o)
+    if dynamic:
+        secs = secs.push(elf_out_sec(".interp", SHT_PROGBITS_E, SHF_ALLOC, 1, req.interp.len() + 1, ELF_SEG_R))
+        secs = secs.push(elf_sec_with(elf_out_sec(".dynsym", SHT_DYNSYM_S, SHF_ALLOC, 8, (sc.imports.len() + 1) * 24, ELF_SEG_R), 24, ".dynstr", 1))
+        secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8, elf_gnu_hash_size(0), ELF_SEG_R), 0, ".dynsym", 0))
+        secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
+        secs = secs.push(elf_out_sec(".dynstr", SHT_STRTAB_E, SHF_ALLOC, 1, dynstr0.data.len(), ELF_SEG_R))
+    if n_rela_dyn > 0:
+        var link = ""
+        if dynamic:
+            link = ".dynsym"
+        secs = secs.push(elf_sec_with(elf_out_sec(".rela.dyn", SHT_RELA_S, SHF_ALLOC, 8, n_rela_dyn * 24, ELF_SEG_R), 24, link, 0))
+    if nplt > 0:
+        secs = secs.push(elf_sec_with(elf_out_sec(".rela.plt", SHT_RELA_S, SHF_ALLOC | SHF_INFO_LINK_S, 8, nplt * 24, ELF_SEG_R), 24, ".dynsym", 0))
+        secs = secs.push(elf_out_sec(".plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, elf_plt_size(target, nplt), ELF_SEG_RX))
+        secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, elf_gotplt_size(nplt), ELF_SEG_RW))
+    if sc.got_keys.len() > 0:
+        secs = secs.push(elf_out_sec(".got", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, sc.got_keys.len() * 8, ELF_SEG_RW))
+    if pie or dynamic:
+        var dlink = ""
+        if dynamic:
+            dlink = ".dynstr"
+        secs = secs.push(elf_sec_with(elf_out_sec(".dynamic", SHT_DYNAMIC_S, SHF_ALLOC | SHF_WRITE, 8, ntags * 16, ELF_SEG_RW), 16, dlink, 0))
+    secs = elf_sort_outs(secs)
+    # .rela.plt's sh_info names .got.plt (section header index = position + 1)
+    var si: i64 = 0
+    while si < secs.len():
+        if secs[si].name == ".rela.plt":
+            secs[si] = elf_sec_with(secs[si], 24, ".dynsym", elf_find_out(secs, ".got.plt") + 1)
+        si = si + 1
+
+    # --- layout ---
+    var base = ELF_STATIC_BASE
+    var e_type = ET_EXEC_T
+    if pie:
+        base = 0
+        e_type = ET_DYN_T
+    val plan = elf_exec_plan(secs, base, elf_static_page(target))?
+    var in_to_plan: [i64] = []
+    for o in inputs.outs:
+        in_to_plan = in_to_plan.push(elf_exec_find(plan, o.name))
+    val lay = ElfLayout(plan: plan, in_to_plan: in_to_plan, base: base)
+
+    val got_v = elf_plan_addr(plan, ".got")
+    val plt_v = elf_plan_addr(plan, ".plt")
+    val gotplt_v = elf_plan_addr(plan, ".got.plt")
+
+    # --- relocate input sections ---
+    var j: i64 = 0
+    while j < refs.len():
+        val r = refs[j]
+        if r.rclass == RC_NONE:
+            j = j + 1
+            continue
+        val k = r.out_sec
+        val p = plan.vaddrs[in_to_plan[k]] + r.out_off
+        var rtype = r.rtype
+        var s = elf_ref_addr(ctx, lay, r)?
+        var a = r.addend
+        if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
+            s = got_v + sc.got_idx[r.key] * 8
+            if a64:
+                a = 0
+        else if r.relax:
+            var buf = contents[k]
+            buf[r.out_off - 2] = 0x8d
+            contents[k] = buf
+            rtype = 2  # R_X86_64_PC32: lea foo(%rip)
+        else if r.rclass == RC_BRANCH and r.kind == SYMREF_IMPORT:
+            s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
+        else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
+            # ld.lld: a branch to an undefined weak symbol targets the next instruction
+            s = p + 4 - a
+        val applied = reloc_apply(target, contents[k], r.out_off, rtype, s, a, p)
+        if not applied.success:
+            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
+        contents[k] = reloc_patch_bytes(target, contents[k], r.out_off, rtype, s, a, p)
+        j = j + 1
+
+    # --- synthetic contents ---
+    var got: [i64] = []
+    var rela_rel: [i64] = []
+    var rela_sym: [i64] = []
+    var gi: i64 = 0
+    while gi < sc.got_keys.len():
+        val r = refs[sc.got_ref[gi]]
+        val slot = got_v + gi * 8
+        if r.kind == SYMREF_IMPORT:
+            got = write_u64_le(got, 0)
+            rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0)
+        else:
+            val v = elf_ref_addr(ctx, lay, r)?
+            got = write_u64_le(got, v)
+            if pie and r.kind == SYMREF_DEFINED:
+                rela_rel = elf_rela_entry(rela_rel, slot, 0, elf_dyn_relative(target), v)
+        gi = gi + 1
+    for jr in sc.relative:
+        val r = refs[jr]
+        val v = elf_ref_addr(ctx, lay, r)?
+        rela_rel = elf_rela_entry(rela_rel, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + r.addend)
+    for js in sc.sym_abs:
+        val r = refs[js]
+        rela_sym = elf_rela_entry(rela_sym, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend)
+    var rela_dyn = rela_rel
+    for x in rela_sym:
+        rela_dyn = rela_dyn.push(x)
+    var rela_plt: [i64] = []
+    var pi: i64 = 0
+    while pi < nplt:
+        rela_plt = elf_rela_entry(rela_plt, gotplt_v + (GOTPLT_RESERVED + pi) * 8, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0)
+        pi = pi + 1
+
+    var init_v: i64 = 0
+    var fini_v: i64 = 0
+    if elf_has_def(ctx, "_init"):
+        init_v = elf_entry_addr(ctx, lay, res.defined["_init"])?
+    if elf_has_def(ctx, "_fini"):
+        fini_v = elf_entry_addr(ctx, lay, res.defined["_fini"])?
+    val addrs = ElfDynAddrs(dynsym: elf_plan_addr(plan, ".dynsym"), dynstr: elf_plan_addr(plan, ".dynstr"), hash: elf_plan_addr(plan, ".hash"), gnu_hash: elf_plan_addr(plan, ".gnu.hash"),
+        rela_dyn: elf_plan_addr(plan, ".rela.dyn"), rela_plt: elf_plan_addr(plan, ".rela.plt"), gotplt: gotplt_v,
+        init: init_v, fini: fini_v, init_array: elf_plan_addr(plan, ".init_array"), fini_array: elf_plan_addr(plan, ".fini_array"),
+        preinit_array: elf_plan_addr(plan, ".preinit_array"))
+
+    var out: [[i64]] = []
+    var pk: i64 = 0
+    while pk < plan.secs.len():
+        val n = plan.secs[pk].name
+        val ik = elf_find_out(inputs.outs, n)
+        if ik >= 0:
+            out = out.push(contents[ik])
+        else if n == ".interp":
+            out = out.push(elf_build_interp(req.interp))
+        else if n == ".dynsym":
+            out = out.push(elf_build_dynsym(sc.imports, sc.import_weak, sc.import_type, dynstr0))
+        else if n == ".gnu.hash":
+            # every .dynsym entry is an import (UND), so nothing is hashed: symoffset = .dynsym count
+            out = out.push(elf_build_gnu_hash([], sc.imports.len() + 1))
+        else if n == ".hash":
+            out = out.push(elf_build_hash(sc.imports))
+        else if n == ".dynstr":
+            out = out.push(dynstr0.data)
+        else if n == ".rela.dyn":
+            out = out.push(rela_dyn)
+        else if n == ".rela.plt":
+            out = out.push(rela_plt)
+        else if n == ".plt":
+            if a64:
+                out = out.push(elf_build_plt_a64(plt_v, gotplt_v, nplt))
+            else:
+                out = out.push(elf_build_plt_x64(plt_v, gotplt_v, nplt))
+        else if n == ".got.plt":
+            if a64:
+                out = out.push(elf_build_gotplt(nplt, plt_v))
+            else:
+                out = out.push(elf_build_gotplt_x64(nplt, plt_v, elf_plan_addr(plan, ".dynamic")))
+        else if n == ".got":
+            out = out.push(got)
+        else if n == ".dynamic":
+            out = out.push(elf_build_dynamic(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays)))
+        else:
+            return Err("internal: no content for output section {n}")
+        pk = pk + 1
+
+    val entry_addr = elf_entry_addr(ctx, lay, res.defined[req.entry])?
+    val image = elf_write_image(e_type, machine, entry_addr, plan, out)
+    elf_append_symtab(image, elf_build_symtab(ctx, lay)?)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfStaticInputs, ElfLinkRequest
+export elf_static_link, elf_link, elf_link_structural
+export ELF_STATIC_BASE
+export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE

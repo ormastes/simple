@@ -446,11 +446,19 @@ impl HmInferContext:
         """Infer type of a block."""
         val stmts: [HirStmt] = block.stmts
         var stmt_idx = 0
+        var last_stmt_ty = HirType(kind: HirTypeKind.Unit, span: block.span)
+        var last_stmt_is_return = false
         while stmt_idx < stmts.len():
             val stmt: HirStmt = stmts[stmt_idx]
             match self.infer_stmt(stmt):
-                case Ok(_):
-                    pass
+                case Ok(stmt_ty):
+                    last_stmt_ty = stmt_ty
+                    last_stmt_is_return = match stmt.kind:
+                        case Expr(e):
+                            match e.kind:
+                                case HirExprKind.Return(_): true
+                                case _: false
+                        case _: false
                 case Err(e):
                     return Err(e)
             stmt_idx = stmt_idx + 1
@@ -458,12 +466,22 @@ impl HmInferContext:
         if block.has:
             return self.synthesize_expr(block.value)
 
+        # A block whose final statement is `return expr` never falls through,
+        # so its type is the returned expression's type. This lets the
+        # enclosing function's body-vs-declared-return-type check see the
+        # real payload type (e.g. the T? yielded by `.?`) instead of Unit.
+        if last_stmt_is_return:
+            return Ok(last_stmt_ty)
+
         Ok(HirType(kind: HirTypeKind.Unit, span: block.span))
 
     me infer_stmt(stmt: HirStmt) -> Result<HirType, TypeInferError>:
         """Infer type of a statement."""
         match stmt.kind:
             case Expr(expr):
+                # A `return` statement terminates the block: its expression
+                # type (not Unit) is what the block yields to the enclosing
+                # function's body-vs-declared-return-type check.
                 self.synthesize_expr(expr)
 
             case Let(symbol, type_, init):
@@ -561,9 +579,16 @@ impl HmInferContext:
             # Function parameters are immutable by default (val)
             self.register_symbol_mutability(param.symbol.id, false)
 
-        # Infer body with bidirectional checking
+        # Expose the declared return type to `return` statements while the
+        # body is being inferred, so optional payloads in non-optional
+        # return positions are rejected at their return site.
         val has_return_type = fn_.return_type.kind != HirTypeKind.Infer(0, 0)
+        val saved_return_type = self.current_return_type
+        val saved_fn_name = self.current_fn_name
+        self.current_return_type = if has_return_type: Some(fn_.return_type) else: nil
+        self.current_fn_name = fn_.name
 
+        # Infer body with bidirectional checking
         if has_return_type:
             # Return type annotated - use Check mode to propagate into body
             match self.infer_block(fn_.body):
@@ -579,6 +604,9 @@ impl HmInferContext:
                 case Ok(_): pass
                 case Err(e):
                     self.error(e)
+
+        self.current_return_type = saved_return_type
+        self.current_fn_name = saved_fn_name
 
         self.exit_level()
 
@@ -597,6 +625,25 @@ impl HmInferContext:
         """Infer types for all functions in a module."""
         # Register symbol mutability from module symbol table for narrowing
         self._register_module_symbols(module)
+
+        # Forward-declare every function's signature first so a body may call
+        # a function declared later in the module (`undefined: <callee>`
+        # otherwise depends on dict iteration order).
+        for fn_ in module.functions.values():
+            val symbol = module.symbols.get_symbol(fn_.symbol)
+            if symbol.?:
+                var param_types: [HirType] = []
+                for p in fn_.params:
+                    param_types = param_types.push(p.type_)
+                val declared_ret = if fn_.return_type.kind != HirTypeKind.Infer(0, 0):
+                    fn_.return_type
+                else:
+                    self.fresh_var(fn_.span)
+                val sig_ty = HirType(
+                    kind: HirTypeKind.Function(param_types, declared_ret, fn_.effects),
+                    span: fn_.span
+                )
+                self.bind_poly(fn_.name, self.generalize_all(sig_ty))
 
         for fn_ in module.functions.values():
             val symbol = module.symbols.get_symbol(fn_.symbol)

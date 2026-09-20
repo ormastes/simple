@@ -1,3 +1,37 @@
+## [1.0.0-beta.13] - 2026-09-18
+Tenth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- The SCV entry-closure freeze refused to run: 11 symlinked .spl files under
+  src/ (e.g. src/app/debug/coordinator.spl -> src/lib/nogc_sync_mut/debug/…)
+  cannot pass the no-follow snapshot admission reader, so no source inventory
+  could be admitted (beta.12 windows leg, 83 min into the compile). Replaced
+  the 11 src/ symlinks with copies of their target content; no symlink
+  remains under the admitted source roots. The fail-closed gate stays at full
+  strength (SIMPLE_SCV_FREEZE_FALLBACK was deliberately NOT used).
+  See doc/08_tracking/bug/scv_freeze_refused_symlinked_spl_sources_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.13`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.13`. The 1.0.1 line remains withdrawn.
+
+## [1.0.0-beta.12] - 2026-09-18
+Ninth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- CI shipped a STALE seed binary: the cargo cache's prefix restore-key
+  resurrected a target/ dir from older compiler sources, so beta.11's windows
+  leg ran a seed predating the extern fix merged the same day and died on the
+  exact bug it fixed (byte-identical error to beta.10). Release.yml and
+  build-binaries.yml now touch workspace crate roots after every such cache
+  restore, forcing cargo to rebuild the workspace crates (~5 min) while
+  keeping the dependency cache.
+  See doc/08_tracking/bug/ci_cargo_cache_resurrected_stale_seed_beta11_2026-09-18.md
+
+### Release
+- Product version is `1.0.0-beta.12`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.12`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.11] - 2026-09-18
 Eighth corrected beta of the **1.0.0 line**.
 

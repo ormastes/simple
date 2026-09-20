@@ -1,0 +1,89 @@
+"""LinkExecutionPolicyV1 selects fast vs bounded (design §6.2, §8, D8). The
+mode decoder is total and rejects unknown codes; `Bounded` additionally
+requires a positive `job_memory_limit_bytes` (the §8 6 GB budget is one
+legal value, not a special case)."""
+
+use std.spec.*
+use std.common.kernel_plugin.ids.*
+use std.common.kernel_plugin.schema_header.*
+use std.common.linker.link_policy_v1.*
+
+val REQUIREMENT = KpfSchemaRequirementV1(
+    schema_id: KpfId128(hi: 1, lo: 2),
+    schema_major: 1,
+    minimum_minor: 0,
+    minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+    schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0)
+)
+
+fn valid_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: KpfId128(hi: 1, lo: 2),
+        schema_major: 1,
+        schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0),
+        reserved0: 0
+    )
+
+fn fast_policy(job_memory_limit_bytes: u64) -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(
+        header: valid_header(), mode: LinkExecutionModeV1.Fast,
+        job_memory_limit_bytes: job_memory_limit_bytes, scratch_limit_bytes: 0,
+        max_workers: 1, allowed_placements: 0, enforcement_requirement: 0
+    )
+
+fn bounded_policy(job_memory_limit_bytes: u64) -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(
+        header: valid_header(), mode: LinkExecutionModeV1.Bounded,
+        job_memory_limit_bytes: job_memory_limit_bytes, scratch_limit_bytes: 0,
+        max_workers: 1, allowed_placements: 0, enforcement_requirement: 1
+    )
+
+describe "LinkExecutionModeV1 decode":
+    it "decodes the three known codes and round-trips their names":
+        # @req REQ-LINKER-A2-POLICY
+        step("Decode Fast/Bounded/Auto")
+        expect(link_execution_mode_v1_from_code(0)).to_equal(Some(LinkExecutionModeV1.Fast))
+        expect(link_execution_mode_v1_from_code(1)).to_equal(Some(LinkExecutionModeV1.Bounded))
+        expect(link_execution_mode_v1_from_code(2)).to_equal(Some(LinkExecutionModeV1.Auto))
+        step("Round-trip through name()")
+        expect(LinkExecutionModeV1.Fast.name()).to_equal("Fast")
+        expect(LinkExecutionModeV1.Bounded.name()).to_equal("Bounded")
+        expect(LinkExecutionModeV1.Auto.name()).to_equal("Auto")
+
+    it "rejects an unknown mode code":
+        expect(link_execution_mode_v1_from_code(3)).to_be_nil()
+        expect(link_execution_mode_v1_from_code(-1)).to_be_nil()
+
+describe "LinkExecutionPolicyV1 validation":
+    it "accepts Fast mode with a zero memory limit":
+        expect(link_policy_v1_validate(fast_policy(0), REQUIREMENT)).to_equal("")
+
+    it "rejects Bounded mode with job_memory_limit_bytes = 0":
+        expect(link_policy_v1_validate(bounded_policy(0), REQUIREMENT)).to_contain("job_memory_limit_bytes")
+
+    it "accepts Bounded mode with the design §8 6 GB budget":
+        expect(link_policy_v1_validate(bounded_policy(6000000000), REQUIREMENT)).to_equal("")
+
+    it "rejects max_workers = 0":
+        val policy = LinkExecutionPolicyV1(
+            header: valid_header(), mode: LinkExecutionModeV1.Fast,
+            job_memory_limit_bytes: 0, scratch_limit_bytes: 0,
+            max_workers: 0, allowed_placements: 0, enforcement_requirement: 0
+        )
+        expect(link_policy_v1_validate(policy, REQUIREMENT)).to_contain("max_workers")
+
+    it "rejects a schema header that fails validation":
+        val bad_header = KpfSchemaHeaderV1(
+            abi_version: KPF_ABI_VERSION_V1, struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+            schema_id: KpfId128(hi: 9, lo: 9), schema_major: 1, schema_minor: 0,
+            schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0), reserved0: 0
+        )
+        val policy = LinkExecutionPolicyV1(
+            header: bad_header, mode: LinkExecutionModeV1.Fast,
+            job_memory_limit_bytes: 0, scratch_limit_bytes: 0,
+            max_workers: 1, allowed_placements: 0, enforcement_requirement: 0
+        )
+        expect(link_policy_v1_validate(policy, REQUIREMENT)).to_contain("schema header invalid")

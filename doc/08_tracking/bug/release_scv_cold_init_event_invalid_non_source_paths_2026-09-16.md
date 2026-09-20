@@ -62,3 +62,7 @@ saving a non-source file could fail the whole refresh batch.
 
 `test/01_unit/lib/scv/compile_source_inventory_spec.spl`: two content-ratchet
 `it` blocks pinning the producer filter and the quotePath flag.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

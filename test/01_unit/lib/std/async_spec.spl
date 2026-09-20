@@ -38,82 +38,100 @@ var NEXT_TASK_ID = 0
 # Local Doubles
 # ============================================================================
 
-class Poll:
+class AsyncState:
     ready: bool
     value: i64
 
-    static fn ready(value: i64) -> Poll:
-        Poll(ready: true, value: value)
+# Shared mutable backing for the Future/Promise doubles below. Simple has
+# value semantics — assignment, construction, and anon-tuple destructuring
+# all copy — so two handles cannot observe one mutable object through an
+# embedded class field (destructuring a Promise.new() pair therefore polled
+# inconsistently). Each future/promise state lives in this module-level
+# registry keyed by id; copies of Future/Promise stay interchangeable and
+# poll consistently. Mirrors the module-level registry idiom documented in
+# test/01_unit/lib/nogc_async_mut/promise_spec.spl.
+var _async_states: [AsyncState] = []
 
-    static fn pending() -> Poll:
-        Poll(ready: false, value: 0)
+fn _state_register(ready: bool, value: i64) -> i64:
+    _async_states = _async_states.push(AsyncState(ready: ready, value: value))
+    _async_states.len() - 1
 
+fn _state_get(id: i64) -> AsyncState:
+    _async_states[id]
+
+fn _state_complete(id: i64, value: i64):
+    var st = _async_states[id]
+    st.ready = true
+    st.value = value
+    _async_states[id] = st
+
+enum Poll:
+    Ready(i64)
+    Pending
+
+impl Poll:
     fn is_ready() -> bool:
-        self.ready
+        match self:
+            case Ready(_): true
+            case Pending: false
 
     fn is_pending() -> bool:
-        not self.ready
+        not self.is_ready()
 
     fn unwrap() -> i64:
-        if self.ready:
-            self.value
-        else:
-            panic("Poll is pending")
-
-# Shared cells backing Future/Promise pairs: slot[0] = ready flag (0/1),
-# slot[1] = completed value. A module-level registry is the one mutable
-# channel both endpoints can observe (struct construction copies fields).
-var PROMISE_SLOTS: [[i64]] = []
+        match self:
+            case Ready(value): value
+            case Pending: panic("Poll is pending")
 
 class Future:
-    slot_id: i64
+    state_id: i64
 
     static fn from_value(value: i64) -> Future:
-        PROMISE_SLOTS.push([1, value])
-        Future(slot_id: PROMISE_SLOTS.len() - 1)
+        Future(state_id: _state_register(true, value))
 
     static fn pending() -> Future:
-        PROMISE_SLOTS.push([0, 0])
-        Future(slot_id: PROMISE_SLOTS.len() - 1)
+        Future(state_id: _state_register(false, 0))
 
     fn poll() -> Poll:
-        if PROMISE_SLOTS[self.slot_id][0] == 1:
-            Poll.ready(PROMISE_SLOTS[self.slot_id][1])
+        val st = _state_get(self.state_id)
+        if st.ready:
+            Poll.Ready(st.value)
         else:
-            Poll.pending()
+            Poll.Pending
 
     fn is_ready() -> bool:
         self.poll().is_ready()
 
     fn map(f: fn(i64) -> i64) -> Future:
-        if PROMISE_SLOTS[self.slot_id][0] == 1:
-            Future.from_value(f(PROMISE_SLOTS[self.slot_id][1]))
+        val st = _state_get(self.state_id)
+        if st.ready:
+            Future.from_value(f(st.value))
         else:
             Future.pending()
 
     fn then(f: fn(i64) -> Future) -> Future:
-        if PROMISE_SLOTS[self.slot_id][0] == 1:
-            f(PROMISE_SLOTS[self.slot_id][1])
+        val st = _state_get(self.state_id)
+        if st.ready:
+            f(st.value)
         else:
             Future.pending()
 
 class Promise:
-    slot_id: i64
+    state_id: i64
 
     static fn new() -> (Future, Promise):
-        PROMISE_SLOTS.push([0, 0])
-        val id = PROMISE_SLOTS.len() - 1
-        (Future(slot_id: id), Promise(slot_id: id))
+        val id = _state_register(false, 0)
+        (Future(state_id: id), Promise(state_id: id))
 
     fn complete(value: i64) -> bool:
-        if PROMISE_SLOTS[self.slot_id][0] == 1:
+        if _state_get(self.state_id).ready:
             false
         else:
-            PROMISE_SLOTS[self.slot_id] = [1, value]
+            _state_complete(self.state_id, value)
             true
 
     fn is_completed() -> bool:
-        PROMISE_SLOTS[self.slot_id][0] == 1
+        _state_get(self.state_id).ready
 
 enum TaskState:
     Pending
@@ -194,14 +212,14 @@ class Executor:
         var task = self.tasks[task_index]
         task.state = TaskState.Running
 
-        val poll_result = task.future.poll()
-        if poll_result.is_ready():
-            task.state = TaskState.Completed
-            self.tasks = self.tasks[0:task_index] + self.tasks[task_index + 1:]
-        else:
-            task.state = TaskState.Suspended
-            self.ready_queue.push(task_id)
-            self.tasks[task_index] = task
+        match task.future.poll():
+            case Poll.Ready(_):
+                task.state = TaskState.Completed
+                self.tasks = self.tasks[0:task_index] + self.tasks[task_index + 1:]
+            case Poll.Pending:
+                task.state = TaskState.Suspended
+                self.ready_queue.push(task_id)
+                self.tasks[task_index] = task
 
     me shutdown():
         self.running = false
@@ -299,7 +317,7 @@ describe "Poll<T>":
         # @req REQ-ASYNC-POLL-001
         # @capture(statistics): ready/pending flags for a poll constructed as ready
         step("Construct a ready poll carrying value 42")
-        val p = Poll.ready(42)
+        val p = Poll.Ready(42)
         expect(p.is_ready()).to_equal(true)
         expect(p.is_pending()).to_equal(false)
 
@@ -307,7 +325,7 @@ describe "Poll<T>":
         # @req REQ-ASYNC-POLL-002
         # @capture(statistics): ready/pending flags for a poll constructed as pending
         step("Construct a pending poll")
-        val p = Poll.pending()
+        val p = Poll.Pending
         expect(p.is_ready()).to_equal(false)
         expect(p.is_pending()).to_equal(true)
 
@@ -315,14 +333,14 @@ describe "Poll<T>":
         # @req REQ-ASYNC-POLL-003
         # @capture(statistics): unwrapped value of a ready poll
         step("Construct a ready poll carrying value 42 and unwrap it")
-        val p = Poll.ready(42)
+        val p = Poll.Ready(42)
         expect(p.unwrap()).to_equal(42)  # oracle: the poll was constructed with value 42
 
     it "rejects unwrap of a pending value":
         # @req REQ-ASYNC-POLL-004
         # @capture(statistics): checked-unwrap result for a pending poll
         step("Construct a pending poll and unwrap it through the checked helper")
-        val p = Poll.pending()
+        val p = Poll.Pending
         match unwrap_checked(p):
             case Ok(_): expect(true).to_equal(false)
             case Err(msg): expect(msg).to_equal("Poll is pending")
@@ -420,6 +438,19 @@ describe "Promise<T>":
         expect(promise.complete(33)).to_equal(true)
         expect(future.is_ready()).to_equal(true)
         expect(future.poll().unwrap()).to_equal(33)  # oracle: the promise was completed with value 33
+
+    it "polls consistently across repeated polls after completion":
+        # @req REQ-ASYNC-PROMISE-004
+        # @capture(statistics): readiness and value stability across back-to-back polls
+        step("Complete a promise, then poll the destructured future repeatedly")
+        val (future, promise) = Promise.new()
+        expect(promise.complete(55)).to_equal(true)
+        expect(future.is_ready()).to_equal(true)
+        expect(future.poll().is_ready()).to_equal(true)
+        expect(future.poll().is_ready()).to_equal(true)
+        expect(future.poll().unwrap()).to_equal(55)  # oracle: the promise was completed with value 55
+        expect(future.poll().unwrap()).to_equal(55)  # oracle: repeated polls return the same value
+        expect(future.is_ready()).to_equal(true)
 
 # ============================================================================
 # Task Tests

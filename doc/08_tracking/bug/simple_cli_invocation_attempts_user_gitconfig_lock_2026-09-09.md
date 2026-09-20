@@ -60,3 +60,7 @@ digest, resolved HOME/Git config paths) without a Windows host and a
 `Process Monitor`/strace-equivalent capture, which this lane does not have.
 Left OPEN; recommend the closure-oracle repro be run by a session with Windows
 access, capturing the exact argv per the record's own evidence bar.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

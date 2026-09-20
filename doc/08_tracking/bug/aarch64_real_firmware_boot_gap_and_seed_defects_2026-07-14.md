@@ -1238,3 +1238,11 @@ against it). Board-run is therefore BLOCKED, not passed. The EFI half of this
 doc remains superseded by
 `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
