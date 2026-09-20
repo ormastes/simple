@@ -1,17 +1,28 @@
+use std.io_runtime.{env_get}
 use app.lint.provider.rust.authoritative_session.*
 use app.lint.provider.rust.worker.{RustLintToolV1, RustLintWorkerConfigV1}
 use common.lint_kernel.model.{LintVerdict}
 use os.tooling.rust_analyzer_worker.json_ingest.{ingest_rust_json_lines}
 use os.tooling.rust_analyzer_worker.model.{RustAnalysisResultV1, RustAnalysisState, RustToolchainIdentityV1}
 
+fn _on_windows() -> bool:
+    val os_env = env_get("OS")
+    os_env != nil and os_env.lower().contains("windows")
+
+fn _tool_bin(name: text) -> text:
+    if _on_windows():
+        "test/fixtures/app/lint/rust_worker/bin/{name}.cmd"
+    else:
+        "test/fixtures/app/lint/rust_worker/bin/{name}"
+
 fn identity() -> RustToolchainIdentityV1:
     RustToolchainIdentityV1(cargo_version: "cargo 1.90.0 (fixture)", rustc_version: "rustc 1.90.0 (fixture)", clippy_version: "clippy 0.1.90 (fixture)", rust_analyzer_version: "rust-analyzer 1.90", workspace_fingerprint: "workspace-v1", configuration_fingerprint: "target+features-v1")
 
 fn config(features: text) -> RustLintWorkerConfigV1:
-    RustLintWorkerConfigV1(workspace_root: "test/fixtures/app/lint/rust_worker/workspace", cargo_path: "test/fixtures/app/lint/rust_worker/bin/cargo", rustc_path: "test/fixtures/app/lint/rust_worker/bin/rustc", clippy_path: "test/fixtures/app/lint/rust_worker/bin/clippy-driver", target: "aarch64-unknown-linux-gnu", features: features, timeout_ms: 5000, maximum_output_bytes: 16384, maximum_diagnostics: 8, tool: RustLintToolV1.Clippy)
+    RustLintWorkerConfigV1(workspace_root: "test/fixtures/app/lint/rust_worker/workspace", cargo_path: _tool_bin("cargo"), rustc_path: _tool_bin("rustc"), clippy_path: _tool_bin("clippy-driver"), target: "aarch64-unknown-linux-gnu", features: features, timeout_ms: 5000, maximum_output_bytes: 16384, maximum_diagnostics: 8, tool: RustLintToolV1.Clippy)
 
 fn analyzer_result(state: RustAnalysisState, revision: u64) -> RustAnalysisResultV1:
-    val json = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"rust-analyzer::dead-code\"},\"message\":\"unused item\",\"spans\":[{\"file_name\":\"src/lib.rs\",\"byte_start\":0,\"byte_end\":4,\"line_start\":1,\"line_end\":1,\"column_start\":1,\"column_end\":5,\"suggested_replacement\":\"\",\"suggestion_applicability\":\"MachineApplicable\"}],\"children\":[]}}"
+    val json = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"rust-analyzer::dead-code\"},\"message\":\"unused item\",\"spans\":[{\"file_name\":\"src/lib.rs\",\"byte_start\":0,\"byte_end\":4,\"line_start\":1,\"line_end\":1,\"column_start\":1,\"column_end\":5,\"suggested_replacement\":\"\",\"suggestion_applicability\":\"MachineApplicable\"}],\"children\":[]\}\}"
     val page = ingest_rust_json_lines(json, 8192, 8)
     RustAnalysisResultV1(state: state, identity: identity(), diagnostics: page.diagnostics, malformed_record_count: if state == RustAnalysisState.Partial: 1 else: 0, truncated: false, stderr_text: "revision=" + revision.to_string())
 
