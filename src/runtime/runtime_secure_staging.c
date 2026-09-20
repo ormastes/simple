@@ -38,6 +38,12 @@ static int secure_copy_path(const uint8_t* ptr, uint64_t len, char* out, size_t 
     memcpy(out, ptr, (size_t)len); out[len] = 0; return 1;
 }
 
+#if defined(_WIN32)
+/* Forward declaration -- defined below, ahead of its other two call sites.
+ * rt_file_create_excl needs it too: see the call site for why. */
+static int spl_secure_widen_long_path(const char* path, wchar_t* out);
+#endif
+
 int rt_file_create_excl(const char* path_ptr, int64_t path_len,
                         const char* content_ptr, int64_t content_len) {
     char path[RT_SECURE_PATH_MAX];
@@ -46,8 +52,29 @@ int rt_file_create_excl(const char* path_ptr, int64_t path_len,
                           path, sizeof(path)) ||
         (content_len > 0 && !content_ptr)) return 0;
 #if defined(_WIN32)
-    HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
+    /* CreateFileA is an ANSI entry point and is capped at MAX_PATH (260)
+     * regardless of the underlying filesystem's real limit. The exclusive-
+     * stage candidate path built by native_noop_exclusive_stage_v1 --
+     * <repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/noop-v1/<64-hex>/generations/<64-hex
+     * generation>.tmp.<64-hex nonce> -- measured 310 chars on this host,
+     * so CreateFileA failed identically on all 8 differently-nonced retry
+     * attempts (same MAX_PATH ceiling, not a real collision), and
+     * native_noop_exclusive_stage_v1 exhausted its retry budget and returned
+     * "" -- surfacing four layers up as "exclusive-stage-conflict" even
+     * though no other process or stale claim was ever involved. Prefer the
+     * wide, extended-length-prefixed call so the path can exceed MAX_PATH,
+     * exactly like rt_secure_temp_dir/rt_file_publish_noreplace above; keep
+     * the ANSI call as the fallback for a path that cannot be widened. */
+    HANDLE file = INVALID_HANDLE_VALUE;
+    wchar_t wide_path[32768];
+    if (spl_secure_widen_long_path(path, wide_path)) {
+        file = CreateFileW(wide_path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    } else {
+        file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    }
     if (file == INVALID_HANDLE_VALUE) return 0;
     DWORD written = 0;
     int ok = content_len <= (int64_t)UINT32_MAX;
@@ -76,9 +103,26 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_SECURE_PATH_MAX];
     if (!secure_copy_path(path_ptr, path_len, path, sizeof(path))) return 0;
 #if defined(_WIN32)
-    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                              FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Same bug class as rt_file_create_excl above: CreateFileA is an ANSI
+     * entry point capped at MAX_PATH. Prefer the wide, extended-length-
+     * prefixed call so a bootstrap-length path is not silently rejected;
+     * fall back to the ANSI call only when the path cannot be widened. */
+    /* FILE_FLAG_BACKUP_SEMANTICS: harmless on a regular file, but required
+     * for CreateFile to open a directory handle at all -- durability-syncing
+     * a directory (the POSIX fsync-the-parent-dir-after-rename idiom) is a
+     * real caller shape elsewhere in this bug class (rt_file_fsync in
+     * runtime.c/runtime_native.c), so this twin is made consistent too. */
+    HANDLE file = INVALID_HANDLE_VALUE;
+    wchar_t wide_path[32768];
+    if (spl_secure_widen_long_path(path, wide_path)) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
     if (file == INVALID_HANDLE_VALUE) return 0;
     int ok = FlushFileBuffers(file);
     if (!CloseHandle(file)) ok = 0;
