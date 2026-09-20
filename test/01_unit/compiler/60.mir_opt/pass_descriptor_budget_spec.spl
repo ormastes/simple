@@ -35,28 +35,29 @@ describe "MIR built-in pass backend cost budget":
     it "filters Cranelift aggressive pipelines by compile-cost budget":
         # @req REQ-SSPEC-UNIT
         step("filters Cranelift aggressive pipelines by compile-cost budget")
-        val normal = optimizationpipeline_passes_for_backend(OptLevel.Aggressive, "cranlift")
-        val medium = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "cranlift", "medium")
+        val normal = optimizationpipeline_passes_for_backend(OptLevel.Aggressive, "cranelift")
+        val medium = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "cranelift", "medium")
+        val high = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "cranelift", "high")
 
-        expect(normal.contains("inline_aggressive")).to_equal(true)
+        # Only Active passes are planned: auto_vectorize is the sole Active
+        # aggressive pass; inline_aggressive is Skeleton and planned out.
         expect(normal.contains("auto_vectorize")).to_equal(true)
-        expect(medium.contains("inline_aggressive")).to_equal(false)
+        expect(normal.contains("inline_aggressive")).to_equal(false)
         expect(medium.contains("auto_vectorize")).to_equal(false)
-        expect(medium.contains("dead_code_elimination")).to_equal(true)
-        expect(medium.contains("loop_unroll")).to_equal(true)
+        expect(medium.len()).to_equal(0)
+        expect(high.contains("auto_vectorize")).to_equal(true)
 
     it "combines LLVM backend skips with compile-cost budget skips":
         # @req REQ-SSPEC-UNIT
         step("combines LLVM backend skips with compile-cost budget skips")
         val medium = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "llvm-lib", "medium")
 
-        expect(medium.contains("dead_code_elimination")).to_equal(true)
-        expect(medium.contains("bounds_check_elimination")).to_equal(true)
-        expect(medium.contains("strength_reduction")).to_equal(false)
-        expect(medium.contains("loop_unroll")).to_equal(false)
-        expect(medium.contains("inline_aggressive")).to_equal(false)
-        expect(mir_pass_applies_to_backend_budget("strength_reduction", "llvm", "high")).to_equal(false)
-        expect(mir_pass_applies_to_backend_budget("inline_aggressive", "cranelift", "medium")).to_equal(false)
+        # Every aggressive pass is either delegated to LLVM, over the medium
+        # budget, or not transform-ready, so the planned pipeline is empty.
+        expect(medium.len()).to_equal(0)
+        expect(mir_pass_applies_to_backend_budget("auto_vectorize", "llvm", "high")).to_equal(false)
+        expect(mir_pass_applies_to_backend_budget("auto_vectorize", "cranelift", "medium")).to_equal(false)
+        expect(mir_pass_applies_to_backend_budget("auto_vectorize", "cranelift", "high")).to_equal(true)
 
     it "uses shared backend aliases without treating future backends as LLVM":
         # @req REQ-SSPEC-UNIT
@@ -64,20 +65,26 @@ describe "MIR built-in pass backend cost budget":
         expect(mir_pass_applies_to_backend_budget("strength_reduction", "llvmlib", "high")).to_equal(false)
         expect(mir_pass_applies_to_backend_budget("strength_reduction", "wasm", "high")).to_equal(true)
         val wasm = optimizationpipeline_passes_for_backend_budget(OptLevel.Aggressive, "wasm", "high")
-        expect(wasm.contains("strength_reduction")).to_equal(true)
-        expect(wasm.contains("global_value_numbering")).to_equal(true)
+        # strength_reduction is Disabled (proof debt), so it applies at the
+        # skip/cost level but is still planned out of the wasm pipeline.
+        expect(wasm.contains("strength_reduction")).to_equal(false)
+        expect(wasm.contains("auto_vectorize")).to_equal(true)
 
     it "explains backend and cost decisions for individual passes":
-        val llvm_skip = mir_pass_backend_decision("predicate_promote", "llvm", "high")
+        val llvm_skip = mir_pass_backend_decision("auto_vectorize", "llvm", "high")
         expect(llvm_skip.applies).to_equal(false)
-        expect(llvm_skip.reason).to_equal("llvm_runs_if_conversion_and_select_promotion")
+        expect(llvm_skip.reason).to_equal("llvm_runs_vectorizer_pipeline")
         expect(llvm_skip.cost_class).to_equal("high")
 
-        val cost_skip = mir_pass_backend_decision("inline_aggressive", "cranelift", "medium")
+        val cost_skip = mir_pass_backend_decision("auto_vectorize", "cranelift", "medium")
         expect(cost_skip.applies).to_equal(false)
         expect(cost_skip.reason).to_equal("cost budget exceeded")
 
-        val ready = mir_pass_backend_decision("write_coalesce", "cranelift", "medium")
+        val status_skip = mir_pass_backend_decision("predicate_promote", "cranelift", "high")
+        expect(status_skip.applies).to_equal(false)
+        expect(status_skip.reason).to_equal("disabled: mask single-use, dominance, and span proof incomplete")
+
+        val ready = mir_pass_backend_decision("auto_vectorize", "cranelift", "high")
         expect(ready.applies).to_equal(true)
         expect(ready.reason).to_equal("ready")
 
@@ -87,14 +94,14 @@ describe "MIR built-in pass backend cost budget":
         val cranelift_skips = optimizationpipeline_skipped_decisions_for_backend_budget(OptLevel.Aggressive, "cranelift", "medium")
         var found_cost_skip = false
         for decision in cranelift_skips:
-            if decision.pass_name == "predicate_promote" and decision.reason == "cost budget exceeded":
+            if decision.pass_name == "auto_vectorize" and decision.reason == "cost budget exceeded":
                 found_cost_skip = true
         expect(found_cost_skip).to_equal(true)
 
         val llvm_skips = optimizationpipeline_skipped_decisions_for_backend_budget(OptLevel.Aggressive, "llvm-lib", "high")
         var found_llvm_skip = false
         for decision in llvm_skips:
-            if decision.pass_name == "predicate_promote" and decision.reason == "llvm_runs_if_conversion_and_select_promotion":
+            if decision.pass_name == "auto_vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
 
@@ -102,16 +109,17 @@ describe "MIR built-in pass backend cost budget":
         # @req REQ-SSPEC-UNIT
         step("builds applied and skipped backend pass plans in one decision pass")
         val plan = optimizationpipeline_backend_plan_for_budget(OptLevel.Aggressive, "llvm", "medium")
-        expect(plan.passes.contains("dead_code_elimination")).to_equal(true)
-        expect(plan.passes.contains("bounds_check_elimination")).to_equal(true)
+        # Every aggressive pass is delegated, over budget, or not
+        # transform-ready for llvm/medium, so nothing is applied.
+        expect(plan.passes.len()).to_equal(0)
         expect(plan.passes.contains("auto_vectorize")).to_equal(false)
 
         var found_backend_skip = false
         var found_cost_skip = false
         for decision in plan.skipped_passes:
-            if decision.pass_name == "predicate_promote" and decision.reason == "llvm_runs_if_conversion_and_select_promotion":
+            if decision.pass_name == "auto_vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
                 found_backend_skip = true
-            if decision.pass_name == "inline_aggressive" and decision.reason == "llvm_runs_inliner_pipeline":
+            if decision.pass_name == "predicate_promote" and decision.reason == "disabled: mask single-use, dominance, and span proof incomplete":
                 found_cost_skip = true
         expect(found_backend_skip).to_equal(true)
         expect(found_cost_skip).to_equal(true)
