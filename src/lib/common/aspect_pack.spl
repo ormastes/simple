@@ -2022,6 +2022,19 @@ fn apk_loader_set_host_offer_v1(ld: i64, offer: HostOfferV1):
         return
     _ld_host_offer[ld] = Some(offer)
 
+fn _apk_host_diverged_from_catalog_v1(ld: i64, facet_key: text,
+        route_abi_hash: text) -> bool:
+    """True when a host offer is installed and its advertised digest for
+    `facet_key` differs from the catalog route's promise — identity
+    acceptance is then the host's negotiation call, not a catalog defect.
+    No offer, or an offer not listing the facet, is never "diverged"."""
+    if _ld_host_offer[ld] == nil:
+        return false
+    for iface in _ld_host_offer[ld].unwrap().ifaces:
+        if iface.name == facet_key:
+            return iface.abi_digest != route_abi_hash
+    false
+
 fn apk_negotiate_module_v1(ld: i64, iface_name: text,
         load: ApkModuleLoadV1) -> NegotiateVerdict:
     if _ld_host_offer[ld] == nil:
@@ -2427,7 +2440,17 @@ fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
     # design §17: the route promises a facet contract ABI; the module states
     # its own. A mismatch is a load failure, never a best-effort bind. An
     # empty promise means the route declares no ABI and nothing is checked.
-    if route.abi_hash != "" and route.abi_hash != load.module_abi_hash:
+    # Precedence with host negotiation: when no host offer is installed, or
+    # the host's advertised digest for this facet IS the catalog promise,
+    # both sides agree on the expected identity and a deviating module is a
+    # plain ABI defect (APK_ABI_MISMATCH). When the host has diverged from
+    # the catalog route (a different advertised digest), identity acceptance
+    # is the host's negotiation call, so the negotiation verdict takes
+    # precedence (e.g. PLUG-E-DIGEST); the ABI check then re-runs after a
+    # successful negotiation so a catalog route that lies about an accepted
+    # module still fails closed.
+    val abi_mismatch = route.abi_hash != "" and route.abi_hash != load.module_abi_hash
+    if abi_mismatch and not _apk_host_diverged_from_catalog_v1(ld, route.facet_key, route.abi_hash):
         _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
         return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
     val plugin_verdict = apk_negotiate_module_v1(ld, route.facet_key, load)
@@ -2435,6 +2458,9 @@ fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
         val code = plugin_verdict.code()
         _ld_last_error[ld] = "{code}: aspect-pack negotiation refused {facet_key}"
         return _apk_facet_error(code, _ld_last_error[ld])
+    if abi_mismatch:
+        _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
+        return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
     # Legacy core/layout/variant checks remain additive while callers migrate
     # their identities into HostOfferV1. Interface negotiation above is never
     # skipped and always runs before publication or handle return.

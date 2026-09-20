@@ -48,7 +48,7 @@ instantiator can compile it from template metadata stored in SMF files.
 
 ## Implementation
 
-File: `/home/ormastes/dev/pub/simple/src/compiler/loader/jit_instantiator.spl`
+File: `$repo/src/compiler/loader/jit_instantiator.spl`
 
 ## Workflow
 
@@ -283,11 +283,13 @@ describe "JitInstantiator Metadata Loading":
             # BLOCKED: Requires real SMF file infrastructure
             # Need to create test SMF file with note.sdn section
             # Placeholder test until SMF I/O is implemented
-            val result = jit.load_smf_metadata("test.smf")
+            # Use a dedicated path so sidecar files written by other examples
+            # cannot leak metadata into this assertion across runs.
+            val result = jit.load_smf_metadata("jit_spec_load_only.smf")
             expect(result.ok.?).to(be_true())
 
             # Verify empty metadata (placeholder behavior)
-            val loaded = jit.loaded_metadata["test.smf"]
+            val loaded = jit.loaded_metadata["jit_spec_load_only.smf"]
             expect(loaded.possible.len()).to(eq(0))
             expect(loaded.instantiations.len()).to(eq(0))
 
@@ -512,13 +514,19 @@ describe "JitInstantiator Compilation":
             var jit = JitInstantiator.new(JitInstantiatorConfig.default())
 
             # Manually add to cache for testing
-            jit.jit_cache["test_fn"] = ([1, 2, 3, 4], 0x1000)
+            jit.jit_cache["test_fn"] = JitCacheRecord(
+                code: [1u8, 2u8, 3u8, 4u8],
+                address: 0x1000,
+                owner: "test"
+            )
 
             val result = jit.try_jit_instantiate("test_fn")
 
             match result:
                 case Success(code, symbol, address):
-                    expect(code).to(eq([1, 2, 3, 4]))
+                    expect(code.len()).to(eq(4))
+                    expect(code[0] == 1u8).to(be_true())
+                    expect(code[3] == 4u8).to(be_true())
                     expect(symbol).to(eq("test_fn"))
                     expect(address.?).to(be_true())
                     expect(address.unwrap()).to(eq(0x1000))
@@ -538,13 +546,13 @@ describe "JitInstantiator Compilation":
             var jit = JitInstantiator.new(JitInstantiatorConfig.default())
 
             # Manually mark symbol as in-progress
-            jit.in_progress = jit.in_progress.insert("cycle_fn")
+            jit.in_progress = jit.in_progress.push("cycle_fn")
 
             val result = jit.try_jit_instantiate("cycle_fn")
 
             match result:
                 case CircularDependency(cycle):
-                    expect(cycle.len()).to(be_greater_than(0))
+                    expect(cycle.len()).to_be_greater_than(0)
                 case _:
                     fail("Expected CircularDependency")
 
@@ -651,7 +659,7 @@ describe "JitInstantiator SMF Updates":
             var jit = JitInstantiator.new(JitInstantiatorConfig.default())
 
             # Create metadata with existing instantiation
-            val existing_inst = InstantiationRecord(
+            val existing_inst = JitInstantiatorRecord(
                 id: 0,
                 template_name: "List",
                 type_args: "text",
@@ -765,8 +773,8 @@ describe "JitInstantiator Statistics":
         var jit = JitInstantiator.new(JitInstantiatorConfig.default())
 
         # Add to cache manually
-        jit.jit_cache["test_fn1"] = ([1], 0x1000)
-        jit.jit_cache["test_fn2"] = ([2], 0x2000)
+        jit.jit_cache["test_fn1"] = JitCacheRecord(code: [1u8], address: 0x1000, owner: "test")
+        jit.jit_cache["test_fn2"] = JitCacheRecord(code: [2u8], address: 0x2000, owner: "test")
 
         val stats = jit.stats()
         expect(stats.cached_count).to(eq(2))
@@ -903,8 +911,8 @@ describe "JitSymbolResolver":
             var resolver = JitSymbolResolver.new(JitInstantiatorConfig.default())
 
             # Manually simulate a cached JIT result
-            resolver.jit.jit_cache["fn$Vec$i64"] = ([1, 2, 3], 0x2000)
-            resolver.jit.symbol_table["fn$Vec$i64"] = 0x2000
+            resolver.set_jit_cache_for_test("fn$Vec$i64", [1u8, 2u8, 3u8], 0x2000)
+            resolver.register("fn$Vec$i64", 0x2000)
 
             # First resolve should hit cache (not registered in symbols yet)
             val addr1 = resolver.resolve("fn$Vec$i64")

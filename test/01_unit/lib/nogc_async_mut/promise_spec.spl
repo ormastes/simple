@@ -101,21 +101,26 @@ class Promise<T>:
 
 impl Promise<T>:
     static fn new(executor) -> Promise<T>:
-        var promise = Promise(
-            state: PromiseState.Pending,
-            callbacks: []
-        )
+        # The executor's resolve/reject callbacks mutate module-level
+        # `_promise_new_state` by index: a nested closure can read an outer
+        # local but cannot modify it, so the pending->resolved/rejected
+        # transition cannot go through a captured local `promise`. See the
+        # module-level comment above `_promise_new_state`.
+        val idx = _promise_new_push_pending()
 
         fn resolve(value):
-            if promise.state.is_pending():
-                promise.state = PromiseState.Resolved(value)
+            if _promise_new_state[idx].is_pending():
+                _promise_new_state[idx] = PromiseState.Resolved(value)
 
         fn reject(error):
-            if promise.state.is_pending():
-                promise.state = PromiseState.Rejected(error)
+            if _promise_new_state[idx].is_pending():
+                _promise_new_state[idx] = PromiseState.Rejected(error)
 
         executor(resolve, reject)
-        return promise
+        Promise(
+            state: _promise_new_state[idx],
+            callbacks: []
+        )
 
 # Helper functions for creating promises
 fn make_resolved<T>(v: T) -> Promise<T>:
@@ -144,11 +149,11 @@ describe "Promise<T> - Basic Operations":
         expect not p.is_pending()
 
     it "creates a promise with executor that resolves":
-        val p = Promise.new(\resolve, reject: resolve(100))
+        val p = Promise.new(\res, rej: res(100))
         expect p.is_resolved()
 
     it "creates a promise with executor that rejects":
-        val p = Promise.new(\resolve, reject: reject("failed"))
+        val p = Promise.new(\res, rej: rej("failed"))
         expect p.is_rejected()
 
     it "starts as pending before executor runs":
@@ -165,33 +170,33 @@ describe "Promise<T> - State Management":
 
     it "resolves only once":
         var resolve_count = 0
-        val p = Promise.new(\resolve, reject:
-            resolve(1)
-            resolve(2)  # Should be ignored
+        val p = Promise.new(\res, rej:
+            res(1)
+            res(2)  # Should be ignored
         )
         expect p.is_resolved()
         # Verify first value was used (can't check exact value without await)
 
     it "rejects only once":
         var reject_count = 0
-        val p = Promise.new(\resolve, reject:
-            reject("first")
-            reject("second")  # Should be ignored
+        val p = Promise.new(\res, rej:
+            rej("first")
+            rej("second")  # Should be ignored
         )
         expect p.is_rejected()
 
     it "cannot transition from resolved to rejected":
-        val p = Promise.new(\resolve, reject:
-            resolve(42)
-            reject("error")  # Should be ignored
+        val p = Promise.new(\res, rej:
+            res(42)
+            rej("error")  # Should be ignored
         )
         expect p.is_resolved()
         expect not p.is_rejected()
 
     it "cannot transition from rejected to resolved":
-        val p = Promise.new(\resolve, reject:
-            reject("error")
-            resolve(42)  # Should be ignored
+        val p = Promise.new(\res, rej:
+            rej("error")
+            res(42)  # Should be ignored
         )
         expect p.is_rejected()
         expect not p.is_resolved()
@@ -274,14 +279,14 @@ describe "Promise<T> - Integration":
         _executor_resolve_called = false
         _executor_reject_called = false
 
-        val p1 = Promise.new(\resolve, reject:
+        val p1 = Promise.new(\res, rej:
             _executor_resolve_called = true
-            resolve(1)
+            res(1)
         )
 
-        val p2 = Promise.new(\resolve, reject:
+        val p2 = Promise.new(\res, rej:
             _executor_reject_called = true
-            reject("err")
+            rej("err")
         )
 
         expect _executor_resolve_called
