@@ -791,20 +791,35 @@ pub(crate) fn evaluate_call(
         // function body never hit this because that path (`node_exec.rs`) binds
         // only `env`, so Priority 6 handled it correctly.
         //
-        // Identity is established by pointer, not by a heuristic about whether the
-        // captured env `looks` non-empty: `CowEnv` is a copy-on-write overlay over
-        // a shared base, so an emptiness test says nothing about what the closure
-        // can actually see. When the env binding and the flat entry are the SAME
-        // `Arc<FunctionDef>`, they are by construction the two registrations of one
-        // nested definition, and the closure is the one that carries scope.
+        // The test is simply: does the CURRENT SCOPE bind this name to a function?
+        // If so it wins, because that is what lexical scoping means -- an inner
+        // binding shadows an outer one, and the flat `functions` map is an outer
+        // scope (plus a recursion aid), not a namespace that should outrank the
+        // block you are standing in.
+        //
+        // This condition was originally `Arc::ptr_eq(env_def, flat_def)` -- the two
+        // registrations had to be the SAME `Arc<FunctionDef>`. Pointer identity was
+        // the right instinct (`CowEnv` is a copy-on-write overlay over a shared
+        // base, so any "does the captured env look non-empty" heuristic says
+        // nothing about what the closure can actually see), but it was too narrow:
+        // it declines in exactly the case where two DIFFERENT nested `fn`s share a
+        // name in different scopes. The flat map is keyed by the bare name, so the
+        // second registration overwrites the first, the `Arc`s differ, and dispatch
+        // fell through to Priority 5 and ran the OTHER scope's closure -- whose
+        // block has already finished, so its locals are gone:
+        //
+        //     semantic: variable `base` not found
+        //
+        // Renaming one of the two, changing nothing else, made both work. See
+        // doc/08_tracking/bug/nested_fn_name_collision_across_scopes_2026-09-19.md
+        //
+        // Recursion still resolves correctly under the wider rule: the letrec
+        // binding puts the function under its own name in the captured env, so the
+        // env lookup inside the body finds itself rather than a same-named
+        // stranger.
         // See doc/08_tracking/bug/nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
-        let env_binding_is_same_nested_fn = match (env.get(name), functions.get(name)) {
-            (Some(Value::Function { def: env_def, .. }), Some(flat_def)) => {
-                Arc::ptr_eq(env_def, flat_def)
-            }
-            _ => false,
-        };
-        if env_binding_is_same_nested_fn {
+        let env_fn_binding_shadows_flat = matches!(env.get(name), Some(Value::Function { .. }));
+        if env_fn_binding_shadows_flat {
             if let Some(val) = env.get(name).cloned() {
                 if let Some(result) =
                     call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)?

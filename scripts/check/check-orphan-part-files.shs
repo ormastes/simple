@@ -1,0 +1,297 @@
+#!/bin/sh
+# check-orphan-part-files.shs
+#
+# Ratchet: no NEW orphaned part-file. A "part-file" is a `.spl` under a
+# `_<Name>/` split directory -- the convention this repo uses to keep a module
+# under the 800-line source limit, where the parent module re-exports the parts.
+# An ORPHANED part-file is one whose module path no `use` anywhere names, so
+# nothing ever compiles it.
+#
+# Why this exists: `src/compiler/50.mir/_MirLoweringExpr/literals.spl` sat in the
+# tree as 717 lines defining 13 `impl MirLowering:` methods that a sibling also
+# defined -- and `mir_lowering_expr.spl` re-exported only three of the four part
+# modules, so nothing ever loaded it. It was filed as a duplicate-method defect
+# and read as a load-order race for six weeks; the real mechanism was that the
+# file was never imported at all. `sweep/seed.tsv` had even recorded it as
+# `compile failed`, and nothing acted, because nothing compiled it.
+# See doc/08_tracking/bug/duplicate_impl_method_definitions_silent_first_wins_2026-08-08.md
+# and doc/08_tracking/bug/orphaned_part_files_never_imported_2026-09-18.md
+#
+# This is a RATCHET, not a zero-bar: the tree carries a baselined population that
+# cannot be deleted blind (one of them is a superseded 851-line native-build
+# original whose live halves have since diverged). Baselined entries are frozen;
+# a NEW orphan fails, and -- same rule as every other ratchet here -- so does a
+# STALE baseline entry, because a baseline that no longer describes the tree is
+# how a ratchet silently stops ratcheting.
+#
+# Module-path derivation matches the compiler's: drop `src/`, drop the `.spl`,
+# `/` becomes `.`, and a numeric ordering prefix on a directory segment is
+# stripped (`50.mir` -> `mir`). Verified against the real spellings in the tree,
+# e.g. `src/compiler/50.mir/_MirLoweringExpr/literals.spl` ->
+# `compiler.mir._MirLoweringExpr.literals`, which is exactly how its siblings are
+# imported.
+#
+# usage: sh scripts/check/check-orphan-part-files.shs [--root DIR] [--baseline FILE] [--selftest]
+# verdict (last line of stdout):
+#   PASS  — <n> part-file(s) checked, 0 new orphan(s), 0 stale baseline entr(ies)
+#   FAIL  — <n> part-file(s) checked, <k> new: <paths>[; <m> stale: <paths>]   [exit 1]
+#   ERROR — nothing was checked (<reason>)                                     [exit 2]
+set -u
+
+ROOT=""
+BASELINE=""
+SELFTEST=0
+REV=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="${2:-}"; shift 2 ;;
+        --baseline) BASELINE="${2:-}"; shift 2 ;;
+        --rev) REV="${2:-}"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"; exit 2; }
+
+# src/a/b/_X/foo.spl -> a.b._X.foo   (numeric ordering prefixes dropped)
+# Every spelling an import may legitimately use for this file, one per line.
+# `src/lib/**` is reachable as `std.<rest>` (CLAUDE.md: `use std.X` resolves from
+# src/lib) and also bare as `<rest>`, alongside the literal `lib.<rest>`; missing
+# those aliases made an earlier revision call 7 live stdlib part-files orphans.
+module_path_of() {
+    _mp=$(printf '%s\n' "${1#src/}" | sed 's/\.spl$//; s|/|.|g' | sed 's/\([.]\|^\)[0-9][0-9]*\./\1/g')
+    printf '%s\n' "$_mp"
+    case "$_mp" in
+        lib.*) printf '%s\n' "std.${_mp#lib.}" "${_mp#lib.}" ;;
+    esac
+}
+
+# Every module path named by a `use` (or `export use`) anywhere under the scan
+# root, one per line. Trailing `.*` / `.{...}` selectors are stripped so the
+# path compares equal to a derived one.
+# Every module path named by a `use` (or `export use`) anywhere in the scanned
+# tree, one per line. Trailing `.*` / `.{...}` selectors are stripped so the path
+# compares equal to a derived one.
+#
+# With --rev this reads COMMITTED content via git, never the working checkout.
+# That is deliberate: push gates that read the shared checkout instead of the
+# pushed commit are a documented defect class here
+# (doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md),
+# and a new gate should not reproduce it. No materialisation is needed --
+# `git grep` and `git ls-tree` read the revision directly.
+strip_use_lines() {
+    sed -E 's/^[^:]*:[[:space:]]*//' \
+      | sed -E 's/^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+//' \
+      | sed -E 's/[[:space:]].*$//' \
+      | sed -E 's/\.\{.*$//; s/\{.*$//; s/\.\*$//' \
+      | sed -E 's/\.$//' \
+      | sort -u
+}
+
+collect_used_modules() {
+    if [ -n "$REV" ]; then
+        git -C "$repo_root" grep -h -E '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]' "$REV" -- '*.spl' 2>/dev/null | strip_use_lines
+    else
+        find "$1" -type f -name '*.spl' -print0 2>/dev/null \
+          | xargs -0 -r grep -hs -E '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]' 2>/dev/null | strip_use_lines
+    fi
+}
+
+# Part-files: *.spl directly inside a `_<Name>/` directory, __init__ excluded.
+# Part-files: *.spl whose IMMEDIATE parent directory starts with `_` -- the
+# split-module convention. Enumerated from `src/` only: a spec or fixture under
+# `test/` is an entry point the runner invokes directly, so nothing importing it
+# is normal rather than a defect, and an earlier revision of this guard flagged
+# 19 of them.
+collect_part_files() {
+    if [ -n "$REV" ]; then
+        git -C "$repo_root" ls-tree -r --name-only "$REV" -- src 2>/dev/null \
+          | grep -E '\.spl$' | grep -v '/__init__\.spl$' \
+          | awk -F/ '$(NF-1) ~ /^_/' | sort
+    else
+        find "$1/src" -type f -name '*.spl' ! -name '__init__.spl' 2>/dev/null \
+          | sed "s|^$1/||" | awk -F/ '$(NF-1) ~ /^_/' | sort
+    fi
+}
+
+# Writes orphan paths (relative to the scan root, one per line) to $2 and
+# ECHOES the count of part-files checked. The count is returned rather than set
+# in a variable because callers read it through a command substitution, and an
+# assignment inside one happens in a subshell and never reaches the caller --
+# under `set -u` that surfaced immediately as `PARTS_CHECKED: parameter not set`
+# rather than as a silent zero, which is the only reason it is written this way.
+find_orphans() {
+    _fo_root=$1
+    _fo_dest=$2
+    : > "$_fo_dest"
+    _fo_used=$(mktemp) || return 2
+    collect_used_modules "$_fo_root" > "$_fo_used"   # repo-wide: a spec importing a part-file is a real consumer
+    _fo_n=0
+    for _fo_f in $(collect_part_files "$_fo_root"); do
+        _fo_n=$((_fo_n + 1))
+        module_path_of "$_fo_f" > "$_fo_dest.cand"
+        grep -qxF -f "$_fo_dest.cand" "$_fo_used" >/dev/null 2>&1 || printf '%s\n' "$_fo_f" >> "$_fo_dest"
+    done
+    rm -f "$_fo_used"
+    echo "$_fo_n"
+    return 0
+}
+
+# Count non-blank lines. Exists as a helper because the obvious inline form,
+# `n=$(grep -c ... || echo 0)`, captures BOTH grep's `0` and the fallback `0` on an
+# empty file and yields the two-line string `0\n0`, which then fails every numeric
+# test -- the guard reported FAIL with an empty offender list until this was fixed.
+count_lines() {
+    _cl=$(grep -c '[^[:space:]]' "$1" 2>/dev/null)
+    printf '%s\n' "${_cl:-0}"
+}
+
+selftest() {
+    _st=$(mktemp -d) || { echo "selftest: mktemp failed"; return 1; }
+    _stf="$_st/orphans.txt"
+    mkdir -p "$_st/src/pkg/_Split"
+    printf 'export use pkg._Split.alive.*\n' > "$_st/src/pkg/parent.spl"
+    printf 'fn a() -> i64:\n    1\n' > "$_st/src/pkg/_Split/alive.spl"
+
+    # Fixture 1: an imported part-file is not an orphan, and the count is real.
+    _n=$(find_orphans "$_st" "$_stf")
+    if [ -s "$_stf" ] || [ "$_n" -ne 1 ]; then
+        echo "selftest FAILED: imported part-file flagged (orphans='$(cat "$_stf")', checked=$_n)"
+        rm -rf "$_st"; return 1
+    fi
+    echo "selftest ok   [an imported part-file is not an orphan]"
+
+    # Fixture 2: the incident shape -- a sibling the parent does NOT re-export.
+    printf 'fn b() -> i64:\n    2\n' > "$_st/src/pkg/_Split/dead.spl"
+    _n=$(find_orphans "$_st" "$_stf")
+    if [ "$(tr -d '\n' < "$_stf")" != "src/pkg/_Split/dead.spl" ]; then
+        echo "selftest FAILED: unimported sibling not reported (got '$(cat "$_stf")')"
+        rm -rf "$_st"; return 1
+    fi
+    echo "selftest ok   [an unimported sibling is an orphan (the literals.spl shape)]"
+
+    # Fixture 3: a numeric ordering prefix must not break the match.
+    mkdir -p "$_st/src/comp/50.mir/_Low"
+    printf 'export use comp.mir._Low.part.*\n' > "$_st/src/comp/50.mir/owner.spl"
+    printf 'fn c() -> i64:\n    3\n' > "$_st/src/comp/50.mir/_Low/part.spl"
+    find_orphans "$_st" "$_stf" >/dev/null
+    if grep -q '_Low/part.spl' "$_stf"; then
+        echo "selftest FAILED: numeric-prefixed dir mismatched its import spelling"
+        rm -rf "$_st"; return 1
+    fi
+    echo "selftest ok   [a 50.mir-style prefix resolves to mir in the module path]"
+
+    # Fixture 4: a selective `use a.b.{X}` import counts as an import.
+    printf 'fn d() -> i64:\n    4\n' > "$_st/src/pkg/_Split/sel.spl"
+    printf 'use pkg._Split.sel.{d}\n' > "$_st/src/pkg/other.spl"
+    find_orphans "$_st" "$_stf" >/dev/null
+    if grep -q 'sel.spl' "$_stf"; then
+        echo "selftest FAILED: a use-with-selector import was not recognised"
+        rm -rf "$_st"; return 1
+    fi
+    echo "selftest ok   [use a.b.{X} counts as importing a.b]"
+
+    # Fixture 6: a src/lib part-file imported through the `std.` alias must not be
+    # flagged. An earlier revision derived only `lib.a.b` and called seven live
+    # stdlib part-files orphans.
+    mkdir -p "$_st/src/lib/mypkg/_Parts"
+    printf 'fn f() -> i64:\n    6\n' > "$_st/src/lib/mypkg/_Parts/piece.spl"
+    printf 'export use std.mypkg._Parts.piece.*\n' > "$_st/src/lib/mypkg/owner.spl"
+    find_orphans "$_st" "$_stf" >/dev/null
+    if grep -q 'piece.spl' "$_stf"; then
+        echo "selftest FAILED: a std.-aliased src/lib import was not recognised"
+        rm -rf "$_st"; return 1
+    fi
+    echo "selftest ok   [src/lib resolves through the std. alias as well as lib.]"
+
+    # Fixture 7: a spec under test/ is an entry point, never a part-file.
+    mkdir -p "$_st/test/01_unit/_probe"
+    printf 'fn g() -> i64:\n    7\n' > "$_st/test/01_unit/_probe/thing_spec.spl"
+    find_orphans "$_st" "$_stf" >/dev/null
+    if grep -q 'thing_spec.spl' "$_stf"; then
+        echo "selftest FAILED: a test/ spec was enumerated as a part-file"
+        rm -rf "$_st"; return 1
+    fi
+    echo "selftest ok   [a spec under test/ is an entry point, not a part-file]"
+
+    # Fixture 5: a tree with no part-files must check 0, forcing the caller to ERROR.
+    _st2=$(mktemp -d) || { rm -rf "$_st"; return 1; }
+    mkdir -p "$_st2/src/pkg"; printf 'fn e() -> i64:\n    5\n' > "$_st2/src/pkg/plain.spl"
+    _n=$(find_orphans "$_st2" "$_st2/o.txt")
+    if [ "$_n" -ne 0 ]; then
+        echo "selftest FAILED: a tree with no part-files checked $_n"; rm -rf "$_st" "$_st2"; return 1
+    fi
+    echo "selftest ok   [no part-files means 0 checked, which the caller must ERROR on]"
+
+    # Fixture 8: the verdict path's line counting. An empty offender list must
+    # count 0 and stay numerically usable; this is what broke.
+    _st3=$(mktemp -d) || { rm -rf "$_st" "$_st2"; return 1; }
+    : > "$_st3/empty.txt"; printf 'a\nb\n' > "$_st3/two.txt"
+    _e=$(count_lines "$_st3/empty.txt"); _t=$(count_lines "$_st3/two.txt")
+    if [ "$_e" -ne 0 ] || [ "$_t" -ne 2 ]; then
+        echo "selftest FAILED: count_lines gave empty=$_e two=$_t"
+        rm -rf "$_st" "$_st2" "$_st3"; return 1
+    fi
+    rm -rf "$_st3"
+    echo "selftest ok   [an empty offender list counts 0, not a two-line string]"
+
+    rm -rf "$_st" "$_st2"
+    echo "selftest: 8 fixture(s) passed"
+    return 0
+}
+
+# The selftest builds real fixture trees on disk, so it always runs in working-tree
+# mode even when the caller asked for --rev.
+_saved_rev="$REV"; REV=""
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+REV="$_saved_rev"
+[ "$SELFTEST" -eq 1 ] && exit 0
+
+[ -n "$ROOT" ] || ROOT="$repo_root"
+[ -n "$BASELINE" ] || BASELINE="$repo_root/scripts/check/orphan_part_file_baseline.txt"
+[ -d "$ROOT" ] || { echo "ERROR — nothing was checked (no such root: $ROOT)"; exit 2; }
+BASELINE_REL=${BASELINE#"$repo_root/"}
+if [ -z "$REV" ] && [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (no baseline at $BASELINE)"; exit 2
+fi
+
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+checked=$(find_orphans "$ROOT" "$work/now.txt") || {
+    rm -rf "$work"; echo "ERROR — nothing was checked (scan failed)"; exit 2; }
+[ "$checked" -gt 0 ] || {
+    rm -rf "$work"; echo "ERROR — nothing was checked (0 part-files found under $ROOT)"; exit 2; }
+
+if [ -n "$REV" ]; then
+    # The baseline comes from the PUSHED commit too, not the shared checkout --
+    # otherwise a push could be admitted against a baseline it does not carry.
+    git -C "$repo_root" show "$REV:$BASELINE_REL" 2>/dev/null > "$work/base_raw.txt" || {
+        rm -rf "$work"; echo "ERROR — nothing was checked (no $BASELINE_REL at $REV)"; exit 2; }
+else
+    cat "$BASELINE" > "$work/base_raw.txt"
+fi
+grep -v '^[[:space:]]*#' "$work/base_raw.txt" | grep -v '^[[:space:]]*$' | sort -u > "$work/base.txt"
+sort -u "$work/now.txt" > "$work/now_sorted.txt"
+
+comm -23 "$work/now_sorted.txt" "$work/base.txt" > "$work/new.txt"
+comm -13 "$work/now_sorted.txt" "$work/base.txt" > "$work/stale.txt"
+
+new_count=$(count_lines "$work/new.txt")
+stale_count=$(count_lines "$work/stale.txt")
+base_count=$(count_lines "$work/base.txt")
+
+if [ "$new_count" -eq 0 ] && [ "$stale_count" -eq 0 ]; then
+    rm -rf "$work"
+    echo "PASS — $checked part-file(s) checked, 0 new orphan(s), 0 stale baseline entr(ies) ($base_count baselined)"
+    exit 0
+fi
+msg="FAIL — $checked part-file(s) checked"
+[ "$new_count" -gt 0 ] && msg="$msg, $new_count new: $(tr '\n' ' ' < "$work/new.txt")"
+[ "$stale_count" -gt 0 ] && msg="$msg; $stale_count stale: $(tr '\n' ' ' < "$work/stale.txt")"
+rm -rf "$work"
+echo "$msg"
+echo "       A new orphan is a part-file nothing imports — wire it into its parent module or delete it."
+echo "       A stale entry is a baselined orphan that is now imported or gone — remove its baseline row."
+exit 1
