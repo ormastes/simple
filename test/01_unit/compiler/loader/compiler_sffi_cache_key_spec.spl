@@ -12,6 +12,22 @@ describe "Compiler SFFI cache keys":
         expect(hints_to_key([absent, explicit]) == hints_to_key([explicit, absent])).to_equal(false)
 
     it "builds deterministic ordered type keys":
+        # The plain "kind:name:kind:name" format this used to assert was
+        # replaced by a length-prefixed, delimiter-framed structural key
+        # (see `sffi_cache_key_field` / `append_type_cache_key` in
+        # compiler_sffi.spl: "Frame one cache-key field so embedded
+        # delimiters cannot collide") precisely so a type `name` containing
+        # ":" cannot forge a different type's key. This spec was still
+        # asserting the pre-framing plain format; update it to the current,
+        # collision-safe encoding rather than weakening the check.
         val integer = make_int_type(64, true)
         val named = make_named_type("Widget")
-        expect(types_to_key([integer, named])).to_equal("int:i64:named:Widget")
+        # A literal "{"/"}" inside a Simple string is parsed as string
+        # interpolation (doc/08_tracking/bug/string_interpolation_silently_evaluates_literal_braces_2026-07-28.md),
+        # so the framed brace delimiters below must be built via
+        # text.from_char_code rather than typed as bare characters.
+        val lb = text.from_char_code(123)
+        val rb = text.from_char_code(125)
+        val expected_key = "2:t" + lb + "3#int3#i64b12#64s11l0a0:e0" + rb +
+            "t" + lb + "5#named6#Widgetb0s0l0a0:e0" + rb
+        expect(types_to_key([integer, named])).to_equal(expected_key)
