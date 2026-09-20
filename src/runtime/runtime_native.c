@@ -13772,6 +13772,26 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
     char new_path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(old_ptr, old_len, old_path, sizeof(old_path))) return false;
     if (!rt_text_arg_to_path(new_ptr, new_len, new_path, sizeof(new_path))) return false;
+#if defined(_WIN32)
+    /* CRT rename() is an ANSI/narrow-CRT entry point capped at MAX_PATH --
+     * same bug class as rt_file_fsync above. native_noop_admission.spl
+     * renames a staged generation file whose path was already shown to
+     * exceed MAX_PATH (the incident that motivated this whole fix pass), so
+     * this call was silently failing right after the just-fixed fsync
+     * succeeded, reproducing the identical "generation-publication-failed"
+     * symptom for an unrelated reason. Prefer the wide, extended-length-
+     * prefixed MoveFileExW with no replace flag -- matching rename()'s
+     * Windows semantics of failing when the destination already exists --
+     * falling back to plain rename() only when a path cannot be widened. */
+    wchar_t* wide_old = rt_widen_long_path_rc(old_path);
+    wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
+    if (wide_old && wide_new) {
+        BOOL ok = MoveFileExW(wide_old, wide_new, 0);
+        free(wide_old); free(wide_new);
+        return ok != 0;
+    }
+    free(wide_old); free(wide_new);
+#endif
     return rename(old_path, new_path) == 0;
 }
 
