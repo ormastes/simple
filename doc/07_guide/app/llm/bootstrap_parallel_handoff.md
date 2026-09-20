@@ -64,6 +64,18 @@ build evidence only; it does not establish compiled test execution. Full
 compiler inventory rows remain distinct from the repository-wide Stage 6
 `test test --whole --mode=interpreter` release gate.
 
+For an admitted Phase 3 compiler, `--strategy=full` also freezes a sorted
+inventory of every `test/**/*_spec.spl` and `test/**/*_test.spl` file and
+terminalizes each row through
+the Phase 3 built runner with its exact full CLI owner. Every row uses isolated
+interpreter execution with `--assert-ran`, caches and the session daemon
+disabled. Each row retains JSON counts and must report at least one executed
+example; skipped-only success is rejected. The receipt records total, passed,
+timeout, and crash counts; an empty inventory, a skipped command owner, a
+timeout, a crash, a discovery error, or any nonzero row makes
+the Phase 3 full-test result fail. This inventory is Phase 3 evidence and does
+not replace Stage 4 or release testing.
+
 Stage 2 and Stage 3 `bootstrap_main` artifacts are intentionally compiler-only.
 They can native-build self-running specs but do not expose suite discovery. Run
 `test test --whole --mode=interpreter` only with the non-vacuous full CLI built
