@@ -78,6 +78,27 @@ The externs `rt_fd_pread`/`rt_fd_pwrite` exist in the seed source as of
 (`posix_spec` 3/3 on `bin/simple`); on an older binary they return nil and the
 spec is red. The surface is re-exported from the capsule `__init__`.
 
+## File mapping: two distinct operations (2026-09-19)
+
+`std.nogc_async_mut.sosix.file_map` is the ONLY host-mapping path in Simple
+product code; `std.nogc_sync_mut.io.file_ops` no longer carries `file_mmap`
+(the raw `rt_mmap`/`rt_munmap`/`rt_madvise` externs live behind
+`std.nogc_sync_mut.sffi.fs` aliases and are not imported anywhere else).
+
+| Op | Purpose | POSIX | Windows |
+|---|---|---|---|
+| `sosix_file_map(path, size, offset, readonly) -> i64` + `sosix_file_unmap(addr, size)` | ACTUAL access: read (or write) the bytes through the address | `mmap(2)` / `munmap` | `CreateFileMapping` + `MapViewOfFile` / `UnmapViewOfFile` |
+| `sosix_file_map_prefetch(path, size, offset) -> bool` | CACHING: startup warm-up of the page cache | `mmap` + `madvise(WILLNEED)` + `munmap`, composed in Simple | **no-op, returns true, maps nothing** |
+
+Bounds contract (runtime-owned, identical in the Rust owner, `runtime_native.c`
+and the `platform/*` headers): 0 on any failure, `size > 0`, `offset >= 0`,
+`offset + size` must not overflow and must lie inside the file; `offset` must be
+page-aligned as `mmap` requires. The Rust owner additionally consults the
+sandbox (`READ_FILE`, and `WRITE_FILE` for `readonly: false`); the core-C
+runtime has no sandbox and this facade adds no policy hook. Verified on Linux
+by `scripts/check/check-file-map-c.shs` (both C owners) and the interpreter
+probe in this change's report; the Windows branches are written, not compiled.
+
 ## Not available (do not advertise)
 
 - **Exact POSIX aliases** (`sosix.posix.pread`/`pwrite`): blocked on runtime-owned

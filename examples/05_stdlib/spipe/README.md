@@ -98,6 +98,14 @@ docs:
 
 The Unix setup script also accepts `--doc-root PATH` or `SPIPE_DOC_ROOT=PATH`.
 
+When the selected host is a Simple workspace, this command also installs the
+repository root-manifest pre-commit hook in the default `.git/hooks` directory.
+It does so only when the host has `FILE.md`,
+`scripts/setup/setup-hooks.shs`, and
+`scripts/hooks/pre-commit-root-guard`; other hosts, incomplete checkouts, and
+`--dry-run` report the skipped or planned hook action without modifying hooks.
+The existing repository installer owns hook preservation and verification.
+
 On Windows PowerShell:
 
 ```powershell
