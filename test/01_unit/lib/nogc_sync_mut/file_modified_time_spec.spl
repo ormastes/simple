@@ -1,0 +1,61 @@
+# `file_modified_time` must answer a modification TIME, not the file size.
+#
+# Bug: doc/08_tracking/bug/rt_file_stat_returns_size_on_interpret_lane_2026-09-19.md
+#
+# `file_modified_time` (src/lib/nogc_sync_mut/io/file_ops.spl) calls the extern
+# `rt_file_stat`. Both C implementations return `st.st_mtime`, but the
+# INTERPRETER's version returned `meta.len()` -- the size -- behind the comment
+# "simplified - returns size or -1". It was a byte-for-byte duplicate of
+# `rt_file_size`, down to a copy-pasted "rt_file_size exceeds i64 range" error
+# string.
+#
+# Nothing caught it for the obvious reason: it is wrong on ONE lane only.
+# Measured on the deployed seed, for a 10-byte file:
+#
+#   default (JIT) lane   1789803583   correct epoch
+#   interpret lane       10           the size
+#
+# `bin/simple test` runs specs on the interpret route, so this spec DOES
+# discriminate -- unlike a JIT-only defect, which a spec cannot see.
+#
+# The casualty was `.simple/test-manifest.idx`: every one of its 11,629 rows was
+# written with mtime == size, degrading the cache's invalidation fingerprint to
+# size-only. A same-size edit to a spec then never invalidates test discovery.
+#
+# The assertions below are deliberately written to fail on the OLD behaviour
+# without hardcoding a timestamp: a size and an epoch-seconds value differ by
+# many orders of magnitude, so "mtime is far larger than the byte count" is both
+# stable and decisive.
+
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_size, file_write}
+
+fn fixture_path() -> text:
+    "/tmp/claude-file-modified-time-spec.txt"
+
+fn make_fixture() -> i64:
+    file_write(fixture_path(), "abcdefghij")
+    file_size(fixture_path())
+
+describe "file_modified_time reports a time, not a size":
+    it "reports the file's size as ten bytes":
+        # Control. If this ever fails the fixture is wrong, not the clock.
+        expect(make_fixture()).to_equal(10)
+
+    it "does not answer the byte count":
+        # The exact old answer was 10 -- the size. This is the direct pin.
+        make_fixture()
+        expect(file_modified_time(fixture_path()) == 10).to_equal(false)
+
+    it "answers a plausible epoch-seconds timestamp":
+        # Any real mtime is far past this; a size never is. 1_000_000_000 is
+        # 2001-09-09, comfortably before this repo existed and comfortably
+        # above any spec file's byte count.
+        make_fixture()
+        expect(file_modified_time(fixture_path()) > 1000000000).to_equal(true)
+
+    it "fails closed with zero for a path that does not exist":
+        # Contract from the C runtime: both implementations return 0, NOT -1,
+        # when stat fails. The interpreter used to return -1, so this pins the
+        # sentinel the pure-Simple caller documents as "fails closed".
+        expect(file_modified_time("/tmp/claude-no-such-file-anywhere-12345")).to_equal(0)

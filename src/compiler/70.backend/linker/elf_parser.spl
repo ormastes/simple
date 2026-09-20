@@ -302,6 +302,15 @@ fn elf_shdr_offset(bytes: [u8], section_index: i64, shoff: i64) -> i64:
     val base = shoff + section_index * ELF64_SHDR_SIZE
     elf_read_u64_le(bytes, base + 24)
 
+fn elf_section_addralign(obj: ElfObject, section_index: i64) -> i64:
+    """Read sh_addralign (not carried by ElfSectionHeader) from the raw bytes."""
+    val base = obj.header.e_shoff + section_index * ELF64_SHDR_SIZE
+    elf_read_u64_le(obj.raw, base + 48)
+
+fn elf_section_name(obj: ElfObject, section_index: i64) -> text:
+    """Resolve a section's name through .shstrtab."""
+    elf_strtab_get(obj.shstrtab, obj.sections[section_index].sh_name)
+
 # ============================================================================
 # Top-Level Parser
 # ============================================================================
@@ -363,13 +372,26 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     if shstrndx >= 0 and shstrndx < sections.len():
         shstrtab = elf_parse_string_table(bytes, sections[shstrndx])
 
-    # Find .strtab: SHT_STRTAB section that is not shstrtab
+    # Symbol names live in the string table named by the symtab's sh_link.
+    # LLVM emits ONE combined .strtab that is also e_shstrndx, so "first
+    # STRTAB that is not shstrtab" finds nothing there; honour sh_link first.
+    var strtab_found = false
+    var t: i64 = 0
+    while t < sections.len():
+        if sections[t].sh_type == SHT_SYMTAB:
+            val link = elf_read_u32_le(bytes, shoff + t * ELF64_SHDR_SIZE + 40)
+            if link > 0 and link < sections.len() and sections[link].sh_type == SHT_STRTAB:
+                strtab = elf_parse_string_table(bytes, sections[link])
+                strtab_found = true
+            t = sections.len()
+        t = t + 1
+
+    # Fallback: first SHT_STRTAB section that is not shstrtab
     var j: i64 = 0
-    while j < sections.len():
+    while j < sections.len() and not strtab_found:
         if j != shstrndx and sections[j].sh_type == SHT_STRTAB:
             strtab = elf_parse_string_table(bytes, sections[j])
-            # Use the first one found
-            j = sections.len()
+            strtab_found = true
         j = j + 1
 
     # Find and parse symbol table
@@ -424,6 +446,7 @@ export elf_find_section_by_type
 export elf_defined_symbols
 export elf_undefined_symbols
 export elf_make_empty_strtab
+export elf_section_addralign, elf_section_name
 export SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE, SHT_NOBITS, SHT_REL
 export SHN_UNDEF
 export STB_LOCAL, STB_GLOBAL, STB_WEAK

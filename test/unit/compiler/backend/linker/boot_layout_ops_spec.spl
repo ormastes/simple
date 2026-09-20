@@ -1,0 +1,117 @@
+# BootLayoutPlan replayable order + expression evaluator (lane A9 rung 3)
+#
+# Rung 3 replays the script in source order, so the plan must keep that order:
+# `_kernel_end = .` after a trailing `. = ALIGN(...)` and `_bss_start` before
+# `*(.bss*)` are otherwise indistinguishable. Expectations are read by hand
+# from examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld.
+#
+# @cover src/compiler/70.backend/linker/boot_layout/boot_layout_plan.spl
+
+use compiler.backend.linker.boot_layout.boot_layout_plan.{
+    BootLayoutPlan, BootOp, boot_layout_from_text, boot_layout_find_section, boot_layout_add_defsym,
+    boot_eval, boot_eval_ctx,
+    BOOT_OP_SECTION, BOOT_OP_DOT, BOOT_OP_SYMBOL, BOOT_OP_ASSERT, BOOT_OP_INPUT, BOOT_OP_PAD, BOOT_OP_ALIGN
+}
+use std.io_runtime.{file_read}
+
+fn _limine() -> BootLayoutPlan:
+    boot_layout_from_text(file_read("examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld")).unwrap()
+
+fn _kinds(ops: [BootOp]) -> [i64]:
+    var out: [i64] = []
+    for op in ops:
+        out = out.push(op.kind)
+    out
+
+describe "boot_layout - replayable SECTIONS order":
+    it "keeps dot assignments, symbols and sections in source order":
+        val plan = _limine()
+        val S = BOOT_OP_SECTION
+        val D = BOOT_OP_DOT
+        val Y = BOOT_OP_SYMBOL
+        expect(_kinds(plan.ops)).to_equal([D, Y, S, D, S, S, S, D, S, D, Y, S])
+
+    it "a SECTIONS-level symbol op points at its assignment":
+        val plan = _limine()
+        expect(plan.symbols[plan.ops[1].index].name).to_equal("_kernel_start")
+        expect(plan.symbols[plan.ops[10].index].name).to_equal("_kernel_end")
+        expect(plan.ops[9].expr).to_equal("ALIGN(0x1000)")
+
+    it "a section body keeps symbols around its input statements":
+        val plan = _limine()
+        val bss = boot_layout_find_section(plan, ".bss").unwrap()
+        expect(_kinds(bss.body)).to_equal([BOOT_OP_SYMBOL, BOOT_OP_INPUT, BOOT_OP_INPUT, BOOT_OP_SYMBOL])
+        expect(bss.body[1].patterns).to_equal([".bss*"])
+        expect(plan.symbols[bss.body[0].index].name).to_equal("_bss_start")
+
+    it "pad and inner align are ordered body ops with their values":
+        val plan = boot_layout_from_text("ENTRY(s) SECTIONS { .d : { *(.data) . += 0x10; . = ALIGN(0x20); } }").unwrap()
+        val d = boot_layout_find_section(plan, ".d").unwrap()
+        expect(_kinds(d.body)).to_equal([BOOT_OP_INPUT, BOOT_OP_PAD, BOOT_OP_ALIGN])
+        expect(d.body[1].value).to_equal(16)
+        expect(d.body[2].value).to_equal(32)
+
+    it "statements outside SECTIONS and --defsym go to top_ops":
+        val plan = boot_layout_from_text("ENTRY(s) SECTIONS { .t : { *(.text) } } ASSERT(1, \"m\")").unwrap()
+        expect(_kinds(plan.top_ops)).to_equal([BOOT_OP_ASSERT])
+        val p2 = boot_layout_add_defsym(plan, "_start", "main")
+        expect(_kinds(p2.top_ops)).to_equal([BOOT_OP_ASSERT, BOOT_OP_SYMBOL])
+        expect(p2.symbols[p2.top_ops[1].index].expr).to_equal("main")
+
+    it "PHDRS FILEHDR / PHDRS / AT are carried":
+        val plan = boot_layout_from_text("ENTRY(s) PHDRS { h PT_PHDR PHDRS; t PT_LOAD FILEHDR PHDRS AT(0x1000) FLAGS(5); } SECTIONS { .t : { *(.text) } :t }").unwrap()
+        expect(plan.segments[0].phdrs_hdr).to_equal(true)
+        expect(plan.segments[0].filehdr).to_equal(false)
+        expect(plan.segments[1].filehdr).to_equal(true)
+        expect(plan.segments[1].at_expr).to_equal("0x1000")
+
+describe "boot_layout - evaluator operators":
+    it "comparisons yield 1 / 0":
+        expect(boot_eval("5 <= 6", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("7 <= 6", boot_eval_ctx(0)).unwrap()).to_equal(0)
+
+    it "compares addresses unsigned (higher half above low memory)":
+        expect(boot_eval("0xffffffff80000000 > 0x40000000", boot_eval_ctx(0)).unwrap()).to_equal(1)
+
+    it "division, two-argument ALIGN, MAX and MIN":
+        expect(boot_eval("0x100 / 4", boot_eval_ctx(0)).unwrap()).to_equal(64)
+        expect(boot_eval("ALIGN(0x1001, 0x1000)", boot_eval_ctx(0)).unwrap()).to_equal(8192)
+        expect(boot_eval("MAX(3, 9) + MIN(3, 9)", boot_eval_ctx(0)).unwrap()).to_equal(12)
+
+describe "boot_layout - C operator precedence (ld semantics)":
+    it "&& binds looser than comparisons":
+        expect(boot_eval("1 < 2 && 5 < 3", boot_eval_ctx(0)).unwrap()).to_equal(0)
+        expect(boot_eval("1 < 2 && 5 > 3", boot_eval_ctx(0)).unwrap()).to_equal(1)
+
+    it "& binds looser than ==":
+        expect(boot_eval("6 & 2 == 2", boot_eval_ctx(0)).unwrap()).to_equal(0)
+        expect(boot_eval("(6 & 2) == 2", boot_eval_ctx(0)).unwrap()).to_equal(1)
+
+    it "|| is looser than &&, | looser than ^, shifts tighter than ==":
+        expect(boot_eval("1 || 0 && 0", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("1 | 2 ^ 3", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("0x10 >> 4 == 1", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("1 + 2 << 1", boot_eval_ctx(0)).unwrap()).to_equal(6)
+
+    it ">> is a logical (unsigned) shift":
+        expect(boot_eval("0xffffffffffffffff >> 60", boot_eval_ctx(0)).unwrap()).to_equal(15)
+
+describe "boot_layout - AT> load region":
+    it "carries the AT> region":
+        val plan = boot_layout_from_text("ENTRY(s) MEMORY { ROM : ORIGIN = 0x1000, LENGTH = 4K RAM : ORIGIN = 0x8000, LENGTH = 4K } SECTIONS { .d : { *(.data) } > RAM AT> ROM }").unwrap()
+        expect(boot_layout_find_section(plan, ".d").unwrap().lma_region).to_equal("ROM")
+
+    it "rejects an undeclared AT> region and AT() together with AT>":
+        expect(boot_layout_from_text("ENTRY(s) MEMORY { RAM : ORIGIN = 0x8000, LENGTH = 4K } SECTIONS { .d : { *(.data) } > RAM AT> ROM }").is_err()).to_equal(true)
+        expect(boot_layout_from_text("ENTRY(s) MEMORY { RAM : ORIGIN = 0x8000, LENGTH = 4K } SECTIONS { .d : AT(0x10) { *(.data) } > RAM AT> RAM }").is_err()).to_equal(true)
+
+describe "boot_layout - unsigned MIN / MAX / division":
+    it "MIN and MAX compare unsigned":
+        expect(boot_eval("MIN(0xffffffffffffffff, 1)", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("MAX(0xffffffffffffffff, 1)", boot_eval_ctx(0)).unwrap()).to_equal(-1)
+
+    it "/ and % are unsigned":
+        expect(boot_eval("0xffffffffffffffff / 2", boot_eval_ctx(0)).unwrap()).to_equal(9223372036854775807)
+        expect(boot_eval("0xffffffffffffffff % 10", boot_eval_ctx(0)).unwrap()).to_equal(5)
+        expect(boot_eval("0xffffffffffffffff / 0x8000000000000000", boot_eval_ctx(0)).unwrap()).to_equal(1)
+        expect(boot_eval("0x100 / 4", boot_eval_ctx(0)).unwrap()).to_equal(64)
