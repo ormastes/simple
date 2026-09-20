@@ -1685,8 +1685,8 @@ fn test_security_registry_init_source_filters_and_escapes() {
         "capability == \"engine2d-composited-glass-material-v1\" or ready\n"
     ));
 
-    let escaped = cxx_raw_string_literal("before )SECURITY_SDN\" after");
-    assert!(!escaped.contains(")SECURITY_SDN\""));
+    let escaped = c_string_literal("before \\ and \"quote\"\n after");
+    assert_eq!(escaped, "before \\\\ and \\\"quote\\\"\\n\"\n\" after");
 }
 
 #[test]

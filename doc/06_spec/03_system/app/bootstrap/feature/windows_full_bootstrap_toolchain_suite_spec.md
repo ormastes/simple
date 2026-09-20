@@ -6,6 +6,22 @@
 
 This manual guides the Windows bootstrap operator through exact phase admission, compiler/interpreter checks, interpreter/native tool verification, integrated suites, protected publication, local deployment, and rollback.
 
+## Windows compiler authority
+
+Windows bootstrap uses Clang C drivers only. The default MSVC lane binds
+`clang-cl`; the explicit `--mingw` lane binds absolute, target-qualified
+`clang` and `llvm-ar` for `x86_64-w64-windows-gnu`. Other compiler
+substitutions are rejected before a fingerprint or Cargo invocation can admit
+them.
+
+The Rust terminal shim uses ABI-specific Clang flags, and the Simple Windows
+GNU linker reads the same bound `CC` authority and supplies the GNU target.
+The generated main stub, module-init caller, and security-registry initializer
+are C sources; every direct Windows GNU Clang invocation supplies
+`--target=x86_64-w64-windows-gnu`. Shared core-C runtime, SQLite, and hosted
+inline-assembly objects obtain the same target flag through one helper. C/C++
+linkage guards preserve the generated symbols for Linux and macOS C++ drivers.
+
 ## Primary workflow
 
 1. **Admit the phase compiler and provenance** — freeze conflict-free source; retain absolute subject path/hash, source/toolchain/parent identity, command, bounded logs, and typed admission.

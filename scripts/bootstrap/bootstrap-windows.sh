@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Windows bootstrap entrypoint for Git Bash/MSYS2. The shared POSIX wrapper
-# owns the pipeline so Windows follows the same pure-Simple/full-build policy.
+# Windows bootstrap entrypoint for Git Bash/MSYS2. Windows bootstrap uses
+# Clang: clang-cl for the MSVC default and target-qualified clang with llvm-ar
+# for --mingw. Keep each lane bound to its C driver.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
-abi="${SIMPLE_WINDOWS_ABI:-}"
+abi="${SIMPLE_WINDOWS_ABI:-msvc}"
 forward=()
 
 for arg in "$@"; do

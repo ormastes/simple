@@ -306,6 +306,9 @@ pub(crate) fn core_c_target_flags(
     riscv_vector: bool,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
+    if let Some(flag) = windows_gnu_target_flag(target) {
+        flags.push(flag);
+    }
     if target.arch == simple_common::target::TargetArch::Aarch64 {
         flags.push("-mno-outline-atomics");
     }
@@ -314,6 +317,14 @@ pub(crate) fn core_c_target_flags(
         flags.extend(["-march=rv64gcv", "-mabi=lp64d"]);
     }
     flags
+}
+
+pub(crate) fn windows_gnu_target_flag(
+    target: simple_common::target::Target,
+) -> Option<&'static str> {
+    (target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
+        .then_some("--target=x86_64-w64-windows-gnu")
 }
 
 /// C11-atomics flags required by the MSVC-style drivers, and by nobody else.

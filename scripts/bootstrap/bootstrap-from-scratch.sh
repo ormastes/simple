@@ -1084,6 +1084,18 @@ if [ "${target}" = "simpleos-x86_64" ]; then
   exec "${repo_root}/bin/simple" run src/os/port/bootstrap_cross.spl -- ${simpleos_args}
 fi
 
+# Git Bash exports MSYSTEM and would otherwise select GNU implicitly. The
+# Windows bootstrap default is the clang-cl/MSVC lane; --mingw remains an
+# explicit Clang GNU lane through SIMPLE_WINDOWS_ABI=gnu.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows*)
+    if [ -z "${SIMPLE_WINDOWS_ABI:-}" ]; then
+      SIMPLE_WINDOWS_ABI=msvc
+      export SIMPLE_WINDOWS_ABI
+    fi
+    ;;
+esac
+
 # Shared platform detection
 . "${repo_root}/scripts/setup/platform-detect.shs"
 PLATFORM="${PLATFORM_TRIPLE}"
@@ -1098,7 +1110,6 @@ archive_suffix=".a"
 # leaving the Linux/macOS/FreeBSD invocations byte-identical.
 bootstrap_windows_abi_env=""
 bootstrap_windows_cc_env=""
-bootstrap_windows_cxx_env=""
 bootstrap_windows_include_env=""
 bootstrap_windows_lib_env=""
 bootstrap_windows_libpath_env=""
@@ -1124,8 +1135,8 @@ if [ "${os}" = "windows" ]; then
   # heuristic. Dropping the variable therefore did not fall back to the
   # requested target -- it fell back to MSYSTEM, which is always set under Git
   # Bash, so an explicit `--target x86_64-pc-windows-msvc` silently built with
-  # GNU flavour and invoked `g++` for the main stub (measured 2026-08-30:
-  # "Failed to compile main stub (g++)"). Forward the explicit choice.
+  # GNU flavour and selected the wrong main-stub C driver. Forward the explicit
+  # choice.
   bootstrap_windows_abi_env="SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR}"
   if [ "${PLATFORM_ABI}" = "msvc" ]; then
     archive_prefix=""
@@ -1650,7 +1661,7 @@ bootstrap_stage_sanity() (
   # Target::linker_flavor() (common/src/target.rs) falls back to an MSYSTEM
   # heuristic, which is always set under Git Bash -- so a requested
   # --target x86_64-pc-windows-msvc build silently ran GNU flavor and invoked
-  # g++ for the main stub. This is the exact "bootstrap_windows_abi_env" fix
+  # the wrong main-stub C driver. This is the exact "bootstrap_windows_abi_env" fix
   # already applied to the stage2/stage3 native-build invocations (see that
   # variable's own comment above) but never wired into this sanity check.
   # INCLUDE/LIB/LIBPATH: required for cl.exe/clang-cl to find MSVC headers and
@@ -1661,8 +1672,8 @@ bootstrap_stage_sanity() (
   # empty. SystemDrive is required for link.exe to resolve drive-rooted LIB
   # entries (bisected 2026-08-24: its absence alone produces
   # LNK1181 'cannot open input file kernel32.lib' even with LIB correct).
-  # TEMP/TMP: native (non-MSYS) Windows toolchain binaries such as mingw64
-  # g++.exe resolve their own scratch directory via the Win32 TEMP/TMP
+  # TEMP/TMP: native (non-MSYS) Windows toolchain binaries resolve their own
+  # scratch directory via the Win32 TEMP/TMP
   # environment variables, not the POSIX TMPDIR this function sets below. With
   # both unset, GetTempPath falls back to the Windows install directory, which
   # is not writable without elevation: "Cannot create temporary file in
@@ -1770,7 +1781,7 @@ bootstrap_stage_sanity() (
     CC=${sanity_cc}
     export CC
   fi
-  if [ -n "${sanity_cxx}" ]; then
+  if [ "${os}" != windows ] && [ -n "${sanity_cxx}" ]; then
     CXX=${sanity_cxx}
     export CXX
   fi
@@ -2139,6 +2150,41 @@ fi
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
+# Bind Windows GNU Cargo tools before the pre-build fingerprint. The same
+# exported canonical paths pass into Cargo and remain present for the post and
+# commit fingerprints, so tool-name spelling cannot create input drift.
+cc_abs=""
+if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
+  cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
+    echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
+    exit 1
+  }
+  mingw_tools=$(bootstrap_stage3_windows_gnu_cargo_tools "${cc_abs}") || {
+    echo "error: could not resolve canonical Windows GNU Cargo tools" >&2
+    exit 1
+  }
+  mingw_linker=$(printf '%s\n' "${mingw_tools}" | sed -n 's/^linker=//p')
+  mingw_cc=$(printf '%s\n' "${mingw_tools}" | sed -n 's/^cc=//p')
+  mingw_ar=$(printf '%s\n' "${mingw_tools}" | sed -n 's/^ar=//p')
+  mingw_target=x86_64-w64-windows-gnu
+  mingw_cflags=--target=${mingw_target}
+  mingw_rustflags="-C link-arg=--target=${mingw_target}"
+  [ -n "${mingw_linker}" ] && [ -n "${mingw_cc}" ] && [ -n "${mingw_ar}" ] || {
+    echo "error: incomplete Windows GNU Cargo tool authority" >&2
+    exit 1
+  }
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}"
+  export CC_x86_64_pc_windows_gnu="${mingw_cc}"
+  export AR_x86_64_pc_windows_gnu="${mingw_ar}"
+  export CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}"
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}"
+  # Normal bootstrap and --full-bootstrap share the same Windows GNU linker
+  # owner. Bind CC before fingerprinting so both modes reach the canonical
+  # Clang C-driver authority.
+  bootstrap_windows_cc_env="CC=${mingw_cc}"
+  CC=${mingw_cc}
+  export CC
+fi
 seed_inputs_fingerprint=not-used-by-admitted-stage4-resume
 if [ -z "${resume_stage4_output}" ]; then
   bootstrap_progress_mark fingerprint ""
@@ -2193,16 +2239,22 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: Rust toolchain binaries missing under sysroot: ${rust_sysroot}" >&2
     exit 1
   }
-  mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}"
-  mingw_cc="${CC_x86_64_pc_windows_gnu:-gcc}"
-  mingw_ar="${AR_x86_64_pc_windows_gnu:-ar}"
-  cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
-    echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
-    exit 1
-  }
+  if [ -z "${cc_abs}" ]; then
+    cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
+      echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
+      exit 1
+    }
+  fi
+  if [ "${os}" != windows ] || [ "${PLATFORM_ABI}" != gnu ]; then
+    mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-clang}"
+    mingw_cc="${CC_x86_64_pc_windows_gnu:-clang}"
+    mingw_ar="${AR_x86_64_pc_windows_gnu:-llvm-ar}"
+    mingw_cflags="${CFLAGS_x86_64_pc_windows_gnu:-}"
+    mingw_rustflags="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:-}"
+  fi
   if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
-    # Stage 2/3 must use the compiler admitted above by exact path. Leaving
-    # CC/CXX unset makes the Rust seed perform a second PATH search; on hosts
+    # Stage 2/3 must use the compiler admitted above by exact path. Leaving CC
+    # unset makes the Rust seed perform a second PATH search; on hosts
     # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
     # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
     # Kept OUT of bootstrap_windows_abi_env: that variable is expanded
@@ -2214,16 +2266,14 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     # bootstrap_stage3_env_assignment_names -- a pre-exec refusal that produced
     # no build log at all. Carry them as single quoted words instead.
     bootstrap_windows_cc_env="CC=${cc_abs}"
-    bootstrap_windows_cxx_env="CXX=${cc_abs}"
-    # Same sandbox reason as CC/CXX, and each may legitimately contain spaces
-    # and is therefore carried as its own single quoted word. LIBPATH is often
+    # Same sandbox reason as CC, and each may legitimately contain spaces and
+    # is therefore carried as its own single quoted word. LIBPATH is often
     # empty; it is still passed so the assignment-name list is stable.
     bootstrap_windows_include_env="INCLUDE=${INCLUDE:-}"
     bootstrap_windows_lib_env="LIB=${LIB:-}"
     bootstrap_windows_libpath_env="LIBPATH=${LIBPATH:-}"
     CC=${cc_abs}
-    CXX=${cc_abs}
-    export CC CXX
+    export CC
   fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
@@ -2350,6 +2400,8 @@ run_rust_authority_cargo() {
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+        CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
@@ -2368,6 +2420,8 @@ run_rust_authority_cargo() {
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+        CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
@@ -2387,6 +2441,8 @@ run_rust_authority_cargo() {
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+      CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
@@ -2401,6 +2457,8 @@ run_rust_authority_cargo() {
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+      CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
@@ -2949,7 +3007,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
-      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
       ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
@@ -3027,7 +3084,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
-      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
       ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
@@ -3076,7 +3132,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
-      ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
       ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
@@ -3592,7 +3647,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     ${bootstrap_windows_abi_env} \
     ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
-    ${bootstrap_windows_cxx_env:+"${bootstrap_windows_cxx_env}"} \
     ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
     ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
     ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
@@ -3636,7 +3690,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
   # Stage 3 self-host provenance gate (fail-closed).
   # `Build complete: N compiled, M cached, K failed` and `Linked: ... via
-  # clang++` are emitted ONLY by src/compiler_rust/native_all/src/lib.rs. The
+  # clang` are emitted ONLY by src/compiler_rust/native_all/src/lib.rs. The
   # pure-Simple in-process CompilerDriver path prints neither -- it is silent on
   # success and prints `error: in-process native-build: ...` on failure. So
   # either marker in the Stage 3 log proves the Rust seed, not the Stage 2
