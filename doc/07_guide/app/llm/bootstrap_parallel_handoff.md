@@ -50,10 +50,10 @@ revision, entry path, target, backend, runtime authority, and exact argv. Reuse
 the same directory for incremental retries of that lineage. Never let parallel
 writers or different compiler hashes share a cache.
 
-`bootstrap-phase-verification.shs` freezes a command-owner receipt beside the
-two built tools. The receipt binds the exact full CLI and standalone runner
-paths and SHA-256 values. Every check and test validates the receipt and both
-tools before and after execution, and test subprocesses receive
+`bootstrap-phase-verification.shs` freezes a phase-qualified command-owner
+receipt beside the two built tools. The receipt binds the phase, exact full CLI
+standalone runner, and MCP server paths and SHA-256 values. Every check and test
+validates the receipt and all three tools before and after execution, and test subprocesses receive
 `SIMPLE_BINARY=<that full CLI>`. A runner must never select itself or an ambient
 deployed compiler as its child command owner. Same-lineage retries may reuse an
 identical frozen receipt; a changed tool pair receives a hash-qualified receipt.
@@ -64,13 +64,30 @@ build evidence only; it does not establish compiled test execution. Full
 compiler inventory rows remain distinct from the repository-wide Stage 6
 `test test --whole --mode=interpreter` release gate.
 
+For an admitted Phase 3 or Phase 4 compiler, `--strategy=full` also freezes a sorted
+inventory of every `test/**/*_spec.spl` and `test/**/*_test.spl` file and
+terminalizes each row through
+the requested phase's built runner with its exact full CLI owner. Every row uses isolated
+interpreter execution with `--assert-ran`, caches and the session daemon
+disabled. MCP rows also receive the receipt-bound `SIMPLE_MCP_TEST_BINARY`; no
+inventory row may use a deployed `bin/simple_mcp_server`. Each row retains JSON counts and must report at least one executed
+example; skipped-only success is rejected. The receipt records total, passed,
+timeout, and crash counts; an empty inventory, a skipped command owner, a
+timeout, a crash, a discovery error, or any nonzero row makes
+the phase full-test result fail. Phase 4's inventory is a Stage 4 gate and does
+not replace release testing.
+
 Stage 2 and Stage 3 `bootstrap_main` artifacts are intentionally compiler-only.
 They can native-build self-running specs but do not expose suite discovery. Run
 `test test --whole --mode=interpreter` only with the non-vacuous full CLI built
 by the requested producer. A zero exit without a `Results:` line is vacuous and
 must fail the gate. Phase 4 repeats the two tool builds with Phase 4 as producer
 before self-host or release claims; a Phase 3-built tool does not prove a Phase
-4-produced tool.
+4-produced tool. It also freezes a Stage 4 tooling receipt that binds the
+admitted compiler snapshot, hosted runtime authority, Phase 4 CLI/runner
+receipt, and MCP/LSP server hashes. Stage 4 MCP integration and both server help
+probes validate this receipt before and after execution. Phase-qualified cache
+and output paths keep Phase 3 artifacts outside the Stage 4 evidence namespace.
 
 ## Current x86 transaction status (2026-08-14)
 
