@@ -14,8 +14,8 @@ DRY_RUN=0
 APPLY=0
 PATH_FILE=""
 BASELINE_FILE=""
-QUARANTINE_BASE="build/workspace_quarantine"
-MUTABLE_ROOT_DIRS="build tmp target bootstrap .git .jj"
+QUARANTINE_BASE=".scv/quarantine/root"
+MUTABLE_ROOT_DIRS="build tmp target bootstrap .git .jj .scv"
 
 usage() {
     cat <<'EOF'
@@ -94,6 +94,7 @@ THIRD_PARTY_NOTICES.md
 .gemini
 .github
 .spipe
+.scv
 bin
 src
 test
@@ -240,33 +241,23 @@ policy_tmp_dir() {
     mktemp -d "${TMPDIR:-/tmp}/workspace-root-guard.XXXXXX"
 }
 
-_emit_prefixes() {
-    awk -F/ -v md="$1" '
-        {
-            for (d = 1; d <= NF && d <= md; d++) {
-                path = $1
-                for (i = 2; i <= d; i++) path = path "/" $i
-                print path
-            }
-        }
-    ' | sort -u
-}
-
 list_audit_paths() {
-    max_depth=2
-    if [ -s "$MANIFEST_DIRS_FILE" ]; then
-        md=$(awk -F/ '{if (NF > m) m = NF} END {print m+1}' "$MANIFEST_DIRS_FILE")
-        [ "$md" -gt "$max_depth" ] && max_depth="$md"
-    fi
     if [ "$STAGED_ONLY" -eq 1 ]; then
-        git diff --cached --name-only --diff-filter=AR 2>/dev/null | _emit_prefixes "$max_depth"
+        git diff --cached --name-only --diff-filter=AR 2>/dev/null
     elif [ -n "$PATH_FILE" ]; then
-        _emit_prefixes "$max_depth" < "$PATH_FILE"
+        cat "$PATH_FILE"
     else
         {
-            git -c core.quotePath=false ls-files 2>/dev/null || true
-            git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null || true
-        } | _emit_prefixes "$max_depth"
+            # Root entries come from find below so index-only paths left by a
+            # local mv do not look like live root pollution.
+            git -c core.quotePath=false ls-files 2>/dev/null | awk 'index($0, "/") > 0' | while IFS= read -r path; do
+                [ -e "$path" ] && printf '%s\n' "$path"
+            done
+            git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null | awk 'index($0, "/") > 0' || true
+            # Ignored root files are still root-policy violations. Include the
+            # root itself because --others --exclude-standard omits them.
+            find . -mindepth 1 -maxdepth 1 -print 2>/dev/null || true
+        }
     fi
 }
 
@@ -329,17 +320,19 @@ run_audit() {
         FILENAME == paths_file {
             rel = $0
             sub(/^\.\//, "", rel)
-            if (rel == "" || rel == ".git" || rel == ".jj") next
+            if (rel == "" || rel == "." || rel == ".git" || rel == ".jj") next
             if (rel ~ /^\.git\// || rel ~ /^\.jj\//) next
-            if (ignored[rel]) next
             part_count = split(rel, parts, "/")
+            # An ignore rule is a containment rule for nested generated data,
+            # not permission to create a new root entry outside FILE.md.
+            if (ignored[rel] && part_count > 1) next
             first = parts[1]
             # Wholesale-owned root dirs: declared as a single FILE.md entry, with
             # no child manifest and no per-child declaration. Their contents are
             # generated or per-session state (.spipe/<slug>/ is live SPipe state
             # owned by whichever agent session created it), so enumerating the
             # children in FILE.md is not the intended mechanism.
-            if (first == "build" || first == "tmp" || first == "target" || first == "bootstrap" || first == ".spipe") next
+            if (first == "build" || first == "tmp" || first == "target" || first == "bootstrap" || first == ".spipe" || first == ".scv") next
             if (!allowed_root[first]) {
                 # WRG001 is UNCONDITIONAL (2026-09-03). It used to be waived for
                 # an entry that was already tracked, on the theory that existing
@@ -609,6 +602,24 @@ CHILD
 
         printf '%s\n' README.md build/generated.tmp > clean_paths.txt
         WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit --path-file clean_paths.txt >/dev/null
+
+        # Default audit must enumerate ignored root entries too; the ordinary
+        # untracked-file scan deliberately omits them.
+        printf '%s\n' '*.smf.jit.note.sdn' > .gitignore
+        git add .gitignore
+        : > test.smf.jit.note.sdn
+        : > stale_root
+        git add stale_root
+        rm stale_root
+        if WRG_ROOT_DIR="$tmp" sh "$ROOT_DIR/scripts/check-workspace-root-guard.shs" audit > ignored_root_out.txt 2>&1; then
+            echo "workspace-root-guard: self-test expected ignored root violation but audit passed" >&2
+            exit 1
+        fi
+        grep -q "WRG001 root entry is not allowed by FILE.md: test.smf.jit.note.sdn" ignored_root_out.txt
+        if grep -q "stale_root" ignored_root_out.txt; then
+            echo "workspace-root-guard: self-test reported a deleted index-only root entry" >&2
+            exit 1
+        fi
     )
     echo "workspace-root-guard: self-test OK"
 }

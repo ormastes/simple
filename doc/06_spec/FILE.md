@@ -45,6 +45,7 @@ Specification documentation. Contains both **generated** and **manually written*
 | `integration/` | Legacy/manual integration specs |
 | `system/` | Legacy/manual system specs |
 | `perf/` | Legacy/manual performance specs |
+| `examples/` | Canonical sample and legacy generated-spec outputs |
 | `feature.md` | Feature list (auto-generated every test run) |
 | `pending_feature.md` | Pending features (auto-generated every test run) |
 | `feature_db.sdn` | Feature database |

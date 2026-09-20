@@ -348,9 +348,16 @@ fn result_helpers_lower_to_builtin_enum_ops() {
         "fn load(flag: bool) -> Result<i64, text>:\n    if flag:\n        return Ok(7)\n    return Err(\"bad\")\n\nfn test(flag: bool) -> text:\n    val result = load(flag)\n    if result.is_err():\n        return result.unwrap_err()\n    \"ok\"\n",
     )
     .unwrap();
+    // `is_err()` lowers to `rt_enum_check_variant` (value, expected_enum_id,
+    // expected_discriminant), not the older 2-arg `rt_enum_check_discriminant`.
+    // `rt_enum_check_variant` was added alongside this lowering change
+    // (df7ac9f6cc2, runtime/src/value/objects.rs) to also check the enum's
+    // runtime identity, guarding against two different enums sharing a
+    // (hashed) discriminant value; `rt_enum_check_discriminant` is kept only
+    // for other call sites and is no longer emitted for is_ok/is_err.
     assert!(has_inst(&mir, |i| matches!(
         i,
-        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_check_discriminant")
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_check_variant")
     )));
     assert!(has_inst(&mir, |i| matches!(
         i,
