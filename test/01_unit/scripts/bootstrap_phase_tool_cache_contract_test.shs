@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 phase="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+mcp_spec="$root/test/02_integration/app/mcp_stdio_integration_spec.spl"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
@@ -21,8 +22,14 @@ grep -Fq -- '--output "$outputs/simple_lsp_mcp_server"' "$phase" ||
 # A phase compiler is bootstrap_main and deliberately has no full `check` or
 # `test` command surface. The verifier must materialize SHA-bound command
 # owners instead of manufacturing one failure per source/spec.
-grep -Fq -- 'tool_cache="$cache_root/compiler-tools/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
-    fail "full CLI/test-runner cache is not compiler/runtime-SHA-bound"
+grep -Fq -- 'tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
+  fail "full CLI/test-runner cache is not compiler/runtime-SHA-bound"
+grep -Fq -- 'tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
+  fail "full CLI/test-runner outputs are not phase-isolated"
+grep -Fq -- 'tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
+  fail "MCP/LSP cache is not phase-isolated"
+grep -Fq -- 'server_outputs="$outputs/tool-builds/$phase/$snapshot_sha/$runtime_cache_identity"' "$phase" ||
+  fail "MCP/LSP outputs are not phase-isolated"
 grep -Fq -- 'hosted-runtime.env' "$phase" ||
     fail "hosted runtime authority is not receipt-bound"
 grep -Fq -- 'simple-bootstrap-hosted-runtime-authority-v1' "$phase" ||
@@ -50,8 +57,10 @@ if grep -Fq -- '"$compiler_snapshot" check ' "$phase" ||
    grep -Fq -- '"$compiler_snapshot" test ' "$phase"; then
     fail "bootstrap_main is still used as a full check/test CLI"
 fi
-grep -Fq -- 'simple-bootstrap-command-owners-v1' "$phase" ||
-    fail "command-owner evidence receipt is not schema-bound"
+grep -Fq -- 'simple-bootstrap-command-owners-v3' "$phase" ||
+  fail "command-owner evidence receipt is not schema-bound"
+grep -Fq -- 'echo "phase=$phase"' "$phase" ||
+  fail "command-owner evidence is not phase-bound"
 grep -Fq -- 'set -C' "$phase" ||
     fail "command-owner evidence receipt can overwrite prior evidence"
 grep -Fq -- 'chmod 400 "$receipt"' "$phase" ||
@@ -68,11 +77,49 @@ grep -Fq -- 'test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compi
     fail "MCP integration lacks representative compile-mode coverage"
 grep -Fq -- 'run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt"' "$phase" ||
     fail "compiler tests are not routed through the compiled test runner"
+grep -Fq -- 'run_repository_full_tests "$test_runner" "$command_owner_receipt" "$mcp_server"' "$phase" ||
+    fail "full Stage3/Stage4 strategy does not execute the repository inventory"
+grep -Fq -- '[ "$phase" = stage3 ] || [ "$phase" = stage4 ]' "$phase" ||
+  fail "Stage4 does not execute the full repository inventory"
+grep -Fq -- "\\( -name '*_spec.spl' -o -name '*_test.spl' \\)" "$phase" ||
+    fail "repository inventory is not materialized from the complete test tree"
+grep -Fq -- '--mode=interpreter --unstable --assert-ran --no-cache --no-db' "$phase" ||
+    fail "repository inventory can admit vacuous or cached results"
 grep -Fq -- 'test_owner_reason=test-runner-artifact-not-built' "$phase" ||
     fail "missing test runner reason is not explicit"
 grep -Fq -- 'record_unsupported_task compiler_unit_tests "$test_owner_reason"' "$phase" ||
     fail "missing test runner can still expand into false per-spec failures"
 grep -Fq -- 'host-gpu-hosted-runtime-authority-unavailable' "$phase" ||
     fail "missing hosted runtime authority is not classified explicitly"
+grep -Fq -- 'simple-bootstrap-stage4-tooling-owners-v1' "$phase" ||
+  fail "Stage4 tooling receipt is not schema-bound"
+grep -Fq -- '"$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha"' "$phase" ||
+  fail "command-owner receipt filename does not bind every owned tool hash"
+grep -Fq -- '"$runtime_path" "$hosted_runtime_sha" "$stage4_mcp_sha" "$stage4_lsp_sha"' "$phase" ||
+  fail "Stage4 tooling receipt filename does not bind runtime and service hashes"
+grep -Fq -- 'validate_stage4_tooling_receipt "$task_stage4_tooling_receipt"' "$phase" ||
+  fail "Stage4 tooling receipt is not checked before and after invocation"
+grep -Fq -- '--verification-stage4-tooling-receipt="$stage4_tooling_receipt"' "$phase" ||
+  fail "Stage4 MCP/LSP gates are not bound to Stage4 tooling evidence"
+grep -Fq -- 'SIMPLE_MCP_TEST_BINARY="$server_outputs/simple_mcp_server"' "$phase" ||
+  fail "MCP integration does not receive the receipt-bound server path"
+grep -Fq -- '--assert-ran --no-cache --no-db --no-session-daemon --sequential' "$phase" ||
+  fail "Stage4 MCP integration is not a non-vacuous isolated execution"
+grep -Fq -- 'validate_stage4_compiler_snapshot' "$phase" ||
+  fail "Stage4 producer snapshot is not re-hashed"
+grep -Fq -- 'Stage4 compiler snapshot changed during producer invocation' "$phase" ||
+  fail "Stage4 producer snapshot mutation is not rejected after invocation"
+grep -Fq -- 'env_get("SIMPLE_MCP_TEST_BINARY")' "$mcp_spec" ||
+  fail "MCP integration does not consume an explicit server owner"
+grep -Fq -- '?? "bin/simple_mcp_server"' "$mcp_spec" ||
+  fail "ordinary MCP integration callers lost their deployed-server fallback"
+grep -Fq -- 'mcp_server_path' "$phase" ||
+  fail "command-owner receipt does not bind the MCP server path"
+grep -Fq -- 'mcp_server_sha256' "$phase" ||
+  fail "command-owner receipt does not bind the MCP server hash"
+mcp_build_line=$(grep -n 'run_matrix_task mcp_build --verification-expect-executable="$mcp_server"' "$phase" | head -n 1 | cut -d: -f1)
+inventory_line=$(grep -n 'run_repository_full_tests "$test_runner" "$command_owner_receipt" "$mcp_server"' "$phase" | head -n 1 | cut -d: -f1)
+[ -n "$mcp_build_line" ] && [ -n "$inventory_line" ] && [ "$mcp_build_line" -lt "$inventory_line" ] ||
+  fail "MCP server build is scheduled after the full inventory"
 
 echo "PASS: phase tool builds share cache while retaining distinct outputs"
