@@ -238,3 +238,22 @@ Rejected Stage 2 candidate (run 19), preserved, not deployed:
 `.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`,
 139328328 bytes. Run 18's: 139328456 bytes, sha256
 `e4346afc60c640973007e906e75cb9e429893d29dab5b1063ab69e1c91691f68`.
+
+## Linux aarch64 measurement and one site removed (2026-09-20)
+
+Lane `work/stage2-nil-guard-miscompile`, Stage 2 built receipt-free from
+`origin/main` `0c25d5eef60`, counted with `objdump -d` (same awk as above,
+`bl` edges to `lib__nogc_async_mut__async__poll__Poll.unwrap` outside its own
+frame):
+
+| Stage 2 | external sites | external functions |
+|---|---|---|
+| `0c25d5eef60` (+ alias-import unblock), sha256 `2cddadf49cd6…` | 210 | 110 |
+| + `record_external_layout_reference` on scalar readers, sha256 `ae06cc25e5c0…` | 209 | 109 |
+
+`MirLowering.record_external_layout_reference` was one of the 110 functions and
+it was the crash that took Stage 2 down on any program with a struct-typed
+local (fault address 0x48, see
+`stage2_native_method_scoped_dict_field_write_segfaults_2026-09-14.md`
+Correction 2). That site is worked around by scalar readers; the producer is
+still open, so every remaining site is still latent.
