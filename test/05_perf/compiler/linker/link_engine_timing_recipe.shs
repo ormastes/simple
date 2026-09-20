@@ -1,0 +1,187 @@
+#!/bin/sh
+# link_engine_timing_recipe.shs — lane A11 (conformance/perf) paired timing
+# recipe: links the A7 fixtures (test/fixtures/linker/elf/{start_a64.o,
+# libchain_a64.a}, aarch64, freestanding — start_a64.o plus the archive
+# exercises the same fixpoint-extraction path as
+# elf_archive_closure_spec.spl's "an object plus the archive links into an
+# executable") three ways — the internal pure-Simple static ELF engine
+# (`elf_static_link`, via test/05_perf/compiler/linker/internal_link_driver.spl
+# and `$SIMPLE_BIN run`), `ld.lld -static`, and `mold -static` (skipped if not
+# installed) — and reports 1 cold run + the median of 5 warm runs for wall
+# time and peak RSS (`/usr/bin/time -v`) per engine, bracketed by binary
+# identity for both the Simple binary and each external linker.
+#
+# "Cold" here means the first invocation in this process (no root access on
+# most hosts to drop page cache beforehand); "warm" is the 5 runs after it.
+# On this small a link even "cold" mostly hits warm OS page cache for the
+# already-open fixture files, so the cold/warm gap is expected to be small —
+# report it rather than assume it.
+#
+# doc/01_research/compiler/linker/mold_mdsocpp_linker_2026-09-15.md §11:
+# "Performance: paired runs with pinned mold/lld; cold and warm separate."
+# This is a RECIPE, not a gate: it prints numbers and exits 0 as long as it
+# could run every available engine; it does not fail on a regression (no
+# established baseline yet — first measurement). Output is scratch-only
+# (printed to stdout); nothing is written under the repo.
+#
+# Usage: sh test/05_perf/compiler/linker/link_engine_timing_recipe.shs
+#   LINK_PERF_SIMPLE_BIN (or the shared MUTATION_GATE_SIMPLE_BIN) overrides
+#   the Simple binary explicitly. With neither set, this tries
+#   "$(git rev-parse --show-toplevel)/bin/simple" first (works from any
+#   checkout of this repo, including a fresh clone or CI) and falls back to
+#   the linker plan's documented shared-host path,
+#   /home/yoon/dev/simple/bin/simple (doc/03_plan/compiler/linker/
+#   mold_mdsocpp_linker_plan_2026-09-18.md §1), only if the former does not
+#   resolve to a file. Must be run with cwd = a linker-lane checkout root
+#   (reads test/fixtures/linker/elf/* and this file's own sibling driver
+#   relative to cwd, same convention as `$SIMPLE_BIN test`).
+set -u
+
+SELF=link_engine_timing_recipe
+FIX_DIR="test/fixtures/linker/elf"
+DRIVER="test/05_perf/compiler/linker/internal_link_driver.spl"
+WARM_RUNS=5
+
+die() {
+    echo "$SELF: ERROR — $*"
+    exit 2
+}
+
+[ -f "$FIX_DIR/start_a64.o" ] && [ -f "$FIX_DIR/libchain_a64.a" ] \
+    || die "fixtures not found under $FIX_DIR (run from the linker-lane checkout root)"
+[ -f "$DRIVER" ] || die "internal driver not found: $DRIVER"
+command -v /usr/bin/time >/dev/null 2>&1 || die "/usr/bin/time is required for -v (wall + peak RSS)"
+
+resolve_simple_bin() {
+    if [ -n "${LINK_PERF_SIMPLE_BIN:-}" ]; then
+        readlink -f "$LINK_PERF_SIMPLE_BIN" 2>/dev/null
+        return
+    fi
+    if [ -n "${MUTATION_GATE_SIMPLE_BIN:-}" ]; then
+        readlink -f "$MUTATION_GATE_SIMPLE_BIN" 2>/dev/null
+        return
+    fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [ -n "$top" ] && [ -f "$top/bin/simple" ]; then
+        readlink -f "$top/bin/simple" 2>/dev/null
+        return
+    fi
+    readlink -f /home/yoon/dev/simple/bin/simple 2>/dev/null
+}
+
+SIMPLE_BIN_RESOLVED=$(resolve_simple_bin)
+[ -n "$SIMPLE_BIN_RESOLVED" ] && [ -f "$SIMPLE_BIN_RESOLVED" ] \
+    || die "no Simple binary found (checked \$LINK_PERF_SIMPLE_BIN, \$MUTATION_GATE_SIMPLE_BIN, <repo>/bin/simple, /home/yoon/dev/simple/bin/simple)"
+
+LLD_BIN=$(command -v ld.lld 2>/dev/null || true)
+MOLD_BIN=$(command -v mold 2>/dev/null || true)
+
+scratch=$(mktemp -d) || die "mktemp failed"
+trap 'rm -rf "$scratch"' EXIT
+
+echo "=== binary identity ==="
+echo "SIMPLE_BIN: $SIMPLE_BIN_RESOLVED"
+stat -c '  size=%s mtime=%y' "$SIMPLE_BIN_RESOLVED"
+if [ -n "$LLD_BIN" ]; then
+    echo "ld.lld: $LLD_BIN ($("$LLD_BIN" --version 2>&1 | head -1))"
+else
+    echo "ld.lld: NOT FOUND on PATH — skipped"
+fi
+if [ -n "$MOLD_BIN" ]; then
+    echo "mold: $MOLD_BIN ($("$MOLD_BIN" --version 2>&1 | head -1))"
+else
+    echo "mold: NOT FOUND on PATH — skipped"
+fi
+echo
+
+# $1 = seconds/errors from /usr/bin/time -v's "Elapsed (wall clock) time"
+# field, formatted "h:mm:ss.cc" or "m:ss.cc". Prints decimal seconds.
+elapsed_to_seconds() {
+    v=$1
+    nf=$(printf '%s' "$v" | awk -F: '{print NF}')
+    if [ "$nf" -eq 3 ]; then
+        printf '%s' "$v" | awk -F: '{printf "%.3f", ($1*3600)+($2*60)+$3}'
+    else
+        printf '%s' "$v" | awk -F: '{printf "%.3f", ($1*60)+$2}'
+    fi
+}
+
+median() {
+    # $@ = numbers (any count); prints the median via full numeric sort.
+    n=$#
+    sorted=$(printf '%s\n' "$@" | sort -n)
+    mid=$(( (n + 1) / 2 ))
+    printf '%s\n' "$sorted" | sed -n "${mid}p"
+}
+
+# `/usr/bin/time -v`'s wall-clock field has ~10ms resolution (m:ss.cc, two
+# fraction digits), so a link this small on lld/mold routinely rounds to
+# 0.000s — that is a real "faster than we can resolve", not a broken
+# measurement, and is reported as such instead of a bare misleading zero.
+fmt_wall() {
+    v=$1
+    case "$v" in
+        0.000) echo "<0.01s (below /usr/bin/time -v's resolution)" ;;
+        *) echo "${v}s" ;;
+    esac
+}
+
+# Runs "$@" under /usr/bin/time -v into $scratch/time.out, discarding the
+# command's own stdout/stderr (not what is being measured). Prints
+# "<wall_seconds> <peak_rss_kb>" on success, or nothing (+ nonzero return) if
+# the command failed.
+timed_run() {
+    /usr/bin/time -v -o "$scratch/time.out" "$@" >/dev/null 2>"$scratch/cmd.err"
+    rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    wall_raw=$(grep "Elapsed (wall clock) time" "$scratch/time.out" | sed 's/.*: //')
+    rss=$(grep "Maximum resident set size" "$scratch/time.out" | sed 's/.*: //')
+    [ -n "$wall_raw" ] && [ -n "$rss" ] || return 1
+    wall=$(elapsed_to_seconds "$wall_raw")
+    printf '%s %s\n' "$wall" "$rss"
+}
+
+# Runs $WARM_RUNS+1 iterations of "$@" (arg 1 = engine label for output);
+# prints a report line. Skips (does not fail) an engine whose command errors.
+report_engine() {
+    label=$1
+    shift
+    cold=$(timed_run "$@") || { echo "$label: FAILED to run (see recipe for the command) — skipped"; return; }
+    cold_wall=$(printf '%s' "$cold" | cut -d' ' -f1)
+    cold_rss=$(printf '%s' "$cold" | cut -d' ' -f2)
+
+    i=0
+    walls=""
+    rsses=""
+    while [ "$i" -lt "$WARM_RUNS" ]; do
+        one=$(timed_run "$@") || { echo "$label: FAILED on a warm run — skipped"; return; }
+        w=$(printf '%s' "$one" | cut -d' ' -f1)
+        r=$(printf '%s' "$one" | cut -d' ' -f2)
+        walls="$walls $w"
+        rsses="$rsses $r"
+        i=$((i + 1))
+    done
+    # shellcheck disable=SC2086
+    med_wall=$(median $walls)
+    # shellcheck disable=SC2086
+    med_rss=$(median $rsses)
+    echo "$label: cold=$(fmt_wall "$cold_wall")/${cold_rss}KB  warm_median(${WARM_RUNS} runs)=$(fmt_wall "$med_wall")/${med_rss}KB"
+}
+
+echo "=== timing (cold=1 run, warm=median of $WARM_RUNS runs) ==="
+report_engine "internal (elf_static_link, interpreted)" "$SIMPLE_BIN_RESOLVED" run "$DRIVER"
+
+if [ -n "$LLD_BIN" ]; then
+    report_engine "ld.lld -static" "$LLD_BIN" -static -e _start -o "$scratch/out_lld" "$FIX_DIR/start_a64.o" "$FIX_DIR/libchain_a64.a"
+fi
+if [ -n "$MOLD_BIN" ]; then
+    report_engine "mold -static" "$MOLD_BIN" -static -e _start -o "$scratch/out_mold" "$FIX_DIR/start_a64.o" "$FIX_DIR/libchain_a64.a"
+fi
+
+echo
+echo "NOTE: the internal engine has no native codegen path yet for this call"
+echo "(elf_static_link has no JIT-registered external symbol), so it runs in"
+echo "the interpreter and its wall time includes ~seed-interpreter startup;"
+echo "it is expected to be slower than ld.lld/mold, which are compiled native"
+echo "binaries doing the same link. This is a first measurement, not a"
+echo "regression check — no baseline is established by this recipe."
