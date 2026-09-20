@@ -241,3 +241,49 @@ instead of a silently wrong boolean). Not re-filed as a separate doc — same
 root, needs the same interpreter-side fix. `src/lib/**` not modified (out of
 triage scope; this is upstream stdlib code, not a test-spec edit).
 
+
+## 2026-09-19 re-verification — contract contradiction with
+`dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md`;
+two system specs reclassified STALE SPEC PIN
+
+Re-ran the `.?` probes against the Rust seed binary
+(`bin/simple.exe`, seed-warning banner confirmed) in **both** `run` and
+`test --mode=interpreter`:
+
+```
+val present = "hello" / val absent = nil / {"a": 1}.get("b")
+present.? == true  -> false   (passthrough "hello", strict ==)
+absent.? == false  -> false   (passthrough nil, strict ==)
+```
+
+The seed implements passthrough in both modes. Passthrough is also exactly
+what the pure-Simple reference source in this tree implements
+(`src/compiler/10.frontend/core/_AstExpr/nodes.spl:63`:
+"EXPR_EXISTS_CHECK = 49  # .? existence check (returns T? — value if
+present, nil if absent)"; `src/compiler/10.frontend/core/interpreter/eval.spl:451-458`:
+returns the normalized payload or `val_make_nil()`), as cited by the newer
+2026-08-09 ledger above. So the bool-conversion expectation recorded in this
+ledger's "Symptom" section contradicts the documented compiler contract and
+the reference implementation; on the evidence, the passthrough is the
+contract and the bool reading (incl. the `.claude/rules/language.md` "predicates"
+line) is the stale claim. This ledger's normalization header already notes
+its status was never backed by resolution evidence.
+
+Consequence: specs that pin `strict == true/false` against a `.?` result are
+STALE SPEC PINS, not seed debt. On 2026-09-19 two byte-identical wave-6
+generated system specs failed on exactly this shape
+("expected false to equal true"):
+
+- `test/system/features/gc_system_spec.spl` ("workflow 2 - error handling":
+  `verify(error.? == true)`; "error 5 - missing key":
+  `verify(dict.get("b").? == false)`)
+- `test/system/features/error_handling_system_spec.spl` (same two examples;
+  the two files are identical except their `@cover` line)
+
+Both pins were fixed to contract-correct oracles preserving intent
+(`verify(error != nil)`; `verify(dict.get("b") == nil)`); each spec then
+passed 33/33. Truthy-position uses such as `verify(error.?)` (payload coerced
+at a `condition: bool` parameter) still pass and were left untouched.
+Future triage: before citing this ledger as seed debt for a `.?`-shaped
+failure, check whether the pin compares `.?` with strict `==`; if so it is a
+spec bug per the compiler-source contract.
