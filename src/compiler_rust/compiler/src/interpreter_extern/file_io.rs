@@ -287,15 +287,47 @@ pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(Path::new(&path).is_dir()))
 }
 
-/// Get file stat info (simplified - returns size or -1)
+/// Get a file's MODIFICATION TIME, in seconds since the Unix epoch.
+///
+/// The contract is set by the C runtime, where both implementations
+/// (`src/runtime/runtime.c` and `src/runtime/runtime_core_host_services.c`)
+/// `return (int64_t)st.st_mtime`, and both return **0** -- not -1 -- when
+/// `stat` fails. The pure-Simple caller agrees: `file_modified_time` in
+/// `src/lib/nogc_sync_mut/io/file_ops.spl` calls this and documents "A zero
+/// result fails closed: cache users must treat it as unavailable."
+///
+/// This used to return `meta.len()` -- the file SIZE -- behind the comment
+/// "simplified - returns size or -1", which made it a byte-for-byte duplicate
+/// of `rt_file_size` right down to a copy-pasted "rt_file_size exceeds i64
+/// range" error string. Nothing reported it, because it is only wrong on the
+/// INTERPRET lane: the JIT/native lanes link the C function and answered
+/// correctly, so the two lanes silently disagreed.
+///
+/// Measured on the deployed seed before this fix, for a 10-byte file:
+///
+///   default (JIT) lane   file_modified_time -> 1789803583   (correct epoch)
+///   interpret lane       file_modified_time -> 10           (the size)
+///
+/// The casualty was the test manifest. `bin/simple test` runs on the interpret
+/// route, so every row of `.simple/test-manifest.idx` was written with
+/// `mtime == size` -- 11,629 of 11,629 -- degrading the cache's invalidation
+/// fingerprint to size-only. A same-size edit to a spec then never invalidates
+/// test discovery.
+/// See doc/08_tracking/bug/rt_file_stat_returns_size_on_interpret_lane_2026-09-19.md
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match fs::metadata(&path) {
-        Ok(meta) => i64::try_from(meta.len())
-            .map(Value::Int)
-            .map_err(|_| CompileError::runtime("rt_file_size exceeds i64 range")),
-        Err(_) => Ok(Value::Int(-1)),
-    }
+    let meta = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return Ok(Value::Int(0)),
+    };
+    use std::time::UNIX_EPOCH;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(mtime))
 }
 
 /// Get file size in bytes

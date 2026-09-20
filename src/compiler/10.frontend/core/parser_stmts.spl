@@ -716,9 +716,15 @@ fn parse_statement() -> i64:
             var mleft = parse_postfix_on(expr_ident("match", 0))
             mleft = parse_binary_from(mleft)
             kind = par_kind_get()
-            if kind == 100 or kind == 106:
+            if kind == 100:
                 parser_advance()
                 return stmt_expr_stmt(expr_assign(mleft, parse_expr(), 0), 0)
+            if kind == 106:
+                # Walrus creates a val binding, and `val match` is reserved
+                # (see parse_val_decl_stmt) -- reject the sugar form too.
+                parser_error("reserved 'match' keyword cannot be used as a walrus binding name")
+                parser_advance()
+                return stmt_expr_stmt(parse_expr(), 0)
             kind = par_kind_get()
             if kind == 101:
                 parser_advance()
@@ -1007,6 +1013,22 @@ fn parse_statement() -> i64:
         eprint("[parser-block] expr-branch:start kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
     var expression = 0
     if kind == TOK_IDENT:
+        # Walrus statement: `name := expr` is sugar for `val name = expr`
+        # (doc/02_requirements/language/type_system/pass_variants_and_walrus.md):
+        # immutable binding, simple identifier LHS, statement level only.
+        # Expression contexts reject `:=` in parse_assignment below.
+        val walrus_snap = lex_snapshot_save()
+        val (walrus_nums, walrus_text) = parser_tok_save()
+        val walrus_name = par_text_get()
+        parser_advance()
+        if par_kind_get() == 106:
+            parser_advance()
+            val walrus_init = parse_expr()
+            val walrus_type = infer_expr_type_from_parse(walrus_init)
+            lex_snapshot_commit(walrus_snap)
+            return stmt_val_decl(walrus_name, walrus_type, walrus_init, 0)
+        lex_snapshot_rollback(walrus_snap)
+        parser_tok_restore(walrus_nums, walrus_text)
         val (bc_matched, bc_call) = try_parse_bare_ident_string_call()
         expression = if bc_matched: bc_call else: parse_expr()
     else:
