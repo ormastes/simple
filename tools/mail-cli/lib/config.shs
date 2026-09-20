@@ -69,6 +69,146 @@ _mail_truncate() {
   fi
 }
 
+# --- Portable date ---------------------------------------------------------
+# Some call sites use GNU `date -d` with relative ("5 minutes ago") or
+# absolute RFC 2822 strings; BSD/macOS date has no -d. This function shadows
+# date(1) within the mail-cli process and emulates the -d subset via BSD's
+# -v (relative adjustments) and -j -f (string parsing) flags. When the
+# system date is GNU (Linux) every call passes straight through, and any
+# call without -d passes through untouched on both platforms, so Linux
+# behavior is unchanged — only the -d flag itself is intercepted on BSD.
+date() {
+  if [ -z "${_MAIL_DATE_KIND:-}" ]; then
+    if command date -d @0 >/dev/null 2>&1; then
+      _MAIL_DATE_KIND=gnu
+    else
+      _MAIL_DATE_KIND=bsd
+    fi
+  fi
+  if [ "$_MAIL_DATE_KIND" = gnu ]; then
+    command date "$@"
+    return
+  fi
+
+  # Quick scan: without -d, BSD date handles everything natively (-R, +fmt,
+  # -j -f, -r, ...). Passing the original "$@" through keeps exact quoting.
+  local _scan
+  local _have_d=0
+  for _scan in "$@"; do
+    case "$_scan" in
+      -d|-d?*) _have_d=1; break ;;
+    esac
+  done
+  if [ "$_have_d" -eq 0 ]; then
+    command date "$@"
+    return
+  fi
+
+  # Split out -d <str>, -R and +fmt; anything else is passed through.
+  local _arg _d_str=""
+  local _out_fmt=""
+  local -a _passthrough
+  _passthrough=()
+  while [ $# -gt 0 ]; do
+    _arg="$1"; shift
+    case "$_arg" in
+      -d)
+        _d_str="${1:-}"
+        if [ $# -gt 0 ]; then shift; fi
+        ;;
+      -d?*)
+        _d_str="${_arg#-d}"
+        ;;
+      -R)
+        _out_fmt='%a, %d %b %Y %H:%M:%S %z'
+        ;;
+      +*)
+        _out_fmt="${_arg#+}"
+        ;;
+      *)
+        _passthrough+=("$_arg")
+        ;;
+    esac
+  done
+
+  # Trim whitespace around the -d value.
+  _d_str="${_d_str#"${_d_str%%[![:space:]]*}"}"
+  _d_str="${_d_str%"${_d_str##*[![:space:]]}"}"
+
+  # GNU's default rendering for `date -d str` (no +fmt given).
+  if [ -z "$_out_fmt" ]; then
+    _out_fmt='%a %b %e %H:%M:%S %Z %Y'
+  fi
+
+  local -a _cmd
+  _cmd=()
+  if [ ${#_passthrough[@]} -gt 0 ]; then
+    _cmd+=("${_passthrough[@]}")
+  fi
+
+  local _n _unit _sign _fmt
+  local _rel_re='^([0-9]+)[[:space:]]+(second|minute|hour|day|week|month|year)s?([[:space:]]+ago)?$'
+  case "$_d_str" in
+    now)
+      : ;;  # plain current time
+    yesterday|tomorrow)
+      if [ "$_d_str" = yesterday ]; then
+        _cmd+=(-v-1d)
+      else
+        _cmd+=(-v+1d)
+      fi
+      ;;
+    @*)
+      _cmd+=(-r "${_d_str#@}")
+      ;;
+    *)
+      if [[ "$_d_str" =~ $_rel_re ]]; then
+        _n="${BASH_REMATCH[1]}"
+        _unit="${BASH_REMATCH[2]}"
+        _sign="+"
+        if [ -n "${BASH_REMATCH[3]}" ]; then _sign="-"; fi
+        case "$_unit" in
+          second) _cmd+=("-v${_sign}${_n}S") ;;
+          minute) _cmd+=("-v${_sign}${_n}M") ;;
+          hour)   _cmd+=("-v${_sign}${_n}H") ;;
+          day)    _cmd+=("-v${_sign}${_n}d") ;;
+          week)   _cmd+=("-v${_sign}${_n}w") ;;
+          month)  _cmd+=("-v${_sign}${_n}m") ;;
+          year)   _cmd+=("-v${_sign}${_n}y") ;;
+        esac
+      else
+        # Absolute date string: parse via BSD -j -f, most specific formats
+        # first; fall through to empty output + nonzero exit when nothing
+        # matches, mirroring GNU's failure mode so callers' fallbacks work.
+        for _fmt in \
+          '%a, %d %b %Y %H:%M:%S %z' \
+          '%a, %e %b %Y %H:%M:%S %z' \
+          '%d %b %Y %H:%M:%S %z' \
+          '%a, %d %b %Y %H:%M:%S' \
+          '%d %b %Y %H:%M:%S' \
+          '%Y-%m-%dT%H:%M:%S%z' \
+          '%Y-%m-%dT%H:%M:%S' \
+          '%Y-%m-%d %H:%M:%S %z' \
+          '%Y-%m-%d %H:%M:%S' \
+          '%Y-%m-%d' ; do
+          if [ ${#_cmd[@]} -gt 0 ]; then
+            if command date "${_cmd[@]}" -j -f "$_fmt" "$_d_str" "+$_out_fmt" 2>/dev/null; then
+              return 0
+            fi
+          else
+            if command date -j -f "$_fmt" "$_d_str" "+$_out_fmt" 2>/dev/null; then
+              return 0
+            fi
+          fi
+        done
+        return 1
+      fi
+      ;;
+  esac
+  _cmd+=("+$_out_fmt")
+  command date "${_cmd[@]}"
+}
+
 # Render an RFC 2822 date as a relative time ("3h ago", "Jun 12") when it
 # parses; falls back to the raw string on any parse failure (e.g. BSD date
 # without GNU-style -d, or an unparseable header value).

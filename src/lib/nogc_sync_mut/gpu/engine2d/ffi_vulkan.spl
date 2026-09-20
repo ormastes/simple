@@ -13,6 +13,7 @@ Usage:
 """
 
 use std.sffi.dynamic.{DynLib}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
 
 # ============================================================================
@@ -34,14 +35,81 @@ use std.gpu.engine2d.sffi_vulkan.{
 }
 
 # ============================================================================
+# Rejected-op name table
+# ============================================================================
+
+# The boxed ledger stores an op code, not text (atomics are integer-only).
+# Code 0 means "no rejection recorded yet"; every Dynamic-mode op this class
+# honestly rejects has a stable code in both directions below.
+fn _reject_op_code(op: text) -> i64:
+    match op:
+        case "init": 1
+        case "shutdown": 2
+        case "device_count": 3
+        case "select_device": 4
+        case "alloc_buffer": 5
+        case "free_buffer": 6
+        case "compile_glsl": 7
+        case "create_compute_pipeline": 8
+        case "create_descriptor_set": 9
+        case "bind_buffer": 10
+        case "destroy_descriptor_set": 11
+        case "begin_compute": 12
+        case "bind_pipeline": 13
+        case "bind_descriptors": 14
+        case "dispatch": 15
+        case "end_compute": 16
+        case "submit_and_wait": 17
+        case "wait_idle": 18
+        case "destroy_shader": 19
+        case "destroy_pipeline": 20
+        case _: 0
+
+fn _reject_op_name(code: i64) -> text:
+    match code:
+        case 1: "init"
+        case 2: "shutdown"
+        case 3: "device_count"
+        case 4: "select_device"
+        case 5: "alloc_buffer"
+        case 6: "free_buffer"
+        case 7: "compile_glsl"
+        case 8: "create_compute_pipeline"
+        case 9: "create_descriptor_set"
+        case 10: "bind_buffer"
+        case 11: "destroy_descriptor_set"
+        case 12: "begin_compute"
+        case 13: "bind_pipeline"
+        case 14: "bind_descriptors"
+        case 15: "dispatch"
+        case 16: "end_compute"
+        case 17: "submit_and_wait"
+        case 18: "wait_idle"
+        case 19: "destroy_shader"
+        case 20: "destroy_pipeline"
+        case _: ""
+
+# ============================================================================
 # VulkanDynFfi
 # ============================================================================
 
 class VulkanDynFfi:
     _mode: GpuFfiMode
     _dyn_lib: DynLib?
-    _dyn_rejected_ops: i64 = 0
-    _dyn_last_rejection: text = ""
+    # The ledger is boxed behind runtime atomic handles rather than plain
+    # fields: the tree-walk interpreter lane that `bin/simple test` uses drops
+    # class-field mutations performed through option-typed receivers, and
+    # create_dynamic() returns VulkanDynFfi?, so every spec-driven method call
+    # arrives through such a receiver. Atomic handles mutate runtime-owned
+    # storage instead of the receiver binding, keeping the documented
+    # rejected_op_count()/last_rejection() contract observable there. Plain
+    # fields would be correct only on lanes with class-reference semantics.
+    # See doc/08_tracking/bug/jit_class_mutation_drop_characterization_2026-07-04.md
+    # and doc/08_tracking/bug/gpu_ffi_loader_probes_linux_sonames_on_macos_2026-09-19.md.
+    # _dyn_rejected_ops counts rejections; _dyn_last_rejection stores an op
+    # code from _reject_op_code (0 = none recorded yet).
+    _dyn_rejected_ops: AtomicI64
+    _dyn_last_rejection: AtomicI64
 
 impl FfiDispatchBase for VulkanDynFfi:
 
@@ -53,12 +121,19 @@ impl FfiDispatchBase for VulkanDynFfi:
         real libvulkan.so exports no (struct-based) symbol this raw
         call0..call4(i64...) FFI mechanism can invoke. Static mode never
         increments this."""
-        self._dyn_rejected_ops
+        self._dyn_rejected_ops.load(MemoryOrdering.SeqCst)
 
     fn last_rejection() -> text:
         """Name of the most recently rejected Dynamic-mode operation, or
         empty text if none has been rejected yet."""
-        self._dyn_last_rejection
+        _reject_op_name(self._dyn_last_rejection.load(MemoryOrdering.SeqCst))
+
+    me _dyn_record_reject(op: text):
+        """Shared ledger-write for the reject helpers: store the op code,
+        then advance the counter. Both writes go through runtime atomic
+        handles so they survive receiver copies on mutation-dropping lanes."""
+        self._dyn_last_rejection.store(_reject_op_code(op), MemoryOrdering.SeqCst)
+        self._dyn_rejected_ops.fetch_add(1, MemoryOrdering.SeqCst)
 
     me _dyn_reject_bool(op: text) -> bool:
         """Honest-gate primitive for bool-returning Dynamic-mode ops: no
@@ -66,32 +141,45 @@ impl FfiDispatchBase for VulkanDynFfi:
         rt_vulkan_* names, not vkCreateInstance/vkAllocateMemory/... driver
         exports), so record the rejection instead of dlsym'ing a
         nonexistent export and silently no-opping."""
-        self._dyn_rejected_ops = self._dyn_rejected_ops + 1
-        self._dyn_last_rejection = op
+        self._dyn_record_reject(op)
         false
 
     me _dyn_reject_i64(op: text) -> i64:
         """Same as `_dyn_reject_bool` for i64-returning ops."""
-        self._dyn_rejected_ops = self._dyn_rejected_ops + 1
-        self._dyn_last_rejection = op
+        self._dyn_record_reject(op)
         0
 
     # --- Constructors -------------------------------------------------------
 
     static fn create_static() -> VulkanDynFfi:
-        VulkanDynFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
+        VulkanDynFfi(
+            _mode: GpuFfiMode.Static,
+            _dyn_lib: nil,
+            _dyn_rejected_ops: atomic_i64_new(0),
+            _dyn_last_rejection: atomic_i64_new(0),
+        )
 
     static fn create_dynamic() -> VulkanDynFfi?:
         val lib = try_load_gpu_lib("vulkan")
         if lib == nil:
             return nil
-        VulkanDynFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
+        VulkanDynFfi(
+            _mode: GpuFfiMode.Dynamic,
+            _dyn_lib: lib,
+            _dyn_rejected_ops: atomic_i64_new(0),
+            _dyn_last_rejection: atomic_i64_new(0),
+        )
 
     static fn create_dynamic_from(path: text) -> VulkanDynFfi?:
         val lib = DynLib.load(path)
         if lib == nil:
             return nil
-        VulkanDynFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
+        VulkanDynFfi(
+            _mode: GpuFfiMode.Dynamic,
+            _dyn_lib: lib,
+            _dyn_rejected_ops: atomic_i64_new(0),
+            _dyn_last_rejection: atomic_i64_new(0),
+        )
 
     static fn create(ffi_mode: GpuFfiMode) -> VulkanDynFfi?:
         match ffi_mode:

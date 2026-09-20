@@ -3,8 +3,11 @@
 # Provides convention-based dynamic loading of .so/.dll for SFFI.
 # Convention: rt_{prefix}_{fn} -> $SIMPLE_SFFI_PATH/libspl_{prefix}.so
 #
-# Works in C-compiled mode where spl_dlopen/spl_dlsym are available.
-# In interpreter mode, spl_dlopen is not whitelisted — use compiled binary.
+# Works in C-compiled mode and in interpreter mode. The interpreter lane's RAW
+# spl_dlopen/spl_dlsym raise and abort on failure (Simple has no try/catch), so
+# the checked wrappers below drive spl_dlopen_checked/spl_dlsym_checked first
+# and only touch the raw ABIs where the checked status/out transport is
+# ambiguous (the pre-2026-09-11 out-slot writeback loss).
 #
 # Usage:
 #   val lib = DynLib.load("build/libspl_torch.so")
@@ -138,11 +141,21 @@ fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
         spl_dlopen_checked(path, &mut handle)
     if status == 0 and handle > 0:
         return Ok(handle)
+    if status != 0:
+        # Genuine load failure (missing bare soname, unloadable artifact, ...).
+        # Return Err WITHOUT retrying through the raw `spl_dlopen` ABI: in the
+        # interpreter lane that ABI raises `spl_dlopen failed for '<path>'` and
+        # aborts the process, which made DynLib.load's documented nil path
+        # unreachable there. See
+        # doc/08_tracking/bug/gpu_ffi_loader_probes_linux_sonames_on_macos_2026-09-19.md.
+        return Err("E-SFFI-001: failed to load provider: {path} (status {status})")
     # status==0 with handle==0 is the &mut-out-param writeback-loss signature
-    # of the seed interpreter lane (spl_dlopen_checked sets the out slot through
-    # a BorrowMut the caller never observes). Fall back to the direct-return
-    # ABI, which works identically in compiled and interpreted modes; a genuine
-    # load failure still surfaces as handle<=0 here.
+    # of a pre-2026-09-11 seed interpreter lane (spl_dlopen_checked set the out
+    # slot through a BorrowMut the caller never observed; fixed 2026-09-11, see
+    # the note on _sffi_i64_out_transport_honoured above). The load itself
+    # SUCCEEDED, so the raw retry cannot raise here; recover the handle through
+    # the direct-return ABI, which works identically in compiled and
+    # interpreted modes.
     val direct = unsafe(capabilities: [ffi]):
         spl_dlopen(path)
     if direct <= 0:
@@ -158,7 +171,15 @@ fn _sffi_dlsym_checked(handle: i64, name: text) -> Result<i64, text>:
         spl_dlsym_checked(handle, name, &mut symbol)
     if status == 0 and symbol > 0:
         return Ok(symbol)
-    # Same writeback-loss fallback as _sffi_dlopen_checked above.
+    if status != 0:
+        # Same guard as _sffi_dlopen_checked above: a genuine resolution
+        # failure returns Err instead of entering the raw `spl_dlsym` ABI,
+        # which raises `spl_dlsym: unresolved symbol '<name>'` and aborts in
+        # the interpreter lane.
+        return Err("E-SFFI-001: unresolved foreign symbol: {name} (status {status})")
+    # Same writeback-loss fallback as _sffi_dlopen_checked above: status==0
+    # with symbol==0 means the resolution succeeded but the out slot was lost,
+    # so the symbol exists and the raw retry cannot raise.
     val direct = unsafe(capabilities: [ffi]):
         spl_dlsym(handle, name)
     if direct <= 0:

@@ -15,6 +15,7 @@ Usage:
 
 use std.sffi.dynamic.{DynLib, DynLoader, sffi_call}
 use std.io_runtime.{env_get}
+use std.nogc_sync_mut.env.platform.{detect_os}
 
 extern fn rt_is_interpreter_runtime() -> bool
 
@@ -62,29 +63,34 @@ trait FfiDispatchBase:
 # ============================================================================
 
 fn gpu_lib_path(lib_name: text) -> text:
-    val os = env_get("OS")
-    if os == "Windows_NT":
+    # SIMPLE_OS_TYPE is never set by any runtime or CLI entry in this repo, so
+    # the old env gate probed Linux sonames even on macOS. detect_os() consults
+    # the in-process rt_platform_name() primitive first and needs no env.
+    # See doc/08_tracking/bug/gpu_ffi_loader_probes_linux_sonames_on_macos_2026-09-19.md.
+    val os = detect_os()
+    if os == "windows":
         "{lib_name}.dll"
+    elif os == "macos":
+        "lib{lib_name}.dylib"
     else:
-        val uname = env_get("SIMPLE_OS_TYPE")
-        if uname == "Darwin":
-            "lib{lib_name}.dylib"
-        else:
-            "lib{lib_name}.so"
+        "lib{lib_name}.so"
 
 fn gpu_lib_candidates(base_name: text) -> [text]:
-    val os = env_get("OS")
+    val os = detect_os()
     var paths: [text] = []
-    if os == "Windows_NT":
+    if os == "windows":
         paths.push("{base_name}.dll")
+    elif os == "macos":
+        paths.push("lib{base_name}.dylib")
+        paths.push("lib{base_name}.1.dylib")
+        # dyld does not search Homebrew's lib dir for bare sonames, so probe
+        # the standard prefixes directly. Absent files are rejected by the
+        # file_exists pre-probe in std.sffi.dynamic before any dlopen attempt.
+        paths.push("/opt/homebrew/lib/lib{base_name}.dylib")
+        paths.push("/usr/local/lib/lib{base_name}.dylib")
     else:
-        val uname = env_get("SIMPLE_OS_TYPE")
-        if uname == "Darwin":
-            paths.push("lib{base_name}.dylib")
-            paths.push("lib{base_name}.1.dylib")
-        else:
-            paths.push("lib{base_name}.so.1")
-            paths.push("lib{base_name}.so")
+        paths.push("lib{base_name}.so.1")
+        paths.push("lib{base_name}.so")
     paths
 
 fn try_load_gpu_lib(base_name: text) -> DynLib?:
