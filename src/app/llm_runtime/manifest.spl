@@ -5,20 +5,31 @@ pub class LlmRuntimeAdapter:
     path: text
 
 pub class LlmRuntimeManifest:
+    backend: text
     base_model: text
     endpoint: text
     chat_template: text
     lora_adapters: [LlmRuntimeAdapter]
     dynamic_lora: text
+    tensor_parallel_size: i64
+    data_parallel_size: i64
+    memory_fraction_static: text
     invalid_adapter_count: i64
 
 pub fn llm_runtime_manifest(base_model: text, endpoint: text, chat_template: text, lora_adapters: [LlmRuntimeAdapter], dynamic_lora: text) -> LlmRuntimeManifest:
+    llm_runtime_manifest_with_backend("vllm", base_model, endpoint, chat_template, lora_adapters, dynamic_lora, 0, 0, "")
+
+pub fn llm_runtime_manifest_with_backend(backend: text, base_model: text, endpoint: text, chat_template: text, lora_adapters: [LlmRuntimeAdapter], dynamic_lora: text, tensor_parallel_size: i64, data_parallel_size: i64, memory_fraction_static: text) -> LlmRuntimeManifest:
     LlmRuntimeManifest(
+        backend: _serving_backend(backend),
         base_model: base_model.trim(),
         endpoint: endpoint.trim(),
         chat_template: chat_template.trim(),
         lora_adapters: lora_adapters,
         dynamic_lora: _dynamic_lora_mode(dynamic_lora),
+        tensor_parallel_size: _non_negative(tensor_parallel_size),
+        data_parallel_size: _non_negative(data_parallel_size),
+        memory_fraction_static: memory_fraction_static.trim(),
         invalid_adapter_count: 0
     )
 
@@ -32,6 +43,10 @@ pub fn llm_runtime_manifest_from_text(content: text) -> LlmRuntimeManifest:
     var endpoint = ""
     var chat_template = ""
     var dynamic_lora = "disabled"
+    var backend = "vllm"
+    var tensor_parallel_size: i64 = 0
+    var data_parallel_size: i64 = 0
+    var memory_fraction_static = ""
     var invalid_adapter_count: i64 = 0
     var adapters: [LlmRuntimeAdapter] = []
     for raw in content.split("\n"):
@@ -45,21 +60,33 @@ pub fn llm_runtime_manifest_from_text(content: text) -> LlmRuntimeManifest:
         val value = _join_tail(parts, 1, "=").trim()
         if key == "base_model" or key == "model":
             base_model = value
+        else if key == "backend" or key == "engine":
+            backend = value
         else if key == "endpoint" or key == "endpoint_url":
             endpoint = value
         else if key == "chat_template":
             chat_template = value
         else if key == "dynamic_lora":
             dynamic_lora = value
+        else if key == "tensor_parallel_size" or key == "tp":
+            tensor_parallel_size = value.to_i64() ?? 0
+        else if key == "data_parallel_size" or key == "dp":
+            data_parallel_size = value.to_i64() ?? 0
+        else if key == "memory_fraction_static" or key == "mem_fraction_static":
+            memory_fraction_static = value
         else if key == "lora_adapters" or key == "adapters":
             invalid_adapter_count = _invalid_adapter_count(value)
             adapters = _parse_adapters(value)
     LlmRuntimeManifest(
+        backend: _serving_backend(backend),
         base_model: base_model.trim(),
         endpoint: endpoint.trim(),
         chat_template: chat_template.trim(),
         lora_adapters: adapters,
         dynamic_lora: _dynamic_lora_mode(dynamic_lora),
+        tensor_parallel_size: _non_negative(tensor_parallel_size),
+        data_parallel_size: _non_negative(data_parallel_size),
+        memory_fraction_static: memory_fraction_static.trim(),
         invalid_adapter_count: invalid_adapter_count
     )
 
@@ -115,5 +142,18 @@ fn _dynamic_lora_mode(value: text) -> text:
         return "blocked"
     "blocked"
 
+fn _serving_backend(value: text) -> text:
+    val backend = value.trim().to_lower()
+    if backend == "" or backend == "vllm":
+        return "vllm"
+    if backend == "sglang":
+        return "sglang"
+    "unsupported"
+
+fn _non_negative(value: i64) -> i64:
+    if value < 0:
+        return 0
+    value
+
 export LlmRuntimeAdapter, LlmRuntimeManifest
-export llm_runtime_manifest, llm_runtime_manifest_from_text, llm_runtime_manifest_from_file
+export llm_runtime_manifest, llm_runtime_manifest_with_backend, llm_runtime_manifest_from_text, llm_runtime_manifest_from_file

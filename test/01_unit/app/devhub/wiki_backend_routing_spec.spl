@@ -33,6 +33,8 @@ use std.spec.step
 use std.spec
 use std.spec.step
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime.{time_now_unix_micros}
+use app.io.mod (is_dir)
 use app.devhub.cmd_wiki.{handle_wiki}
 
 extern fn rt_env_get(key: text) -> text?
@@ -44,31 +46,54 @@ extern fn rt_file_delete(path: text) -> bool
 val FIXTURE_HOME = "build/test-itf-wiki-routing-fixture/home"
 
 
-fn _fixture_bare_wiki_repo() -> text:
-    """Bare `demo.wiki.git` seeded with a Home.md page, through a temp
-    clone (all local — no network)."""
-    val script = "set -eu\n" +
-        "ROOT=$(mktemp -d /tmp/devhub-wiki-routing-fixture.XXXXXX)\n" +
-        "BARE=\"$ROOT/demo.wiki.git\"\n" +
-        "SEED=\"$ROOT/seed\"\n" +
-        "git init -q --bare \"$BARE\"\n" +
-        "git clone -q \"$BARE\" \"$SEED\"\n" +
-        "cd \"$SEED\"\n" +
-        "git config user.email test@example.invalid\n" +
-        "git config user.name 'Wiki Routing Fixture'\n" +
-        "printf '# Home\\n\\nWelcome to the wiki.\\n' > Home.md\n" +
-        "git add -A\n" +
-        "git commit -q -m 'seed wiki'\n" +
-        "BRANCH=$(git symbolic-ref --short HEAD)\n" +
-        "git push -q origin \"$BRANCH\"\n" +
-        "printf '%s' \"$BARE\"\n"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", script])
-    out.trim()
-
+var _fixture_counter: i64 = 0
 
 fn _fresh_temp_dir() -> text:
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", "mktemp -d /tmp/devhub-wiki-routing-cache.XXXXXX\n"])
-    out.trim()
+    """Unique temp dir under build/ (native — no /bin/mktemp, which does not
+    exist on Windows hosts running this suite)."""
+    _fixture_counter = _fixture_counter + 1
+    val dir = "build/test-artifacts/devhub-wiki-routing/{time_now_unix_micros()}_{_fixture_counter}"
+    val _mk = rt_dir_create_all(dir)
+    dir
+
+
+fn _git(args: [text]) -> (text, text, i64):
+    process_run("git", args)
+
+
+fn _fixture_bare_wiki_repo() -> text:
+    """Bare `demo.wiki.git` seeded with a Home.md page, through a temp
+    clone (all local — no network).
+
+    Built from native rt_* calls + direct `git` spawns — the POSIX
+    /bin/sh + mktemp recipe this replaced cannot run on Windows. Every step
+    tolerates the seed runtime running each spawn twice (second result
+    returned): a first-run clone leaves a real .git behind, and a repeated
+    commit reports "nothing to commit" on stdout."""
+    val root = _fresh_temp_dir()
+    val bare = "{root}/demo.wiki.git"
+    val seed = "{root}/seed"
+    val (_i1, _e1, init_code) = _git(["init", "-q", "--bare", bare])
+    if init_code != 0:
+        return ""
+    val (_i2, _e2, _clone_code) = _git(["clone", "-q", bare, seed])
+    if not is_dir("{seed}/.git"):
+        return ""
+    val _w1 = rt_file_write_text("{seed}/Home.md", "# Home\n\nWelcome to the wiki.\n")
+    val (_c1, _ce1, cfg1) = _git(["-C", seed, "config", "user.email", "test@example.invalid"])
+    val (_c2, _ce2, cfg2) = _git(["-C", seed, "config", "user.name", "Wiki Routing Fixture"])
+    val (_a, _ae, add_code) = _git(["-C", seed, "add", "-A"])
+    val (mout, merr, commit_code) = _git(["-C", seed, "commit", "-q", "-m", "seed wiki"])
+    val committed = commit_code == 0 or mout.contains("nothing to commit") or merr.contains("nothing to commit")
+    if cfg1 != 0 or cfg2 != 0 or add_code != 0 or not committed:
+        return ""
+    val (branch, _be, branch_code) = _git(["-C", seed, "symbolic-ref", "--short", "HEAD"])
+    if branch_code != 0:
+        return ""
+    val (_p, _pe, push_code) = _git(["-C", seed, "push", "-q", "origin", branch.trim()])
+    if push_code != 0:
+        return ""
+    bare
 
 
 fn _run_wiki_github(bare_repo: text, cache_root: text, args: [text]) -> i64:

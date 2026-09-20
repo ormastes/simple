@@ -1,9 +1,34 @@
 use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get}
 use common.kernel_plugin.ids.KpfDigest256
 use app.lint.provider.cpp.model.*
 use app.lint.provider.cpp.worker.cpp_lint_worker_default_limits_v1
 use app.lint.provider.cpp.session.*
 use os.tooling.clang_worker.clangd_session.ClangdLifecycleStateV1
+
+fn _on_windows() -> bool:
+    val os_env = env_get("OS")
+    os_env != nil and os_env.lower().contains("windows")
+
+fn _clangd_command() -> text:
+    # The POSIX fixture is an sh daemon script; Windows cannot spawn it, so
+    # use ping.exe (a real long-running executable) as the stand-in clangd.
+    if _on_windows():
+        "ping"
+    else:
+        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clangd.shs"
+
+fn _clangd_arguments() -> [text]:
+    if _on_windows():
+        ["-t", "127.0.0.1"]
+    else:
+        ["--compile-commands-dir=/workspace/build"]
+
+fn _tidy_wrapper() -> text:
+    if _on_windows():
+        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.cmd"
+    else:
+        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs"
 
 fn digest(value: u64) -> KpfDigest256:
     KpfDigest256(value, value + 1, value + 2, value + 3)
@@ -17,8 +42,8 @@ fn database() -> text:
 fn session(database_content: text) -> AuthoritativeCppToolingSessionV1:
     AuthoritativeCppToolingSessionV1.create(
         "/workspace", database_content, "/workspace/build/compile_commands.json", "/workspace/a.cc", "debug",
-        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clangd.shs", ["--compile-commands-dir=/workspace/build"], toolchain("clangd"),
-        "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs", toolchain("clang-tidy"), cpp_lint_worker_default_limits_v1(),
+        _clangd_command(), _clangd_arguments(), toolchain("clangd"),
+        _tidy_wrapper(), toolchain("clang-tidy"), cpp_lint_worker_default_limits_v1(),
     )
 
 describe "authoritative C++ IDE and lint session":

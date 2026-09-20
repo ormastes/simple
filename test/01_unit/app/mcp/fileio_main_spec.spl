@@ -20,9 +20,9 @@ use std.spec.step
 use std.spec
 use std.spec.step
 use std.text.{NL}
-use app.io.mod.{shell}
-use app.io.file_ops.{file_write, file_read, file_exists}
-use app.mcp.fileio_main
+use app.io.file_ops.{file_write, file_read, file_exists, dir_create}
+use std.nogc_async_mut.mcp.fileio_json.{extract_json_string_v2, parse_params_json}
+use std.nogc_async_mut.mcp.fileio_server.{FileIOServer, get_all_tools}
 use std.common.spec.evidence.untyped_capture.{UntypedCapture, untyped_capture_to_canonical}
 use std.common.spec.evidence.model.{EvidenceStatus, oracle_spec, check_exact}
 use std.common.spec.evidence.evidence_comparator.{compare_evidence}
@@ -50,13 +50,13 @@ describe "FileIO Main - Parsing Helpers":
     it "parses method and params":
         # @req REQ-SSPEC-APP
         step("parses method and params")
-        expect(parse_method("{\"method\":\"ping\"}")).to_equal("ping")
-        expect(parse_method("{\"method\":123}")).to_equal("")
-        expect(parse_method("{}" )).to_equal("")
+        expect(extract_json_string_v2("{\"method\":\"ping\"}", "method")).to_equal("ping")
+        expect(extract_json_string_v2("{\"method\":123}", "method")).to_equal("")
+        expect(extract_json_string_v2("{}", "method" )).to_equal("")
         val json = "{\"params\":{\"name\":\"safe_read\",\"arguments\":{\"path\":\"x\"}}}"
-        val params = parse_params(json)
+        val params = parse_params_json(json)
         expect(params.contains("\"name\"" )).to_equal(true)
-        expect(parse_params("{\"id\":1}")).to_equal("{}")
+        expect(parse_params_json("{\"id\":1}")).to_equal("{}")
 
     it "parses arguments and handles missing values":
         # @req REQ-SSPEC-APP
@@ -80,7 +80,7 @@ describe "FileIO Main - Parsing Helpers":
     it "lists tools":
         # @req REQ-SSPEC-APP
         step("lists tools")
-        val resp = handle_tools_list("1")
+        val resp = "{\"tools\":[" + get_all_tools().join(",") + "]}"
         expect(resp.contains("safe_read")).to_equal(true)
         expect(resp.contains("safe_write")).to_equal(true)
 
@@ -107,7 +107,7 @@ describe "FileIO Main - Safe Read":
         # @req REQ-SSPEC-APP
         step("reads redirected files")
         val server = setup_server()
-        shell("mkdir -p tmp/fileio_temp")
+        dir_create("tmp/fileio_temp", true)
         write_text("tmp/fileio_temp/mcp_redirect.txt", "temp-data")
         val resp = server.tool_safe_read("{\"path\":\"/tmp/mcp_redirect.txt\"}")
         expect(resp.contains("temp-data")).to_equal(true)
@@ -152,6 +152,7 @@ describe "FileIO Main - Safe Write/Delete/Append":
         step("writes redirected files to temp")
         val server = setup_server()
         val path = "/tmp/mcp_redirect.txt"
+        server.ensure_temp_manager()
         val temp_path = server.temp_manager.get_temp_path(path)
         val resp = server.tool_safe_write("{\"path\":\"{path}\",\"content\":\"temp\"}")
         expect(resp.contains("temp")).to_equal(true)
@@ -186,6 +187,7 @@ describe "FileIO Main - Safe Write/Delete/Append":
         step("deletes redirected temp files")
         val server = setup_server()
         val path = "/tmp/mcp_redirect.txt"
+        server.ensure_temp_manager()
         val temp_path = server.temp_manager.get_temp_path(path)
         write_text(temp_path, "bye")
         val resp = server.tool_safe_delete("{\"path\":\"{path}\"}")
@@ -221,6 +223,7 @@ describe "FileIO Main - Safe Write/Delete/Append":
         step("appends to redirected files")
         val server = setup_server()
         val path = "/tmp/mcp_redirect.txt"
+        server.ensure_temp_manager()
         val temp_path = server.temp_manager.get_temp_path(path)
         write_text(temp_path, "a")
         val resp = server.tool_safe_append("{\"path\":\"{path}\",\"content\":\"b\"}")
@@ -268,6 +271,7 @@ describe "FileIO Main - Copy and Move":
         val src = "/tmp/mcp_src_copy2.txt"
         val dest = "/tmp/mcp_redirect_dest.txt"
         write_text(src, "copy2")
+        server.ensure_temp_manager()
         val temp_dest = server.temp_manager.get_temp_path(dest)
         val resp = server.tool_safe_copy("{\"src\":\"{src}\",\"dest\":\"{dest}\"}")
         expect(resp.contains("temp")).to_equal(true)
@@ -313,6 +317,7 @@ describe "FileIO Main - Copy and Move":
         val src = "/tmp/mcp_src_move2.txt"
         val dest = "/tmp/mcp_redirect_dest.txt"
         write_text(src, "move2")
+        server.ensure_temp_manager()
         val temp_dest = server.temp_manager.get_temp_path(dest)
         val resp = server.tool_safe_move("{\"src\":\"{src}\",\"dest\":\"{dest}\"}")
         expect(resp.contains("temp")).to_equal(true)
@@ -365,6 +370,7 @@ describe "FileIO Main - Other Tools":
         # @req REQ-SSPEC-APP
         step("manages temp files")
         val server = setup_server()
+        server.ensure_temp_manager()
         val temp_path = server.temp_manager.get_temp_path("/tmp/mcp_temp.txt")
         write_text(temp_path, "temp")
         val list_resp = server.tool_list_temp_files("{}")
