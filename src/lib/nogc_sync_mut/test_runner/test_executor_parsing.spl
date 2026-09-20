@@ -595,18 +595,51 @@ fn take_crash_sentinel(file_path: text) -> bool:
 # silent: it gets no chance to emit any of these. A process that faults, aborts,
 # or panics does. Absence of a marker is therefore NOT taken as proof of a crash
 # -- silence falls through to TERMINATED, the unverified class.
+fn _is_crash_evidence_line(clean: text) -> bool:
+    (clean.contains("fatal runtime error") or
+        clean.contains("Segmentation fault") or clean.contains("SIGSEGV") or
+        clean.contains("SIGABRT") or clean.contains("Aborted") or
+        clean.contains("panicked at") or clean.contains("stack overflow") or
+        clean.contains("double free") or clean.contains("memory allocation of"))
+
+fn crash_evidence_line(combined: text) -> text:
+    """Return the first output line carrying a fault diagnostic, or "".
+
+    Single source of truth for the crash-evidence patterns: has_crash_evidence
+    asks whether one exists, the crash paths in make_result_from_output report
+    the line itself. Keeping the decision and the report on ONE pattern list is
+    the point -- they used to be two lists that had already drifted apart.
+    """
+    for raw_line in combined.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if _is_crash_evidence_line(clean):
+            return clean
+    ""
+
 fn has_crash_evidence(combined: text) -> bool:
-    if combined.contains("fatal runtime error"):
-        return true
-    if combined.contains("Segmentation fault") or combined.contains("SIGSEGV"):
-        return true
-    if combined.contains("SIGABRT") or combined.contains("Aborted"):
-        return true
-    if combined.contains("panicked at") or combined.contains("stack overflow"):
-        return true
-    if combined.contains("double free") or combined.contains("memory allocation of"):
-        return true
-    false
+    crash_evidence_line(combined) != ""
+
+fn crash_last_output_suffix(combined: text) -> text:
+    """Build the `; last output: ...` suffix for a signal death.
+
+    The fault diagnostic that has_crash_evidence already matched is reported
+    FIRST and unconditionally. extract_error_message alone cannot do this job:
+    its pattern list (`semantic:` / `parse error:` / `ERROR:` / ...) never
+    matched `memory allocation of N bytes failed`, `panicked at` or
+    `Segmentation fault`, so a crash whose only evidence was one of those lines
+    reported `CRASHED: child died by signal 6 (exit 134); last output: ` --
+    empty. 66 crashes in one `test/01_unit/compiler/backend/` directory run
+    printed a blank diagnosis while the runner already held the reason.
+    extract_error_message is appended as secondary detail when it adds
+    something, so an assertion line can never displace the abort reason.
+    """
+    val evidence = crash_evidence_line(combined)
+    if evidence == "":
+        return ""
+    val detail = extract_error_message(combined)
+    if detail != "" and detail != evidence:
+        return "; last output: {evidence} -- {detail}"
+    "; last output: {evidence}"
 
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Outcome classification -- contract frozen in .spipe/unstable_test_mode/state.md.
@@ -652,7 +685,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         val extra = if sentinel_seen:
             " after writing its crash sentinel"
         elif has_crash_evidence(stdout + "\n" + stderr):
-            "; last output: {extract_error_message(stdout + "\n" + stderr)}"
+            crash_last_output_suffix(stdout + "\n" + stderr)
         else:
             ""
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal {signo} (exit {exit_code}){extra}", timed_out: false, cached: false)
@@ -665,7 +698,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         if take_crash_sentinel(file_path):
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after writing its crash sentinel", timed_out: false, cached: false)
         if has_crash_evidence(stdout + "\n" + stderr):
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after emitting a fault diagnostic; last output: {extract_error_message(stdout + "\n" + stderr)}", timed_out: false, cached: false)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after emitting a fault diagnostic{crash_last_output_suffix(stdout + "\n" + stderr)}", timed_out: false, cached: false)
         if exit_code == -1:
             # -1 without the runtime's trailing TIMEOUT marker is NOT a signal
             # death (those arrive as 128+signo) and NOT a timeout: it is a
