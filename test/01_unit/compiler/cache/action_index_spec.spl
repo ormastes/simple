@@ -8,17 +8,21 @@
 ## Overview
 
 Tests for the ActionDigest -> ResultManifestDigest index storage: exact-key
-put/get, and conflict quarantine when the same ActionDigest is written twice
+put/get, and conflict reporting when the same ActionDigest is written twice
 with two DIFFERENT ResultManifestDigests (never a silent overwrite).
 """
 
 use std.spec.*
-use compiler.driver.cache.action_index.action_index.{action_index_put, action_index_get, action_index_has, ActionIndexPutOutcome}
+use compiler.driver.cache.action_index.action_index.{
+    action_index_put, action_index_get, action_index_read_raw,
+    CacheNamespace, IndexLookupResult, IndexPutResult
+}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
-extern fn rt_file_exists(path: text) -> bool
+
+val NS: CacheNamespace = CacheNamespace.WorkspaceLocal
 
 fn fresh_index_root() -> text:
     val root = "build/tmp/action_index_spec/{rt_getpid()}-{rt_time_now_unix_micros()}"
@@ -27,69 +31,83 @@ fn fresh_index_root() -> text:
 
 # `got` is a match on the get result reduced to a real derived digest (or ""
 # when absent) so assertions below compare an actual value, never a literal.
-fn got_digest_or_empty(got: text?) -> text:
+fn hit_digest_or_empty(got: IndexLookupResult) -> text:
     match got:
-        case Some(digest):
+        case IndexLookupResult.Hit(digest):
             digest
-        case nil:
+        case IndexLookupResult.Miss:
             ""
 
+fn put_is_ok(outcome: IndexPutResult) -> bool:
+    match outcome:
+        case IndexPutResult.Ok:
+            true
+        case IndexPutResult.Conflict(_, _):
+            false
+
+fn put_conflict_pair(outcome: IndexPutResult) -> text:
+    match outcome:
+        case IndexPutResult.Ok:
+            ""
+        case IndexPutResult.Conflict(existing, attempted):
+            "{existing}|{attempted}"
+
 describe "action_index_put / action_index_get":
-    it "stores a fresh mapping and returns Stored":
+    it "stores a fresh mapping and returns Ok":
         val root = fresh_index_root()
-        val outcome = action_index_put(root, "action-digest-1", "result-manifest-digest-1")
-        expect(outcome == ActionIndexPutOutcome.Stored).to_equal(true)
+        val outcome = action_index_put(root, NS, "action-digest-1", "result-manifest-digest-1")
+        expect(put_is_ok(outcome)).to_equal(true)
 
     it "an exact-key get returns exactly what was put":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-2", "result-manifest-digest-2")
-        val got = action_index_get(root, "action-digest-2")
-        expect(got_digest_or_empty(got)).to_equal("result-manifest-digest-2")
+        action_index_put(root, NS, "action-digest-2", "result-manifest-digest-2")
+        val got = action_index_get(root, NS, "action-digest-2")
+        expect(hit_digest_or_empty(got)).to_equal("result-manifest-digest-2")
 
     it "a lookup for a DIFFERENT action_digest is a miss (exact-key only, no fallback)":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-3", "result-manifest-digest-3")
-        val got = action_index_get(root, "action-digest-3-nomatch")
-        expect(got_digest_or_empty(got)).to_equal("")
+        action_index_put(root, NS, "action-digest-3", "result-manifest-digest-3")
+        val got = action_index_get(root, NS, "action-digest-3-nomatch")
+        expect(hit_digest_or_empty(got)).to_equal("")
 
-    it "action_index_has agrees with a subsequent action_index_get":
+    it "action_index_read_raw agrees with a subsequent action_index_get":
         val root = fresh_index_root()
-        expect(action_index_has(root, "action-digest-4")).to_equal(false)
-        action_index_put(root, "action-digest-4", "result-manifest-digest-4")
-        expect(action_index_has(root, "action-digest-4")).to_equal(true)
+        expect(action_index_read_raw(root, NS, "action-digest-4")).to_be_nil()
+        action_index_put(root, NS, "action-digest-4", "result-manifest-digest-4")
+        expect(hit_digest_or_empty(action_index_get(root, NS, "action-digest-4"))).to_equal("result-manifest-digest-4")
 
-    it "re-putting the SAME mapping is a no-op (AlreadyPresentSame)":
+    it "re-putting the SAME mapping is a no-op (Ok, entry unchanged)":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-5", "result-manifest-digest-5")
-        val outcome = action_index_put(root, "action-digest-5", "result-manifest-digest-5")
-        expect(outcome == ActionIndexPutOutcome.AlreadyPresentSame).to_equal(true)
-        val got = action_index_get(root, "action-digest-5")
-        expect(got_digest_or_empty(got)).to_equal("result-manifest-digest-5")
+        action_index_put(root, NS, "action-digest-5", "result-manifest-digest-5")
+        val outcome = action_index_put(root, NS, "action-digest-5", "result-manifest-digest-5")
+        expect(put_is_ok(outcome)).to_equal(true)
+        val got = action_index_get(root, NS, "action-digest-5")
+        expect(hit_digest_or_empty(got)).to_equal("result-manifest-digest-5")
 
-describe "action_index conflict quarantine":
-    it "the SAME action_digest mapping to a DIFFERENT result_manifest_digest is quarantined, not overwritten":
+describe "action_index conflict reporting":
+    it "the SAME action_digest mapping to a DIFFERENT result_manifest_digest is reported as a Conflict":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-6", "result-manifest-digest-6-A")
-        val outcome = action_index_put(root, "action-digest-6", "result-manifest-digest-6-B")
-        expect(outcome == ActionIndexPutOutcome.ConflictQuarantined).to_equal(true)
+        action_index_put(root, NS, "action-digest-6", "result-manifest-digest-6-A")
+        val outcome = action_index_put(root, NS, "action-digest-6", "result-manifest-digest-6-B")
+        expect(put_conflict_pair(outcome)).to_equal("result-manifest-digest-6-A|result-manifest-digest-6-B")
 
-    it "after a conflict, the ORIGINAL mapping is no longer readable as a live entry (quarantined, not silently kept)":
+    it "after a conflict, the ORIGINAL mapping is still the live entry (never overwritten)":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-7", "result-manifest-digest-7-A")
-        action_index_put(root, "action-digest-7", "result-manifest-digest-7-B")
-        val got = action_index_get(root, "action-digest-7")
-        expect(got_digest_or_empty(got)).to_equal("")
+        action_index_put(root, NS, "action-digest-7", "result-manifest-digest-7-A")
+        action_index_put(root, NS, "action-digest-7", "result-manifest-digest-7-B")
+        val got = action_index_get(root, NS, "action-digest-7")
+        expect(hit_digest_or_empty(got)).to_equal("result-manifest-digest-7-A")
 
     it "a conflict never silently admits the SECOND (new) mapping either":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-8", "result-manifest-digest-8-A")
-        action_index_put(root, "action-digest-8", "result-manifest-digest-8-B")
-        val got = action_index_get(root, "action-digest-8")
-        # Neither A nor B may be silently served as the live answer.
-        expect(got_digest_or_empty(got)).to_equal("")
+        action_index_put(root, NS, "action-digest-8", "result-manifest-digest-8-A")
+        action_index_put(root, NS, "action-digest-8", "result-manifest-digest-8-B")
+        val got = action_index_get(root, NS, "action-digest-8")
+        # Neither A nor B may be silently replaced: the live answer is A.
+        expect(hit_digest_or_empty(got)).to_equal("result-manifest-digest-8-A")
 
-    it "quarantine directory receives evidence of the conflict (both sides preserved)":
+    it "the conflict outcome preserves both sides (existing and attempted)":
         val root = fresh_index_root()
-        action_index_put(root, "action-digest-9", "result-manifest-digest-9-A")
-        action_index_put(root, "action-digest-9", "result-manifest-digest-9-B")
-        expect(rt_file_exists("{root}/quarantine")).to_equal(true)
+        action_index_put(root, NS, "action-digest-9", "result-manifest-digest-9-A")
+        val outcome = action_index_put(root, NS, "action-digest-9", "result-manifest-digest-9-B")
+        expect(put_conflict_pair(outcome)).to_equal("result-manifest-digest-9-A|result-manifest-digest-9-B")
