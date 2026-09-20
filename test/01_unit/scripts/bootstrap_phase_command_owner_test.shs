@@ -23,6 +23,7 @@ chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
 : >"$tmp/invocations"
 : >"$tmp/executions"
 : >"$tmp/source/test/01_unit/compiler/fixture_spec.spl"
+: >"$tmp/source/test/01_unit/compiler/fixture_test.spl"
 
 # Git-for-Windows reports NTFS paths as 755/644 even after chmod.  The
 # production verifier receives POSIX modes on supported bootstrap hosts; this
@@ -51,6 +52,16 @@ if [ "${PHASE_REPLACE_COMMAND_RECEIPT:-0}" = 1 ] && \
   chmod u+w "$receipt"
   printf '\n# replaced by fixture\n' >>"$receipt"
 fi
+case " $* " in
+  *' --json '*)
+    if [ "${PHASE_SKIPPED_FULL_INVENTORY:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    else
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    fi
+    ;;
+esac
 exit 0
 EOF
 chmod +x "$tmp/tool"
@@ -139,6 +150,14 @@ grep -F 'task=mcp_behavior|' "$tmp/work/summary.env" |
 grep -F 'task=mcp_behavior_compile|' "$tmp/work/summary.env" |
   grep -Fq 'command_owner_before=PASS|command_owner_after=PASS' ||
   fail "MCP compile behavior was not command-owner checked"
+grep -Fq 'task=repository_full_tests|result=PASS|status=0' "$tmp/work/summary.env" ||
+  fail "Phase 3 repository inventory did not pass"
+grep -Fq 'spec_count=2|passed_count=2|timeout_count=0|crash_count=0' \
+  "$tmp/work/summary.env" || fail "Phase 3 repository inventory counts are not exact"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/fixture_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+  "$tmp/executions" || fail "full inventory row did not use the exact CLI and non-vacuous options"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/fixture_test.spl .* --json$" \
+  "$tmp/executions" || fail "*_test.spl inventory row was not executed"
 
 # A retry of the same admitted lineage reuses the frozen receipt and distinct
 # shared build caches. It must not fail merely because evidence already exists.
@@ -212,6 +231,27 @@ grep -Fq 'task=compiler_bootstrap_compile_tests|result=UNSUPPORTED|status=full-c
   "$tmp/cli-failed-work/summary.env" || fail "compile row did not terminalize after CLI build failure"
 grep -Fq 'task=mcp_behavior_compile|result=UNSUPPORTED|status=full-cli-artifact-not-built' \
   "$tmp/cli-failed-work/summary.env" || fail "MCP compile row did not terminalize after CLI build failure"
+grep -Fq 'task=repository_full_tests|result=UNSUPPORTED|status=full-cli-artifact-not-built' \
+  "$tmp/cli-failed-work/summary.env" || fail "full inventory did not terminalize after CLI build failure"
+
+# A skipped-only file returns zero from the runner but executes no examples.
+# Phase 3 must classify that row nonpassing instead of inflating passed_count.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_SKIPPED_FULL_INVENTORY=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/skipped-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "skipped-only repository row was admitted"
+grep -Fq 'fixture_test.spl' "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "skipped-only fixture is absent from inventory"
+awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 92 && \
+  $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } END { exit !found }' \
+  "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "skipped-only fixture did not fail with zero executed examples"
 
 # A test runner can be executable and return zero while changing the full CLI.
 # The verifier must reject it after the invocation instead of admitting a
