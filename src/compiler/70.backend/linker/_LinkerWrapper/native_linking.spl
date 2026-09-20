@@ -1457,9 +1457,12 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
             if not msvc_config.libs.contains(wlib):
                 msvc_config.libs.push(wlib)
 
-    # Extra flags
+    # Extra flags. `-rpath <value>` is meaningful only to ELF/Mach-O linkers.
+    # Keep this final MSVC boundary defensive because an early self-hosted
+    # compiler can misclassify its host while the selected linker is still
+    # unambiguously link.exe.
     var extra = native_retained_symbol_msvc_args(config.retained_symbols)
-    for flag in config.extra_flags:
+    for flag in native_msvc_extra_args(config.extra_flags):
         extra.push(flag)
     # Size optimization: remove unreferenced data + fold identical COMDATs
     if not config.debug:
@@ -1483,6 +1486,23 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
             Ok(output)
         case Err(e):
             Err("Windows MSVC linking failed: {e.message}")
+
+fn native_msvc_extra_args(extra_flags: [text]) -> [text]:
+    """Drop Unix rpath options before invoking an MSVC/COFF linker."""
+    var result: [text] = []
+    var index = 0
+    while index < extra_flags.len():
+        val flag = extra_flags[index]
+        if flag == "-rpath":
+            index = index + 1
+            if index < extra_flags.len():
+                index = index + 1
+        elif flag.starts_with("-Wl,-rpath,"):
+            index = index + 1
+        else:
+            result.push(flag)
+            index = index + 1
+    result
 
 fn _find_msvc_lib_paths() -> [text]:
     """Find MSVC CRT and Windows SDK library paths."""
