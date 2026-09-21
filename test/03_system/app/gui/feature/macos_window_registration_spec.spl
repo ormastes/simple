@@ -1,0 +1,46 @@
+# Live macOS regression for gui_winit_window_not_registered_window_server_2026_07_06.
+# Run on the GUI main thread through scripts/gui/macos-gui-run.shs.
+# During the 60-second window, use PID-scoped AX to locate the window, drag its
+# titlebar by (+150,+80) points, click its content, then type q. The external
+# observer must also compare AX bounds; a moved event alone does not prove a drag.
+# No simulated events or source-text assertions count as registration evidence.
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.ui.gui_renderer.{
+    GuiRenderer, GUI_EVT_MOVED, GUI_EVT_MOUSE_BUTTON, GUI_EVT_KEYBOARD,
+    GUI_EVT_CLOSE}
+
+describe "macOS winit application registration":
+    it "receives real movement, pointer and keyboard input in a registered window":
+        # @req REQ-GUI-WINIT-MACOS-REGISTRATION
+        step("Create a real winit window through the production dynamic provider")
+        val created = GuiRenderer.create("winit", 520, 360, "Simple registration regression")
+        expect(created != nil).to_equal(true)
+        if created != nil:
+            var renderer = created.unwrap()
+            var moved = false
+            var clicked = false
+            var typed_q = false
+            var presented = false
+            val deadline = time_now_monotonic_ms() + 60000
+            step("Observe an external titlebar drag, content click, and q key")
+            while time_now_monotonic_ms() < deadline and not typed_q:
+                val event = renderer.poll_event()
+                if event.kind == GUI_EVT_MOVED:
+                    moved = true
+                if event.kind == GUI_EVT_MOUSE_BUTTON and event.pressed:
+                    clicked = true
+                if event.kind == GUI_EVT_KEYBOARD and event.pressed and event.keycode == 81:
+                    typed_q = true
+                if event.kind == GUI_EVT_CLOSE:
+                    break
+                if renderer.stage_clear(520, 360, 0x00204466):
+                    if renderer.present_staged(520, 360):
+                        presented = true
+            renderer.close()
+            step("Require native presentation and all three delivered event classes")
+            expect(presented).to_equal(true)
+            expect(moved).to_equal(true)
+            expect(clicked).to_equal(true)
+            expect(typed_q).to_equal(true)

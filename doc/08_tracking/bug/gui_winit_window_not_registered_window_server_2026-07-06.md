@@ -82,3 +82,20 @@ Re-run the drag repro above; PASS criteria:
    `drag_before.png`/`drag_after.png` window bounding boxes);
 3. a CGEvent click on the "Run" button increments the on-frame `Clicks` counter
    (`SIMPLE_EVT_LOG` shows `[widget-showcase] input left_button …`).
+
+## 2026-09-21 scoped registration audit
+
+At baseline `6a7a22ddc37`, both winit providers already configure activation
+policy Regular; the dynamic provider also activates the app and orders its
+window frontmost/key. A new pure-Simple live regression fixture removes the
+widget showcase dependency:
+`test/03_system/app/gui/feature/macos_window_registration_spec.spl`.
+Its procedure and limitations are recorded in
+`doc/06_spec/03_system/app/gui/feature/macos_window_registration_spec.md`.
+
+The installed release-path binary could not execute the canonical launcher
+invocation: it exited before a window with `No source file specified for
+interpret mode`. With bootstrap delegation disabled, it identifies itself as
+a Rust seed and cannot parse the current imported `process_ops.spl`. Therefore
+this audit does not claim a new live PASS or change the bug status. Qualification
+still needs a current pure-Simple runtime; no full bootstrap was attempted.
