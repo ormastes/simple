@@ -30,6 +30,15 @@ fail() {
   exit 1
 }
 
+process_is_live() {
+  observed_pid=$1
+  kill -0 "$observed_pid" 2>/dev/null || return 1
+  observed_state=$(ps -o stat= -p "$observed_pid" 2>/dev/null | tr -d ' ' || :)
+  [ -n "$observed_state" ] || return 1
+  case "$observed_state" in Z*) return 1 ;; esac
+  return 0
+}
+
 hash_file() {
   sha256sum "$1" | awk '{print $1}'
 }
@@ -121,7 +130,15 @@ printf '%s\n' \
   '  fake_active_count=$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d " ")' \
   '  printf "%s\t%s\t%s\n" "${STAGE4_MATRIX_ID:-missing}" "${STAGE4_MATRIX_TASK_ID:-missing}" "$fake_active_count" >>"$FAKE_CONCURRENCY_AUDIT"' \
   '  trap '\''rmdir "$fake_active" 2>/dev/null || :'\'' EXIT INT TERM HUP' \
-  '  sleep "$FAKE_GATE_DELAY"' \
+  '  if [ -n "${FAKE_DESCENDANT_DIR:-}" ]; then' \
+  '    sleep "$FAKE_GATE_DELAY" &' \
+  '    fake_descendant=$!' \
+  '    fake_descendant_pgid=$(ps -o pgid= -p "$fake_descendant" | tr -d " ")' \
+  '    printf "pid=%s\npgid=%s\n" "$fake_descendant" "$fake_descendant_pgid" >"$FAKE_DESCENDANT_DIR/${STAGE4_MATRIX_TASK_ID:-missing}.env"' \
+  '    wait "$fake_descendant"' \
+  '  else' \
+  '    sleep "$FAKE_GATE_DELAY"' \
+  '  fi' \
   'fi' \
   'if [ "${FAKE_SLEEP_TASK:-}" = "${STAGE4_MATRIX_TASK_ID:-}" ]; then sleep "${FAKE_SLEEP_SECONDS:-30}"; fi' \
   'out=' \
@@ -690,6 +707,9 @@ grep -Fxq 'terminal_count=3' "$fake_root/build/mini_builds/stage4_tooling_case-t
 # parent aggregate, and removes only that invocation's scheduler run directory.
 signal_matrix_status=0
 export FAKE_GATE_DELAY=30
+FAKE_DESCENDANT_DIR="$fixture/signal-descendants"
+export FAKE_DESCENDANT_DIR
+mkdir -p "$FAKE_DESCENDANT_DIR"
 # shellcheck disable=SC2086
 "$runner" --matrix-id=signal-cleanup --scope=link-only $common_args --build-jobs=3 &
 signal_matrix_pid=$!
@@ -707,6 +727,34 @@ while [ "$signal_wait_count" -lt 100 ]; do
 done
 [ -n "$signal_active_dir" ] || fail "signal cleanup matrix never exposed owned workers"
 signal_run_dir=$(dirname "$signal_active_dir")
+signal_descendant_wait=0
+while [ "$signal_descendant_wait" -lt 100 ] &&
+      [ "$(find "$FAKE_DESCENDANT_DIR" -type f -name '*.env' -print | wc -l | tr -d ' ')" -lt 3 ]; do
+  sleep 0.05
+  signal_descendant_wait=$((signal_descendant_wait + 1))
+done
+[ "$(find "$FAKE_DESCENDANT_DIR" -type f -name '*.env' -print | wc -l | tr -d ' ')" -eq 3 ] ||
+  fail "signal cleanup descendants did not acknowledge start"
+signal_cleanup_violation="$fixture/signal-cleanup-order-violation"
+(
+  signal_cleanup_observations=0
+  while [ -d "$signal_run_dir" ] && [ "$signal_cleanup_observations" -lt 500 ]; do
+    sleep 0.01
+    signal_cleanup_observations=$((signal_cleanup_observations + 1))
+  done
+  if [ -d "$signal_run_dir" ]; then
+    echo "scheduler state remained after cancellation deadline" >"$signal_cleanup_violation"
+    exit 1
+  fi
+  for signal_descendant_file in "$FAKE_DESCENDANT_DIR"/*.env; do
+    signal_descendant_pid=$(sed -n 's/^pid=//p' "$signal_descendant_file")
+    if process_is_live "$signal_descendant_pid"; then
+      echo "state removed while descendant $signal_descendant_pid was live" >"$signal_cleanup_violation"
+      exit 1
+    fi
+  done
+) &
+signal_cleanup_monitor=$!
 : >"$fixture/signal-workers.tsv"
 for signal_active_file in "$signal_active_dir"/*.env; do
   signal_task=$(sed -n 's/^task=//p' "$signal_active_file")
@@ -724,8 +772,14 @@ for signal_active_file in "$signal_active_dir"/*.env; do
 done
 kill -TERM "$signal_matrix_pid"
 wait "$signal_matrix_pid" || signal_matrix_status=$?
-unset FAKE_GATE_DELAY
+wait "$signal_cleanup_monitor" || :
+unset FAKE_GATE_DELAY FAKE_DESCENDANT_DIR
 [ "$signal_matrix_status" -eq 143 ] || fail "signal cleanup returned $signal_matrix_status"
+[ ! -f "$signal_cleanup_violation" ] || fail "$(cat "$signal_cleanup_violation")"
+for signal_descendant_file in "$fixture/signal-descendants"/*.env; do
+  signal_descendant_pid=$(sed -n 's/^pid=//p' "$signal_descendant_file")
+  ! process_is_live "$signal_descendant_pid" || fail "acknowledged descendant survived scheduler cleanup"
+done
 while IFS="$(printf '\t')" read -r signal_task signal_worker_pid signal_worker_pgid; do
   ! kill -0 "$signal_worker_pid" 2>/dev/null || fail "$signal_task worker PID survived cleanup"
   ! kill -0 -- "-$signal_worker_pgid" 2>/dev/null || fail "$signal_task process group survived cleanup"
