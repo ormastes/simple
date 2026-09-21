@@ -2758,6 +2758,52 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // Text.ord() reads the first Unicode code point; the existing
+                // runtime helper returns zero for an empty string as well.
+                if matches!(method, "ord" | "codepoint" | "code_point") && args.is_empty()
+                    && matches!(func_name.split('.').next(), Some("str" | "text" | "String"))
+                {
+                    let recv = self.get_vreg(receiver, vreg_map)?;
+                    let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
+                    let code_at_ty = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                    let code_at = module.get_function("rt_string_char_code_at")
+                        .unwrap_or_else(|| module.add_function("rt_string_char_code_at", code_at_ty, None));
+                    let result = builder.build_call(code_at, &[recv.into(), i64_type.const_zero().into()], "ord")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("ord call", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(value) = result.try_as_basic_value().basic() {
+                            vreg_map.insert(*d, value);
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Scalar float methods use LLVM's target intrinsics. Preserve
+                // the incoming float width; integer receivers have no such
+                // method and continue through normal method resolution.
+                if matches!(method, "floor" | "ceil" | "round") && args.is_empty()
+                    && matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64))
+                {
+                    let is_f32 = matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32));
+                    let float_ty = if is_f32 { self.context_ref().f32_type() } else { self.context_ref().f64_type() };
+                    let suffix = if is_f32 { "f32" } else { "f64" };
+                    let operation = if method == "round" { "nearbyint" } else { method };
+                    let intrinsic_name = format!("llvm.{operation}.{suffix}");
+                    let recv = self.get_vreg(receiver, vreg_map)?;
+                    let recv = self.coerce_value_to_type(recv, Some(float_ty.into()), builder)?;
+                    let intrinsic_ty = float_ty.fn_type(&[float_ty.into()], false);
+                    let intrinsic = module.get_function(&intrinsic_name)
+                        .unwrap_or_else(|| module.add_function(&intrinsic_name, intrinsic_ty, None));
+                    let call = builder.build_call(intrinsic, &[recv.into()], "float_method")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(value) = call.try_as_basic_value().basic() {
+                            vreg_map.insert(*d, value);
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if matches!(method, "min" | "max") && args.len() == 1 {
                     let lhs = self.get_vreg(receiver, vreg_map)?;
                     let rhs = self.get_vreg(&args[0], vreg_map)?;
@@ -2884,6 +2930,7 @@ impl LlvmBackend {
                     "at" => Some("rt_at"),
                     "char_code_at" => Some("rt_string_char_code_at"),
                     "byte_at" => Some("rt_string_byte_at"),
+                    "char_count" => Some("rt_string_char_count"),
                     "push" => Some("rt_array_push"),
                     "pop" => Some("rt_array_pop"),
                     // Keep the LLVM bootstrap table synchronized with the
@@ -2894,6 +2941,8 @@ impl LlvmBackend {
                     // dedicated mutating-method channel.
                     "write_span" => Some("rt_array_write_span"),
                     "clear" => Some("rt_array_clear"),
+                    "write_span" => Some("rt_array_write_span"),
+                    "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
                     // "strip"/"trimmed" synonyms for "trim" (this table's own
                     // comment below documents this exact class of gap for
@@ -3857,6 +3906,51 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn builtin_method_symbols_and_float_intrinsics() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("builtin_method_symbols").unwrap();
+        let cases = [
+            ("str.char_count", 0usize, "@rt_string_char_count("),
+            ("Array.write_span", 4, "@rt_array_write_span("),
+            ("Array.enumerate", 0, "@rt_array_enumerate("),
+            ("str.ord", 0, "@rt_string_char_code_at("),
+        ];
+        for (idx, (method, count, expected)) in cases.into_iter().enumerate() {
+            let mut f = MirFunction::new(format!("builtin_{idx}"), crate::hir::TypeId::I64,
+                simple_parser::ast::Visibility::Public);
+            for i in 0..=count {
+                f.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(i as u32), value: 0 });
+            }
+            let result = VReg((count + 1) as u32);
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result), receiver: VReg(0), func_name: method.to_string(),
+                args: (1..=count).map(|i| VReg(i as u32)).collect(),
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(result));
+            backend.compile_function(&f).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(expected), "{method}: {ir}");
+            if method == "str.ord" {
+                assert!(ir.contains("i64 0)"), "ord must read codepoint zero: {ir}");
+            }
+        }
+        for (method, intrinsic) in [("floor", "floor"), ("ceil", "ceil"), ("round", "nearbyint")] {
+            let mut f = MirFunction::new(format!("float_{method}"), crate::hir::TypeId::F64,
+                simple_parser::ast::Visibility::Public);
+            f.blocks[0].instructions.push(MirInst::ConstFloat { dest: VReg(0), value: 1.5 });
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: format!("f64.{method}"), args: vec![],
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&f).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(&format!("@llvm.{intrinsic}.f64(")), "{method}: {ir}");
+        }
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
