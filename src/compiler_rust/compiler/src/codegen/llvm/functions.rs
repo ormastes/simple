@@ -3955,7 +3955,9 @@ mod tests {
 
     #[test]
     fn scalar_round_halfway_values_execute_away_from_zero() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        // The generated code is executed below, so its triple must match
+        // the test runner host on Linux, macOS, Windows, and other hosts.
+        let target = Target::host();
         let backend = LlvmBackend::new(target).unwrap();
         backend.create_module("scalar_round_halfway").unwrap();
         for (name, value) in [("positive_halfway", 2.5), ("negative_halfway", -2.5)] {
