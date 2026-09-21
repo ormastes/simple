@@ -1,0 +1,118 @@
+#!/bin/sh
+# Canonical regression for Phase 3 Markdown and source-comment doctest
+# discovery.  The two logical categories share one physical bootstrap owner,
+# so result accounting must execute and admit that owner exactly once.
+
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper=$root/scripts/bootstrap/phase3-test-inventory.shs
+owner=scripts/check/check-sdoctest-bootstrap.shs
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase3-docs-inventory-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+  printf 'bootstrap_phase3_docs_inventory_test: FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+make_tree() {
+  tree=$1
+  mkdir -p "$tree/test/01_unit/lib/demo" "$tree/src/lib/demo" \
+    "$tree/tools" "$tree/scripts/check" "$tree/doc"
+  cat >"$tree/test/01_unit/lib/demo/example_spec.spl" <<'EOF'
+describe "fixture":
+    it "runs":
+        expect(1).to_equal(1)
+EOF
+  cat >"$tree/doc/example.md" <<'EOF'
+```simple
+print "markdown"
+```
+EOF
+  cat >"$tree/src/lib/demo/example.spl" <<'EOF'
+# ```simple
+# print "comment"
+# ```
+fn example():
+    pass
+EOF
+  cp "$root/$owner" "$tree/$owner"
+}
+
+source_root=$tmp/source
+make_tree "$source_root"
+
+# Red before: the historical Phase 3 suffix walk sees the Simple spec, but it
+# cannot see either the Markdown fence or the source-comment doctest owner.
+find "$source_root/test" -type f \
+  \( -name '*_spec.spl' -o -name '*_test.spl' \) -print \
+  >"$tmp/legacy.paths"
+[ "$(wc -l <"$tmp/legacy.paths" | tr -d ' ')" = 1 ] ||
+  fail legacy-spec-count-not-exact
+grep -Fq 'example_spec.spl' "$tmp/legacy.paths" || fail legacy-spec-missing
+if grep -Eq '\.md$|src/.+\.spl$|check-sdoctest-bootstrap' "$tmp/legacy.paths"; then
+  fail legacy-discovery-unexpectedly-covered-doctests
+fi
+
+# Green after: both logical doctest categories are explicit, stable rows that
+# point at the same physical executable owner.
+sh "$helper" discover "$source_root" >"$tmp/inventory.tsv"
+grep -Fxq "docs${tab:-	}markdown-doctest${tab:-	}doctest-bootstrap${tab:-	}execute${tab:-	}$owner${tab:-	}-" \
+  "$tmp/inventory.tsv" || fail markdown-doctest-row-missing
+grep -Fxq "docs${tab:-	}spl-comment-doctest${tab:-	}doctest-bootstrap${tab:-	}execute${tab:-	}$owner${tab:-	}-" \
+  "$tmp/inventory.tsv" || fail spl-comment-doctest-row-missing
+[ "$(awk -F '\t' '$1 == "docs" { n++ } END { print n+0 }' "$tmp/inventory.tsv")" = 2 ] ||
+  fail docs-row-count-not-exact
+[ "$(awk -F '\t' '$1 == "docs" { owner[$3 FS $5]=1 } END { for (x in owner) n++; print n+0 }' "$tmp/inventory.tsv")" = 1 ] ||
+  fail docs-owner-is-not-unique
+
+sh "$helper" summarize "$tmp/inventory.tsv" >"$tmp/summary.tsv"
+grep -Fxq 'docs	2	2	0	1' "$tmp/summary.tsv" ||
+  fail docs-summary-does-not-preserve-two-categories-one-owner
+
+# One physical result covers both logical categories.  Requiring two result
+# rows would execute the expensive whole-tree owner twice and is rejected as a
+# duplicate owner by the canonical accounting check.
+cat >"$tmp/results.tsv" <<EOF
+runner	path	result	executed	skipped
+doctest-bootstrap	$owner	PASS	2	0
+simple-spec	test/01_unit/lib/demo/example_spec.spl	PASS	1	0
+EOF
+sh "$helper" check-results "$tmp/inventory.tsv" "$tmp/results.tsv" \
+  >"$tmp/accounted.tsv"
+grep -Fxq 'docs	2	2	0	2	0' "$tmp/accounted.tsv" ||
+  fail docs-result-was-not-accounted-once
+cp "$tmp/results.tsv" "$tmp/duplicate-results.tsv"
+printf 'doctest-bootstrap\t%s\tPASS\t2\t0\n' "$owner" \
+  >>"$tmp/duplicate-results.tsv"
+if sh "$helper" check-results "$tmp/inventory.tsv" "$tmp/duplicate-results.tsv" \
+    >"$tmp/duplicate.out" 2>"$tmp/duplicate.err"; then
+  fail duplicate-physical-owner-was-admitted
+fi
+
+# A discovery command that emits a plausible partial set and then fails must
+# not yield an inventory.  PATH injection exercises the production find call.
+mkdir -p "$tmp/fail-bin"
+cat >"$tmp/fail-bin/find" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$2/partial_spec.spl"
+exit 37
+EOF
+chmod +x "$tmp/fail-bin/find"
+if PATH="$tmp/fail-bin:$PATH" sh "$helper" discover "$source_root" \
+    >"$tmp/discovery.out" 2>"$tmp/discovery.err"; then
+  fail partial-discovery-failure-was-admitted
+fi
+
+# The owner file is an authority boundary, not a marker file.  Empty content
+# cannot claim the Markdown and source-comment categories.
+empty_owner_root=$tmp/empty-owner
+make_tree "$empty_owner_root"
+: >"$empty_owner_root/$owner"
+if sh "$helper" discover "$empty_owner_root" \
+    >"$tmp/empty-owner.out" 2>"$tmp/empty-owner.err"; then
+  fail empty-doctest-owner-was-admitted
+fi
+
+printf 'bootstrap_phase3_docs_inventory_test: PASS (legacy=1, docs=2, physical_owners=1)\n'
