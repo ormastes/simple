@@ -216,8 +216,8 @@ if [ -x /usr/bin/time ] &&
 else
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-      if [ -r /proc/self/stat ] && command -v getconf >/dev/null 2>&1; then
-        rss_measurement=proc-tree-rss-kib
+      if [ -r /proc/self/stat ]; then
+        rss_measurement=proc-group-rss-kib
       fi
       ;;
   esac
@@ -226,43 +226,8 @@ rm -f "$rss_probe"
 echo "max_rss_measurement=$rss_measurement" >>"$summary"
 
 proc_tree_rss_kib() {
-  measured_root=$1
-  page_bytes=$(getconf PAGESIZE 2>/dev/null || printf '0\n')
-  case "$page_bytes" in
-    ''|*[!0-9]*|0) return 1 ;;
-  esac
-  page_kib=$((page_bytes / 1024))
-  [ "$page_kib" -gt 0 ] || return 1
-  measured_pids=$(ps -l | awk -v root="$measured_root" '
-    NR > 1 { parent[$1] = $2; group[$1] = $3; count++ }
-    END {
-      owned[root] = 1
-      for (pass = 0; pass <= count; pass++)
-        for (pid in parent)
-          if (owned[parent[pid]]) owned[pid] = 1
-      target_group = 0
-      for (pid in owned)
-        if (group[pid] == pid) target_group = pid
-      if (target_group > 0)
-        for (pid in group)
-          if (group[pid] == target_group) print pid
-    }
-  ')
-  total_pages=0
-  for measured_child in $measured_pids; do
-    stat_line=$(cat "/proc/$measured_child/stat" 2>/dev/null || :)
-    [ -n "$stat_line" ] || continue
-    stat_fields=${stat_line#*) }
-    set -- $stat_fields
-    shift 21
-    child_rss_pages=${1:-0}
-    case "$child_rss_pages" in
-      ''|*[!0-9]*) child_rss_pages=0 ;;
-    esac
-    total_pages=$((total_pages + child_rss_pages))
-  done
-  [ "$total_pages" -gt 0 ] || return 1
-  printf '%s\n' "$((total_pages * page_kib))"
+  ps -l | awk -v root="$1" -v proc_root="${2:-/proc}" \
+    -f "$source_root/scripts/bootstrap/windows-process-group-rss.awk"
 }
 
 run_measured_timeout() {
@@ -274,7 +239,7 @@ run_measured_timeout() {
     "$rss_time" -f '%M' -o "$metric_file" \
       "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
       "$measured_timeout" "$measured_grace" "$@"
-  elif [ "$rss_measurement" = proc-tree-rss-kib ]; then
+  elif [ "$rss_measurement" = proc-group-rss-kib ]; then
     "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
       "$measured_timeout" "$measured_grace" "$@" &
     measured_pid=$!
