@@ -1,6 +1,6 @@
 # Windows C compiler authority review
 
-STATUS: HOLD for complete admission. The shell/native portion has focused passing evidence and two exact-head lint P1 findings have candidate repairs; independent exact-head rereview and self-hosted verification remain pending.
+STATUS: HOLD for complete admission. The shell/native portion has focused passing evidence, but exact-head `1d744dd3016dc72d8b69ec5817d059120ba279fb` retains one lint P1; self-hosted verification also remains pending.
 
 ## Current change
 
@@ -24,6 +24,8 @@ The paired C probe uses the same source, C11 language, O2 optimization, and DLL 
 The lint provider's source-authority test now recognizes the official LLVM 23.1.x Windows MSVC distribution independently of its install root, including the PR1216 workspace cache. It requires a root-bound driver, an executed version query, an exact 23.1.x predicate, and fail-closed rejection. A bare `--version` token or untrusted compiler alias remains denied. PR1216 itself is unchanged by this lane.
 
 The first exact-head follow-up review found that exported target-specific CC/CXX names bypassed assignment classification and that a valid-looking predicate could inspect unrelated text. The candidate repair recognizes exported and batch target-specific names and traces the queried compiler's captured output through one derived assignment before accepting the exact family expression, either directly or through the PR1216 clang-cl pattern mapping. Focused fixtures retain both failures as regressions, including an unused exact metadata pattern beside a weak predicate over the real output.
+
+The final permitted exact-head review found that shell query assignments record `_simple_win_version` while later shell references tokenize as `$_simple_win_version`, so the binding comparison cannot validate the canonical positive shell fixture. The same classification expansion now inspects `CC_x86_64_pc_windows_msvc="$CC"`, but the admitted-driver helper does not trace `$CC` back to the already validated `CC="$_simple_win_cc"`. A fresh scoped correction must canonicalize shell variable names before comparison, trace the canonical target CC alias to the validated driver, and retain positive tests for the production shell plus negative tests for forged metadata and forbidden target-specific CC/CXX. The production implementation is frozen at the three-cycle cap; no P0/P1-clear claim is made.
 
 This follow-up is a fresh scoped continuation of the prior review and retains the three-cycle guard. An independent exact-head review is required before the draft PR can claim the P1 is clear.
 

@@ -39,3 +39,5 @@ The executable source is
   no self-hosted runner available.
 - No pass or fail result is claimed here. The Rust seed fallback is prohibited
   for this check.
+- Exact-head static review is HOLD: shell query/reference symbol forms and the
+  canonical target-specific `CC="$CC"` alias need a fresh scoped correction.
