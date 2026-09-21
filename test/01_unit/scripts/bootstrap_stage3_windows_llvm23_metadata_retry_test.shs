@@ -11,7 +11,7 @@ mkdir -p "$prefix/bin" "$prefix/lib" "$tmp/tools"
 printf 'import library\n' >"$prefix/lib/LLVM-C.lib"
 printf 'runtime dll\n' >"$prefix/bin/LLVM-C.dll"
 
-cat >"$prefix/bin/llvm-config" <<EOF
+cat >"$prefix/bin/llvm-config.exe" <<EOF
 #!/bin/sh
 set -eu
 case "\${1-}" in
@@ -36,7 +36,7 @@ if [ ! -e "\$state" ]; then
 fi
 printf '%s\n' "\$answer"
 EOF
-chmod 700 "$prefix/bin/llvm-config"
+chmod 700 "$prefix/bin/llvm-config.exe"
 
 tool_path="$prefix/bin:/usr/bin:/bin"
 stderr="$tmp/resolver.stderr"
@@ -49,6 +49,7 @@ authority=$(bootstrap_stage3_resolve_llvm_build_authority \
 
 printf '%s\n' "$authority" | grep -q '^llvm-version=23.1.1$'
 printf '%s\n' "$authority" | grep -q '^llvm-link-kind=dynamic-c-api$'
+printf '%s\n' "$authority" | grep -q "^llvm-config-path=$prefix/bin/llvm-config.exe$"
 printf '%s\n' "$authority" | grep -q "^llvm-c-import-lib-path=$prefix/lib/LLVM-C.lib$"
 printf '%s\n' "$authority" | grep -q "^llvm-c-runtime-dll-path=$prefix/bin/LLVM-C.dll$"
 grep -q 'bootstrap-native-metadata-probe=llvm-config-version attempt=1 shell-status=73' "$stderr"
@@ -65,6 +66,35 @@ fi
 grep -q 'bootstrap-native-metadata-probe=llvm-config-version attempt=1 shell-status=74' "$persistent_stderr"
 grep -q 'bootstrap-native-metadata-probe=llvm-config-version attempt=2 shell-status=74' "$persistent_stderr"
 rm -f "$tmp/fail-always"
+
+# A replacement between the admitted version and prefix probes is rejected by
+# the resolver-wide executable hash binding, even though each individual
+# probe observes stable bytes during its own launch.
+eval "$(sed \
+    '1s/bootstrap_stage3_native_metadata_probe/bootstrap_stage3_native_metadata_probe_unwrapped/' \
+    <<EOF
+$(command -V bootstrap_stage3_native_metadata_probe | sed '1d')
+EOF
+)"
+bootstrap_stage3_native_metadata_probe() {
+    if [ "${1-}" = llvm-config-prefix ]; then
+        printf '\n# replaced between metadata probes\n' \
+            >>"$prefix/bin/llvm-config.exe"
+    fi
+    bootstrap_stage3_native_metadata_probe_unwrapped "$@"
+}
+rm -f "$tmp/version.seen" "$tmp/prefix.seen"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$tool_path" '--features llvm' >/dev/null 2>"$tmp/interval.stderr"; then
+  echo 'FAIL: llvm-config replacement between metadata probes was admitted' >&2
+  exit 1
+fi
+eval "$(sed \
+    '1s/bootstrap_stage3_native_metadata_probe_unwrapped/bootstrap_stage3_native_metadata_probe/' \
+    <<EOF
+$(command -V bootstrap_stage3_native_metadata_probe_unwrapped | sed '1d')
+EOF
+)"
 
 # A changed executable is rejected before any retry can admit new bytes.
 : >"$tmp/mutate-binary"

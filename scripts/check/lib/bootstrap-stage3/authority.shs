@@ -610,6 +610,30 @@ bootstrap_stage3_canonical_file() {
     bootstrap_stage3_canonical_path "$1"
 }
 
+# MSYS command lookup accepts a native `tool.exe` when asked for `tool`, but
+# reports the extensionless spelling.  Cwd::abs_path preserves that spelling
+# even though only the `.exe` file exists.  Executing the alias through a
+# later clean `env -i` native launch is not a stable Windows authority (it can
+# fail with shell status 125).  Bind the physical executable spelling before
+# hashing or launching it.
+bootstrap_stage3_canonical_native_command() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_native_command=$1
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            case "$bootstrap_stage3_native_command" in
+                *.exe) ;;
+                *)
+                    [ -f "${bootstrap_stage3_native_command}.exe" ] &&
+                        bootstrap_stage3_native_command=\
+"${bootstrap_stage3_native_command}.exe"
+                    ;;
+            esac
+            ;;
+    esac
+    bootstrap_stage3_canonical_file "$bootstrap_stage3_native_command"
+}
+
 # Resolve a Stage 3 output directory against the two explicit trust roots.
 # Repository-relative inputs remain supported. Absolute inputs are accepted
 # only below the physical repository build directory or at/below the separately
@@ -1463,9 +1487,12 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     export PATH
     bootstrap_stage3_llvm_config=$(command -v llvm-config) || return 1
     bootstrap_stage3_llvm_config_canonical=$(
-        perl -MCwd=abs_path -e \
-            'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+        bootstrap_stage3_canonical_native_command \
             "$bootstrap_stage3_llvm_config"
+    ) || return 1
+    bootstrap_stage3_llvm_config_sha256=$(
+        bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_llvm_config_canonical"
     ) || return 1
     bootstrap_stage3_llvm_version=$(
         bootstrap_stage3_native_metadata_probe llvm-config-version \
@@ -1482,6 +1509,9 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     bootstrap_stage3_llvm_prefix=$(
         CDPATH= cd -- "$bootstrap_stage3_llvm_prefix" && pwd -P
     ) || return 1
+    [ "$bootstrap_stage3_llvm_config_sha256" = \
+        "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_llvm_config_canonical")" ] || return 1
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*)
             # The official LLVM 23 Windows archive is a static LLVM build, so
@@ -1520,8 +1550,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 "$bootstrap_stage3_llvm_prefix"
             printf 'llvm-config-path=%s\nllvm-config-sha256=%s\n' \
                 "$bootstrap_stage3_llvm_config_canonical" \
-                "$(bootstrap_stage3_hash_file \
-                    "$bootstrap_stage3_llvm_config_canonical")"
+                "$bootstrap_stage3_llvm_config_sha256"
             printf 'llvm-c-import-lib-path=%s\nllvm-c-import-lib-sha256=%s\n' \
                 "$bootstrap_stage3_llvm_c_import" \
                 "$(bootstrap_stage3_hash_file \
@@ -1676,8 +1705,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
         "$bootstrap_stage3_llvm_prefix" "$bootstrap_stage3_llvm_libdir" \
         "$bootstrap_stage3_llvm_config_canonical"
     printf 'llvm-config-sha256=%s\n' \
-        "$(bootstrap_stage3_hash_file \
-            "$bootstrap_stage3_llvm_config_canonical")"
+        "$bootstrap_stage3_llvm_config_sha256"
     printf 'llvm-sdkroot=%s\nllvm-sdk-version=%s\n' \
         "$bootstrap_stage3_llvm_sdkroot" "$bootstrap_stage3_llvm_sdk_version"
     printf 'llvm-homebrew-prefix=%s\nllvm-library-path=%s\n' \
@@ -4410,31 +4438,63 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 >>"$bootstrap_stage3_seed_records" || exit 1
         fi
         bootstrap_stage3_seed_trace native-cc-recorded
+        bootstrap_stage3_seed_llvm_status=$(printf '%s\n' \
+            "$bootstrap_stage3_seed_llvm_authority" |
+            sed -n 's/^llvm-build-status=//p') || exit 1
+        case "$bootstrap_stage3_seed_llvm_status" in
+            enabled|disabled) ;;
+            *) exit 1 ;;
+        esac
         if command -v llvm-config >/dev/null 2>&1; then
             bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||
                 exit 1
             bootstrap_stage3_seed_trace native-llvm-selected
             bootstrap_stage3_seed_llvm_config_canonical=$(
-                perl -MCwd=abs_path -e \
-                    'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                bootstrap_stage3_canonical_native_command \
                     "$bootstrap_stage3_seed_llvm_config"
             ) || exit 1
             bootstrap_stage3_seed_trace native-llvm-canonicalized
+            if [ "$bootstrap_stage3_seed_llvm_status" = enabled ]; then
+                bootstrap_stage3_seed_llvm_authority_config=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-config-path=//p') || exit 1
+                bootstrap_stage3_seed_llvm_authority_hash=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-config-sha256=//p') || exit 1
+                bootstrap_stage3_seed_llvm_version=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-version=//p') || exit 1
+                bootstrap_stage3_seed_llvm_prefix=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-prefix=//p') || exit 1
+                [ "$bootstrap_stage3_seed_llvm_authority_config" = \
+                    "$bootstrap_stage3_seed_llvm_config_canonical" ] || exit 1
+                [ "$bootstrap_stage3_seed_llvm_authority_hash" = \
+                    "$(bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_seed_llvm_config_canonical")" ] ||
+                    exit 1
+                [ -n "$bootstrap_stage3_seed_llvm_version" ] || exit 1
+                [ -n "$bootstrap_stage3_seed_llvm_prefix" ] || exit 1
+            else
+                bootstrap_stage3_seed_llvm_authority_hash=$(
+                    bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_seed_llvm_config_canonical"
+                ) || exit 1
+                bootstrap_stage3_seed_llvm_version=$(
+                    bootstrap_stage3_native_metadata_probe llvm-config-version \
+                        "$bootstrap_stage3_seed_llvm_config_canonical" --version
+                ) || exit 1
+                bootstrap_stage3_seed_llvm_prefix=$(
+                    bootstrap_stage3_native_metadata_probe llvm-config-prefix \
+                        "$bootstrap_stage3_seed_llvm_config_canonical" --prefix
+                ) || exit 1
+            fi
             printf 'llvm-config-path=%s\nllvm-config-sha256=%s\n' \
                 "$bootstrap_stage3_seed_llvm_config_canonical" \
-                "$(bootstrap_stage3_hash_file \
-                    "$bootstrap_stage3_seed_llvm_config_canonical")" \
+                "$bootstrap_stage3_seed_llvm_authority_hash" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
             bootstrap_stage3_seed_trace native-llvm-identity-recorded
-            bootstrap_stage3_seed_llvm_version=$(
-                bootstrap_stage3_native_metadata_probe llvm-config-version \
-                    "$bootstrap_stage3_seed_llvm_config" --version
-            ) || exit 1
             bootstrap_stage3_seed_trace native-llvm-version-returned
-            bootstrap_stage3_seed_llvm_prefix=$(
-                bootstrap_stage3_native_metadata_probe llvm-config-prefix \
-                    "$bootstrap_stage3_seed_llvm_config" --prefix
-            ) || exit 1
             bootstrap_stage3_seed_trace native-llvm-prefix-returned
             printf 'llvm-config-version=%s\n' \
                 "$bootstrap_stage3_seed_llvm_version" \
@@ -4442,6 +4502,8 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             printf 'llvm-config-prefix=%s\n' \
                 "$bootstrap_stage3_seed_llvm_prefix" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
+        elif [ "$bootstrap_stage3_seed_llvm_status" = enabled ]; then
+            exit 1
         else
             echo "llvm-config=absent" >>"$bootstrap_stage3_seed_records" ||
                 exit 1
