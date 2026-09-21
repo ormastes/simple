@@ -3344,15 +3344,16 @@ impl MirLowering:
                     if val byte_at_local = byte_at_result:
                         return byte_at_local
 
-                # Primitive float rounding methods have no MethodResolver
+                # Primitive f64 rounding methods have no MethodResolver
                 # symbol.  Leaving them as `f64.floor` / `f64.ceil` /
                 # `f64.round` MethodCallStatic instructions makes LLVM's
                 # builtin-receiver guard reject them: those qualified names
                 # are receiver annotations, not linkable symbols.  Route the
-                # exact zero-argument float shapes through the typed runtime
-                # ABI after custom-owner recovery above has had first chance.
-                # This is also shared by the interpreter and loader compiler
-                # lanes because the choice is made once in MIR.
+                # exact zero-argument float shapes through the production
+                # floor/ceil ABI after custom-owner recovery above has had
+                # first chance.  `rt_math_round` is deliberately not used: it
+                # exists in the Rust bootstrap runtime but not the canonical C
+                # runtime shared by native host and hosted SoSIX builds.
                 val float_rounding_shape = (
                     args.len() == 0 and
                     (method == "floor" or method == "ceil" or method == "round"))
@@ -3365,11 +3366,23 @@ impl MirLowering:
                             case _: ()
                     if float_rounding_receiver:
                         var b_rounding = self.builder
-                        var float_rounding_symbol = "rt_math_round"
+                        var float_rounding_symbol = "rt_math_floor"
+                        var float_rounding_arg = unresolved_receiver_local
                         if method == "floor":
                             float_rounding_symbol = "rt_math_floor"
                         if method == "ceil":
                             float_rounding_symbol = "rt_math_ceil"
+                        if method == "round":
+                            # Match std.io.math.math_round's portable
+                            # half-up definition: floor(x + 0.5).  Keeping the
+                            # expression in MIR makes the same semantics reach
+                            # LLVM, interpreter, loader, and SoSIX providers
+                            # without adding a provider-specific ABI symbol.
+                            float_rounding_arg = b_rounding.emit_binop(
+                                MirBinOp.Add,
+                                mir_operand_copy(unresolved_receiver_local),
+                                mir_operand_const_float(0.5),
+                                MirType.f64())
                         val float_rounding_op = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str(float_rounding_symbol),
                             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -3380,7 +3393,7 @@ impl MirLowering:
                         ))
                         val float_rounding_result = b_rounding.emit_call(
                             float_rounding_op,
-                            [mir_operand_copy(unresolved_receiver_local)],
+                            [mir_operand_copy(float_rounding_arg)],
                             MirType.f64()
                         )
                         self.builder = b_rounding
