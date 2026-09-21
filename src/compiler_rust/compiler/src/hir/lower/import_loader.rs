@@ -289,7 +289,11 @@ impl Lowerer {
                 // by `fn consume(g: CacheGateway): g.store()` cannot recover
                 // the vtable slot and degrades to a bare static `store` call.
                 if let Some(trait_info) = self.module.trait_infos.get(&original_name).cloned() {
-                    self.module.trait_infos.entry(alias_name.clone()).or_insert(trait_info);
+                    // Alias bindings overwrite consistently with type aliases
+                    // and globals. The cloned record retains its canonical
+                    // `name`; inference deduplicates by that name while MIR
+                    // can resolve the authored alias key directly.
+                    self.module.trait_infos.insert(alias_name.clone(), trait_info);
                 }
             }
 

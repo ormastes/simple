@@ -925,6 +925,20 @@ impl Lowerer {
         ret
     }
 
+    /// Return one metadata record per declared trait, ordered by its canonical
+    /// name. Selective-import aliases are additional lookup keys for MIR
+    /// dispatch, but must not alter whole-module inference ordering.
+    fn canonical_trait_infos(&self) -> Vec<&crate::hir::HirTraitInfo> {
+        let mut infos: Vec<_> = self
+            .module
+            .trait_infos
+            .iter()
+            .filter_map(|(lookup_name, info)| (lookup_name == &info.name).then_some(info))
+            .collect();
+        infos.sort_by(|left, right| left.name.cmp(&right.name));
+        infos
+    }
+
     fn lookup_method_return_type_inner(&self, recv_ty: TypeId, method: &str) -> TypeId {
         // Optional unwrap: `T?` is represented as `Pointer { inner: T }`
         // (type_resolver.rs). `.unwrap()`/`.expect(...)` on such a value yields
@@ -1077,10 +1091,8 @@ impl Lowerer {
             }
         }
         if impls_disagree {
-            let mut trait_names: Vec<&String> = self.module.trait_infos.keys().collect();
-            trait_names.sort();
-            for tn in trait_names {
-                if let Some(sig) = self.module.trait_infos.get(tn).and_then(|ti| ti.methods.get(method)) {
+            for trait_info in self.canonical_trait_infos() {
+                if let Some(sig) = trait_info.methods.get(method) {
                     if sig.return_type != TypeId::ANY && sig.return_type != TypeId::VOID {
                         return sig.return_type;
                     }
@@ -1898,5 +1910,79 @@ impl Lowerer {
 
         // Generic path expression not supported
         Err(LowerError::Unsupported(format!("Path expression {:?}", segments)))
+    }
+}
+
+#[cfg(test)]
+mod trait_alias_tests {
+    use super::*;
+    use crate::hir::HirTraitInfo;
+
+    #[test]
+    fn trait_alias_does_not_change_erased_receiver_return_inference() {
+        let mut lowerer = Lowerer::new();
+        let mut bool_trait = HirTraitInfo::new("B".to_string());
+        bool_trait.add_method("poll".to_string(), Vec::new(), TypeId::BOOL);
+        let mut int_trait = HirTraitInfo::new("Z".to_string());
+        int_trait.add_method("poll".to_string(), Vec::new(), TypeId::I64);
+        lowerer.module.trait_infos.insert("B".to_string(), bool_trait);
+        lowerer.module.trait_infos.insert("Z".to_string(), int_trait.clone());
+        lowerer
+            .method_return_types
+            .insert("BoolImpl.poll".to_string(), TypeId::BOOL);
+        lowerer
+            .method_return_types
+            .insert("IntImpl.poll".to_string(), TypeId::I64);
+
+        assert_eq!(
+            lowerer.lookup_method_return_type_inner(TypeId::ANY, "poll"),
+            TypeId::BOOL,
+            "canonical B must win the deterministic disagreement fallback"
+        );
+
+        // `use module.{Z as A}` adds an authored-name lookup key for MIR.
+        // That alias sorts before B, but it still denotes canonical Z and must
+        // not perturb inference for another erased trait receiver.
+        lowerer.module.trait_infos.insert("A".to_string(), int_trait);
+        assert_eq!(
+            lowerer.lookup_method_return_type_inner(TypeId::ANY, "poll"),
+            TypeId::BOOL,
+            "an alias lookup key must not participate as a second trait"
+        );
+    }
+
+    #[test]
+    fn canonical_trait_key_wins_same_name_alias_metadata_collision() {
+        let mut lowerer = Lowerer::new();
+        let mut canonical = HirTraitInfo::new("Backend".to_string());
+        canonical.add_method("poll".to_string(), Vec::new(), TypeId::BOOL);
+        let mut stale_alias = HirTraitInfo::new("Backend".to_string());
+        stale_alias.add_method("poll".to_string(), Vec::new(), TypeId::I64);
+
+        lowerer
+            .module
+            .trait_infos
+            .insert("ABackend".to_string(), stale_alias.clone());
+        lowerer.module.trait_infos.insert("BBackend".to_string(), stale_alias);
+        lowerer.module.trait_infos.insert("Backend".to_string(), canonical);
+        lowerer
+            .method_return_types
+            .insert("BoolImpl.poll".to_string(), TypeId::BOOL);
+        lowerer
+            .method_return_types
+            .insert("IntImpl.poll".to_string(), TypeId::I64);
+
+        let infos = lowerer.canonical_trait_infos();
+        assert_eq!(infos.len(), 1, "alias snapshots are lookup entries, not declarations");
+        assert_eq!(
+            infos[0].get_method("poll").map(|method| method.return_type),
+            Some(TypeId::BOOL),
+            "the map entry keyed by the canonical name is authoritative"
+        );
+        assert_eq!(
+            lowerer.lookup_method_return_type_inner(TypeId::ANY, "poll"),
+            TypeId::BOOL,
+            "same-name alias snapshots must not make fallback inference nondeterministic"
+        );
     }
 }
