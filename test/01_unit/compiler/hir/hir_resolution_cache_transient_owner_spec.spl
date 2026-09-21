@@ -16,7 +16,7 @@ doc/08_tracking/bug/stage3_hir_segv_compiler_driver_unit2of833_2026-09-14.md.
 # @tag: unit, compiler, hir, native
 # @req REQ-HIR-CACHE-SCOPE-001
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering._Items.module_import_registration.*
@@ -27,8 +27,63 @@ extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 extern fn rt_array_len(value: Any) -> i64
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_transient_scope_promoted_bytes() -> i64
+extern fn rt_time_now_nanos() -> i64
+
+# Native production counters, not RSS or an interpreted allocation model.
+# Return elapsed ns, retained heap objects, and promoted bytes. Assertions
+# execute after teardown so the SSpec assertion machinery cannot be reclaimed.
+fn cache_churn_profile(modules: i64) -> [i64]:
+    var lowering = hirlowering_for_module("profile.spl", ModuleSurfacesByName.empty())
+    var retained = 0
+    var promoted_bytes = 0
+    val started = rt_time_now_nanos()
+    for module_index in 0..modules:
+        lowering.begin_module("profile.spl")
+        val before = rt_heap_registry_count()
+        val began = rt_transient_array_scope_begin()
+        assert(began)
+        lowering.reexport_root_memo_record("owner {module_index}", 0, "item {module_index}")
+        for query in 0..256:
+            lowering.glob_reachable_miss_memo_record("importer {module_index} missing {query}")
+        val churn_peak = rt_heap_registry_count()
+        val paused = rt_transient_array_scope_pause()
+        val promoted = lowering.promote_resolution_caches_transient_owner()
+        val bytes = rt_transient_scope_promoted_bytes()
+        val ended = rt_transient_array_scope_end()
+        val after = rt_heap_registry_count()
+        assert(paused and promoted and ended)
+        assert(churn_peak - before >= 256)
+        assert(churn_peak - after >= 256)
+        assert(after - before < 128)
+        assert(bytes > 0 and bytes < 65536)
+        assert(lowering.glob_reachable_miss_memo_keys.len() == 0)
+        assert(lowering.reexport_root_memo_lookup("owner {module_index}") == module_index)
+        assert(lowering.reexport_root_memo_item_values[module_index] == "item {module_index}")
+        retained = retained + after - before
+        promoted_bytes = promoted_bytes + bytes
+    val elapsed = rt_time_now_nanos() - started
+    assert(lowering.reexport_root_memo_keys.len() == modules)
+    assert(lowering.reexport_root_memo_lookup("owner 0") == 0)
+    assert(lowering.reexport_root_memo_item_values[0] == "item 0")
+    [elapsed, retained, promoted_bytes]
 
 describe("streaming HIR resolution cache ownership", fn():
+    it("bounds retained memory and promotion time while importer misses churn", fn():
+        step("Warm the native cache path, then profile 8 and 32 module scopes")
+        val warm = cache_churn_profile(1)
+        val small = cache_churn_profile(8)
+        val large = cache_churn_profile(32)
+        print "[cache-profile] small={small} large={large} units=ns,objects,bytes"
+        expect(warm[0] > 0 and small[0] > 0 and large[0] > 0).to_equal(true)
+        expect(large[1] < 4096).to_equal(true)
+        expect(large[2] > small[2]).to_equal(true)
+        # Four times the work: tolerate scheduler noise, reject gross runaway.
+        expect(large[0] < small[0] * 12 + 100000000).to_equal(true)
+        expect(large[0] < 10000000000).to_equal(true)
+    )
+
     it("retains cache rows and newly appended values across two module scopes", fn():
         step("Create a frozen registry and a reusable lowerer")
         val surface = ModuleSurface.empty("cache_scope.owner")
