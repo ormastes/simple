@@ -1,0 +1,202 @@
+#!/bin/sh
+# Admit one completed bootstrap phase-verification summary and its inventories.
+set -eu
+
+[ "$#" -eq 5 ] || {
+  echo "usage: $0 PHASE SUMMARY LANE_STATE SOURCE_ROOT SOURCE_SHA" >&2
+  exit 2
+}
+phase=$1
+summary=$2
+lane_state=$3
+source_root=$4
+source_sha=$5
+case "$phase" in stage2|stage3) ;; *) exit 2 ;; esac
+[ "$lane_state" = completed ] || {
+  echo "bootstrap evidence is not completed: $lane_state" >&2
+  exit 1
+}
+[ -f "$summary" ] && [ ! -L "$summary" ] || exit 1
+[ -d "$source_root/.git" ] || [ -f "$source_root/.git" ] || exit 1
+case "$source_sha" in *[!0-9a-f]*|'') exit 1 ;; esac
+[ "${#source_sha}" -eq 40 ] || exit 1
+[ "$(git -C "$source_root" rev-parse HEAD)" = "$source_sha" ] || {
+  echo "bootstrap evidence source revision mismatch" >&2
+  exit 1
+}
+
+perl - "$phase" "$summary" "$source_sha" <<'PERL'
+use strict;
+use warnings;
+use Digest::SHA qw(sha256_hex);
+use Cwd qw(abs_path);
+my ($expected_phase, $summary, $source_sha) = @ARGV;
+open my $fh, '<', $summary or die "open summary: $!\n";
+my @lines = <$fh>;
+chomp @lines;
+
+sub exact_scalar {
+    my ($key, $expected) = @_;
+    my @rows = grep { /^\Q$key\E=/ } @lines;
+    die "$key must occur exactly once\n" unless @rows == 1;
+    my ($value) = $rows[0] =~ /^[^=]+=(.*)$/;
+    die "$key mismatch\n" if defined($expected) && $value ne $expected;
+    return $value;
+}
+
+exact_scalar('schema', 'bootstrap-phase-verification-v1');
+exact_scalar('phase', $expected_phase);
+exact_scalar('strategy', 'full');
+exact_scalar('hash_policy', 'canonical');
+exact_scalar('compiler_hash_status', 'PASS');
+exact_scalar('source_git_sha', $source_sha);
+my $expected_sha = exact_scalar('expected_compiler_sha256', undef);
+my $actual_sha = exact_scalar('actual_compiler_sha256', undef);
+die "compiler SHA is not exact\n"
+    unless $expected_sha =~ /^[0-9a-f]{64}$/ && $actual_sha eq $expected_sha;
+my $runtime = exact_scalar('runtime_path', undef);
+die "runtime authority missing\n" if $runtime eq '-' || $runtime eq '';
+die "runtime authority is not an exact directory\n" unless -d $runtime && !-l $runtime;
+my $runtime_receipt = "$runtime/phase2-runtime-capsule.env";
+die "runtime capsule receipt missing\n" unless -f $runtime_receipt && !-l $runtime_receipt;
+open my $runtime_fh, '<', $runtime_receipt or die "open runtime receipt: $!\n";
+my %runtime_field;
+while (<$runtime_fh>) {
+    chomp;
+    my ($key, $value) = split(/=/, $_, 2);
+    die "malformed runtime receipt\n" unless defined($key) && defined($value);
+    die "duplicate runtime receipt key\n" if exists $runtime_field{$key};
+    $runtime_field{$key} = $value;
+}
+die "runtime capsule is not bound to this compiler\n"
+    unless ($runtime_field{schema} // '') eq 'simple-phase2-runtime-capsule-v1' &&
+           ($runtime_field{status} // '') eq 'frozen' &&
+           ($runtime_field{compiler_sha256} // '') eq $expected_sha;
+die "runtime capsule identity missing\n"
+    unless ($runtime_field{capsule_identity_sha256} // '') =~ /^[0-9a-f]{64}$/;
+exact_scalar('terminal_failures', '0');
+exact_scalar('overall', 'PASS');
+die "nonterminal result admitted\n"
+    if grep { /\|result=(?:FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)(?:\||$)/ } @lines;
+
+sub task_fields {
+    my ($task) = @_;
+    my @rows = grep { /^task=\Q$task\E\|/ } @lines;
+    die "$task must occur exactly once\n" unless @rows == 1;
+    my %fields;
+    for my $part (split(/\|/, $rows[0])) {
+        my ($key, $value) = split(/=/, $part, 2);
+        die "$task malformed field\n" unless defined $key && defined $value;
+        die "$task duplicate field $key\n" if exists $fields{$key};
+        $fields{$key} = $value;
+    }
+    return %fields;
+}
+
+for my $task (qw(compiler_bootstrap_tests compiler_bootstrap_compile_tests
+                 loader_interpreter_tests loader_compile_tests)) {
+    my %f = task_fields($task);
+    die "$task did not pass\n" unless ($f{result} // '') eq 'PASS';
+    die "$task executed zero tests\n" unless ($f{executed} // '') =~ /^[1-9][0-9]*$/;
+    die "$task recorded failures\n" unless ($f{failed} // '') eq '0';
+    die "$task lost command-owner provenance\n"
+        unless ($f{command_owner_before} // '') eq 'PASS' &&
+               ($f{command_owner_after} // '') eq 'PASS';
+}
+{
+    my %library = task_fields('library_check');
+    die "library_check did not pass\n" unless ($library{result} // '') eq 'PASS';
+    die "library_check lost command-owner provenance\n"
+        unless ($library{command_owner_before} // '') eq 'PASS' &&
+               ($library{command_owner_after} // '') eq 'PASS';
+}
+
+sub validate_inventory {
+    my ($task) = @_;
+    my %field = task_fields($task);
+    for my $key (qw(spec_count passed_count timeout_count crash_count inventory command_owner_receipt)) {
+        die "$task missing $key\n" unless defined $field{$key};
+    }
+    die "$task did not pass\n"
+        unless ($field{result} // '') eq 'PASS' && $field{spec_count} =~ /^[1-9][0-9]*$/ &&
+               $field{passed_count} eq $field{spec_count} && $field{timeout_count} eq '0' &&
+               $field{crash_count} eq '0';
+    die "$task command owner receipt missing\n"
+        if $field{command_owner_receipt} eq '-' || $field{command_owner_receipt} eq '';
+    die "$task command owner differs from summary\n"
+        unless $field{command_owner_receipt} eq exact_scalar('command_owner_receipt', undef);
+
+    die "$task inventory is a symlink\n" if -l $field{inventory};
+    my $inventory_real = abs_path($field{inventory});
+    my $summary_dir = abs_path($summary =~ s{/[^/]+$}{}r);
+    die "$task inventory path escaped evidence root\n"
+        unless defined($inventory_real) && defined($summary_dir) &&
+               index($inventory_real, "$summary_dir/") == 0;
+    open my $inv, '<', $inventory_real or die "open inventory: $!\n";
+    my $header = <$inv> // die "empty inventory\n";
+    chomp $header;
+    my @columns = split /\t/, $header, -1;
+    my %index;
+    for my $i (0 .. $#columns) {
+        die "duplicate inventory column $columns[$i]\n" if exists $index{$columns[$i]};
+        $index{$columns[$i]} = $i;
+    }
+    for my $key (qw(result executed failed)) {
+        die "inventory missing $key\n" unless exists $index{$key};
+    }
+    my $rows = 0;
+    my %specs;
+    while (my $row = <$inv>) {
+        chomp $row;
+        next if $row eq '';
+        my @v = split /\t/, $row, -1;
+        $rows++;
+        die "duplicate inventory spec row\n" if $specs{$v[0]}++;
+        die "inventory row did not pass\n" unless ($v[$index{result}] // '') eq 'PASS';
+        die "inventory row executed zero tests\n"
+            unless ($v[$index{executed}] // '') =~ /^[1-9][0-9]*$/;
+        die "inventory row recorded failures\n" unless ($v[$index{failed}] // '') eq '0';
+    }
+    die "inventory is empty or partial\n" unless $rows == $field{spec_count};
+}
+validate_inventory('compiler_unit_tests');
+validate_inventory('repository_full_tests') if $expected_phase eq 'stage3';
+
+my $owner = exact_scalar('command_owner_receipt', undef);
+my $owner_sha = exact_scalar('command_owner_receipt_sha256', undef);
+die "command-owner receipt is not a regular file\n" unless -f $owner && !-l $owner;
+open my $owner_fh, '<', $owner or die "open command-owner receipt: $!\n";
+binmode $owner_fh;
+my $owner_bytes = do { local $/; <$owner_fh> };
+die "command-owner receipt SHA mismatch\n"
+    unless $owner_sha =~ /^[0-9a-f]{64}$/ && sha256_hex($owner_bytes) eq $owner_sha;
+seek $owner_fh, 0, 0 or die "rewind command-owner receipt: $!\n";
+my %owner;
+while (<$owner_fh>) {
+    chomp;
+    my ($key, $value) = split(/=/, $_, 2);
+    die "duplicate command-owner key\n" if exists $owner{$key};
+    $owner{$key} = $value;
+}
+die "command-owner receipt schema mismatch\n"
+    unless ($owner{schema} // '') eq 'simple-bootstrap-command-owners-v3' &&
+           ($owner{status} // '') eq 'frozen' &&
+           ($owner{phase} // '') eq $expected_phase &&
+           ($owner{compiler_snapshot_sha256} // '') eq $expected_sha &&
+           ($owner{runtime_identity_sha256} // '') eq $runtime_field{capsule_identity_sha256};
+for my $pair ([qw(compiler_cli_path compiler_cli_sha256)],
+              [qw(test_runner_path test_runner_sha256)]) {
+    my ($path_key, $sha_key) = @$pair;
+    my $path = $owner{$path_key} // '';
+    my $sha = $owner{$sha_key} // '';
+    die "command-owner $path_key missing\n" if $path eq '' || $path eq '-';
+    die "command-owner $sha_key invalid\n" unless $sha =~ /^[0-9a-f]{64}$/;
+    die "command-owner $path_key is not a regular executable\n"
+        unless -f $path && !-l $path && -x $path;
+    open my $artifact, '<', $path or die "open $path_key: $!\n";
+    binmode $artifact;
+    die "command-owner $path_key SHA mismatch\n"
+        unless sha256_hex(do { local $/; <$artifact> }) eq $sha;
+}
+print "PASS — $expected_phase bootstrap evidence is terminal and non-vacuous\n";
+PERL
