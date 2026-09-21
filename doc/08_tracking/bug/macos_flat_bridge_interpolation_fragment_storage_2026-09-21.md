@@ -59,22 +59,25 @@ databases and files owned by the preceding repair commits were not edited.
 
 The regression now includes an 8,192-character suffix in a completed
 interpolation identifier and checks the complete converted identifier value.
-A second case calls the production bridge with 32-byte and 65,536-byte
-unfinished regions, measuring each call with the production
-`std.nogc_sync_mut.sffi.host.heap_array_capacity_bytes` facade. The input text
-and span are constructed before either measurement. Because no closing brace
-is present, neither call invokes the inner expression parser.
+A second case calls the production bridge with equal-length 65,537-byte
+plain and unfinished-region strings, measuring each call with the production
+`std.nogc_sync_mut.sffi.host.heap_registry_count` facade. Its ABI is implemented
+in `src/runtime/runtime_native.c`, unlike the initially chosen
+`heap_array_capacity_bytes` ABI, which exists only in the Rust runtime. The
+input text and span are constructed before either measurement. Short-string
+caches are warmed before counting. Neither measured call invokes the inner
+expression parser.
 
-The test requires nonnegative capacity deltas and at most 4 KiB more array
-storage for the large input. The old `inner_parts` algorithm retains at least
-65,536 text slots (512 KiB on the native runtime), while the corrected scanner
-retains only its constant-sized result array. This observable allocation
-assertion complements the source-shape guard; it does not depend on searching
-production text. A live 2,048-element integer array calibrates the counter and
-requires at least 16 KiB of reported growth, so inert accounting cannot turn
-the test green.
+The test requires positive live-object deltas and exactly one additional
+object for the unfinished region: its fresh empty return array. The old
+scanner also resets `inner_parts` on the opening brace and therefore allocates
+one extra accumulator container, making the difference two. This container
+retains 65,536 text slots. The counter measures redundant live containers,
+not their capacity bytes; no byte bound is inferred from the measurement.
+A live two-element integer array calibrates the counter and must increase it,
+so inert accounting cannot turn the test green.
 
-This allocation case requires the native runtime's array-capacity accounting
+This allocation case requires the native runtime's live-object accounting
 and no automatic collection during the measured call. A runtime without the
 counter must report an unavailable-symbol/qualification failure; it must not
 skip the assertion or substitute zero. The added cases have not been executed:
@@ -90,10 +93,11 @@ inner parser receives the same identifier after trimming. Inputs are built
 before timing. Every result must contain exactly one `Ident("marker")`, and
 the measured batches must produce semantic checksum 144.
 
-The test uses the production monotonic-millisecond facade, warms each size,
+The test uses the production monotonic-nanosecond facade, warms each size,
 then takes exactly three alternating-order samples of four calls per size.
-It compares each size's best sample and requires `large_ms <= 3 * small_ms +
-25`. This permits timer granularity and shared-host scheduling variation
+Every measured batch must advance the clock at least 1,000 ns; zero-duration
+or frozen-clock samples fail. It compares each size's best sample and requires
+`large_ns <= 3 * small_ns + 25_000_000`. This permits shared-host scheduling variation
 above expected 2x scan work. It is a scaling regression guard, not a measured
 speedup claim or an absolute latency target. The strict allocation assertion
 remains a separate gate. Runtime execution remains pending the admitted
