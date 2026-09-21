@@ -222,37 +222,16 @@ const LLVM_AND_CRANELIFT_NATIVE_BACKENDS: &[NativeCodegenBackend] =
 pub fn is_native_codegen_backend_available(backend: NativeCodegenBackend) -> bool {
     match backend {
         NativeCodegenBackend::Cranelift => true,
-        // The compile-time feature covers the seed's own inkwell codegen.
-        // The bootstrap lane additionally proves the LLVM backend at runtime:
-        // the pure-Simple compiler loads LLVM-C.dll directly (llvm_loader),
-        // independent of how the Rust seed was linked. A declared LLVM
-        // library path (SIMPLE_LLVM_PATH) that exists is positive-only
-        // evidence that the backend is usable in this lane.
-        NativeCodegenBackend::Llvm => cfg!(feature = "llvm") || llvm_backend_runtime_available(),
+        // This API describes the Rust seed's executable backends. The
+        // pure-Simple bootstrap compiler has a separate runtime LLVM loader,
+        // but a SIMPLE_LLVM_PATH value cannot add inkwell code that was not
+        // compiled into this binary.
+        NativeCodegenBackend::Llvm => cfg!(feature = "llvm"),
     }
-}
-
-#[cfg(not(feature = "llvm"))]
-fn llvm_backend_runtime_available() -> bool {
-    if let Ok(path) = std::env::var("SIMPLE_LLVM_PATH") {
-        if !path.is_empty() && std::path::Path::new(&path).is_file() {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(feature = "llvm")]
-fn llvm_backend_runtime_available() -> bool {
-    false
 }
 
 pub fn default_native_codegen_backend() -> NativeCodegenBackend {
-    // Default stays conservative: without the compile-time feature the seed
-    // defaults to cranelift. The runtime probe in
-    // is_native_codegen_backend_available only ADMITS an explicit
-    // --backend llvm in the decoupled lane; it must not move the default,
-    // because deeper seed pipelines still cfg-gate llvm on the feature.
+    // The seed can only default to a backend compiled into this binary.
     if cfg!(feature = "llvm") {
         NativeCodegenBackend::Llvm
     } else {
