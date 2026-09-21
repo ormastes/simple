@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
 #if !defined(_WIN32) && !defined(_WIN64)
     #include <dlfcn.h>
 #endif
@@ -244,13 +245,35 @@ typedef struct {
     int              raw_worker_args;
     int              arity;
     int64_t          result;
-    int              done;
+    atomic_int       done;
+    /* The public handle and worker each retain this record independently. */
+    atomic_int       references;
 #ifdef SPL_THREAD_PTHREAD
     pthread_t        thread;
 #else
     HANDLE           thread;
 #endif
 } RtThreadData;
+
+static void rt_thread_data_release(RtThreadData* td) {
+    if (atomic_fetch_sub_explicit(&td->references, 1, memory_order_acq_rel) == 1) {
+        SPL_FREE(td);
+    }
+}
+
+static int64_t rt_thread_publish_handle(RtThreadData* td) {
+    int64_t handle = alloc_handle(HANDLE_THREAD, td);
+    if (handle == 0) {
+        /* Handle exhaustion must relinquish the owner's reference too. */
+#ifdef SPL_THREAD_PTHREAD
+        pthread_detach(td->thread);
+#else
+        CloseHandle(td->thread);
+#endif
+        rt_thread_data_release(td);
+    }
+    return handle;
+}
 
 static int64_t rt_native_closure_payload(int64_t raw) {
     uint64_t value = (uint64_t)raw;
@@ -291,7 +314,8 @@ static void* rt_isolated_wrapper(void* raw) {
     } else {
         td->result = td->entry(td->closure_ptr);
     }
-    td->done = 1;
+    atomic_store_explicit(&td->done, 1, memory_order_release);
+    rt_thread_data_release(td);
     return NULL;
 }
 
@@ -309,7 +333,8 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
     } else {
         td->result = td->entry(td->closure_ptr);
     }
-    td->done = 1;
+    atomic_store_explicit(&td->done, 1, memory_order_release);
+    rt_thread_data_release(td);
     return 0;
 }
 #endif
@@ -328,7 +353,8 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
     td->raw_worker_args = 0;
     td->arity       = 1;
     td->result      = 0;
-    td->done        = 0;
+    atomic_init(&td->done, 0);
+    atomic_init(&td->references, 2);
 
 #ifdef SPL_THREAD_PTHREAD
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
@@ -342,7 +368,7 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
         return 0;
     }
 #endif
-    return alloc_handle(HANDLE_THREAD, td);
+    return rt_thread_publish_handle(td);
 }
 
 int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
@@ -378,7 +404,8 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
     td->raw_worker_args = 1;
     td->arity       = 2;
     td->result      = 0;
-    td->done        = 0;
+    atomic_init(&td->done, 0);
+    atomic_init(&td->references, 2);
 
 #ifdef SPL_THREAD_PTHREAD
     if (pthread_create(&td->thread, NULL, rt_isolated_wrapper, td) != 0) {
@@ -392,7 +419,7 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
         return 0;
     }
 #endif
-    return alloc_handle(HANDLE_THREAD, td);
+    return rt_thread_publish_handle(td);
 }
 
 int64_t rt_thread_join(int64_t handle) {
@@ -405,15 +432,15 @@ int64_t rt_thread_join(int64_t handle) {
     CloseHandle(td->thread);
 #endif
     int64_t result = td->result;
-    SPL_FREE(td);
     free_handle(handle);
+    rt_thread_data_release(td);
     return result;
 }
 
 int64_t rt_thread_is_done(int64_t handle) {
     RtThreadData* td = (RtThreadData*)get_handle(handle, HANDLE_THREAD);
     if (!td) return 1;
-    return td->done ? 1 : 0;
+    return atomic_load_explicit(&td->done, memory_order_acquire) ? 1 : 0;
 }
 
 int64_t rt_thread_id(int64_t handle) {
@@ -434,8 +461,8 @@ void rt_thread_free(int64_t handle) {
 #else
     CloseHandle(td->thread);
 #endif
-    SPL_FREE(td);
     free_handle(handle);
+    rt_thread_data_release(td);
 }
 
 void rt_thread_sleep(int64_t millis) {
