@@ -22,6 +22,19 @@ def fixture(mode, target):
             os.write(1, b"x" * 2000000)
     elif mode == "sleep":
         time.sleep(30)
+    elif mode.startswith("orphan-"):
+        # Simulate a tool that exits while an inherited-output telemetry child
+        # stays in its Job (the native Cargo/VCTIP failure mode).
+        child = subprocess.Popen([sys.executable, __file__, "--fixture", "sleep", str(target)],
+                                 stdin=subprocess.DEVNULL)
+        target.write_text(str(child.pid), encoding="ascii")
+        if mode == "orphan-overflow":
+            os.write(1, b"x" * 2000000)
+        else:
+            os.write(1, b"root finished\n")
+        if mode == "orphan-exception":
+            ctypes.WinDLL("kernel32").ExitProcess(0xC0000005)
+        return 7 if mode == "orphan-fail" else 0
     elif mode == "exception":
         ctypes.WinDLL("kernel32").ExitProcess(0xC0000005)
     elif mode == "mutate":
@@ -83,13 +96,17 @@ def main():
     work = Path(tempfile.mkdtemp(prefix="collector-regression-", dir=evidence))
     checks = []
 
-    def run(name, mode, target=None, expected=0, cap=4096, timeout=5, collector=helper, environment=None):
+    def run(name, mode, target=None, expected=0, cap=4096, timeout=5, collector=helper, environment=None,
+            root_exit_policy=None):
         command = [sys.executable, str(collector), f"--output-parent={work}",
                    f"--log-leaf={name}.log", f"--receipt-leaf={name}.env",
                    f"--max-bytes={cap}", f"--timeout-seconds={timeout}",
-                   "--term-grace-seconds=1", f"--helper-sha256={sha(collector)}", "--",
+                   "--term-grace-seconds=1", f"--helper-sha256={sha(collector)}"]
+        if root_exit_policy is not None:
+            command.append(f"--root-exit-policy={root_exit_policy}")
+        command.extend(["--",
                    sys.executable, str(Path(__file__).resolve()), "--fixture", mode,
-                   str(target or work / f"{name}.target")]
+                   str(target or work / f"{name}.target")])
         started = time.monotonic()
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20, env=environment)
         (work / f"{name}.driver.log").write_bytes(result.stdout)
@@ -148,6 +165,26 @@ def main():
             assert receipt["reason"] == ("timeout" if mode == "descendant" else "overflow")
             assert dead(int(pid_file.read_text())), f"native {mode} descendant survived"
         assert (work / "overflow.log").stat().st_size == 1024
+        for name, mode, expected in (("orphan-success", "orphan-success", 0),
+                                     ("orphan-failure", "orphan-fail", 7),
+                                     ("orphan-exception", "orphan-exception", 139),
+                                     ("orphan-overflow", "orphan-overflow", 125)):
+            pid_file = work / f"{name}.pid"
+            receipt = run(name, mode, pid_file, expected=expected, cap=1024, timeout=4,
+                          root_exit_policy="terminate-job")
+            assert receipt["root_exit_policy"] == "terminate-job"
+            assert dead(int(pid_file.read_text())), f"native {name} descendant survived"
+            if expected != 125:
+                assert receipt["job_remnants_terminated"] == "yes"
+                assert (work / f"{name}.log").read_bytes() == b"root finished\n"
+                assert receipt["native_exit_status"] == ("3221225477" if expected == 139 else str(expected))
+                assert receipt["reason"] == ("child-native-exception" if expected == 139 else "child-exit")
+            else:
+                assert receipt["reason"] == "overflow"
+                assert (work / f"{name}.log").stat().st_size == 1024
+        live = run("policy-live-root-timeout", "sleep", expected=124, timeout=2,
+                   root_exit_policy="terminate-job")
+        assert live["reason"] == "timeout" and live["job_remnants_terminated"] == "no"
         exact = run("exact-exit", "exception", expected=139)
         assert exact["reason"] == "child-native-exception" and exact["native_exit_status"] == "3221225477"
 
