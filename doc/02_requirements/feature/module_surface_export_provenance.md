@@ -21,3 +21,15 @@
 - **REQ-009:** The design shall reserve a phased path to a
   `ResolvedModuleGraph` owning canonical nodes, typed import/export edges, and
   symbol-body closure without requiring that larger migration now.
+- **REQ-HIR-CACHE-SCOPE-001:** Resolution facts retained across streaming HIR
+  modules shall remain live after each transient scope ends, including newly
+  appended cache payloads. Importer-local enum owner rows shall be cleared for
+  the next module. Native scope tests and the three-module
+  `test/fixtures/hir_resolution_cache_scope` fixture cover this correction;
+  current verification scope is macOS arm64.
+- **REQ-EXPORT-SCRATCH-001:** Streaming export-origin resolution shall reclaim
+  temporary lookup and import-walk graphs after each surface, retain origin
+  arrays and projections across fixpoint passes, and preserve errors after
+  cleanup. The canonical macOS Stage 3 compile at jobs=8 must peak below
+  1,000,000,000 bytes RSS for the compiler process; a smaller fixture does not
+  establish that full-closure memory requirement.

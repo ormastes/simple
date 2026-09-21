@@ -1,0 +1,90 @@
+"""
+Native lifetime checks for streaming export-origin resolution. Run with a
+qualified native SSpec runner; interpreted execution does not prove reclamation.
+The macOS canonical Stage 3 peak-RSS gate is <1 GB for the compiler process.
+"""
+# @req REQ-EXPORT-SCRATCH-001
+use std.spec.{describe, it, expect, step}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfaceBuilder}
+use compiler.hir.hir_lowering.module_surface_export_index.*
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
+use compiler.frontend.parser_types.{Export, Import}
+use compiler.common.diagnostics.span.{Span}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn scratch_scope_builder() -> ModuleSurfaceBuilder:
+    var builder = ModuleSurfaceBuilder.new()
+    var facade = ModuleSurface.empty("scratch.facade")
+    facade.canonical_path = "scratch/facade.spl"
+    facade.exports = [Export(items: ["visible"], span: Span.empty())]
+    facade.imports = [Import(module: "scratch.leaf", items: [], is_lazy: false, span: Span.empty())]
+    var leaf = ModuleSurface.empty("scratch.leaf")
+    leaf.canonical_path = "scratch/leaf.spl"
+    leaf.callable_names = ["answer"]
+    leaf.exports = [Export(items: ["answer:visible"], span: Span.empty())]
+    builder.add_surface_canonical_identity(facade, "scratch.facade", facade.canonical_path)
+    builder.add_surface_canonical_identity(leaf, "scratch.leaf", leaf.canonical_path)
+    builder
+
+describe("streaming export-origin scratch scopes", fn():
+    it("preserves a delayed alias through per-surface reclamation and fixpoint revisits", fn():
+        step("Resolve the facade before the leaf supplying its aliased export")
+        var builder = scratch_scope_builder()
+        val resolved = builder.resolve_export_origins_streaming()
+        expect(resolved.is_ok()).to_equal(true)
+        if resolved.is_err():
+            return
+        val leaf_origin = module_surface_export_origin_index_lookup(
+            builder.surfaces[1].export_origin_index, "visible")
+        val facade_origin = module_surface_export_origin_index_lookup(
+            builder.surfaces[0].export_origin_index, "visible")
+        expect(leaf_origin.found).to_equal(true)
+        expect(leaf_origin.owner_module).to_equal("scratch.leaf")
+        expect(leaf_origin.source_name).to_equal("answer")
+        expect(facade_origin.found).to_equal(true)
+        expect(facade_origin.owner_module).to_equal("scratch.leaf")
+        expect(facade_origin.source_name).to_equal("answer")
+        expect(facade_origin.resolution_kind).to_equal("glob")
+        step("Confirm the resolver ended its last scope")
+        val began = rt_transient_array_scope_begin()
+        val ended = if began: rt_transient_array_scope_end() else: false
+        expect(began).to_equal(true)
+        expect(ended).to_equal(true)
+    )
+
+    it("retains ambiguity diagnostics and ends the failing surface scope", fn():
+        step("Give a facade two distinct wildcard owners for one name")
+        var builder = scratch_scope_builder()
+        var duplicate = ModuleSurface.empty("scratch.other")
+        duplicate.canonical_path = "scratch/other.spl"
+        duplicate.callable_names = ["visible"]
+        builder.add_surface_canonical_identity(duplicate, "scratch.other", duplicate.canonical_path)
+        builder.surfaces[0].imports.push(Import(
+            module: "scratch.other", items: [], is_lazy: false, span: Span.empty()))
+        val resolved = builder.resolve_export_origins_streaming()
+        expect(resolved.is_err()).to_equal(true)
+        if resolved.is_err():
+            expect(resolved.unwrap_err()).to_contain("ambiguous explicit facade export")
+        val began = rt_transient_array_scope_begin()
+        val ended = if began: rt_transient_array_scope_end() else: false
+        expect(began).to_equal(true)
+        expect(ended).to_equal(true)
+    )
+
+    it("rejects a nested scope without ending the caller's scope", fn():
+        step("Hold a caller-owned scope while requesting streaming resolution")
+        var builder = scratch_scope_builder()
+        val began = rt_transient_array_scope_begin()
+        val resolved = builder.resolve_export_origins_streaming()
+        val failed = resolved.is_err()
+        val paused = rt_transient_array_scope_pause()
+        val ended = rt_transient_array_scope_end()
+        expect(began).to_equal(true)
+        expect(failed).to_equal(true)
+        expect(paused).to_equal(true)
+        expect(ended).to_equal(true)
+    )
+)

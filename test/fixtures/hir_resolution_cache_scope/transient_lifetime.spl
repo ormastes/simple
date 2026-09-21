@@ -1,0 +1,51 @@
+# Native runtime contract used by streaming HIR resolution-cache promotion.
+# Compile this bare positional entry with an admitted macOS Stage 2.
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_array_free(array: [Any])
+
+class RetainedCache:
+    keys: [text]
+    positions: [i64]
+
+fn main() -> i64:
+    var cache = RetainedCache(keys: [], positions: [])
+    if not rt_transient_array_scope_begin():
+        return 1
+    cache.keys = ["first" + "Key"]
+    cache.positions = [42]
+    if not rt_transient_array_scope_pause():
+        return 2
+    var roots: [Any] = [cache.keys, cache.positions]
+    if not rt_transient_heap_promote(roots):
+        return 3
+    rt_array_free(roots)
+    if not rt_transient_array_scope_end():
+        return 4
+    if cache.keys.len() != 1 or cache.keys[0] != "firstKey":
+        return 5
+    if cache.positions[0] != 42:
+        return 6
+
+    if not rt_transient_array_scope_begin():
+        return 7
+    cache.keys = cache.keys.push("second" + "Key")
+    cache.positions = cache.positions.push(43)
+    if not rt_transient_array_scope_pause():
+        return 8
+    roots = [cache.keys, cache.positions]
+    if not rt_transient_heap_promote(roots):
+        return 9
+    rt_array_free(roots)
+    if not rt_transient_array_scope_end():
+        return 10
+    if cache.keys.len() != 2 or cache.keys[0] != "firstKey" or cache.keys[1] != "secondKey":
+        return 11
+    if cache.positions[0] != 42 or cache.positions[1] != 43:
+        return 12
+    if rt_transient_heap_promote(cache.keys):
+        return 13
+    print("hir-transient-lifetime-ok")
+    0

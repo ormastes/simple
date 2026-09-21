@@ -4,8 +4,21 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurface
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_package_name}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_array_free(array: [Any])
+
 impl ModuleSurfaceBuilder:
     me resolve_export_origins() -> Result<(), text>:
+        self.resolve_export_origins_with_scratch_scope(false)
+
+    me resolve_export_origins_streaming() -> Result<(), text>:
+        """Bound temporary export-resolution graphs to one surface at a time."""
+        self.resolve_export_origins_with_scratch_scope(true)
+
+    me resolve_export_origins_with_scratch_scope(reclaim_scratch: bool) -> Result<(), text>:
         if self.frozen:
             return Err("module surface builder is frozen")
         # Build one package/name owner index up front. Stage4 carries thousands
@@ -142,6 +155,8 @@ impl ModuleSurfaceBuilder:
         var surface_index = 0
         while surface_index < self.surfaces.len():
             var surface = self.surfaces[surface_index]
+            if reclaim_scratch and not rt_transient_array_scope_begin():
+                return Err("export-origin scratch scope unavailable")
             # In-flight receipt: names the surface about to be processed.
             if origin_trace:
                 module_surface_origin_trace(true,
@@ -163,7 +178,8 @@ impl ModuleSurfaceBuilder:
                             surface.export_origin_index,
                             local_name, surface.module_name, source_name, "direct")
                         if put_result.is_err():
-                            return Err(put_result.unwrap_err())
+                            return Err(module_surface_origin_finish_scope(
+                                reclaim_scratch, surface.export_origin_index, put_result.unwrap_err()))
                         surface.export_origins = surface.export_origin_index.origins
                         continue
 
@@ -171,14 +187,16 @@ impl ModuleSurfaceBuilder:
                         self.surfaces, name_index, surface,
                         source_name, local_name)
                     if imported_result.is_error:
-                        return Err(imported_result.error)
+                        return Err(module_surface_origin_finish_scope(
+                            reclaim_scratch, surface.export_origin_index, imported_result.error))
                     if imported_result.found:
                         val put_result = module_surface_export_origin_index_put(
                             surface.export_origin_index,
                             local_name, imported_result.owner_module,
                             imported_result.source_name, imported_result.resolution_kind)
                         if put_result.is_err():
-                            return Err(put_result.unwrap_err())
+                            return Err(module_surface_origin_finish_scope(
+                                reclaim_scratch, surface.export_origin_index, put_result.unwrap_err()))
                         surface.export_origins = surface.export_origin_index.origins
                         continue
 
@@ -205,15 +223,21 @@ impl ModuleSurfaceBuilder:
                         owner_source_by_package_name,
                         surface, source_name)
                     if sibling_result.is_error:
-                        return Err(sibling_result.error)
+                        return Err(module_surface_origin_finish_scope(
+                            reclaim_scratch, surface.export_origin_index, sibling_result.error))
                     if sibling_result.found:
                         val put_result = module_surface_export_origin_index_put(
                             surface.export_origin_index,
                             local_name, sibling_result.owner_module,
                             sibling_result.source_name, sibling_result.resolution_kind)
                         if put_result.is_err():
-                            return Err(put_result.unwrap_err())
+                            return Err(module_surface_origin_finish_scope(
+                                reclaim_scratch, surface.export_origin_index, put_result.unwrap_err()))
                         surface.export_origins = surface.export_origin_index.origins
+            val scratch_error = module_surface_origin_finish_scope(
+                reclaim_scratch, surface.export_origin_index, "")
+            if scratch_error != "":
+                return Err(scratch_error)
             self.surfaces[surface_index] = surface
             surface_index = surface_index + 1
 
@@ -298,6 +322,8 @@ impl ModuleSurfaceBuilder:
             var revisit_index = 0
             while revisit_index < self.surfaces.len():
                 var revisit_surface = self.surfaces[revisit_index]
+                if reclaim_scratch and not rt_transient_array_scope_begin():
+                    return Err("export-origin revisit scratch scope unavailable")
                 if origin_trace:
                     module_surface_origin_trace(true,
                         "revisit pass {origin_pass} {revisit_index}/{self.surfaces.len()} in-flight {revisit_surface.module_name}")
@@ -322,7 +348,8 @@ impl ModuleSurfaceBuilder:
                             self.surfaces, name_index, revisit_surface,
                             source_name, local_name)
                         if imported_result.is_error:
-                            return Err(imported_result.error)
+                            return Err(module_surface_origin_finish_scope(
+                                reclaim_scratch, revisit_surface.export_origin_index, imported_result.error))
                         if imported_result.found:
                             val revisit_origin_index_explicit: ModuleSurfaceExportOriginIndex = revisit_surface.export_origin_index
                             val previous_origin = module_surface_export_origin_index_lookup(revisit_origin_index_explicit, local_name)
@@ -337,7 +364,8 @@ impl ModuleSurfaceBuilder:
                                     local_name, imported_result.owner_module,
                                     imported_result.source_name, imported_result.resolution_kind)
                                 if put_result.is_err():
-                                    return Err(put_result.unwrap_err())
+                                    return Err(module_surface_origin_finish_scope(
+                                        reclaim_scratch, revisit_surface.export_origin_index, put_result.unwrap_err()))
                                 revisit_surface.export_origins = revisit_surface.export_origin_index.origins
                                 origin_changed = true
                             continue
@@ -356,7 +384,8 @@ impl ModuleSurfaceBuilder:
                             owner_source_by_package_name,
                             revisit_surface, source_name)
                         if sibling_result.is_error:
-                            return Err(sibling_result.error)
+                            return Err(module_surface_origin_finish_scope(
+                                reclaim_scratch, revisit_surface.export_origin_index, sibling_result.error))
                         if sibling_result.found:
                             val revisit_origin_index_sibling: ModuleSurfaceExportOriginIndex = revisit_surface.export_origin_index
                             val previous_origin = module_surface_export_origin_index_lookup(revisit_origin_index_sibling, local_name)
@@ -371,9 +400,14 @@ impl ModuleSurfaceBuilder:
                                     local_name, sibling_result.owner_module,
                                     sibling_result.source_name, sibling_result.resolution_kind)
                                 if put_result.is_err():
-                                    return Err(put_result.unwrap_err())
+                                    return Err(module_surface_origin_finish_scope(
+                                        reclaim_scratch, revisit_surface.export_origin_index, put_result.unwrap_err()))
                                 revisit_surface.export_origins = revisit_surface.export_origin_index.origins
                                 origin_changed = true
+                val revisit_scratch_error = module_surface_origin_finish_scope(
+                    reclaim_scratch, revisit_surface.export_origin_index, "")
+                if revisit_scratch_error != "":
+                    return Err(revisit_scratch_error)
                 self.surfaces[revisit_index] = revisit_surface
                 revisit_index = revisit_index + 1
             origin_pass = origin_pass + 1
@@ -387,6 +421,37 @@ impl ModuleSurfaceBuilder:
         if origin_changed:
             return Err("facade export origin resolution did not converge after {max_origin_passes} passes")
         Ok(())
+
+pub(package) fn module_surface_origin_finish_scope(
+    reclaim_scratch: bool,
+    origin_index: ModuleSurfaceExportOriginIndex,
+    failure: text
+) -> text:
+    if not reclaim_scratch:
+        return failure
+    if not rt_transient_array_scope_pause():
+        val _ended = rt_transient_array_scope_end()
+        return "export-origin scratch scope pause failed"
+    # The surface and registry predate this scope. Only this index is mutated:
+    # retain its projections and newly split names, not temporary lookup
+    # results, copied declarations, import walks, or trace strings. The error
+    # text must also outlive teardown on every early-return path.
+    var roots: [Any] = []
+    roots.push(origin_index.origins)
+    roots.push(origin_index.index_by_name)
+    roots.push(origin_index.names)
+    roots.push(origin_index.owner_modules)
+    roots.push(origin_index.source_names)
+    roots.push(origin_index.resolution_kinds)
+    roots.push(failure)
+    val promoted = rt_transient_heap_promote(roots)
+    rt_array_free(roots)
+    val ended = rt_transient_array_scope_end()
+    if not promoted:
+        return "export-origin ownership promotion failed"
+    if not ended:
+        return "export-origin scratch scope end failed"
+    failure
 
 pub(package) fn module_surface_declares_item(surface: ModuleSurface, name: text) -> bool:
     module_surface_name_position(surface.callable_names, name) >= 0 or
