@@ -1,6 +1,6 @@
 # AVX-512 frame-value planner. Shape metadata never depends on a physical
 # register. SIMD values live in their own frame slots between instructions.
-use compiler.mir.mir_data.{MirFunction, MirOperand, MirOperandKind, MirTypeKind}
+use compiler.mir.mir_data.{MirFunction, MirInst, MirOperand, MirOperandKind, MirTypeKind}
 use compiler.backend.native.x86_64_avx512_ops.{avx512_binop_code, avx512_unop_code, avx512_cmp_code, avx512_reduce_code}
 
 struct X86Avx512FunctionPlanV1:
@@ -49,8 +49,29 @@ fn x86_function_has_avx512_fixed(func: MirFunction) -> bool:
 fn x86_avx512_reject(reason: text) -> X86Avx512FunctionPlanV1:
     X86Avx512FunctionPlanV1(ok: false, shapes: {}, reason: "avx512-{reason}")
 
+fn x86_avx512_instruction_owned(inst: MirInst, shapes: Dict<i64, text>) -> bool:
+    match inst.kind:
+        case Copy(dest, _): shapes.contains_key(dest.id)
+        case Move(dest, _): shapes.contains_key(dest.id)
+        case MirSimdLoad(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdSplat(dest, _, _): shapes.contains_key(dest.id)
+        case MirSimdGather(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdBinop(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdTernop(dest, _, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdUnop(dest, _, _): shapes.contains_key(dest.id)
+        case MirSimdShuffle(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdPermute(dest, _, _): shapes.contains_key(dest.id)
+        case MirSimdCmp(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdSelect(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdMaskOp(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdStore(value, _, _): x86_avx512_source_shape(shapes, value) != ""
+        case MirSimdScatter(value, _, _): x86_avx512_source_shape(shapes, value) != ""
+        case MirSimdReduce(_, value, _): x86_avx512_source_shape(shapes, value) != ""
+        case _: false
+
 fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
     var shapes: Dict<i64, text> = {}
+    var lower_width_vectors: Dict<i64, bool> = {}
     for local in func.locals:
         val shape = x86_avx512_load_shape(local.type_.kind)
         if shape != "":
@@ -58,6 +79,9 @@ fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
             match local.kind:
                 case Arg(_): return x86_avx512_reject("vector-argument-ABI-unavailable-use-pointer-kernel")
                 case _: ()
+        match local.type_.kind:
+            case Vec4f | Vec8f | Vec4d | Vec4i: lower_width_vectors[local.id.id] = true
+            case _: ()
     if x86_avx512_load_shape(func.signature.return_type.kind) != "":
         return x86_avx512_reject("vector-return-ABI-unavailable-use-pointer-kernel")
     # MIR has no first-class mask type. Recover mask lane count from its
@@ -80,14 +104,21 @@ fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
                         dest = id.id
                         inferred = x86_avx512_shape(shapes, source.id)
                     case _: ()
-                if dest >= 0 and inferred != "" and x86_avx512_shape(shapes, dest) != inferred:
-                    shapes[dest] = inferred
-                    changed = true
+                if dest >= 0 and inferred != "":
+                    if lower_width_vectors.contains_key(dest): return x86_avx512_reject("copy-move-cross-width")
+                    val declared = x86_avx512_shape(shapes, dest)
+                    if declared != "" and declared != inferred: return x86_avx512_reject("copy-move-shape-mismatch")
+                    if declared == "":
+                        shapes[dest] = inferred
+                        changed = true
         if not changed: break
     for block in func.blocks:
         for inst in block.instructions:
             var reason = ""
+            if not x86_avx512_instruction_owned(inst, shapes): continue
             match inst.kind:
+                case Copy(dest, source), Move(dest, source):
+                    if x86_avx512_shape(shapes, source.id) != x86_avx512_shape(shapes, dest.id): reason = "copy-move-shape-mismatch"
                 case MirSimdLoad(dest, _, _, type_), MirSimdSplat(dest, _, type_), MirSimdGather(dest, _, _, type_):
                     val shape = x86_avx512_shape(shapes, dest.id)
                     if shape == "" or shape != x86_avx512_load_shape(type_.kind): reason = "load-splat-gather-shape-mismatch"
