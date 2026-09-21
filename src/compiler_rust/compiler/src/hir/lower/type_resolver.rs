@@ -172,6 +172,37 @@ impl Lowerer {
         })
     }
 
+    fn has_global_field_candidate(&self, field: &str) -> bool {
+        self.global_struct_defs
+            .as_ref()
+            .is_some_and(|defs| defs.values().any(|fields| fields.iter().any(|(name, _)| name == field)))
+    }
+
+    /// Resolve a receiver-blind field only when every local and imported
+    /// candidate agrees on the physical slot and field type. Each scope can
+    /// be internally unambiguous while still conflicting with the other.
+    pub(super) fn resolve_unambiguous_receiver_blind_field_info(
+        &mut self,
+        field: &str,
+        include_bitfields: bool,
+    ) -> Option<(usize, TypeId)> {
+        let local = self.resolve_unambiguous_local_field_info(field, include_bitfields);
+        let global = self.resolve_global_field_info(field);
+        let has_local = self.has_local_field_candidate(field, include_bitfields);
+        let has_global = self.has_global_field_candidate(field);
+
+        match (local, global) {
+            (Some((local_idx, local_ty, _)), Some((global_idx, global_ty, _, _)))
+                if local_idx == global_idx && local_ty == global_ty =>
+            {
+                Some((local_idx, local_ty))
+            }
+            (Some((idx, ty, _)), None) if !has_global => Some((idx, ty)),
+            (None, Some((idx, ty, _, _))) if !has_local => Some((idx, ty)),
+            _ => None,
+        }
+    }
+
     fn instantiate_builtin_generic_enum(&mut self, family: &str, args: &[Type]) -> Option<LowerResult<TypeId>> {
         match (family, args.len()) {
             ("Option", 1) => {
@@ -715,7 +746,7 @@ impl Lowerer {
         // otherwise it must fail closed rather than read a wrong in-bounds
         // slot. This closes the Stage 2 field-offset corruption class.
         if struct_ty == TypeId::ANY {
-            if let Some((idx, ty, count)) = self.resolve_unambiguous_local_field_info(field, false) {
+            if let Some((idx, ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, false) {
                 if crate::hir::lower::trace_field_get_enabled() {
                     let fpath = self
                         .current_file
@@ -723,39 +754,9 @@ impl Lowerer {
                         .and_then(|p| p.file_name())
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown");
-                    eprintln!("[FIELD-TRACE] ANY/{field} -> LOCAL-UNAMBIGUOUS idx={idx} count={count} in {fpath}");
+                    eprintln!("[FIELD-TRACE] ANY/{field} -> UNAMBIGUOUS idx={idx} in {fpath}");
                 }
                 return Ok((idx, ty));
-            }
-            if self.has_local_field_candidate(field, false) {
-                return Err(LowerError::CannotInferFieldType {
-                    struct_name: "ANY".to_string(),
-                    field: field.to_string(),
-                    available_fields: vec![],
-                });
-            }
-            // Search global struct definitions from other compilation units.
-            // Skip names that are known to be ambiguous across multiple
-            // structs — those must fall back to method-call resolution so
-            // we don't silently pick the wrong byte offset.
-            if self.is_ambiguous_global_field(field) {
-                return Err(LowerError::CannotInferFieldType {
-                    struct_name: "ANY".to_string(),
-                    field: field.to_string(),
-                    available_fields: vec![],
-                });
-            }
-            if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                if crate::hir::lower::trace_field_get_enabled() {
-                    let fpath = self
-                        .current_file
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown");
-                    eprintln!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
-                }
-                return Ok((idx, field_ty));
             }
             return Err(LowerError::CannotInferFieldType {
                 struct_name: "ANY".to_string(),
@@ -769,7 +770,7 @@ impl Lowerer {
                 // Any type may use receiver-blind lookup only for an
                 // unambiguous local field layout.
                 HirType::Any => {
-                    if let Some((idx, ty, count)) = self.resolve_unambiguous_local_field_info(field, false) {
+                    if let Some((idx, ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, false) {
                         if crate::hir::lower::trace_field_get_enabled() {
                             let fpath = self
                                 .current_file
@@ -777,23 +778,9 @@ impl Lowerer {
                                 .and_then(|p| p.file_name())
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("unknown");
-                            eprintln!(
-                                "[FIELD-TRACE] AnyTy/{field} -> LOCAL-UNAMBIGUOUS idx={idx} count={count} in {fpath}"
-                            );
+                            eprintln!("[FIELD-TRACE] AnyTy/{field} -> UNAMBIGUOUS idx={idx} in {fpath}");
                         }
                         return Ok((idx, ty));
-                    }
-                    if self.has_local_field_candidate(field, false) {
-                        return Err(LowerError::CannotInferFieldType {
-                            struct_name: "Any".to_string(),
-                            field: field.to_string(),
-                            available_fields: vec![],
-                        });
-                    }
-                    if !self.is_ambiguous_global_field(field) {
-                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                            return Ok((idx, field_ty));
-                        }
                     }
                     Err(LowerError::CannotInferFieldType {
                         struct_name: "Any".to_string(),
@@ -958,10 +945,8 @@ impl Lowerer {
                     // failed to load, so guessing "the largest struct that
                     // declares this name" is guessing with no receiver
                     // information at all.
-                    if !self.is_ambiguous_global_field(field) {
-                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                            return Ok((idx, field_ty));
-                        }
+                    if let Some((idx, field_ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, false) {
+                        return Ok((idx, field_ty));
                     }
                     // For VOID, Pointer, or other non-struct types (often caused by
                     // cross-module imports where field types resolve to VOID because
@@ -970,38 +955,8 @@ impl Lowerer {
                     if self.lenient_types {
                         // An unresolved receiver has no layout proof. Reuse
                         // the same unambiguous-slot rule as TypeId::ANY.
-                        if let Some((idx, ty, _)) = self.resolve_unambiguous_local_field_info(field, true) {
+                        if let Some((idx, ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, true) {
                             return Ok((idx, ty));
-                        }
-                        if self.has_local_field_candidate(field, true) {
-                            return Err(LowerError::CannotInferFieldType {
-                                struct_name: "wildcard".to_string(),
-                                field: field.to_string(),
-                                available_fields: vec![],
-                            });
-                        }
-                        // Search global struct definitions from other modules.
-                        // Skip ambiguous names — see the ANY branch above.
-                        if self.is_ambiguous_global_field(field) {
-                            return Err(LowerError::CannotInferFieldType {
-                                struct_name: "wildcard".to_string(),
-                                field: field.to_string(),
-                                available_fields: vec![],
-                            });
-                        }
-                        if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                            if crate::hir::lower::trace_field_get_enabled() {
-                                let fpath = self
-                                    .current_file
-                                    .as_ref()
-                                    .and_then(|p| p.file_name())
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown");
-                                eprintln!(
-                                    "[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}"
-                                );
-                            }
-                            return Ok((idx, field_ty));
                         }
                     }
                     Err(LowerError::CannotInferFieldType {

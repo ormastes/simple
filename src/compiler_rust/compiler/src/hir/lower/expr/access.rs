@@ -362,17 +362,13 @@ impl Lowerer {
                 // Class 2 fallback: when the receiver's type is ANY (e.g.
                 // from a call expression like `shell(...)` whose return type
                 // wasn't propagated) and no candidate struct names could be
-                // inferred, search the global struct definitions for any
-                // struct that contains this field. This is the same heuristic
-                // that `get_field_info` uses in its ANY branch but applied
-                // here in the fallback chain where it was previously skipped
-                // because `candidate_struct_names` was empty.
-                if receiver_is_dynamic
-                    && candidate_struct_names.is_empty()
-                    && !self.has_local_field_candidate(field, false)
-                    && !self.is_ambiguous_global_field(field)
-                {
-                    if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                // inferred, accept the field only if every local and imported
+                // struct candidate agrees on its slot and type. This is the
+                // same proof `get_field_info` uses in its ANY branch.
+                if receiver_is_dynamic && candidate_struct_names.is_empty() {
+                    if let Some((field_index, field_ty)) =
+                        self.resolve_unambiguous_receiver_blind_field_info(field, false)
+                    {
                         if crate::hir::lower::trace_field_get_enabled() {
                             let fpath = self
                                 .current_file
@@ -393,39 +389,30 @@ impl Lowerer {
                 }
 
                 if !has_known_method && receiver_is_dynamic {
-                    // ROOT FIX (bug #62): when the field NAME is globally
-                    // ambiguous (defined in more than one struct), the
-                    // owner guess below is receiver-type-blind ("most
-                    // fields wins") and its field TYPE must not be
-                    // trusted. `scope.symbols` (Scope, Dict<text,SymbolId>)
-                    // was typed via HirModule.symbols: SymbolTable — the
-                    // 21-field winner — which then qualified the erased
-                    // dict call `scope.symbols.get(name)` as
-                    // `SymbolTable.get(SymbolId?)` in MIR method dispatch
-                    // and segfaulted the stage4 binary on a text key.
-                    // Keep the index heuristic (unchanged behaviour) but
-                    // degrade the expression type to ANY so method
-                    // dispatch stays bare and tag-dispatches at runtime.
-                    let ambiguous_field = self.is_ambiguous_global_field(field);
-                    if !self.has_local_field_candidate(field, false) {
-                        if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
-                            if crate::hir::lower::trace_field_get_enabled() {
-                                let fpath = self
-                                    .current_file
-                                    .as_ref()
-                                    .and_then(|p| p.file_name())
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown");
-                                eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}");
-                            }
-                            return Ok(HirExpr {
-                                kind: HirExprKind::FieldAccess {
-                                    receiver: recv_hir,
-                                    field_index,
-                                },
-                                ty: if ambiguous_field { TypeId::ANY } else { field_ty },
-                            });
+                    // The dynamic receiver has no nominal layout evidence.
+                    // Only the combined local/imported agreement proof may
+                    // produce a field load; every other candidate set fails
+                    // through to the existing diagnostic or dynamic result
+                    // projection paths.
+                    if let Some((field_index, field_ty)) =
+                        self.resolve_unambiguous_receiver_blind_field_info(field, false)
+                    {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[FT2] NKM-UNAMBIGUOUS/{field} idx={field_index} in {fpath}");
                         }
+                        return Ok(HirExpr {
+                            kind: HirExprKind::FieldAccess {
+                                receiver: recv_hir,
+                                field_index,
+                            },
+                            ty: field_ty,
+                        });
                     }
                     if std::env::var("SIMPLE_DEBUG_FIELD_FAIL").is_ok() {
                         eprintln!(

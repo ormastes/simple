@@ -2,9 +2,32 @@
 
 > Native struct-field access regression for the self-hosted AOT path.
 
+<!-- sdn-diagram:id=native_struct_field_access_regression_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=native_struct_field_access_regression_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+native_struct_field_access_regression_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=native_struct_field_access_regression_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,7 +43,7 @@ Native struct-field access regression for the self-hosted AOT path.
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/native_struct_field_access_regression_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Native struct-field access regression for the self-hosted AOT path.
@@ -30,10 +53,6 @@ Native struct-field access regression for the self-hosted AOT path.
 ### self-hosted native struct field access
 
 #### compiles and reads a text field from a local struct
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
 
 - compiles and reads a text field from a local struct
 - Write the minimal struct-field AOT repro
@@ -82,60 +101,131 @@ expect(ran.stdout).to_equal("A")
 
 </details>
 
+#### rejects an erased receiver with conflicting narrow and wide layouts
+
+- rejects an erased receiver with conflicting narrow and wide layouts
+- Write distinct narrow and wide sentinels that share a field name at different slots
+   - Expected: dir_create_all(BUILD_DIR) is true
+- Run it through the JIT lowering path and require an ambiguity refusal
+   - Expected: erased.exit_code == 0 is false
+- Observe that neither narrow nor wide sentinel is guessed
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 34 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects an erased receiver with conflicting narrow and wide layouts")
+step("Write distinct narrow and wide sentinels that share a field name at different slots")
+expect(dir_create_all(BUILD_DIR)).to_equal(true)
+expect(file_write(
+    ERASED_SOURCE_PATH,
+    "struct ZzSmall:\n" +
+    "    zzq: i64\n" +
+    "\n" +
+    "struct ZzBig:\n" +
+    "    p0: i64\n" +
+    "    p1: i64\n" +
+    "    zzq: i64\n" +
+    "    p2: i64\n" +
+    "    p3: i64\n" +
+    "\n" +
+    "fn read_zzq(o: any) -> i64:\n" +
+    "    return o.zzq\n" +
+    "\n" +
+    "fn main():\n" +
+    "    var s = ZzSmall(zzq: 7)\n" +
+    "    var w = ZzBig(p0: 11, p1: 13, zzq: 42, p2: 17, p3: 19)\n" +
+    "    print(read_zzq(w))\n"
+)).to_equal(true)
+
+step("Run it through the JIT lowering path and require an ambiguity refusal")
+val erased = shell(
+    "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+    "bin/simple run " + ERASED_SOURCE_PATH + " 2>&1"
+)
+expect(erased.exit_code == 0).to_equal(false)
+
+step("Observe that neither narrow nor wide sentinel is guessed")
+expect(erased.stdout).to_contain("cannot infer field")
+```
+
+</details>
+
+#### rejects conflicting erased-receiver layouts independently of declaration order
+
+- rejects conflicting erased-receiver layouts independently of declaration order
+- Declare a wide target and narrow sentinel in reverse order
+   - Expected: dir_create_all(BUILD_DIR) is true
+- Run it through the JIT lowering path and require an ambiguity refusal
+   - Expected: ordered.exit_code == 0 is false
+- Observe that the dynamic layout remains fail-closed after order reversal
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects conflicting erased-receiver layouts independently of declaration order")
+step("Declare a wide target and narrow sentinel in reverse order")
+expect(dir_create_all(BUILD_DIR)).to_equal(true)
+expect(file_write(
+    ORDER_SOURCE_PATH,
+    "struct ZzWide:\n" +
+    "    q0: i64\n" +
+    "    q1: i64\n" +
+    "    zzr: i64\n" +
+    "    q2: i64\n" +
+    "    q3: i64\n" +
+    "    q4: i64\n" +
+    "\n" +
+    "struct ZzMid:\n" +
+    "    m0: i64\n" +
+    "    zzr: i64\n" +
+    "    m1: i64\n" +
+    "\n" +
+    "struct ZzTiny:\n" +
+    "    zzr: i64\n" +
+    "\n" +
+    "fn read_zzr(o: any) -> i64:\n" +
+    "    return o.zzr\n" +
+    "\n" +
+    "fn main():\n" +
+    "    var t = ZzTiny(zzr: 7)\n" +
+    "    var w = ZzWide(q0: 1, q1: 2, zzr: 42, q2: 3, q3: 4, q4: 5)\n" +
+    "    print(read_zzr(w))\n"
+)).to_equal(true)
+
+step("Run it through the JIT lowering path and require an ambiguity refusal")
+val ordered = shell(
+    "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+    "bin/simple run " + ORDER_SOURCE_PATH + " 2>&1"
+)
+expect(ordered.exit_code == 0).to_equal(false)
+
+step("Observe that the dynamic layout remains fail-closed after order reversal")
+expect(ordered.stdout).to_contain("cannot infer field")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4349563b81d8ea122e2368a6bcfff38ae62d9cd42e52c1e03c7f6c5ea53d6324`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4349563b81d8ea122e2368a6bcfff38ae62d9cd42e52c1e03c7f6c5ea53d6324`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4349563b81d8ea122e2368a6bcfff38ae62d9cd42e52c1e03c7f6c5ea53d6324`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/03_system/compiler/native_struct_field_access_regression_spec.spl
-mirror: doc/06_spec/03_system/compiler/native_struct_field_access_regression_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/native_struct_field_access_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/native_struct_field_access_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/native_struct_field_access_regression_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/compiler/native_struct_field_access_regression_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles and reads a text field from a local struct' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
