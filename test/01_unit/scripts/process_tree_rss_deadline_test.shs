@@ -5,6 +5,31 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 guard=$root/scripts/resource/process-tree-rss-watchdog.pl
 fail() { echo "FAIL: $*" >&2; exit 1; }
+sample_gap_below_limit() {
+    awk -F= '
+        /^sample_gap_max_ms=/ {
+            count++
+            if (NF != 2 || $2 !~ /^[0-9]+([.][0-9]+)?$/ || $2 >= 130) invalid = 1
+        }
+        END { exit !(count == 1 && !invalid) }
+    ' "$1"
+}
+# Reject missing, malformed, duplicated and out-of-budget cadence evidence.
+# The previous awk checks silently accepted absent and empty fields.
+for value in '' 'status=complete' 'sample_gap_max_ms=' 'sample_gap_max_ms=bad' \
+    'sample_gap_max_ms=NaN' 'sample_gap_max_ms=-1' 'sample_gap_max_ms=1=extra' \
+    'sample_gap_max_ms=130'; do
+    printf '%s\n' "$value" >"$tmp/invalid-gap.env"
+    if sample_gap_below_limit "$tmp/invalid-gap.env"; then
+        fail "accepted missing or invalid cadence: $value"
+    fi
+done
+printf 'sample_gap_max_ms=1\nsample_gap_max_ms=2\n' >"$tmp/invalid-gap.env"
+if sample_gap_below_limit "$tmp/invalid-gap.env"; then fail 'accepted duplicate cadence'; fi
+for value in 0 100 129.99; do
+    printf 'status=complete\nsample_gap_max_ms=%s\n' "$value" >"$tmp/valid-gap.env"
+    sample_gap_below_limit "$tmp/valid-gap.env" || fail "rejected valid cadence: $value"
+done
 mkdir "$tmp/bin"
 real_ps=$(command -v ps)
 cat >"$tmp/bin/ps" <<EOF
@@ -17,7 +42,7 @@ chmod +x "$tmp/bin/ps"
 # Warm this artificial sampler before measuring the deliberate 40 ms delay.
 "$tmp/bin/ps" -p $$ >/dev/null
 PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/cadence.env" -- sleep .65
-awk -F= '/^sample_gap_max_ms=/ { print; if ($2 >= 130) exit 1 }' "$tmp/cadence.env" || fail 'sample time added to interval'
+sample_gap_below_limit "$tmp/cadence.env" || fail 'invalid cadence receipt or sample time added to interval'
 status=0
 perl "$guard" --timeout-seconds=1 --receipt="$tmp/deadline.env" -- sleep 1.01 || status=$?
 [ "$status" -eq 124 ] || fail "late completion bypassed deadline: $status"
@@ -64,7 +89,7 @@ RSS_GUARD_TEST_DELAY=3
 CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold.env" -- /bin/sleep .25
 grep -Fxq 'status=complete' "$tmp/cold.env" || fail 'cold admission did not complete'
 grep -Fxq 'session_helper_integrity=verified' "$tmp/cold.env" || fail 'cold helper was not verified'
-awk -F= '/^sample_gap_max_ms=/ { if ($2 >= 130) exit 1 }' "$tmp/cold.env" || fail 'cold admission entered sample clock'
+sample_gap_below_limit "$tmp/cold.env" || fail 'invalid cold cadence receipt or admission entered sample clock'
 
 # A genuine ps failure after cold admission must keep its measurement receipt.
 cat >"$tmp/bin/ps" <<'EOF'
