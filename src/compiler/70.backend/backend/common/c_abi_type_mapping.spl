@@ -1,8 +1,8 @@
-# Shared C/C++ ABI spellings for generated headers and the C plugin.
+# C headers and the C++ backend have different aggregate spellings.
 
 use compiler.mir.mir_types.{MirType}
 
-fn c_abi_map_type(ty: MirType,
+fn c_backend_map_type(ty: MirType,
         type_names: Dict<i64, text> = {}) -> text:
     match ty.kind:
         case I64: "int64_t"
@@ -23,16 +23,16 @@ fn c_abi_map_type(ty: MirType,
         case FuncPtr(_): "void*"
         case Dict(_, _): "void*"
         case Array(elem, _):
-            "spl::Array<{c_abi_map_type(elem, type_names)}>"
+            "spl::Array<{c_backend_map_type(elem, type_names)}>"
         case Slice(elem):
-            "spl::Array<{c_abi_map_type(elem, type_names)}>"
+            "spl::Array<{c_backend_map_type(elem, type_names)}>"
         case Tuple(elements):
             if elements.len() == 0:
                 "void"
             else:
                 var types: [text] = []
                 for elem in elements:
-                    types = types.push(c_abi_map_type(elem, type_names))
+                    types = types.push(c_backend_map_type(elem, type_names))
                 "std::tuple<{types.join(", ")}>"
         case Struct(symbol):
             if type_names.contains_key(symbol.id):
@@ -67,4 +67,39 @@ fn c_abi_map_type(ty: MirType,
         case ScalableVec(_, _): panic("E-C-ABI-TYPE-ScalableVec: unsupported MIR type")
         case _: panic("E-C-ABI-TYPE-Unknown: unsupported MIR type")
 
-export c_abi_map_type
+fn c_abi_map_type(ty: MirType) -> text:
+    match ty.kind:
+        # These scalar and pointer spellings agree with the backend mapping.
+        case I64: "int64_t"
+        case I32: "int32_t"
+        case I16: "int16_t"
+        case I8: "int8_t"
+        case U64: "uint64_t"
+        case U32: "uint32_t"
+        case U16: "uint16_t"
+        case U8: "uint8_t"
+        case F64: "double"
+        case F32: "float"
+        case Bool: "int64_t"
+        case Unit: "void"
+        case Char: "int16_t"
+        case Ptr(_, _): "void*"
+        case Ref(_, _): "void*"
+        case Never: "void"
+        case Opaque(name):
+            if name == "str" or name == "text": "const char*"
+            else: "void*"
+        case Bits(width, signed):
+            if width <= 8: (if signed: "int8_t" else: "uint8_t")
+            elif width <= 16: (if signed: "int16_t" else: "uint16_t")
+            elif width <= 32: (if signed: "int32_t" else: "uint32_t")
+            elif width <= 64: (if signed: "int64_t" else: "uint64_t")
+            else: panic("E-C-ABI-TYPE-Bits: width exceeds 64")
+        # No C layout or ownership contract exists for these value aggregates.
+        # Refuse the export instead of emitting C++ syntax or inventing void*.
+        case Array(_, _): panic("E-C-ABI-TYPE-Array: no C value ABI")
+        case Slice(_): panic("E-C-ABI-TYPE-Slice: no C value ABI")
+        case Tuple(_): panic("E-C-ABI-TYPE-Tuple: no C value ABI")
+        case _: panic("E-C-ABI-TYPE-Unsupported: no C value ABI")
+
+export c_abi_map_type, c_backend_map_type
