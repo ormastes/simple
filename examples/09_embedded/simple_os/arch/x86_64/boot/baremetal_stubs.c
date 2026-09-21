@@ -179,6 +179,18 @@ static void serial_put_hex(uint64_t v)
     }
 }
 
+/* Entry-closure probes can omit interrupt.spl. Keep a real fatal handler in
+ * this C object so a C-only reference never becomes an undefined link symbol.
+ * The pure-Simple export overrides this weak fallback in complete images. */
+__attribute__((weak, noreturn))
+void spl_x86_on_kernel_ud2_fault(uint64_t rip)
+{
+    serial_puts("\n[fault] FATAL: kernel #UD (ud2) trap at rip=");
+    serial_put_hex(rip);
+    serial_puts(" vector=6 (#UD)\n");
+    for (;;) __asm__ volatile("cli; hlt");
+}
+
 static void serial_put_dec(int64_t v)
 {
     if (v < 0) {
@@ -14733,10 +14745,27 @@ __attribute__((naked)) static void _rich_fault_entry(void)
         "addq $8, %%rsp\n\t"
         "iretq\n\t"
         "3:\n\t"
-        /* No error code: advance RIP (at [rsp]), iretq */
+        /* A kernel ud2 is an intentional trap. Diagnose and halt rather
+         * than turning it into a silent RIP+=2 recovery. */
+        "pushq %%rax\n\t"
+        "pushq %%rcx\n\t"
+        "movq 16(%%rsp), %%rax\n\t"
+        "movzwl (%%rax), %%ecx\n\t"
+        "cmpl $0x0B0F, %%ecx\n\t"
+        "popq %%rcx\n\t"
+        "popq %%rax\n\t"
+        "je 6f\n\t"
+        /* Other no-error-code faults retain the legacy recovery. */
         "addq $2, (%%rsp)\n\t"
         "movq $0x3, %%rax\n\t"
         "iretq\n\t"
+        "6:\n\t"
+        "movq (%%rsp), %%rdi\n\t"
+        "callq spl_x86_on_kernel_ud2_fault\n\t"
+        "cli\n\t"
+        "7:\n\t"
+        "hlt\n\t"
+        "jmp 7b\n\t"
         : : : "memory"
     );
 }

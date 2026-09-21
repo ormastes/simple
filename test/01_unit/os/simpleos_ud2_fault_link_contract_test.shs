@@ -1,0 +1,51 @@
+#!/bin/sh
+# Compile the actual C fault handler and weak fallback in isolation. The full
+# baremetal translation unit has unrelated ABI dependencies, so this keeps the
+# C-to-C link symbol check focused on the fault path used by staged kernels.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+source_file="$root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+test_dir=$(mktemp -d)
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+
+python3 - "$source_file" "$test_dir/fault.c" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text()
+weak = re.search(r'__attribute__\(\(weak, noreturn\)\)\s*void spl_x86_on_kernel_ud2_fault\(uint64_t rip\)\s*\{.*?\n\}', source, re.S)
+handler = re.search(r'__attribute__\(\(naked\)\) static void _rich_fault_entry\(void\)\s*\{.*?\n\}\s*/\* _rich_fault_print', source, re.S)
+if weak is None or handler is None:
+    raise SystemExit('missing weak fallback or rich fault handler')
+body = handler.group().split('/* _rich_fault_print')[0]
+if 'cmpl $0x0B0F' not in body or 'callq spl_x86_on_kernel_ud2_fault' not in body:
+    raise SystemExit('kernel ud2 detection or fatal call missing')
+fixture = '''#include <stdint.h>
+static void serial_puts(const char *s) {(void)s;}
+static void serial_put_hex(uint64_t value) {(void)value;}
+void _rich_fault_print(uint64_t rip, uint64_t error, uint64_t cs,
+    uint64_t flags, uint64_t cr2, uint64_t cr3) {
+    (void)rip; (void)error; (void)cs; (void)flags; (void)cr2; (void)cr3;
+}
+''' + weak.group() + '\n' + body
+pathlib.Path(sys.argv[2]).write_text(fixture)
+PY
+
+clang -target x86_64-unknown-none -ffreestanding -fno-builtin \
+    -c "$test_dir/fault.c" -o "$test_dir/fault.o"
+nm "$test_dir/fault.o" | grep -Eq ' W spl_x86_on_kernel_ud2_fault$'
+if nm -u "$test_dir/fault.o" | grep -q spl_x86_on_kernel_ud2_fault; then
+    echo 'ud2_fault_link_contract=fail reason=undefined-symbol'
+    exit 1
+fi
+cat >"$test_dir/strong.c" <<'C'
+#include <stdint.h>
+void spl_x86_on_kernel_ud2_fault(uint64_t rip) { (void)rip; }
+C
+clang -target x86_64-unknown-none -ffreestanding -fno-builtin \
+    -c "$test_dir/strong.c" -o "$test_dir/strong.o"
+ld.lld -r "$test_dir/fault.o" "$test_dir/strong.o" -o "$test_dir/combined.o"
+nm "$test_dir/combined.o" | grep -Eq ' T spl_x86_on_kernel_ud2_fault$'
+echo 'ud2_fault_link_contract=pass'
