@@ -43,6 +43,7 @@ use compiler.driver.driver_log_helpers.{
     log_debug,
     log_phase,
     log_mem_snapshot,
+    driver_phase_trace_enabled,
     log_module_surface_released,
     log_module_surface_stage,
     log_build_progress
@@ -537,8 +538,10 @@ impl CompilerDriver:
                 log_module_surface_released(source_paths[source_index], release_seq)
             source_index = source_index + 1
 
-        log_phase("phase2:surface:source_records:begin count={frozen_source_count}")
-        log_mem_snapshot("phase2-source-records-begin")
+        val profile_surface_boundaries = driver_phase_trace_enabled()
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:source_records:begin count={frozen_source_count}")
+            log_mem_snapshot("phase2-source-records-begin")
         # Rebuild the phase-3 record inventory from the retained SoA strings.
         # The original boxed SourceFile records may have been reclaimed even
         # though their promoted field owners remain valid.
@@ -552,14 +555,17 @@ impl CompilerDriver:
                 module_name: source_module_names[retained_index]))
             retained_index = retained_index + 1
         self.ctx.sources = retained_sources
-        log_phase("phase2:surface:source_records:end count={retained_sources.len()}")
-        log_mem_snapshot("phase2-source-records-end")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:source_records:end count={retained_sources.len()}")
+            log_mem_snapshot("phase2-source-records-end")
 
-        log_phase("phase2:surface:export_origins:begin surfaces={builder.surfaces.len()}")
-        log_mem_snapshot("phase2-export-origins-begin")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:export_origins:begin surfaces={builder.surfaces.len()}")
+            log_mem_snapshot("phase2-export-origins-begin")
         val origin_result = builder.resolve_export_origins_streaming()
-        log_phase("phase2:surface:export_origins:end")
-        log_mem_snapshot("phase2-export-origins-end")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:export_origins:end")
+            log_mem_snapshot("phase2-export-origins-end")
         if origin_result.is_err():
             self.ctx.add_error(
                 "Module surface extraction error: {origin_result.unwrap_err()}")
@@ -568,8 +574,9 @@ impl CompilerDriver:
         # deep-promote the whole registry graph before committing it. Promoting
         # individual surfaces is insufficient: the registry's Dict and aligned
         # name/index arrays are allocated only during finalization.
-        log_phase("phase2:surface:registry_finish:begin")
-        log_mem_snapshot("phase2-registry-finish-begin")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:registry_finish:begin")
+            log_mem_snapshot("phase2-registry-finish-begin")
         if not _sffi_transient_array_scope_begin():
             self.ctx.add_error(
                 "Module surface retention scope unavailable after phase 2")
@@ -578,8 +585,9 @@ impl CompilerDriver:
             surfaces: [], index_by_name: {},
             ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
         val finish_error = builder.finish_into(retained_surfaces)
-        log_phase("phase2:surface:registry_finish:end")
-        log_mem_snapshot("phase2-registry-finish-end")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:registry_finish:end")
+            log_mem_snapshot("phase2-registry-finish-end")
         if finish_error != "":
             val _paused = _sffi_transient_array_scope_pause()
             val _ended = _sffi_transient_array_scope_end()
@@ -591,11 +599,13 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface retention scope pause failed after phase 2")
             return false
-        log_phase("phase2:surface:registry_promote:begin")
-        log_mem_snapshot("phase2-registry-promote-begin")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:registry_promote:begin")
+            log_mem_snapshot("phase2-registry-promote-begin")
         val promote_reason = module_surfaces_promote_reason(retained_surfaces)
-        log_phase("phase2:surface:registry_promote:end")
-        log_mem_snapshot("phase2-registry-promote-end")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:registry_promote:end")
+            log_mem_snapshot("phase2-registry-promote-end")
         if promote_reason != "":
             val _ended = _sffi_transient_array_scope_end()
             self.ctx.add_error(
@@ -605,8 +615,9 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface retention scope end failed after phase 2")
             return false
-        log_phase("phase2:surface:registry_scope:end")
-        log_mem_snapshot("phase2-registry-scope-end")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:registry_scope:end")
+            log_mem_snapshot("phase2-registry-scope-end")
         val retained_alignment_error = module_surfaces_retained_alignment_error(
             retained_surfaces)
         if retained_alignment_error != "":
@@ -621,8 +632,9 @@ impl CompilerDriver:
         self.streaming_surface_owner_ready = true
         self.ctx.module_surfaces = Some(retained_surfaces)
         self.ctx.modules = {}
-        log_phase("phase2:surface:context_owner:committed")
-        log_mem_snapshot("phase2-context-owner-committed")
+        if profile_surface_boundaries:
+            log_phase("phase2:surface:context_owner:committed")
+            log_mem_snapshot("phase2-context-owner-committed")
         if driver_parse_shard_active():
             # The streaming parse has no front-end parse cache to warm, and a
             # shard child must never carry on into HIR/MIR/codegen (it did:
