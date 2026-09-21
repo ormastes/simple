@@ -10,7 +10,7 @@ case "${1:-}" in
           'Compiles one native fixture, then measures scoped/baseline and batch/sequential at N/2N.' \
           'Run test/05_perf/scv/compile_source_inventory_resource_profile_spec.spl for semantic/resource assertions.'
         exit 0 ;;
-    '') ;;
+    ''|--admission-only) ;;
     *) fail 'unknown argument' ;;
 esac
 sha256_file() {
@@ -26,6 +26,12 @@ COMPILER=$(CDPATH= cd -- "$(dirname -- "$COMPILER")" && pwd -P)/$(basename -- "$
 PROVENANCE=$(dirname -- "$COMPILER")/stage2-provenance.receipt
 SANITY=$(dirname -- "$COMPILER")/stage2-sanity.receipt
 [ -f "$PROVENANCE" ] && [ -f "$SANITY" ] || fail 'missing Stage 2 admission receipts'
+[ "$(receipt_value "$PROVENANCE" schema)" = simple-bootstrap-stage2-parent-provenance-v1 ] || fail 'invalid provenance schema'
+[ "$(receipt_value "$SANITY" schema)" = simple-bootstrap-stage2-parent-sanity-v1 ] || fail 'invalid sanity schema'
+case "$(receipt_value "$PROVENANCE" authority)" in
+    explicit-full-bootstrap-stage2-trust-root|admitted-pure-simple-runtime-stage2-trust-root) ;;
+    *) fail 'unsupported Stage 2 parent authority' ;;
+esac
 grep -qx 'stage2-provenance: pure-simple' "$PROVENANCE" || fail 'producer is not pure-Simple'
 grep -qx 'stage2-sanity: pass' "$SANITY" || fail 'producer sanity is not admitted'
 COMPILER_HASH=$(sha256_file "$COMPILER")
@@ -39,10 +45,42 @@ ADMISSION_HASH=$(sha256_file "$ADMISSION")
 [ "$(receipt_value "$SANITY" admission_receipt_sha256)" = "$ADMISSION_HASH" ] || fail 'sanity admission hash mismatch'
 [ "$(receipt_value "$ADMISSION" status)" = admitted ] || fail 'producer is not admitted'
 [ "$(receipt_value "$ADMISSION" candidate_sha256)" = "$COMPILER_HASH" ] || fail 'admission candidate mismatch'
-RUNTIME_DIR=$(receipt_value "$ADMISSION" runtime_authority_path)
-RUNTIME_ARCHIVE=$RUNTIME_DIR/$(receipt_value "$ADMISSION" hosted_runtime_relative_path)
-[ -f "$RUNTIME_ARCHIVE" ] || fail 'missing admitted runtime archive'
-[ "$(sha256_file "$RUNTIME_ARCHIVE")" = "$(receipt_value "$ADMISSION" hosted_runtime_sha256)" ] || fail 'runtime archive hash mismatch'
+# Replay the canonical admission binding, including sanity/receiver evidence,
+# frozen runtime identity and source/tool snapshots. Receipt-shaped files with
+# self-consistent hashes are not admission authority by themselves.
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+for authority_file in "$COMPILER" "$PROVENANCE" "$SANITY" "$ADMISSION"; do
+    [ "$(bootstrap_stage3_canonical_file "$authority_file")" = "$authority_file" ] || fail 'noncanonical admission input'
+done
+ADMISSION_ROOT=$(dirname -- "$(dirname -- "$ADMISSION")")
+ADMITTED_CANDIDATE=$ADMISSION_ROOT/stage2-admitted/simple
+SOURCE_SNAPSHOT=$ADMISSION_ROOT/source-inputs-before.txt
+RUNTIME_SNAPSHOT=$ADMISSION_ROOT/runtime-admitted.txt
+TOOL_SNAPSHOT=$ADMISSION_ROOT/tool-authority-before.txt
+RUNTIME_DIR=$ADMISSION_ROOT/stage2-runtime-authority
+SANITY_EVIDENCE=$ADMISSION_ROOT/stage2-sanity.env
+RECEIVER_EVIDENCE=$ADMISSION_ROOT/stage2-receiver.env
+RECEIVER_LOG=$ADMISSION_ROOT/stage2-receiver.log
+ARGS_HASH=$(receipt_value "$ADMISSION" build_args_sha256) || fail 'missing admitted build arguments'
+SIMPLE_ABI_POLICY=v1
+export SIMPLE_ABI_POLICY
+bootstrap_stage3_verify_stage2_admission_receipt \
+    "$ADMISSION" "$ADMISSION" "$ADMITTED_CANDIDATE" "$ADMITTED_CANDIDATE" \
+    "$SOURCE_SNAPSHOT" "$SOURCE_SNAPSHOT" "$RUNTIME_SNAPSHOT" "$RUNTIME_SNAPSHOT" \
+    "$RUNTIME_DIR" "$RUNTIME_DIR" "$TOOL_SNAPSHOT" "$TOOL_SNAPSHOT" "$ARGS_HASH" \
+    "$SANITY_EVIDENCE" "$SANITY_EVIDENCE" "$ADMISSION_ROOT" \
+    "$RECEIVER_EVIDENCE" "$RECEIVER_EVIDENCE" "$RECEIVER_LOG" "$RECEIVER_LOG" \
+    "$ROOT_DIR" || fail 'canonical Stage 2 admission validation failed'
+[ "$(sha256_file "$ADMITTED_CANDIDATE")" = "$COMPILER_HASH" ] || fail 'admitted candidate differs from requested compiler'
+for binding in source_snapshot_sha256 runtime_snapshot_sha256 tool_authority_sha256; do
+    [ "$(receipt_value "$PROVENANCE" "$binding")" = "$(receipt_value "$ADMISSION" "$binding")" ] || fail "parent $binding binding mismatch"
+done
+if [ "${1:-}" = --admission-only ]; then
+    printf 'admission_validated=yes\n'
+    exit 0
+fi
 if command -v timeout >/dev/null 2>&1; then TIMEOUT=$(command -v timeout);
 elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT=$(command -v gtimeout);
 else fail 'timeout or gtimeout is required for bounded measurement'; fi
@@ -80,7 +118,7 @@ measure() {
         printf 'compile_elapsed_us=%s\n' "$elapsed"
     else
         [ "$(grep -c '^SCV_PROFILE_DONE$' "$BUILD_DIR/$row.out")" = 1 ] || fail "$row missing native completion"
-        for field in count elapsed_us digest; do
+        for field in count elapsed_us digest live_allocations; do
             value=$(receipt_value "$BUILD_DIR/$row.out" "$field") || fail "$row missing/duplicate $field"
             printf '%s_%s=%s\n' "$row" "$field" "$value"
         done

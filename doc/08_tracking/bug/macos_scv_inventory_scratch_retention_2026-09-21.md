@@ -120,3 +120,12 @@ name field-list collisions. The workload did not execute, and the producer
 does not provide `test`; these new executable regressions remain unqualified.
 See `doc/06_spec/05_perf/scv/compile_source_inventory_resource_profile_spec.md`
 for thresholds, commands, and limitations. No full bootstrap was attempted.
+
+Review follow-up: the resource SSpec now requires strict live-object-count
+separation between scoped and unscoped construction, with a native unit
+negative control for the original unscoped mutation. The collector now invokes
+the canonical admission validator instead of accepting hashes alone. All five
+fabricated-receipt negatives refuse before producer invocation. Full admission
+of the previously selected producer currently fails the sanity version binding
+(`1.0.1-beta.1` receipt versus `1.0.0-beta.14` checkout). Consequently the prior
+MIR row remains diagnostic history, and no new native qualification is claimed.
