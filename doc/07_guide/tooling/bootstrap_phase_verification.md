@@ -53,6 +53,36 @@ failures in the inventory and summary. A nonzero runner status is preserved.
 `scripts/bootstrap/validate-test-runner-json.pl` owns the strict JSON boundary;
 the shell runner records only its admitted passed/failed/skipped counters.
 
+The phase-owned full CLI and standalone test runner also run the compiler
+bootstrap suite and `compiler/loader/module_loader_relocation_spec.spl` in explicit
+interpreter and compile modes. Every focused row uses `--assert-ran`, isolated
+cache/database/session state, strict terminal JSON, nonzero executed counts,
+and the frozen command-owner receipt. The receipt binds the compiler snapshot
+and hosted runtime identity as well as the produced CLI and test runner. The Stage 2
+bootstrap executable remains compiler-only; these test commands belong to the
+same-generation full CLI built by that admitted compiler. Missing either owner
+artifact records all four rows as unsupported and cannot produce an overall
+PASS.
+
+Each task summary retains `elapsed_seconds` and `max_rss_kib` when GNU time
+rusage is available; inventory TSV rows retain their own RSS and the suite row
+retains the maximum. `timing_scope=post-admission-excludes-git-lfs-checkout`
+separates repository checkout/LFS materialization from compiler and test time.
+Hosts without GNU rusage report `max_rss_kib=unavailable` explicitly.
+
+### Phase 2 post-admission runtime
+
+The retained task rows make the long tail attributable. After admission the
+verifier builds four native products (full CLI, test runner, MCP, and LSP),
+runs source checks, executes the bootstrap and loader oracles in two modes, and
+under `--strategy=full` starts one contained test-runner process for every
+discovered compiler spec. That per-spec containment preserves later evidence
+after a crash or timeout, but process startup and repeated compiler loading can
+dominate the full inventory. Compare the four build rows, focused suite rows,
+and `compiler_unit_tests` elapsed/RSS values before changing concurrency or
+cache policy. Git checkout and LFS materialization occur before this verifier
+and are outside these measurements.
+
 ## Why an umbrella exists
 
 Before this, the gates were scattered across three regimes: some invoked from
