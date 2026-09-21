@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+SIMPLE=${SIMPLE_FORMULA_PROFILE_BIN:-}
+case "$SIMPLE" in
+  /*) ;;
+  *) echo "FAIL: SIMPLE_FORMULA_PROFILE_BIN must be an absolute admitted self-hosted binary" >&2; exit 2 ;;
+esac
+[ -x "$SIMPLE" ] || { echo "FAIL: compiler is not executable: $SIMPLE" >&2; exit 2; }
+case "$("$SIMPLE" --version 2>&1)" in
+  *bootstrap*|*self-host*) ;;
+  *) echo "FAIL: compiler does not identify as self-hosted/bootstrap" >&2; exit 2 ;;
+esac
+
+RUN=${FORMULA_NATIVE_RUN_DIR:-"$ROOT/build/test_tmp/formula-dispatch-native.$(date +%s).$$"}
+[ ! -e "$RUN" ] || { echo "FAIL: native fixture directory must be fresh: $RUN" >&2; exit 2; }
+mkdir -p "$RUN/cache" "$RUN/frontend" "$RUN/hir"
+SOURCE=$ROOT/test/fixtures/compiler/formula_dispatch_partition_native.spl
+FORMULA=$ROOT/src/app/office/sheets/formula.spl
+OUT=$RUN/formula_dispatch_partition_native
+STDOUT=$RUN/build.stdout
+STDERR=$RUN/build.stderr
+COMMAND="SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TIMEOUT=300 SIMPLE_NATIVE_BUILD_CACHE_DIR=$RUN/cache SIMPLE_FRONTEND_CACHE_DIR=$RUN/frontend SIMPLE_HIR_CACHE_DIR=$RUN/hir $SIMPLE native-build $SOURCE --source $ROOT/test/fixtures/compiler --source $ROOT/src/app --source $ROOT/src/lib --entry-closure --backend=llvm --cache-dir=$RUN/cache -o $OUT"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+set +e
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TIMEOUT=300 \
+SIMPLE_NATIVE_BUILD_CACHE_DIR="$RUN/cache" \
+SIMPLE_FRONTEND_CACHE_DIR="$RUN/frontend" SIMPLE_HIR_CACHE_DIR="$RUN/hir" \
+  "$SIMPLE" native-build "$SOURCE" \
+    --source "$ROOT/test/fixtures/compiler" --source "$ROOT/src/app" --source "$ROOT/src/lib" \
+    --entry-closure --backend=llvm --cache-dir="$RUN/cache" -o "$OUT" \
+    >"$STDOUT" 2>"$STDERR"
+BUILD_STATUS=$?
+set -e
+[ "$BUILD_STATUS" -eq 0 ] || { tail -80 "$STDERR" >&2; echo "FAIL: fixture build status=$BUILD_STATUS" >&2; exit 1; }
+grep -Eq 'Build complete: [1-9][0-9]* compiled, 0 cached, 0 failed' "$STDOUT" || { cat "$STDOUT" >&2; echo "FAIL: fixture was not a cold zero-cache build" >&2; exit 1; }
+[ -x "$OUT" ] || { echo "FAIL: fixture output missing" >&2; exit 1; }
+
+set +e
+mkdir -p "$RUN/process-tmp"
+TMPDIR="$RUN/process-tmp" sh "$ROOT/scripts/bootstrap/run-process-group-timeout.shs" \
+  30 2 "$OUT" >"$RUN/run.stdout" 2>"$RUN/run.stderr"
+RUN_STATUS=$?
+set -e
+[ "$RUN_STATUS" -eq 0 ] || { cat "$RUN/run.stdout" "$RUN/run.stderr" >&2; echo "FAIL: fixture exit=$RUN_STATUS" >&2; exit 1; }
+
+COMPILER_SHA=$(sha256_file "$SIMPLE")
+SOURCE_SHA=$(sha256_file "$SOURCE")
+FORMULA_SHA=$(sha256_file "$FORMULA")
+ARTIFACT_SHA=$(sha256_file "$OUT")
+COMMAND_SHA=$(printf '%s' "$COMMAND" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')
+{
+  echo schema=simple.formula-dispatch-native-behavior.v1
+  echo compiler_path="$SIMPLE"
+  echo compiler_sha256="$COMPILER_SHA"
+  echo fixture_path="$SOURCE"
+  echo fixture_sha256="$SOURCE_SHA"
+  echo formula_path="$FORMULA"
+  echo formula_sha256="$FORMULA_SHA"
+  echo command="$COMMAND"
+  echo command_sha256="$COMMAND_SHA"
+  echo artifact_path="$OUT"
+  echo artifact_sha256="$ARTIFACT_SHA"
+  echo compiled_cache_status=cold-zero-cache
+  echo run_exit_code=0
+  echo status=pass
+} >"$RUN/receipt.env"
+
+echo "PASS formula_dispatch_native compiler_sha256=$COMPILER_SHA fixture_sha256=$SOURCE_SHA formula_sha256=$FORMULA_SHA artifact_sha256=$ARTIFACT_SHA receipt=$RUN/receipt.env"
