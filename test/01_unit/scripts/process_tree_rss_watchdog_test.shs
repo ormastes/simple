@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+"${CC:-cc}" -O0 "$root/test/01_unit/scripts/fixture_process_tree_rss.c" -o "$tmp/fixture"
+run_case() {
+    name=$1; expected=$2; cap=$3; mb=$4; mode=$5
+    status=0
+    perl "$guard" --max-rss-kib="$cap" --receipt="$tmp/$name.env" -- \
+        "$tmp/fixture" "$mb" "$mode" "$tmp/$name.pids" >"$tmp/$name.log" 2>&1 || status=$?
+    [ "$status" -eq "$expected" ] || { cat "$tmp/$name.log"; fail "$name: expected $expected got $status"; }
+    grep -Fxq 'quiescent=1' "$tmp/$name.env" || fail "$name: no quiescence"
+    while read -r pid; do
+        state=$(ps -o stat= -p "$pid" 2>/dev/null || :)
+        case "$state" in ''|Z*) ;; *) fail "$name: survivor $pid ($state)" ;; esac
+    done <"$tmp/$name.pids"
+}
+run_case below 0 65536 2 normal
+run_case above 88 16384 24 normal
+run_case escaped 88 16384 24 escape
+run_case forking 88 16384 0 fork
+run_case orphan 0 65536 2 orphan
+
+# Startup measurement failure must not release the child exec gate.
+mkdir "$tmp/bin"
+cat >"$tmp/bin/ps" <<'EOF'
+#!/bin/sh
+exit 77
+EOF
+chmod +x "$tmp/bin/ps"
+status=0
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/startup.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/unprotected" >"$tmp/startup.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] || fail "startup failure returned $status"
+[ ! -e "$tmp/unprotected" ] || fail 'work started without measurement'
+grep -Fxq 'status=rss-measurement-failed' "$tmp/startup.env" || fail 'missing measurement failure receipt'
+
+# Failure after startup must terminate already running escaped descendants.
+real_ps=$(command -v ps)
+cat >"$tmp/bin/ps" <<EOF
+#!/bin/sh
+if [ -f "$tmp/measurement-fail" ]; then exit 77; fi
+exec "$real_ps" "\$@"
+EOF
+status=0
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/live-failure.env" -- \
+    /bin/sh -c 'echo $$ >"$1"; sleep .25; touch "$2"; sleep 20' \
+    sh "$tmp/live.pid" "$tmp/measurement-fail" >"$tmp/live-failure.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] || fail "live measurement failure returned $status"
+live=$(cat "$tmp/live.pid")
+kill -0 "$live" 2>/dev/null && fail 'measurement failure left workload running'
+
+# Hard ceiling cannot be raised, and invalid intervals cannot disable sampling.
+for arg in --max-rss-kib=6291457 --max-rss-kib=0 --interval-ms=101; do
+    status=0
+    perl "$guard" "$arg" -- /bin/sh -c 'touch "$1"' sh "$tmp/invalid" >"$tmp/invalid.log" 2>&1 || status=$?
+    [ "$status" -ne 0 ] && [ ! -e "$tmp/invalid" ] || fail "invalid guard setting accepted: $arg"
+done
+
+# The phase verification command owner must propagate the same distinct status.
+status=0
+TMPDIR="$tmp" SIMPLE_PROCESS_TREE_RSS_CAP_KIB=16384 \
+    sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 10 1 \
+    "$tmp/fixture" 24 normal "$tmp/wrapper.pids" >"$tmp/wrapper.log" 2>&1 || status=$?
+[ "$status" -eq 88 ] || fail "phase wrapper cap returned $status"
+grep -Fxq 'status=rss-cap-exceeded' "$tmp/wrapper.log" || fail 'wrapper lost RSS receipt'
+
+# stdin must remain usable by protocol servers.
+printf 'stdin-check\n' | TMPDIR="$tmp" sh "$root/scripts/bootstrap/run-process-group-timeout.shs" \
+    10 1 /bin/sh -c 'read -r value; [ "$value" = stdin-check ]'
+echo 'PASS: RSS cap, startup gate, fail-closed sampling, escape/fork cleanup, limits, phase wrapper and stdin'
