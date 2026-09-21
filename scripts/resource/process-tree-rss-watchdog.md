@@ -14,6 +14,10 @@ private retained directory beside its receipt (or in TMPDIR). Compilation is
 bounded to 30 seconds. It pins the binary with an open file descriptor and
 SHA-256, checks the path's identity and pinned contents before and after
 observations, and warms executable admission before starting the sample clock.
+The first helper observation has a five-second deadline for cold executable
+admission on macOS; the workload does not exist during this warmup. A stalled
+helper still fails installation with exit 89. Subsequent workload observations
+remain within the configured sampling interval (at most 100 ms).
 The helper and source SHA-256 values are included in the receipt.
 
 The canonical outer guard uses `--session-mode=new` and rejects any inbound

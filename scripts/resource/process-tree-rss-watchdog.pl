@@ -130,8 +130,10 @@ sub install_session_helper {
     sysopen($helper_fd, $session_helper, O_RDONLY | O_NOFOLLOW) or die "cannot pin session helper";
     -f $helper_fd or die "session helper is not a regular file";
     $helper_sha = hash_handle($helper_fd);
-    # Warm Darwin executable admission before the workload's 100 ms deadline.
-    my $own_sid = observe_sessions(2, $$)->{$$};
+    # Cold Darwin executable admission can exceed two seconds under host load.
+    # No workload exists yet: allow one bounded warmup, while snapshot() keeps
+    # the strict interval budget for every observation after workload creation.
+    my $own_sid = observe_sessions(5, $$)->{$$};
     $own_sid > 0 or die "cannot determine supervisor session";
     if ($opt{'session-mode'} eq 'inherit') {
         $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} =~ /\A[1-9][0-9]*\z/ &&
