@@ -249,12 +249,20 @@ candidate_frontend_bounded_build() {
     esac
     bounded_log=$bounded_parent/$bounded_leaf
     bounded_receipt=$bounded_parent/$bounded_leaf.bounded.env
+    # native-build is synchronous: once its root exits, any remaining Job
+    # members are helpers, not work needed to produce the probe executable.
+    # Preserve the default wait-job policy on non-Windows collectors.
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        set -- --root-exit-policy=terminate-job -- "$@"
+    else
+        set -- -- "$@"
+    fi
     if candidate_frontend_collect \
         --output-parent="$bounded_output_parent" --log-leaf="$bounded_leaf" \
         --receipt-leaf="$bounded_leaf.bounded.env" \
         --max-bytes="$CANDIDATE_FRONTEND_MAX_LOG_BYTES" \
         --timeout-seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}" \
-        --term-grace-seconds="$COMPILER_CHECK_KILL_GRACE_SECONDS" -- "$@"; then
+        --term-grace-seconds="$COMPILER_CHECK_KILL_GRACE_SECONDS" "$@"; then
         bounded_rc=0
     else
         bounded_rc=$?
@@ -268,6 +276,7 @@ candidate_frontend_bounded_build() {
         "$(candidate_frontend_hash_file "$bounded_log")" ] || return 126
     if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
         [ "$(sed -n 's/^process_group=//p' "$bounded_receipt")" = windows-job ] || return 126
+        [ "$(sed -n 's/^root_exit_policy=//p' "$bounded_receipt")" = terminate-job ] || return 126
         [ "$(sed -n 's/^helper_sha256=//p' "$bounded_receipt")" = \
             "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" ] || return 126
     fi
