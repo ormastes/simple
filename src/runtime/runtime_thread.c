@@ -255,13 +255,13 @@ typedef struct {
 #endif
 } RtThreadData;
 
-static void rt_thread_data_release(RtThreadData* td) {
+static void thread_data_release(RtThreadData* td) {
     if (atomic_fetch_sub_explicit(&td->references, 1, memory_order_acq_rel) == 1) {
         SPL_FREE(td);
     }
 }
 
-static int64_t rt_thread_publish_handle(RtThreadData* td) {
+static int64_t thread_publish_handle(RtThreadData* td) {
     int64_t handle = alloc_handle(HANDLE_THREAD, td);
     if (handle == 0) {
         /* Handle exhaustion must relinquish the owner's reference too. */
@@ -270,7 +270,7 @@ static int64_t rt_thread_publish_handle(RtThreadData* td) {
 #else
         CloseHandle(td->thread);
 #endif
-        rt_thread_data_release(td);
+        thread_data_release(td);
     }
     return handle;
 }
@@ -315,7 +315,7 @@ static void* rt_isolated_wrapper(void* raw) {
         td->result = td->entry(td->closure_ptr);
     }
     atomic_store_explicit(&td->done, 1, memory_order_release);
-    rt_thread_data_release(td);
+    thread_data_release(td);
     return NULL;
 }
 
@@ -334,7 +334,7 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
         td->result = td->entry(td->closure_ptr);
     }
     atomic_store_explicit(&td->done, 1, memory_order_release);
-    rt_thread_data_release(td);
+    thread_data_release(td);
     return 0;
 }
 #endif
@@ -368,7 +368,7 @@ int64_t rt_thread_spawn_isolated(int64_t arg0, int64_t arg1) {
         return 0;
     }
 #endif
-    return rt_thread_publish_handle(td);
+    return thread_publish_handle(td);
 }
 
 int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
@@ -419,7 +419,7 @@ int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_
         return 0;
     }
 #endif
-    return rt_thread_publish_handle(td);
+    return thread_publish_handle(td);
 }
 
 int64_t rt_thread_join(int64_t handle) {
@@ -433,7 +433,7 @@ int64_t rt_thread_join(int64_t handle) {
 #endif
     int64_t result = td->result;
     free_handle(handle);
-    rt_thread_data_release(td);
+    thread_data_release(td);
     return result;
 }
 
@@ -462,7 +462,7 @@ void rt_thread_free(int64_t handle) {
     CloseHandle(td->thread);
 #endif
     free_handle(handle);
-    rt_thread_data_release(td);
+    thread_data_release(td);
 }
 
 void rt_thread_sleep(int64_t millis) {
