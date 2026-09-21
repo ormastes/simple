@@ -1,4 +1,37 @@
 # Test runner's ulimit caps make `simple test <dir>` unusable on macOS (2026-09-05)
+## Update 2026-09-21 — process-policy source fix, native verification pending
+
+Status: fix-implemented-verification-pending
+
+The current canonical runner lives in `src/lib/nogc_sync_mut/test_runner`.
+Its ordinary cap had already increased to 4096, but its safe-mode lane still
+hardcoded 64 and ignored `--no-limits`. The app copy and the existing safe-mode
+spec therefore did not cover the implementation selected by `std.test_runner`.
+
+The source fix makes macOS inherit the user's existing process limit by
+default (`max_procs=0`). RLIMIT_NPROC measures the entire UID, so a small
+default cannot represent a test's process allowance. `--max-procs N` and
+`--max-procs=N` explicitly select a total process cap; zero inherits, negative,
+fractional, missing, and overflowing values are rejected. Safe mode consumes
+the selected cap and honors `--no-limits`, while retaining its 512 MiB, 30 CPU
+seconds and 256 descriptor caps otherwise. Class defaults cannot replace an
+explicit zero process limit. The single-file child parser consumes the new
+option's value without misclassifying it as a test path.
+
+Focused executable specs:
+
+- `test/01_unit/app/test_runner_new/macos_process_policy_spec.spl`
+- `test/01_unit/app/test_runner_new/safe_mode_caps_spec.spl`
+- `test/01_unit/app/test_runner/args_spec.spl`
+- `test/01_unit/app/test_runner_new/single_lane_arg_parsing_neighbors_spec.spl`
+
+These specs are pending the current Phase 2 compiler's SCV memory repair;
+the admitted Phase 2 binary has no `test` command and its native compile path
+currently crosses the 1 GiB guard during cold inventory initialization.
+No self-hosted behavioral PASS or closure of the historical lint blocker is
+claimed. Re-run the focused specs using a source-matched Phase 2 full CLI/test
+runner once that gate clears, then update this record from actual results.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -130,4 +163,3 @@ Blockers 3, then 2, then (already done) 1. Fixing 1 alone does not move the
 ## Related
 Matches the previously recorded "Memory limit 16GB lie" class -- a per-UID
 `ulimit` misfire being reported as a memory/compilation problem.
-
