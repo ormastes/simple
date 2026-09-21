@@ -3,7 +3,7 @@ use std.spec.{describe, it, expect, step}
 use compiler.hir.reexport_diagnostic_policy.{hir_reexport_chase_unresolved_receipt}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering._Items.module_import_registration.*
-use std.nogc_sync_mut.env.variables.{env_set, env_unset}
+use std.nogc_sync_mut.env.variables.{env_get, env_set, env_unset}
 
 extern fn rt_heap_registry_count() -> i64
 extern fn rt_heap_live_bytes() -> i64
@@ -30,7 +30,11 @@ fn profile_fixed_caller(count: i64, lowering: HirLowering) -> [i64]:
     assert(rt_transient_array_scope_end())
     [elapsed, objects, live_bytes, emitted]
 
-fn profile_parent_renderer(count: i64) -> [i64]:
+fn diagnostic_sink(message: text) -> i64:
+    """Injectable stand-in for parent eprint; consumes the fully rendered text."""
+    message.len()
+
+fn profile_parent_with_sink(count: i64) -> [i64]:
     assert(rt_transient_array_scope_begin())
     val before = rt_heap_registry_count()
     val live_before = rt_heap_live_bytes()
@@ -38,9 +42,10 @@ fn profile_parent_renderer(count: i64) -> [i64]:
     var rendered_bytes = 0
     var i = 0
     while i < count:
-        rendered_bytes = rendered_bytes + hir_reexport_chase_unresolved_receipt(
-            true, "lib.nogc_async_mut.io.platform_event", "Result", "Result",
-            "src/lib/nogc_async_mut/io/platform_event.spl").len()
+        rendered_bytes = rendered_bytes + diagnostic_sink(
+            hir_reexport_chase_unresolved_receipt(
+                true, "lib.nogc_async_mut.io.platform_event", "Result", "Result",
+                "src/lib/nogc_async_mut/io/platform_event.spl"))
         i = i + 1
     val elapsed = rt_time_now_nanos() - started
     val objects = rt_heap_registry_count() - before
@@ -48,37 +53,67 @@ fn profile_parent_renderer(count: i64) -> [i64]:
     assert(rt_transient_array_scope_end())
     [elapsed, objects, live_bytes, rendered_bytes]
 
+fn median3(a: i64, b: i64, c: i64) -> i64:
+    if a > b:
+        if b > c: return b
+        if a > c: return c
+        return a
+    if a > c: return a
+    if b > c: return c
+    b
+
 describe "HIR re-export diagnostic resource profile":
     it "keeps disabled miss receipts bounded without a timing regression":
         step("Construct the production caller with an explicitly unset diagnostic environment")
-        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
+        val incoming = env_get("SIMPLE_BOOTSTRAP_DIAG")
+        val unset_ok = env_unset("SIMPLE_BOOTSTRAP_DIAG")
         var lowering = HirLowering.new()
-        expect(lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
+        val enable_ok = env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
+        var enabled_lowering = HirLowering.new()
+        val restore_ok = if incoming == "":
+            env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        else:
+            env_set("SIMPLE_BOOTSTRAP_DIAG", incoming)
+        # Both contexts cache their policy. Restore before profiles/assertions
+        # so any later failure cannot leak SIMPLE_BOOTSTRAP_DIAG to the suite.
         step("Warm fixed production caller and parent renderer")
         profile_fixed_caller(8, lowering)
-        profile_parent_renderer(8)
-        step("Repeat parent and fixed profiles at 10k and 20k misses")
+        profile_parent_with_sink(8)
+        step("Repeat parent and fixed profiles three times at 10k and 20k misses")
         val fixed_small = profile_fixed_caller(10000, lowering)
-        val fixed_large = profile_fixed_caller(20000, lowering)
-        val parent_small = profile_parent_renderer(10000)
-        val parent_large = profile_parent_renderer(20000)
+        val fixed_large_a = profile_fixed_caller(20000, lowering)
+        val fixed_large_b = profile_fixed_caller(20000, lowering)
+        val fixed_large_c = profile_fixed_caller(20000, lowering)
+        val parent_small = profile_parent_with_sink(10000)
+        val parent_large_a = profile_parent_with_sink(20000)
+        val parent_large_b = profile_parent_with_sink(20000)
+        val parent_large_c = profile_parent_with_sink(20000)
+        val fixed_elapsed_median = median3(fixed_large_a[0], fixed_large_b[0], fixed_large_c[0])
+        val parent_elapsed_median = median3(parent_large_a[0], parent_large_b[0], parent_large_c[0])
+        val fixed_objects_median = median3(fixed_large_a[1], fixed_large_b[1], fixed_large_c[1])
+        val parent_objects_median = median3(parent_large_a[1], parent_large_b[1], parent_large_c[1])
+        val fixed_live_median = median3(fixed_large_a[2], fixed_large_b[2], fixed_large_c[2])
+        val parent_live_median = median3(parent_large_a[2], parent_large_b[2], parent_large_c[2])
         step("Measure a bounded enabled production caller including stderr emission")
-        expect(env_set("SIMPLE_BOOTSTRAP_DIAG", "1")).to_equal(true)
-        var enabled_lowering = HirLowering.new()
-        val enabled_actual = profile_fixed_caller(32, enabled_lowering)
-        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
-        print "[hir-reexport-diagnostic] fixed_small={fixed_small} fixed_large={fixed_large} parent_small={parent_small} parent_large={parent_large} enabled_actual={enabled_actual} units=ns,objects,heap-bytes,output"
+        val enabled_a = profile_fixed_caller(8, enabled_lowering)
+        val enabled_b = profile_fixed_caller(8, enabled_lowering)
+        val enabled_c = profile_fixed_caller(8, enabled_lowering)
+        val enabled_elapsed_median = median3(enabled_a[0], enabled_b[0], enabled_c[0])
+        print "[hir-reexport-diagnostic] fixed_small={fixed_small} fixed_large_a={fixed_large_a} fixed_large_b={fixed_large_b} fixed_large_c={fixed_large_c} parent_small={parent_small} parent_large_a={parent_large_a} parent_large_b={parent_large_b} parent_large_c={parent_large_c} fixed_elapsed_median={fixed_elapsed_median} parent_elapsed_median={parent_elapsed_median} enabled_elapsed_median={enabled_elapsed_median} units=ns,objects,heap-bytes,output"
         step("Require fixed caller allocation and live-heap improvement over parent")
+        expect(unset_ok and enable_ok and restore_ok).to_equal(true)
+        expect(lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
         expect(fixed_small[3]).to_equal(0)
-        expect(fixed_large[3]).to_equal(0)
-        expect(fixed_small[1] <= 8 and fixed_large[1] <= 8).to_equal(true)
+        expect(fixed_large_a[3] + fixed_large_b[3] + fixed_large_c[3]).to_equal(0)
+        expect(fixed_small[1] <= 8 and fixed_objects_median <= 8).to_equal(true)
         expect(parent_small[1]).to_be_greater_than(5000)
-        expect(parent_large[1]).to_be_greater_than(parent_small[1])
-        expect(parent_large[2]).to_be_greater_than(fixed_large[2])
-        expect(parent_large[3]).to_be_greater_than(5000000)
+        expect(parent_objects_median).to_be_greater_than(parent_small[1])
+        expect(parent_live_median).to_be_greater_than(fixed_live_median)
+        expect(parent_large_a[3]).to_be_greater_than(5000000)
         step("Prevent fixed and enabled-parent timing regressions")
-        expect(fixed_large[0] <= fixed_small[0] * 3 + 20000000).to_equal(true)
-        expect(fixed_large[0]).to_be_less_than(1000000000)
-        expect(parent_large[0]).to_be_less_than(5000000000)
-        expect(enabled_actual[3]).to_equal(32)
-        expect(enabled_actual[0]).to_be_less_than(1000000000)
+        expect(fixed_elapsed_median <= fixed_small[0] * 3 + 20000000).to_equal(true)
+        expect(fixed_elapsed_median <= parent_elapsed_median + 20000000).to_equal(true)
+        expect(fixed_elapsed_median).to_be_less_than(1000000000)
+        expect(parent_elapsed_median).to_be_less_than(5000000000)
+        expect(enabled_a[3] + enabled_b[3] + enabled_c[3]).to_equal(24)
+        expect(enabled_elapsed_median).to_be_less_than(1000000000)

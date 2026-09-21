@@ -3,26 +3,40 @@ use std.spec.{describe, it, expect}
 use compiler.hir.reexport_diagnostic_policy.{hir_reexport_chase_unresolved_receipt}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering._Items.module_import_registration.*
-use std.nogc_sync_mut.env.variables.{env_set, env_unset}
+use std.nogc_sync_mut.env.variables.{env_get, env_set, env_unset}
 
 describe "HIR re-export diagnostic policy":
     it "caches unset, zero, and one exactly once on construction":
-        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
+        val incoming = env_get("SIMPLE_BOOTSTRAP_DIAG")
+        val unset_ok = env_unset("SIMPLE_BOOTSTRAP_DIAG")
         val unset_lowering = HirLowering.new()
-        expect(unset_lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
-        expect(env_set("SIMPLE_BOOTSTRAP_DIAG", "0")).to_equal(true)
+        val zero_set_ok = env_set("SIMPLE_BOOTSTRAP_DIAG", "0")
         val zero_lowering = HirLowering.new()
-        expect(zero_lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
-        expect(env_set("SIMPLE_BOOTSTRAP_DIAG", "1")).to_equal(true)
+        val one_set_ok = env_set("SIMPLE_BOOTSTRAP_DIAG", "1")
         val one_lowering = HirLowering.new()
+        val restore_ok = if incoming == "":
+            env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        else:
+            env_set("SIMPLE_BOOTSTRAP_DIAG", incoming)
+        # Restore before assertions: a failing expectation cannot contaminate
+        # later examples in the same runner process.
+        expect(unset_ok and zero_set_ok and one_set_ok and restore_ok).to_equal(true)
+        expect(unset_lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
+        expect(zero_lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
         expect(one_lowering.reexport_chase_unresolved_diag_enabled).to_equal(true)
-        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
 
     it "executes the production failed-chase caller without rendering by default":
-        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
+        val incoming = env_get("SIMPLE_BOOTSTRAP_DIAG")
+        val unset_ok = env_unset("SIMPLE_BOOTSTRAP_DIAG")
         var lowering = HirLowering.new()
-        expect(lowering.report_reexport_chase_unresolved(
-            "lib.facade", "Widget", "Alias", "src/use.spl")).to_equal(false)
+        val emitted = lowering.report_reexport_chase_unresolved(
+            "lib.facade", "Widget", "Alias", "src/use.spl")
+        val restore_ok = if incoming == "":
+            env_unset("SIMPLE_BOOTSTRAP_DIAG")
+        else:
+            env_set("SIMPLE_BOOTSTRAP_DIAG", incoming)
+        expect(unset_ok and restore_ok).to_equal(true)
+        expect(emitted).to_equal(false)
 
     it "does not render routine misses when bootstrap diagnostics are disabled":
         expect(hir_reexport_chase_unresolved_receipt(

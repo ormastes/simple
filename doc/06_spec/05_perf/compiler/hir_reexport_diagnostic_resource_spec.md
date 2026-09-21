@@ -3,18 +3,18 @@
 Source: `test/05_perf/compiler/hir_reexport_diagnostic_resource_spec.spl`.
 
 The profile constructs the production `HirLowering` context with the diagnostic
-environment unset and calls the actual failed-chase reporting method. Repeated
-10,000 and 20,000 miss rows compare that fixed caller with the parent behavior,
-which rendered the detailed receipt on every miss. The fixed rows must emit
-nothing and retain no more than eight live objects; the parent control must
-retain thousands of objects, grow with the repetition count, render more than
-5 MiB, and consume more live heap than the fixed row. No environment lookup
-occurs inside a measured miss loop.
+environment unset and calls the actual failed-chase reporting method. The
+parent control renders the same detailed receipt and consumes it through an
+injectable sink, preserving its formatting and allocation cost without
+flooding stderr. Three 20,000-miss trials provide median elapsed, allocation,
+and live-heap values. The fixed median must retain no more than eight live
+objects, remain within the parent median plus 20 ms, scale within 3x plus 20 ms
+from the 10,000 row, and complete within one second.
 
-An explicitly enabled 32-miss production run includes actual stderr emission,
-must report all 32 emissions, and must finish within one second. The 20,000
-parent-control renderer must finish within five seconds, preserving a bounded
-enabled-path timing oracle without flooding test output.
+Three explicitly enabled 8-miss production trials include actual stderr
+emission. Their median must finish within one second and all 24 calls must
+report emission. The parent-control median must finish within five seconds.
+The incoming environment is restored before profiles and assertions run.
 
 This bounded profile prevents memory and performance regressions in the
 corrected owner. It does not certify the full jobs=8 Stage 3 RSS budget.
