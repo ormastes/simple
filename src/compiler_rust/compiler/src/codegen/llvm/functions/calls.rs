@@ -2824,6 +2824,8 @@ impl LlvmBackend {
             for (arg, target_ty) in arg_vals.into_iter().zip(declared_param_types) {
                 let value = inkwell::values::BasicValueEnum::try_from(arg)
                     .map_err(|_| CompileError::semantic("metadata value used as a runtime call argument"))?;
+                let target_ty = inkwell::types::BasicTypeEnum::try_from(target_ty)
+                    .map_err(|_| CompileError::semantic("metadata type used as a runtime call parameter"))?;
                 adapted_args.push(self.coerce_value_to_type(value, Some(target_ty), builder)?.into());
             }
             builder
@@ -2941,6 +2943,9 @@ impl LlvmBackend {
                         inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
+                            t.fn_type(&llvm_param_types, false)
+                        }
                     }
                 };
 

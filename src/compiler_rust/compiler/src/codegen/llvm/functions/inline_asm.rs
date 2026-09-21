@@ -124,11 +124,10 @@ impl LlvmBackend {
         if self.mem_order_mode.get() & MEM_ORDER_NO_REORDER == 0 {
             return Ok(());
         }
-        let single_thread = self.context_ref().get_kind_id("singlethread");
         builder
             .build_fence(
                 inkwell::AtomicOrdering::SequentiallyConsistent,
-                single_thread,
+                true,
                 "",
             )
             .map_err(|e| crate::error::factory::llvm_build_failed("no_reorder_fence", &e))?;

@@ -871,6 +871,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                         inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
+                            t.fn_type(&llvm_param_types, false)
+                        }
                     }
                 };
 
