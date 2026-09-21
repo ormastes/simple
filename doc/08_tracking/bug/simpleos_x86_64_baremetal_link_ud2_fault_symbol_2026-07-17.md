@@ -88,3 +88,28 @@ the gate's budget killed it. Symbol fix plausibly effective; full PASS
 verification deferred to a quiet host. isa-debug-exit rework rides the same
 rerun and is likewise pending a completed boot.
 
+## Current-source repair (2026-09-21; P1 remains OPEN)
+
+The fetched main branch recorded this specific undefined-symbol bug as closed,
+but a later merge removed the C reference to `spl_x86_on_kernel_ud2_fault`
+along with its fatal `ud2` handling. The current generic fault handler had
+returned to advancing RIP by two bytes. This lane restores the intentional
+kernel `ud2` halt and defines a weak C diagnostic fallback in
+`baremetal_stubs.c`; a full kernel can still override it with the strong
+pure-Simple export. The focused link contract compiles the extracted actual C
+handler and fallback, confirms the symbol is defined weakly, then links a
+strong replacement and confirms it wins:
+
+```text
+sh test/01_unit/os/simpleos_ud2_fault_link_contract_test.shs
+ud2_fault_link_contract=pass
+```
+
+This is a symbol and fault-path contract, not a completed QEMU boot. P1 stays
+OPEN until the actual target kernel links and the guest fault behavior passes.
+The full
+baremetal translation unit currently fails a standalone Clang compile earlier
+on unrelated `HeapHeader.gc_flags`/`BYTE_PACKED` and
+`runtime_array_from_abi` errors; the kernel/QEMU gate remains unverified here.
+The fix changes neither SOSIX contracts nor providers or callers: it is the
+x86_64 interrupt-handler C boundary only.
