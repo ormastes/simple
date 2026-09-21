@@ -39,6 +39,32 @@ process_is_live() {
   return 0
 }
 
+cleanup_owned_fake_concurrency_dirs() {
+  cleanup_root=$1
+  cleanup_inventory=$2
+  [ -d "$cleanup_root" ] && [ ! -L "$cleanup_root" ] || return 1
+  cleanup_root_canonical=$(CDPATH= cd -- "$cleanup_root" && pwd -P) || return 1
+  [ "$cleanup_root_canonical" = "$cleanup_root" ] || return 1
+  [ -f "$cleanup_inventory" ] && [ ! -L "$cleanup_inventory" ] || return 1
+  while IFS= read -r cleanup_candidate; do
+    [ -n "$cleanup_candidate" ] || continue
+    cleanup_parent=$(dirname -- "$cleanup_candidate")
+    cleanup_name=$(basename -- "$cleanup_candidate")
+    [ "$cleanup_parent" = "$cleanup_root_canonical" ] || continue
+    case "$cleanup_name" in
+      signal-cleanup.link_cli.*|signal-cleanup.link_mcp.*|signal-cleanup.link_lsp.*) ;;
+      *) continue ;;
+    esac
+    cleanup_pid=${cleanup_name##*.}
+    case "$cleanup_pid" in ''|*[!0-9]*|0|1) continue ;; esac
+    [ -d "$cleanup_candidate" ] && [ ! -L "$cleanup_candidate" ] || continue
+    process_is_live "$cleanup_pid" && continue
+    # Fixture ownership and a dead creator are necessary but not sufficient:
+    # rmdir keeps nonempty or concurrently reused directories intact.
+    rmdir "$cleanup_candidate" 2>/dev/null || :
+  done <"$cleanup_inventory"
+}
+
 hash_file() {
   sha256sum "$1" | awk '{print $1}'
 }
@@ -56,8 +82,9 @@ FAKE_NATIVE_ARGS="$fixture/native-args"
 FAKE_TASK_AUDIT="$fixture/task-audit.tsv"
 FAKE_CONCURRENCY_AUDIT="$fixture/concurrency-audit.tsv"
 FAKE_CONCURRENCY_ACTIVE="$fixture/concurrency-active"
+FAKE_CONCURRENCY_OWNERS="$fixture/concurrency-owners.txt"
 export FAKE_LINK_COUNT FAKE_GATE_COUNT FAKE_TOOL_TEMPLATE FAKE_TEST_ARGS FAKE_ESSENTIAL_COUNT FAKE_NATIVE_ARGS
-export FAKE_TASK_AUDIT FAKE_CONCURRENCY_AUDIT FAKE_CONCURRENCY_ACTIVE
+export FAKE_TASK_AUDIT FAKE_CONCURRENCY_AUDIT FAKE_CONCURRENCY_ACTIVE FAKE_CONCURRENCY_OWNERS
 : >"$FAKE_LINK_COUNT"
 : >"$FAKE_GATE_COUNT"
 : >"$FAKE_TEST_ARGS"
@@ -65,6 +92,7 @@ export FAKE_TASK_AUDIT FAKE_CONCURRENCY_AUDIT FAKE_CONCURRENCY_ACTIVE
 : >"$FAKE_NATIVE_ARGS"
 : >"$FAKE_TASK_AUDIT"
 : >"$FAKE_CONCURRENCY_AUDIT"
+: >"$FAKE_CONCURRENCY_OWNERS"
 mkdir -p "$FAKE_CONCURRENCY_ACTIVE"
 
 printf '%s\n' \
@@ -74,6 +102,7 @@ printf '%s\n' \
   'fake_active=' \
   'if [ "${FAKE_GATE_DELAY:-0}" != 0 ]; then' \
   '  fake_active="$FAKE_CONCURRENCY_ACTIVE/${STAGE4_MATRIX_ID:-missing}.${STAGE4_MATRIX_TASK_ID:-missing}.$$"; mkdir "$fake_active"' \
+  '  printf "%s\n" "$fake_active" >>"$FAKE_CONCURRENCY_OWNERS"' \
   '  fake_active_count=$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d " ")' \
   '  printf "%s\t%s\t%s\n" "${STAGE4_MATRIX_ID:-missing}" "${STAGE4_MATRIX_TASK_ID:-missing}" "$fake_active_count" >>"$FAKE_CONCURRENCY_AUDIT"' \
   '  trap '\''rmdir "$fake_active" 2>/dev/null || :'\'' EXIT INT TERM HUP' \
@@ -127,6 +156,7 @@ printf '%s\n' \
   'fake_active=' \
   'if [ "${FAKE_GATE_DELAY:-0}" != 0 ]; then' \
   '  fake_active="$FAKE_CONCURRENCY_ACTIVE/${STAGE4_MATRIX_ID:-missing}.${STAGE4_MATRIX_TASK_ID:-missing}.$$"; mkdir "$fake_active"' \
+  '  printf "%s\n" "$fake_active" >>"$FAKE_CONCURRENCY_OWNERS"' \
   '  fake_active_count=$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d " ")' \
   '  printf "%s\t%s\t%s\n" "${STAGE4_MATRIX_ID:-missing}" "${STAGE4_MATRIX_TASK_ID:-missing}" "$fake_active_count" >>"$FAKE_CONCURRENCY_AUDIT"' \
   '  trap '\''rmdir "$fake_active" 2>/dev/null || :'\'' EXIT INT TERM HUP' \
@@ -428,13 +458,23 @@ while IFS="$(printf '\t')" read -r signal_task signal_worker_pid signal_worker_p
 done <"$fixture/signal-workers.tsv"
 [ -z "$(find "$signal_scheduler_root" -maxdepth 1 -type d -name 'run.*' -print -quit 2>/dev/null)" ] ||
   fail "signal cleanup retained scheduler run state"
-signal_owner_wait=0
-while [ "$signal_owner_wait" -lt 100 ] &&
-      [ -n "$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]; do
-  sleep 0.01
-  signal_owner_wait=$((signal_owner_wait + 1))
-done
-[ -z "$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print -quit)" ] ||
+signal_live_guard="$FAKE_CONCURRENCY_ACTIVE/signal-cleanup.link_cli.$$"
+signal_unrelated_guard="$FAKE_CONCURRENCY_ACTIVE/unrelated-owner"
+true &
+signal_dead_guard_pid=$!
+wait "$signal_dead_guard_pid"
+signal_nonempty_guard="$FAKE_CONCURRENCY_ACTIVE/signal-cleanup.link_mcp.$signal_dead_guard_pid"
+mkdir "$signal_live_guard" "$signal_unrelated_guard" "$signal_nonempty_guard"
+: >"$signal_unrelated_guard/data"
+: >"$signal_nonempty_guard/data"
+printf '%s\n%s\n%s\n' "$signal_live_guard" "$signal_unrelated_guard" "$signal_nonempty_guard" >>"$FAKE_CONCURRENCY_OWNERS"
+cleanup_owned_fake_concurrency_dirs "$FAKE_CONCURRENCY_ACTIVE" "$FAKE_CONCURRENCY_OWNERS" ||
+  fail "fixture owner cleanup rejected its canonical root"
+[ -d "$signal_live_guard" ] || fail "fixture cleanup removed a live matching owner"
+[ -f "$signal_unrelated_guard/data" ] || fail "fixture cleanup removed unrelated data"
+[ -f "$signal_nonempty_guard/data" ] || fail "fixture cleanup removed a nonempty dead owner"
+[ -z "$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d \
+  ! -path "$signal_live_guard" ! -path "$signal_unrelated_guard" ! -path "$signal_nonempty_guard" -print -quit)" ] ||
   fail "signal cleanup retained a fake case owner after deadline"
 [ -f "$fake_root/build/mini_builds/stage4_tooling_signal-cleanup/summary.env" ] ||
   fail "signal cleanup omitted the parent aggregate"
