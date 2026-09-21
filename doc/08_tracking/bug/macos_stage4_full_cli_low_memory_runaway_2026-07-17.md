@@ -1,12 +1,13 @@
 # macOS Stage 4 full-CLI compile exceeds bounded resource envelope
-## Open 2026-09-16 — needs owner triage
+## Source fixed; native verification pending — audited 2026-09-21
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-Open. Apple Silicon Stage 2/3 self-host succeeds. The whole-tree Stage 4
+Source corrections are present; bounded Stage 4 acceptance remains open.
+The historical run below reported Apple Silicon Stage 2/3 self-host success. The whole-tree Stage 4
 runaway is now traced to two sync regressions, but the corrected compiler
 rebuild currently stops at the separately tracked missing `copy_mem` provider.
 
@@ -83,3 +84,51 @@ within a documented time and peak-RSS budget on a 24 GiB host.
 4. The candidate passes `-c`, source-check, redeploy, MCP, and LSP smoke gates.
 5. Preserve strict `SIMPLE_NO_STUB_FALLBACK=1` and exact provider ownership.
 
+## Current main and PR #1207 audit, 2026-09-21
+
+Fetched main `e0dd873da1b` and PR #1207
+`fix/astra-stage3-hir-20260921` at `6a7a22ddc37`. Both already contain the
+documented correction. The relevant owners are byte-identical across them:
+
+| Owner | SHA-256 | Current contract |
+|---|---|---|
+| `src/compiler/80.driver/driver_source_pipeline_loading.spl` | `1a9a4339ca98f02ac2f6f60c4ced9eda23e2c2dba4b2defd2cfba5933d4f3ee3` | Lines 192–201 select explicit/native entry closure without the historical location guard; lines 477–479 seed only the requested entry; line 636 walks its imports. |
+| `src/app/cli/bootstrap_main.spl` | `5c1b60249a5cec9255047da94b2df3ee1b0d1f49d0868084951004825f631` | `run_native_build_bootstrap` clears the closure flag and supplies `entry_path` through one array input and one scalar input. |
+
+No duplicate source fix is needed. The database's prior `closed` status was
+unsupported by this report and is corrected to
+`fix-implemented-verification-pending`.
+
+The bounded contract
+`test/01_unit/compiler/bootstrap/native_entry_closure_mode_contract_spec.spl`
+now reads the current owners, scopes wrapper assertions to the native build
+route, and rejects the historical location guard, pre-enabled closure flag,
+and whole-tree seed list independently. It also rejects a missing route.
+Previously it searched `driver.spl` for obsolete local variable names.
+
+An inline Python source-text replay extracted the seven literal predicates
+from the updated Simple helper and checked current source plus all four
+negative controls. Result: PASS, 0.04 s wall time, 16,990,208 bytes maximum
+RSS on macOS (`/usr/bin/time -l`). The three historical mutations each changed
+their target text and failed the contract. This is a bounded structural audit,
+not SSpec execution, compilation, a native behavior reproducer, or proof of
+the full Stage 4 resource envelope. The remaining broad July source-contract
+case in `stage4_smoke_gate_spec.spl` also contains obsolete ownership/name
+assertions and is not counted as passing evidence here.
+
+### Performance, memory, and SoSIX assessment
+
+This follow-up changes tests and tracking only. There is no production
+algorithm, allocation, process, file, environment, or host-interface change,
+so no new reciprocal runtime profile is warranted or claimed. The required
+paired Stage 4 elapsed/peak-RSS measurements remain pending and the historical
+GiB/minute values above are not treated as current results. No full bootstrap
+or compiler execution was attempted.
+
+The existing fix routes the same platform-neutral entry/closure data through
+the existing compiler and environment owners. This follow-up introduces no
+OS predicate, macOS API, POSIX/libc import, runtime primitive, or alternate app
+implementation. It therefore adds no SoSIX compatibility delta under the
+one-app/one-host-interface rule. This is a source-boundary audit, not a SoSIX
+execution claim. The old `copy_mem` blocker is historical evidence; its current
+resolution is not established by this lane.
