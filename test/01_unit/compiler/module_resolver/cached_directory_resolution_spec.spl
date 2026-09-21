@@ -1,0 +1,57 @@
+"""
+Repeated module imports retain the same directory/file metadata as their first
+resolution. Directory manifests govern exports and capability checks.
+"""
+# @req: REQ-COMPILER-MODULE-RESOLVER-001
+use std.spec.*
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write}
+use compiler.loader.module_resolver.types.{ModulePath, moduleresolver_new}
+use compiler.loader.module_resolver.resolution
+
+val CACHE_FIXTURE = "build/test-artifacts/cached_directory_resolution"
+
+fn cache_fixture(name: text, directory: bool) -> text:
+    val root = CACHE_FIXTURE + "/" + name
+    val _removed = dir_remove_all(root)
+    expect(dir_create_all(root + "/src/pkg")).to_equal(true)
+    val path = if directory: root + "/src/pkg/__init__.spl" else: root + "/src/pkg.spl"
+    expect(file_write(path, "# cache fixture\n")).to_equal(true)
+    root
+
+fn check_cached_module(name: text, directory: bool, explicit_init: bool):
+    val root = cache_fixture(name, directory)
+    var resolver = moduleresolver_new(root, root + "/src")
+    val segments = if explicit_init: ["crate", "pkg", "__init__"] else: ["crate", "pkg"]
+    val path = ModulePath(segments: segments)
+    val from_file = root + "/src/main.spl"
+    match resolver.resolve(path, from_file):
+        Ok(first):
+            expect(first.is_directory).to_equal(directory and not explicit_init)
+            match resolver.resolve(path, from_file):
+                Ok(cached):
+                    expect(cached.path).to_equal(first.path)
+                    expect(cached.module_path.segments).to_equal(first.module_path.segments)
+                    expect(cached.is_directory).to_equal(first.is_directory)
+                    expect(cached.has_manifest).to_equal(first.has_manifest)
+                    expect(resolver.cache_hit_count).to_equal(1)
+                Err(_): fail("cached module failed to resolve")
+        Err(_): fail("initial module failed to resolve")
+
+describe "module resolution cache preserves module kind":
+    it "keeps a directory module on a cache hit":
+        check_cached_module("directory", true, false)
+    it "keeps a regular file module on a cache hit":
+        check_cached_module("file", false, false)
+    it "keeps an explicitly imported __init__ file a file":
+        check_cached_module("explicit_init", true, true)
+    it "keeps a missing import as an error on a cache hit":
+        val root = cache_fixture("missing", false)
+        var resolver = moduleresolver_new(root, root + "/src")
+        val path = ModulePath(segments: ["crate", "missing"])
+        val from_file = root + "/src/main.spl"
+        match resolver.resolve(path, from_file):
+            Ok(_): fail("missing module unexpectedly resolved")
+            Err(_): expect(resolver.cache_hit_count).to_equal(0)
+        match resolver.resolve(path, from_file):
+            Ok(_): fail("cached missing module unexpectedly resolved")
+            Err(_): expect(resolver.cache_hit_count).to_equal(1)
