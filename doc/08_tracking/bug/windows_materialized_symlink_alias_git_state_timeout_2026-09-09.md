@@ -228,3 +228,23 @@ Git-state receipt; there is no Windows path here to reproduce
 `bootstrap_stage3_git_state` against. Leaving OPEN — BUGFIX-6 lane
 cannot progress this without a Windows host. No code change.
 
+## Windows Stage 3 native temporary directory failure, 2026-09-22
+
+The isolated `D:/wk-stage2-llvm-c-link` replay at HEAD
+`1c2f5a44413ea4279841f12ae97d6d4dbb01a475` reached the materialized
+Git-state consumer after reporting `created=0 already_ok=51`. Receipt
+`build/review/stage2-hir-replay-1c2f5a4-llvm23.receipt` records child exit 1;
+its log reports `stage3-materialized-consumer: Access to the path
+'C:\WINDOWS\0b4frt5s.tmp' is denied.` The shell had created a private
+`TMPDIR` work directory, but the PowerShell `Add-Type` compiler followed
+inherited native `TEMP`/`TMP` instead. The consumer now binds both native
+variables to its private work directory inside its subshell and removes its
+compiler scratch files on success or refusal while retaining the exit status.
+
+The Windows integration fixture exercises the public
+`bootstrap_stage3_materialized_git_state` with invalid inherited native temp,
+a writable `TMPDIR` containing spaces, unchanged parent environment,
+correct HEAD/dirty result, no surviving consumer work directory, and a
+malformed receipt refusal. This is a focused consumer repair; the full Stage 3
+bootstrap replay has not been repeated here. The focused Windows integration
+test completed with exit 0 and `bootstrap_stage3_git_state_materialized=true`.

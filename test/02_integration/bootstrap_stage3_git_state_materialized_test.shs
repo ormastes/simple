@@ -93,6 +93,35 @@ reject() {
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
 accept positive-file-dir-pending
+# Native Add-Type uses TEMP/TMP, not MSYS TMPDIR. Exercise the public entry
+# with unusable inherited native temp and a writable POSIX temp containing spaces.
+case_name=native-temp-isolation
+spaced_tmp="$tmp/writable temp"
+mkdir -p "$spaced_tmp"
+parent_temp=${TEMP-} parent_tmp=${TMP-} parent_tmpdir=$TMPDIR
+TEMP='C:\WINDOWS' TMP='C:\WINDOWS' TMPDIR="$spaced_tmp" \
+    bootstrap_stage3_materialized_git_state "$repo" "$tmp/native-temp.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"
+cmp "$tmp/positive-file-dir-pending.state" "$tmp/native-temp.state"
+grep -qx "head=$head" "$tmp/native-temp.state"
+grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/native-temp.state"
+test "${TEMP-}" = "$parent_temp" && test "${TMP-}" = "$parent_tmp" && test "$TMPDIR" = "$parent_tmpdir"
+test ! -s "$tmp/stdout"
+test -z "$(find "$spaced_tmp" -mindepth 1 -print -quit)"
+case_name=native-temp-unset
+(unset TEMP TMP; TMPDIR="$spaced_tmp" \
+    bootstrap_stage3_materialized_git_state "$repo" "$tmp/unset-temp.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error")
+cmp "$tmp/native-temp.state" "$tmp/unset-temp.state"
+test "${TEMP-}" = "$parent_temp" && test "${TMP-}" = "$parent_tmp"
+test -z "$(find "$spaced_tmp" -mindepth 1 -print -quit)"
+cp "$receipt" "$tmp/malformed-receipt"
+printf '\nmalformed=receipt\n' >>"$tmp/malformed-receipt"
+case_name=native-temp-malformed-receipt
+printf retained >"$tmp/malformed-temp.state"
+if TEMP='C:\WINDOWS' TMP='C:\WINDOWS' TMPDIR="$spaced_tmp" \
+    bootstrap_stage3_materialized_git_state "$repo" "$tmp/malformed-temp.state" "$tmp/malformed-receipt" >"$tmp/stdout" 2>"$tmp/error"; then exit 1; fi
+test "$(cat "$tmp/malformed-temp.state")" = retained
+test ! -s "$tmp/stdout"
+test -z "$(find "$spaced_tmp" -mindepth 1 -print -quit)"
 git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
 git -C "$repo/child-module" config core.autocrlf false
 accept clean-initialized-gitlink
