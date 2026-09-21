@@ -4,6 +4,12 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase-command-owner.XXXXXX")
 tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+loader_oracle=test/01_unit/compiler/loader/module_loader_relocation_spec.spl
+case "$(uname -s)" in
+  Darwin) loader_oracle=test/01_unit/compiler/loader/module_load_intent_spec.spl ;;
+esac
+PHASE_LOADER_ORACLE=$loader_oracle
+export PHASE_LOADER_ORACLE
 trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -28,7 +34,7 @@ chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
 : >"$tmp/executions"
 : >"$tmp/source/test/01_unit/compiler/fixture_spec.spl"
 : >"$tmp/source/test/01_unit/compiler/fixture_test.spl"
-: >"$tmp/source/test/01_unit/compiler/loader/module_loader_relocation_spec.spl"
+: >"$tmp/source/$loader_oracle"
 : >"$tmp/source/test/02_integration/app/mcp_stdio_integration_spec.spl"
 
 # Git-for-Windows reports NTFS paths as 755/644 even after chmod.  The
@@ -47,7 +53,7 @@ cat >"$tmp/tool" <<'EOF'
 #!/bin/sh
 printf '%s\t%s\t%s\n' "$(basename "$0")" "${SIMPLE_BINARY:-}" "$*" >>"$PHASE_EXECUTIONS"
 case "${1:-}" in
-  test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_relocation_spec.spl)
+  test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_relocation_spec.spl|test/01_unit/compiler/loader/module_load_intent_spec.spl)
     [ "${SIMPLE_BIN:-}" = "${SIMPLE_BINARY:-}" ] || exit 24 ;;
 esac
 [ -z "${SIMPLE_MCP_TEST_BINARY:-}" ] ||
@@ -92,7 +98,7 @@ fi
 case " $* " in
   *' --json '*)
     if [ "${PHASE_NO_FOCUSED_JSON:-0}" = 1 ] && \
-       [ "${1:-}" = test/01_unit/compiler/loader/module_loader_relocation_spec.spl ]; then
+       [ "${1:-}" = "${PHASE_LOADER_ORACLE:?}" ]; then
       :
     elif [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
@@ -179,9 +185,9 @@ grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/
   "$tmp/executions" || fail "interpreter test was not bound to the full CLI"
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "compile test was not bound to the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+$loader_oracle --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "loader interpreter oracle was not bound to the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+$loader_oracle --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "loader compile oracle was not bound to the full CLI"
 grep -Fq 'timing_scope=post-admission-excludes-git-lfs-checkout' "$tmp/work/summary.env" ||
   fail "post-admission timing scope was not retained"
