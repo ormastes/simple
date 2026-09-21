@@ -12,7 +12,8 @@ use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestFileResult, TestRunResult}
 use std.test_runner.test_runner_output.{test_run_result_json}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
+use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
+use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_list}
@@ -274,6 +275,23 @@ fn lock_holder_pid() -> text:
         return ""
     ((read_file_text(LIGHT_LOCK)).split("\n")[0]).trim()
 
+fn lock_environment_digest() -> text:
+    if not file_exists(LIGHT_LOCK):
+        return ""
+    val lines = read_file_text(LIGHT_LOCK).split("\n")
+    if lines.len() < 2:
+        return ""
+    lines[1].trim()
+
+fn lock_generation_identity() -> (text, text):
+    """Read PID and environment digest from one atomic lock snapshot."""
+    if not file_exists(LIGHT_LOCK):
+        return ("", "")
+    val lines = read_file_text(LIGHT_LOCK).split("\n")
+    if lines.len() < 2:
+        return ("", "")
+    (lines[0].trim(), lines[1].trim())
+
 fn report_stale_lock():
     """Announce a stale lock BEFORE self-healing it, naming path and remedy.
 
@@ -402,6 +420,9 @@ fn print_response(path: text, content: text) -> i64:
         return 1
     val code = content[0:newline].trim().to_i64() ?? 1
     val body = content[newline + 1:]
+    val client_result = light_response_client_result(code, body)
+    if client_result == LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT:
+        return client_result
     record_json_row(path, body)
     if body != "":
         print body
@@ -533,13 +554,15 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
 # within a single multi-path invocation: time_now_unix_micros() can repeat
 # across two fast iterations, and a colliding id would make the second request
 # overwrite the first one's response file.
-fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
+fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
+        environment_digest: text, daemon_generation: text) -> i64:
     val id = "{time_now_unix_micros()}-{getpid()}-{seq}.req"
     val req_path = "{LIGHT_REQ_DIR}/{id}"
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
     val expiry_micros = light_request_expiry_micros(time_now_unix_micros(), timeout_ms)
     file_delete(resp_path)
-    if not atomic_write_text(req_path, light_request_encode(path, expiry_micros)):
+    if not atomic_write_text(req_path, light_request_encode_v2(
+            path, expiry_micros, environment_digest, daemon_generation)):
         file_delete(req_path)
         file_delete(resp_path)
         print "ERROR: test daemon request write failed: {req_path}"
@@ -693,6 +716,9 @@ fn main() -> i64:
     val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
     val long_timeout_bypass = run.timeout_secs * 1000 > timeout_ms
     ensure_dirs()
+    # Capture once for this suite invocation. Hashing is not repeated per spec.
+    # A legacy daemon has no second lock line and therefore fails this check.
+    val caller_environment = test_daemon_environment_identity_v1()
     # The light daemon may be unable to start (e.g. it relies on runtime
     # methods the seed interpreter lacks). Degrade to direct execution rather
     # than refusing, but decide once for the whole batch.
@@ -761,6 +787,8 @@ fn main() -> i64:
     val daemon_binary = daemon_recorded_binary()
     val daemon_was_alive = daemon_lock_alive()
     val invoker_bypass = daemon_was_alive and daemon_binary != invoker
+    val environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
+        caller_environment, lock_environment_digest())
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
@@ -782,11 +810,15 @@ fn main() -> i64:
     # zero production call sites. This is that wiring.
     val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    var daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
+    var daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
     if daemon_ok:
         val active_daemon_binary = daemon_recorded_binary()
         if active_daemon_binary == "" or active_daemon_binary != candidate_binary:
             print "invoking-binary: test daemon identity is unavailable or mismatched; bypassing daemon so {candidate_binary} executes the spec"
+            daemon_ok = false
+        elif not test_daemon_environment_can_reuse_v1(
+                caller_environment, lock_environment_digest()):
+            print "environment-identity: newly started test daemon did not publish the caller environment identity; running directly"
             daemon_ok = false
     var binary = ""
     if not daemon_ok:
@@ -798,6 +830,8 @@ fn main() -> i64:
             print "test-env-gate: {env_gate_names} set; bypassing test daemon so the gate reaches the spec"
         elif invoker_bypass:
             print "invoking-binary: live test daemon runs {daemon_binary} but this process is {invoker}; bypassing daemon so the invoking binary executes the spec"
+        elif environment_bypass or not caller_environment.valid:
+            print "environment-identity: caller environment differs from the live daemon or could not be snapshotted; running directly"
         elif binary_override_bypass:
             print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
         elif backlog_bypass:
@@ -812,6 +846,19 @@ fn main() -> i64:
     var seq = 0
     for p in requested:
         var code = 0
+        var request_generation = ""
+        var request_environment_digest = ""
+        if daemon_ok:
+            # Revalidate every request. A replacement daemon during a
+            # multi-file suite cannot inherit the prior generation's approval.
+            val request_identity = lock_generation_identity()
+            request_generation = request_identity.0
+            request_environment_digest = request_identity.1
+            if not daemon_lock_alive() or not test_daemon_environment_can_reuse_v1(
+                    caller_environment, request_environment_digest):
+                print "environment-identity: daemon changed during suite; running remaining specs directly"
+                daemon_ok = false
+                binary = candidate_binary
         if daemon_ok:
             # timeout_ms above is computed once from run.timeout_secs (the CLI
             # default), before any per-file slow_it floor. Re-apply the floor
@@ -819,7 +866,13 @@ fn main() -> i64:
             # gets killed by the daemon's own deadline long before the inner
             # runner's self-extended 600s budget ever matters.
             val p_timeout_ms = light_request_timeout_ms_from_seconds(effective_timeout_secs(p, run.timeout_secs))
-            code = run_one_via_daemon(p, p_timeout_ms, seq)
+            code = run_one_via_daemon(p, p_timeout_ms, seq,
+                request_environment_digest, request_generation)
+            if code == LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT:
+                print "environment-identity: daemon generation changed before execution; rerouting directly"
+                daemon_ok = false
+                binary = candidate_binary
+                code = run_one_direct(binary, p, run.timeout_secs)
         else:
             code = run_one_direct(binary, p, run.timeout_secs)
         executed = executed + 1

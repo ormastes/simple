@@ -1,7 +1,38 @@
 use std.spec
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_DEFAULT_TIMEOUT_MS, LIGHT_REQUEST_MAX_TIMEOUT_MS, LIGHT_REQUEST_V1_HEADER, light_request_deadline, light_request_encode, light_request_expiry_micros, light_request_parse, light_request_timeout_ms_from_seconds}
+use app.test_daemon.light_protocol.{LIGHT_REQUEST_DEFAULT_TIMEOUT_MS, LIGHT_REQUEST_MAX_TIMEOUT_MS, LIGHT_REQUEST_V1_HEADER, LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_request_deadline, light_request_encode, light_request_encode_v2, light_request_expiry_micros, light_request_parse, light_request_parse_v2, light_request_matches_daemon_v2, light_response_client_result, light_request_timeout_ms_from_seconds}
 
 describe "test daemon light request protocol":
+    it "rejects another daemon generation or environment":
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val encoded = light_request_encode_v2(
+            "test/example\nbreak_spec.spl", 123, digest, "42")
+        val request = light_request_parse_v2(encoded)
+        expect(request.0).to_equal("test/example\nbreak_spec.spl")
+        expect(request.1).to_equal(123)
+        expect(light_request_matches_daemon_v2(
+            request.2, request.3, digest, "42")).to_equal(true)
+        expect(light_request_matches_daemon_v2(
+            request.2, request.3, digest, "43")).to_equal(false)
+        val other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(light_request_matches_daemon_v2(
+            request.2, request.3, other, "42")).to_equal(false)
+        val legacy = light_request_parse_v2(
+            light_request_encode("test/legacy_spec.spl", 123))
+        expect(light_request_matches_daemon_v2(
+            legacy.2, legacy.3, digest, "42")).to_equal(false)
+
+    it "reroutes only the typed daemon response and preserves worker exit 75":
+        expect(light_response_client_result(
+            LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE,
+            LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER)).to_equal(
+                LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT)
+        # An ordinary spec may exit 75 after side effects. It must remain 75 so
+        # the client never runs that spec a second time.
+        expect(light_response_client_result(75,
+            "SPEC FILE VERDICT: side_effect_spec outcome=ERROR executed=1 passed=0 failed=1 dropped=0")).to_equal(75)
+        expect(light_response_client_result(75,
+            LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER + "-spoof")).to_equal(75)
+
     it "round-trips a tagged deadline and newline-containing path":
         val timeout_ms = light_request_timeout_ms_from_seconds(3)
         val expiry_micros = light_request_expiry_micros(1000000, timeout_ms)

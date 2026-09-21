@@ -9,6 +9,20 @@ val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
 val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 2400000
 val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
 val LIGHT_REQUEST_V1_HEADER: text = "simple-test-daemon-request-v1"
+val LIGHT_REQUEST_V2_HEADER: text = "simple-test-daemon-request-v2"
+val LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE: i64 = 75
+val LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER: text =
+    "TEST_DAEMON_REROUTE_ENVIRONMENT"
+val LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT: i64 = -750075
+
+fn light_response_is_environment_reroute(code: i64, body: text) -> bool:
+    code == LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE and
+        body.trim() == LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER
+
+fn light_response_client_result(code: i64, body: text) -> i64:
+    if light_response_is_environment_reroute(code, body):
+        return LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT
+    code
 
 fn light_request_clamp_timeout_ms(timeout_ms: i64) -> i64:
     if timeout_ms <= 0:
@@ -29,6 +43,33 @@ fn light_request_expiry_micros(now_micros: i64, timeout_ms: i64) -> i64:
 
 fn light_request_encode(path: text, expiry_micros: i64) -> text:
     "{LIGHT_REQUEST_V1_HEADER}\n{expiry_micros}\n{path}"
+
+fn light_request_encode_v2(path: text, expiry_micros: i64,
+        environment_digest: text, daemon_generation: text) -> text:
+    "{LIGHT_REQUEST_V2_HEADER}\n{expiry_micros}\n{environment_digest}\n{daemon_generation}\n{path}"
+
+fn light_request_parse_v2(content: text) -> (text, i64, text, text):
+    val lines = content.split("\n")
+    if lines.len() == 0 or lines[0] != LIGHT_REQUEST_V2_HEADER:
+        val legacy = light_request_parse(content)
+        return (legacy.0, legacy.1, "", "")
+    if lines.len() < 5:
+        return ("", -1, "", "")
+    val parsed_expiry_micros = lines[1].trim().to_i64() ?? -1
+    val expiry_micros = if parsed_expiry_micros > 0: parsed_expiry_micros else: -1
+    var path_parts: [text] = []
+    var i = 4
+    while i < lines.len():
+        path_parts.push(lines[i])
+        i = i + 1
+    (path_parts.join("\n"), expiry_micros, lines[2].trim(), lines[3].trim())
+
+fn light_request_matches_daemon_v2(request_environment_digest: text,
+        request_generation: text, daemon_environment_digest: text,
+        daemon_generation: text) -> bool:
+    request_environment_digest.len() == 64 and
+        request_environment_digest == daemon_environment_digest and
+        request_generation != "" and request_generation == daemon_generation
 
 fn light_request_parse(content: text) -> (text, i64):
     val lines = content.split("\n")

@@ -3,7 +3,8 @@
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
-use app.test_daemon.light_protocol.{light_request_deadline, light_request_parse, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
+use app.test_daemon.light_protocol.{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
+use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_list}
@@ -110,7 +111,8 @@ fn basename(path: text) -> text:
         return path
     parts[parts.len() - 1]
 
-fn handle_request(binary: text, name: text):
+fn handle_request(binary: text, name: text, environment_digest: text,
+        daemon_generation: text):
     if not light_request_is_pollable(name):
         return
     val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
@@ -122,7 +124,7 @@ fn handle_request(binary: text, name: text):
     # test_runner_concurrent_runs_lose_output_2026-08-21.md.
     if not file_exists(req_path):
         return
-    val request = light_request_parse(read_file_text(req_path))
+    val request = light_request_parse_v2(read_file_text(req_path))
     val test_path = request.0
     if test_path == "":
         atomic_write_text(response_path(name), "1\nmissing test path")
@@ -152,6 +154,14 @@ fn handle_request(binary: text, name: text):
         # Could not claim it (another poller won the race, or the rename
         # failed). Do not execute: an unclaimed run is exactly the retry loop
         # this guard exists to prevent.
+        return
+    # Bind execution to the exact generation and environment approved by the
+    # client. A replacement daemon rejects queued work from its predecessor.
+    if lock_owner_pid() != daemon_generation or not light_request_matches_daemon_v2(
+            request.2, request.3, environment_digest, daemon_generation):
+        atomic_write_text(response_path(name),
+            "{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE}\n{LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER}")
+        file_delete(inflight_path)
         return
     val (stdout, stderr, code) = process_run_bounded(
         binary,
@@ -190,7 +200,7 @@ fn pid_is_live(pid: text) -> bool:
         return false
     file_exists("/proc/{pid}")
 
-fn claim_lane() -> bool:
+fn claim_lane(environment_digest: text) -> bool:
     """Take exclusive ownership of the lane, or report that someone else has it.
 
     `ensure_daemon()` in test_runner_client.spl is check-then-spawn with NO
@@ -210,14 +220,19 @@ fn claim_lane() -> bool:
     val incumbent = lock_owner_pid()
     if incumbent != "" and incumbent != my_pid and pid_is_live(incumbent):
         return false
-    if not atomic_write_text(LIGHT_LOCK, my_pid):
+    # PID and environment identity are one atomic generation record. A client
+    # can never pair a new PID with an old digest from a sibling side file.
+    if not atomic_write_text(LIGHT_LOCK, my_pid + "\n" + environment_digest):
         return false
     thread_sleep(200)
     lock_owner_pid() == my_pid
 
 fn main() -> i64:
     ensure_dirs()
-    if not claim_lane():
+    val environment = test_daemon_environment_identity_v1()
+    if not environment.valid:
+        return 1
+    if not claim_lane(environment.digest):
         return 0
     val binary = simple_binary()
     # Publish the served binary BEFORE accepting any request, so a client that
@@ -258,7 +273,7 @@ fn main() -> i64:
         var i = 0
         while i < entries.len():
             if light_request_is_pollable(entries[i]):
-                handle_request(binary, entries[i])
+                handle_request(binary, entries[i], environment.digest, "{getpid()}")
                 i = entries.len()
             else:
                 i = i + 1
