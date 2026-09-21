@@ -80,11 +80,16 @@ even though the later canonical unresolved-name/type diagnostic remains.
 
 The detailed attribution is now rendered only when
 `SIMPLE_BOOTSTRAP_DIAG=1`, matching the other re-export trace receipts. The
-policy is isolated in `compiler.hir.reexport_diagnostic_policy` so the default
-and enabled behavior can be exercised without a full bootstrap. A unit spec
-checks both states. A reciprocal resource spec checks zero rendered bytes and
-bounded live objects for 10,000/20,000 disabled misses, retains an explicitly
-enabled allocation control, and guards elapsed-time scaling.
+environment value is resolved once when each `HirLowering` context is created;
+failed chases read the cached boolean, avoiding both per-miss environment text
+allocation and message interpolation. The policy is isolated in
+`compiler.hir.reexport_diagnostic_policy` so the default and enabled behavior
+can be exercised without a full bootstrap. A unit spec checks both states. A
+reciprocal resource spec constructs the production lowering context, verifies
+its cached value against the production environment resolver, then checks zero
+rendered bytes and bounded live objects for 10,000/20,000 disabled misses. It
+retains an explicitly enabled allocation control and guards elapsed-time
+scaling.
 
 Verification on the admitted Stage 2 producer:
 

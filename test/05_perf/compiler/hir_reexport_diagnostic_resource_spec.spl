@@ -1,6 +1,7 @@
 """Memory and timing guard for disabled HIR re-export miss diagnostics."""
 use std.spec.{describe, it, expect, step}
 use compiler.hir.reexport_diagnostic_policy.{hir_reexport_chase_unresolved_receipt}
+use compiler.hir.hir_lowering.types.{HirLowering}
 
 extern fn rt_heap_registry_count() -> i64
 extern fn rt_time_now_nanos() -> i64
@@ -15,7 +16,7 @@ fn profile_receipts(count: i64, enabled: bool) -> [i64]:
     var i = 0
     while i < count:
         val receipt = hir_reexport_chase_unresolved_receipt(
-            if enabled: "1" else: "",
+            enabled,
             "lib.nogc_async_mut.io.platform_event", "Result", "Result",
             "src/lib/nogc_async_mut/io/platform_event.spl")
         rendered_bytes = rendered_bytes + receipt.len()
@@ -27,15 +28,19 @@ fn profile_receipts(count: i64, enabled: bool) -> [i64]:
 
 describe "HIR re-export diagnostic resource profile":
     it "keeps disabled miss receipts bounded without a timing regression":
+        step("Resolve the production environment policy once in a lowering context")
+        val lowering = HirLowering.new()
+        val production_enabled = lowering.reexport_chase_unresolved_diag_enabled
         step("Warm disabled and explicitly enabled diagnostic paths")
-        profile_receipts(8, false)
+        profile_receipts(8, production_enabled)
         profile_receipts(8, true)
         step("Measure the Stage 3 default path and an enabled negative control")
-        val small = profile_receipts(10000, false)
-        val large = profile_receipts(20000, false)
+        val small = profile_receipts(10000, production_enabled)
+        val large = profile_receipts(20000, production_enabled)
         val enabled = profile_receipts(2000, true)
         print "[hir-reexport-diagnostic] small={small} large={large} enabled={enabled} units=ns,objects,bytes"
         step("Require no rendered default output and bounded live allocations")
+        expect(production_enabled).to_equal(false)
         expect(small[2]).to_equal(0)
         expect(large[2]).to_equal(0)
         expect(enabled[2]).to_be_greater_than(500000)
