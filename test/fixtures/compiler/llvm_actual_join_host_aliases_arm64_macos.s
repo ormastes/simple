@@ -16,7 +16,7 @@ _RtHalIsolatedHostPort.cancel_and_reap_fn:
     ret
 .globl _RtHalIsolatedHostPort.close_fn
 _RtHalIsolatedHostPort.close_fn:
-    b _build__test__llvm_actual_join_close_path__arena_actual_copy__fixture_close_fails
+    b _fixture_close_probe
 .globl _RtHalIsolatedHostPort.spawn_compare_exact_fn
 _RtHalIsolatedHostPort.spawn_compare_exact_fn:
     mov x0, #73
