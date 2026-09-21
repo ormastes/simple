@@ -23,7 +23,7 @@ a fail-closed error path.
 | Windows GNU Cargo target or MinGW/GCC driver under that target | deny `W-WIN-CC-001` |
 | LLVM 23.1.x `clang-cl.exe` under the default local root with a fail-closed exact version predicate | no finding |
 | PR1216 CI workspace root and another relocated official 23.1.x root with root-bound driver, exact predicate, and attestation | no finding |
-| Unknown alias, missing version validation, or a bare `--version` token | deny `W-WIN-CC-001` |
+| Unknown alias, missing compiler-version validation, unrelated 23.1.x predicate, or a bare `--version` token | deny `W-WIN-CC-001` |
 | Cargo MSVC `linker = "link.exe"` | no finding; this is a Rust linker setting |
 | Linux Cargo settings, comments, documentation, vendor files, and Linux paths inside an MSVC-named checkout | no finding |
 | Current Windows shell, CMake, and Cargo inputs | no finding |
