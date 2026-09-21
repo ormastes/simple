@@ -72,9 +72,17 @@ jobs:
           PR: ${{ inputs.pr_number }}
         run: |
           set -eu
-          decision=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json reviewDecision -q '.reviewDecision // ""')
-          if [ "$decision" != "APPROVED" ]; then
-            echo "FAIL — reviewDecision is '${decision:-<none>}', not APPROVED" >&2
+          # NOTE: do NOT check `reviewDecision` here. It reports the PR's review
+          # REQUIREMENT state, and `spipe-vcs-v3-main` sets `approving_reviews: 0`
+          # — with no reviews required GitHub returns null no matter how many
+          # approvals exist. Checking it made a successful approval report FAIL
+          # (run 35562083135: the review was recorded as
+          # `github-actions[bot] | APPROVED` while the step failed on
+          # "reviewDecision is '<none>'"). The reviews list is the real signal.
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\")] | last | .state // \"\"")
+          if [ "$latest" != "APPROVED" ]; then
+            echo "FAIL — latest github-actions[bot] review is '${latest:-<none>}', not APPROVED" >&2
             exit 1
           fi
-          echo "PASS — PR #$PR reviewDecision=APPROVED"
+          echo "PASS — PR #$PR approved by github-actions[bot]"
