@@ -1,0 +1,54 @@
+#!/bin/sh
+# Compile the D3D11 lifecycle owner with the pinned Windows C toolchain and
+# retain identity evidence beside its object. This is deliberately host-gated.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+TOOL=${DIRECTX_CLANG_CL:?set DIRECTX_CLANG_CL to the LLVM 23.1.1 clang-cl path}
+OUT=${DIRECTX_D3D11_LIFECYCLE_EVIDENCE:-"$ROOT/build/windows-directx-d3d11-lifecycle"}
+SRC="$ROOT/src/runtime/runtime_directx_core.c"
+HARNESS="$ROOT/src/runtime/tests/directx_submission_lifecycle_harness.c"
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) echo "FAIL: Windows host required for D3D11 event-query evidence" >&2; exit 2 ;;
+esac
+
+[ -x "$TOOL" ] || { echo "FAIL: clang-cl is not executable: $TOOL" >&2; exit 2; }
+VERSION=$($TOOL --version | sed -n '1p')
+printf '%s\n' "$VERSION" | grep -Eq '([Cc]lang version|LLVM version) 23\.1\.1([^0-9]|$)' || {
+    echo "FAIL: require LLVM 23.1.1, got: $VERSION" >&2
+    exit 2
+}
+
+mkdir -p "$OUT"
+if command -v sha256sum >/dev/null 2>&1; then
+    TOOL_HASH=$(sha256sum "$TOOL" | awk '{print $1}')
+    SOURCE_HASH=$(sha256sum "$SRC" | awk '{print $1}')
+    HARNESS_HASH=$(sha256sum "$HARNESS" | awk '{print $1}')
+else
+    TOOL_HASH=$(certutil -hashfile "$TOOL" SHA256 | tr -d '\r' | sed -n '2p' | tr -d ' ')
+    SOURCE_HASH=$(certutil -hashfile "$SRC" SHA256 | tr -d '\r' | sed -n '2p' | tr -d ' ')
+    HARNESS_HASH=$(certutil -hashfile "$HARNESS" SHA256 | tr -d '\r' | sed -n '2p' | tr -d ' ')
+fi
+"$TOOL" /nologo /std:c11 /W4 /WX "$SRC" "$HARNESS" "/Fe$OUT/directx_submission_lifecycle_harness.exe" /link d3d11.lib dxgi.lib
+"$OUT/directx_submission_lifecycle_harness.exe"
+if command -v sha256sum >/dev/null 2>&1; then
+    EXE_HASH=$(sha256sum "$OUT/directx_submission_lifecycle_harness.exe" | awk '{print $1}')
+else
+    EXE_HASH=$(certutil -hashfile "$OUT/directx_submission_lifecycle_harness.exe" SHA256 | tr -d '\r' | sed -n '2p' | tr -d ' ')
+fi
+{
+    printf 'tool_path=%s\n' "$TOOL"
+    printf 'tool_version=%s\n' "$VERSION"
+    printf 'tool_sha256=%s\n' "$TOOL_HASH"
+    printf 'compile_flags=/nologo /std:c11 /W4 /WX\n'
+    printf 'source=src/runtime/runtime_directx_core.c\n'
+    printf 'harness=src/runtime/tests/directx_submission_lifecycle_harness.c\n'
+    printf 'source_sha256=%s\n' "$SOURCE_HASH"
+    printf 'harness_sha256=%s\n' "$HARNESS_HASH"
+    printf 'exe_sha256=%s\n' "$EXE_HASH"
+    printf 'compile_link_command=%s\n' 'clang-cl /nologo /std:c11 /W4 /WX runtime_directx_core.c directx_submission_lifecycle_harness.c /Fe... /link d3d11.lib dxgi.lib'
+    printf 'harness_exit=0\n'
+} > "$OUT/toolchain-receipt.txt"
+printf 'PASS: %s\n' "$OUT/toolchain-receipt.txt"

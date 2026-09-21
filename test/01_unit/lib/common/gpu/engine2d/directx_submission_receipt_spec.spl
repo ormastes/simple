@@ -1,0 +1,56 @@
+# @cover src/lib/common/gpu/engine2d/directx_submission_receipt.spl 100%
+# @tag: unit, gpu, directx, scheduler, lifecycle
+"""Locks the scheduler-visible DirectX submission lifecycle on every host."""
+
+use std.spec.*
+use std.common.gpu.engine2d.directx_submission_receipt.*
+use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{directx_submission_submit, directx_submission_complete, directx_submission_retire}
+
+describe "DirectX submission receipt lifecycle":
+    it "advances only after a native event-query observation and retires terminally":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Publish a successful submission receipt without claiming GPU completion")
+        val submitted = directx_submission_receipt_submitted(41)
+        expect(submitted.submission_id).to_equal(41)
+        expect(submitted.phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)
+        expect(submitted.gpu_finished_observed).to_be(false)
+        step("Ignore an unready poll, then accept a native event-query completion")
+        val pending = directx_submission_receipt_poll(submitted, false)
+        expect(pending.phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)
+        val finished = directx_submission_receipt_poll(pending, true)
+        expect(finished.phase).to_equal(DIRECTX_SUBMISSION_PHASE_GPU_FINISHED)
+        expect(finished.gpu_finished_observed).to_be(true)
+        step("A scheduler acknowledgement completes, and a native release retires, the same submission")
+        val completed = directx_submission_receipt_complete(finished, true)
+        expect(completed.phase).to_equal(DIRECTX_SUBMISSION_PHASE_COMPLETED)
+        val retired = directx_submission_receipt_retire(completed, true)
+        expect(retired.phase).to_equal(DIRECTX_SUBMISSION_PHASE_RETIRED)
+        expect(retired.terminal).to_be(true)
+        expect(directx_submission_receipt_retire(retired, true).phase).to_equal(DIRECTX_SUBMISSION_PHASE_RETIRED)
+
+    it "rejects fabricated and out-of-order completion evidence":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Reject a zero native submission id")
+        val rejected = directx_submission_receipt_submitted(0)
+        expect(rejected.phase).to_equal(DIRECTX_SUBMISSION_PHASE_REJECTED)
+        expect(rejected.terminal).to_be(true)
+        step("Do not complete or retire before the D3D11 event query has signalled")
+        val submitted = directx_submission_receipt_submitted(42)
+        expect(directx_submission_receipt_complete(submitted, true).phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)
+        expect(directx_submission_receipt_retire(submitted, true).phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)
+        expect(directx_submission_receipt_complete(directx_submission_receipt_poll(submitted, false), true).phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)
+
+    it "exposes the scheduler receipt at the SFFI boundary without invoking an invalid native submission":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Submit invalid dimensions through the DirectX facade")
+        val rejected = directx_submission_submit(0, 1, [])
+        expect(rejected.phase).to_equal(DIRECTX_SUBMISSION_PHASE_REJECTED)
+        expect(rejected.terminal).to_be(true)
+
+    it "requires a visible facade poll before native completion or retirement":
+        # @req REQ-GPU-SCHED-LIFE-001
+        step("Give the facade a submitted receipt whose event query has not been published as finished")
+        val submitted = directx_submission_receipt_submitted(73)
+        step("Completion and retirement must leave it submitted without calling the native transition")
+        expect(directx_submission_complete(submitted).phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)
+        expect(directx_submission_retire(submitted).phase).to_equal(DIRECTX_SUBMISSION_PHASE_SUBMITTED)

@@ -2,10 +2,16 @@
 """Canonical two-hook DirectX frame/readback facade."""
 
 use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_read_i32, raw_write_i64}
+use std.common.gpu.engine2d.directx_submission_receipt.{DirectXSubmissionReceipt, directx_submission_receipt_submitted, directx_submission_receipt_native_failure, directx_submission_receipt_reconcile_native_phase}
 
 #[runtime_intrinsics]
 extern fn rt_directx_execute_readback_checked(width: i64, height: i64, words_ptr: i64, words_len: i64, out_ptr: i64, out_len: i64) -> i64
 extern fn rt_directx_hardware_adapter_identity() -> i64
+extern fn rt_directx_submission_submit(width: i64, height: i64, words_ptr: i64, words_len: i64) -> i64
+extern fn rt_directx_submission_poll(submission_id: i64) -> i64
+extern fn rt_directx_submission_complete(submission_id: i64) -> i64
+extern fn rt_directx_submission_retire(submission_id: i64) -> i64
+extern fn rt_directx_submission_abandon(submission_id: i64) -> i64
 
 class DirectXCheckedReadback:
     status: i64
@@ -64,5 +70,47 @@ fn directx_hardware_adapter_identity() -> i64:
     val identity = rt_directx_hardware_adapter_identity()
     if identity > 0: identity else: 0
 
+fn directx_submission_submit(width: i32, height: i32, words: [u32]) -> DirectXSubmissionReceipt:
+    if width <= 0 or height <= 0 or words.len() < 4:
+        return directx_submission_receipt_submitted(0)
+    val bytes = words.len().to_i64() * 8
+    val ptr = raw_alloc(bytes)
+    if ptr == 0:
+        return directx_submission_receipt_submitted(0)
+    var i = 0
+    while i < words.len():
+        raw_write_i64(ptr, i.to_i64() * 8, words[i].to_i64())
+        i = i + 1
+    val submission_id = rt_directx_submission_submit(width.to_i64(), height.to_i64(), ptr, words.len().to_i64())
+    raw_free(ptr, bytes)
+    directx_submission_receipt_submitted(submission_id)
+
+fn directx_submission_poll(receipt: DirectXSubmissionReceipt) -> DirectXSubmissionReceipt:
+    if receipt.terminal:
+        return receipt
+    val phase = rt_directx_submission_poll(receipt.submission_id)
+    directx_submission_receipt_reconcile_native_phase(receipt, phase)
+
+fn directx_submission_complete(receipt: DirectXSubmissionReceipt) -> DirectXSubmissionReceipt:
+    # The public scheduler must observe gpu_finished through poll before it can
+    # ask native code to complete. This prevents a native poll inside complete
+    # from collapsing submitted -> gpu_finished -> completed behind the receipt.
+    if receipt.phase != "gpu_finished":
+        return receipt
+    directx_submission_receipt_reconcile_native_phase(receipt, rt_directx_submission_complete(receipt.submission_id))
+
+fn directx_submission_retire(receipt: DirectXSubmissionReceipt) -> DirectXSubmissionReceipt:
+    if receipt.phase != "completed":
+        return receipt
+    directx_submission_receipt_reconcile_native_phase(receipt, rt_directx_submission_retire(receipt.submission_id))
+
+fn directx_submission_abandon(receipt: DirectXSubmissionReceipt) -> DirectXSubmissionReceipt:
+    if receipt.terminal:
+        return receipt
+    if rt_directx_submission_abandon(receipt.submission_id) != 1:
+        return directx_submission_receipt_native_failure(receipt)
+    directx_submission_receipt_native_failure(receipt)
+
 export DirectXCheckedReadback
 export directx_execute_readback_checked, directx_hardware_adapter_identity
+export directx_submission_submit, directx_submission_poll, directx_submission_complete, directx_submission_retire, directx_submission_abandon
