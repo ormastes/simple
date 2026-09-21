@@ -84,4 +84,26 @@ fixture
 stat_record 200 100 200 200 0
 stat_record 201 200 200 201 0
 expect_unavailable 'empty sample'
-echo 'PASS: Windows RSS page units, group selection, deduplication, identity and zombie controls'
+
+# Exercise the production measured wrapper, not just its sampler. An
+# asynchronous list receives /dev/null in a noninteractive POSIX shell unless
+# the caller stream is saved before the wrapper itself is backgrounded.
+awk '/^run_measured_timeout\(\)/ { copy=1 } copy { print } copy && /^}/ { exit }' "$runner" >"$tmp/measured.sh"
+[ -s "$tmp/measured.sh" ] || fail 'missing production measured wrapper'
+. "$tmp/measured.sh"
+mkdir -p "$tmp/source/scripts/bootstrap"
+cat >"$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+"$@"
+EOF
+chmod +x "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
+source_root=$tmp/source
+rss_time=
+rss_measurement=proc-group-rss-kib
+payload='phase2 measured stdin parity'
+printf '%s\n' "$payload" | run_measured_timeout "$tmp/metric" 5 1 sh -c 'cat >"$1"; sleep 1' sh "$tmp/stdin"
+[ "$(cat "$tmp/stdin")" = "$payload" ] || fail 'measured wrapper replaced caller stdin with EOF'
+[ -s "$tmp/metric" ] || fail 'measured wrapper omitted its RSS verdict'
+
+echo 'PASS: Windows RSS units, group identity, zombie controls, and measured stdin parity'
