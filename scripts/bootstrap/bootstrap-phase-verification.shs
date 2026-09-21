@@ -206,34 +206,61 @@ fi
 } >>"$summary"
 
 rss_time=""
+rss_time_style=none
 rss_probe="$tmp/phase-verification-rss-probe"
 if [ -x /usr/bin/time ] &&
    /usr/bin/time -f '%M' -o "$rss_probe" true >/dev/null 2>&1 &&
    grep -Eq '^[1-9][0-9]*$' "$rss_probe"; then
   rss_time=/usr/bin/time
+  rss_time_style=gnu
+elif [ -x /usr/bin/time ] &&
+     LC_ALL=C /usr/bin/time -l -o "$rss_probe" true >/dev/null 2>&1 &&
+     grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]+maximum resident set size[[:space:]]*$' "$rss_probe"; then
+  rss_time=/usr/bin/time
+  rss_time_style=darwin
 fi
 rm -f "$rss_probe"
-echo "max_rss_measurement=$([ -n "$rss_time" ] && echo gnu-time-rusage-kib || echo unavailable)" >>"$summary"
+case "$rss_time_style" in
+  gnu) rss_measurement=gnu-time-rusage-kib ;;
+  darwin) rss_measurement=darwin-time-rusage-bytes-normalized-kib ;;
+  *) rss_measurement=unavailable ;;
+esac
+echo "max_rss_measurement=$rss_measurement" >>"$summary"
 
 run_measured_timeout() {
   metric_file=$1
   measured_timeout=$2
   measured_grace=$3
   shift 3
-  if [ -n "$rss_time" ]; then
-    "$rss_time" -f '%M' -o "$metric_file" \
+  case "$rss_time_style" in
+    gnu)
+      "$rss_time" -f '%M' -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    darwin)
+      LC_ALL=C "$rss_time" -l -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    *)
+      printf 'unavailable\n' >"$metric_file"
       "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@"
-  else
-    printf 'unavailable\n' >"$metric_file"
-    "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@"
-  fi
+        "$measured_timeout" "$measured_grace" "$@" ;;
+  esac
 }
 
 read_max_rss_kib() {
   metric_file=$1
-  metric=$(tail -n 1 "$metric_file" 2>/dev/null || :)
+  [ -f "$metric_file" ] || {
+    printf 'unavailable\n'
+    return 0
+  }
+  case "$rss_time_style" in
+    darwin)
+      metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        printf "%.0f\n", int(($1 + 1023) / 1024)
+      }' "$metric_file" | tail -n 1) ;;
+    *) metric=$(tail -n 1 "$metric_file" 2>/dev/null || :) ;;
+  esac
   case "$metric" in
     [1-9][0-9]*) printf '%s\n' "$metric" ;;
     *) printf 'unavailable\n' ;;
