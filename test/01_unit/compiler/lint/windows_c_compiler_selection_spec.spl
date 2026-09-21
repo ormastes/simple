@@ -46,10 +46,98 @@ describe "windows_c_compiler_selection lint rule":
         val shell = "SIMPLE_LLVM_WIN_ROOT_23=/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
             "_simple_win_cc=$SIMPLE_LLVM_WIN_ROOT_23/bin/clang-cl.exe\n" +
             "if ! _simple_win_version=$(\"$_simple_win_cc\" --version); then exit 1; fi\n" +
-            "_simple_win_version=$(printf '%s' \"$_simple_win_version\" | sed -n 's/^clang version \\(23\\.1\\.[0-9][0-9]*\\).*$/\\1/p')\n" +
+            "_simple_win_version=$(printf '%s' \"$_simple_win_version\" | sed -n '1s/^clang version \\(23\\.1\\.[0-9][0-9]*\\)\\([[:space:]].*\\)\\{0,1\\}$/\\1/p')\n" +
             "if [ -z \"$_simple_win_version\" ]; then exit 1; fi\n" +
             "SIMPLE_WINDOWS_C_COMPILER_VERSION=$_simple_win_version\nCC=$_simple_win_cc\n"
         expect(findings_for("scripts/setup/windows-msvc-build.shs", shell).len()).to_equal(0)
+
+    it "accepts canonical target alias tracing through validated CC":
+        val shell = "SIMPLE_LLVM_WIN_ROOT_23=/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
+            "_simple_win_cc=$SIMPLE_LLVM_WIN_ROOT_23/bin/clang-cl.exe\n" +
+            "if ! _simple_win_version=$(\"$_simple_win_cc\" --version); then exit 1; fi\n" +
+            "_simple_win_version=$(printf '%s' \"$_simple_win_version\" | sed -n 's/^clang version \\(23\\.1\\.[0-9][0-9]*\\)\\([[:space:]].*\\)\\{0,1\\}$/\\1/p')\n" +
+            "if [ -z \"$_simple_win_version\" ]; then exit 1; fi\n" +
+            "CC=\"$_simple_win_cc\"\nCC_x86_64_pc_windows_msvc=\"$CC\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", shell).len()).to_equal(0)
+
+    it "rejects diagnostic-only version derivation":
+        val source = "$env:LLVM_ROOT = 'D:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$version = & $tool --version\n" +
+            "$diagnostic = \"compiler output: $version\"\n" +
+            "if ($LASTEXITCODE -ne 0 -or $diagnostic -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)') { throw 'invalid' }\n" +
+            "$env:CC = \"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", source).len()).to_equal(1)
+
+    it "rejects fabricated array joins containing queried output":
+        val source = "$env:LLVM_ROOT = 'D:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$version = & $tool --version\n" +
+            "$proof = @('clang version 23.1.1', $version) -join \"`n\"\n" +
+            "$check = @{ Tool = 'clang-cl.exe'; Pattern = 'clang version 23\\.1\\.[0-9]+(?:\\s|$)' }\n" +
+            "if ($LASTEXITCODE -ne 0 -or $proof -notmatch $check.Pattern) { throw 'invalid' }\n" +
+            "$env:CC = \"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", source).len()).to_equal(1)
+
+    it "rejects a fabricated prefix joined with queried output":
+        val source = "$env:LLVM_ROOT = 'D:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$version = & $tool --version\n" +
+            "$prefix = 'clang version 23.1.1'\n" +
+            "$proof = \"$prefix $version\" -join \"`n\"\n" +
+            "if ($LASTEXITCODE -ne 0 -or $proof -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)') { throw 'invalid' }\n" +
+            "$env:CC = \"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", source).len()).to_equal(1)
+
+    it "rejects an exact pattern present only in diagnostic text":
+        val source = "$env:LLVM_ROOT = 'D:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$version = & $tool --version\n" +
+            "if ($LASTEXITCODE -ne 0 -or $version -notmatch 'clang') { throw 'expected clang version 23\\.1\\.[0-9]+(?:\\s|$)' }\n" +
+            "$env:CC = \"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", source).len()).to_equal(1)
+
+    it "accepts a real transformation of queried compiler output":
+        val source = "$env:LLVM_ROOT = 'D:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$versionLines = @(& $tool --version 2>&1)\n" +
+            "$version = $versionLines -join \"`n\"\n" +
+            "if ($LASTEXITCODE -ne 0 -or $version -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)') { throw 'invalid' }\n" +
+            "$env:CC = \"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", source).len()).to_equal(0)
+
+    it "accepts the escaped CMake query and family boundary":
+        val cmake = "set(SIMPLE_WINDOWS_LLVM_ROOT \"C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\")\n" +
+            "set(CMAKE_C_COMPILER \"${SIMPLE_WINDOWS_LLVM_ROOT}/bin/clang-cl.exe\")\n" +
+            "execute_process(COMMAND \"${CMAKE_C_COMPILER}\" --version\n" +
+            " RESULT_VARIABLE status\n OUTPUT_VARIABLE version)\n" +
+            "if(NOT status EQUAL 0 OR NOT version MATCHES \"^clang version 23\\\\.1\\\\.[0-9]+([ \\r\\n]|$)\")\n" +
+            " message(FATAL_ERROR \"invalid\")\nendif()\n"
+        expect(findings_for(
+            "src/runtime/cmake/toolchains/windows-test.cmake", cmake).len()).to_equal(0)
+
+    it "rejects quoted target GITHUB_ENV forbidden exports":
+        expect(findings_for(
+            ".github/workflows/windows-build.yml",
+            "echo \"CC_x86_64_pc_windows_msvc=gcc\" >> \"$GITHUB_ENV\"\n").len()).to_equal(1)
+        expect(findings_for(
+            ".github/workflows/windows-build.yml",
+            "echo 'CXX_x86_64_pc_windows_msvc=clang++' >> \"$GITHUB_ENV\"\n").len()).to_equal(1)
+
+    it "rejects wildcard dots and missing LLVM family token boundaries":
+        val prefix = "$env:LLVM_ROOT='D:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc'\n" +
+            "$tool=Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n$version=& $tool --version\n"
+        val suffix = "\nif ($LASTEXITCODE -ne 0) { throw 'invalid' }\n$env:CC=\"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        val wildcard = prefix + "if ($version -notmatch 'clang version 23.1.[0-9]+(?:\\s|$)') { throw 'invalid' }" + suffix
+        val bad_prefix = prefix + "if ($version -notmatch 'clang version 123\\.1\\.[0-9]+(?:\\s|$)') { throw 'invalid' }" + suffix
+        val bad_suffix = prefix + "if ($version -notmatch 'clang version 23\\.1\\.[0-9]+bad') { throw 'invalid' }" + suffix
+        val alternate = prefix + "if ($version -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)|clang version 18\\..*') { throw 'invalid' }" + suffix
+        val doubled_ps = prefix + "if ($version -notmatch 'clang version 23\\\\.1\\\\.[0-9]+(?:\\s|$)') { throw 'invalid' }" + suffix
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", wildcard).len()).to_equal(1)
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", bad_prefix).len()).to_equal(1)
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", bad_suffix).len()).to_equal(1)
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", alternate).len()).to_equal(1)
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", doubled_ps).len()).to_equal(1)
 
     it "accepts the PR1216 CI workspace root with exact predicate and attestation":
         val powershell = "$env:LLVM_ROOT = 'D:/a/simple/simple/.toolchains/llvm-23.1.1'\n" +

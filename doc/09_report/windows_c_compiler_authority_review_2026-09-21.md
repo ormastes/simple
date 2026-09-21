@@ -1,6 +1,6 @@
 # Windows C compiler authority review
 
-STATUS: HOLD for complete admission. The shell/native portion has focused passing evidence, but exact-head `1d744dd3016dc72d8b69ec5817d059120ba279fb` retains four lint P1 findings; self-hosted verification also remains pending. The independent report SHA-256 is `517cb50dfbc00a4b7e3f4edbc6d5354a41efa4a7d140e820bfb6e0b3bd5f2234`.
+STATUS: HOLD for complete admission. A scoped continuation fixes the four lint P1 findings and the shell/native contract passes, while exact-head review and self-hosted verification remain pending.
 
 ## Current change
 
@@ -33,6 +33,35 @@ The final permitted exact-head review found four P1 defects:
 - Regex wildcard and missing-boundary acceptance: removing escapes before validation loses the distinction between a literal dot and wildcard, while `[0-9]` alone admits patterns without the required family token boundary.
 
 A fresh scoped correction must retain the production shell as a positive, then add negative regressions for a diagnostic/metadata derivative, quoted target GITHUB_ENV forbidden export, wildcard family pattern, and missing family boundary. It must also retain forbidden target-specific CC/CXX and forged unrelated metadata coverage. The production implementation is frozen at the three-cycle cap; no P0/P1-clear claim is made.
+
+The scoped continuation canonicalizes shell and PowerShell symbol references,
+traces target `CC` through a directly validated `CC` assignment, restricts
+derived evidence to actual output transformations, recognizes quoted target
+exports, and preserves regex escapes while requiring both patch digits and the
+family token boundary. Its executable spec adds each requested negative plus
+canonical shell and real transformation positives. The focused native shell
+contract reports PASS for all five cases. The attempted SSpec invocation found
+that the available `bin/release` executable identifies itself as the Rust seed
+and then failed to spawn its test child; this is not admission evidence and the
+self-hosted test remains pending until Stage 2 exists.
+
+The first exact-head continuation review reported P0=0/P1=3: escape removal
+before validation rejected legitimate predicates, the transform heuristic
+trusted fabricated array joins, and an added regex alternative could broaden a
+mapped pattern. Review receipt:
+`build/review/astra_llvm_authority_exact_head.md`, SHA-256
+`4D989115F8DEC729F965E62B2AC546FA3DB14FC6BBBFA937762FE567E77E2CCE`.
+The second focused correction preserves and normalizes escapes, supports the
+canonical sed capture and CMake boundary forms, admits only pure join/sed
+transformations, and rejects regex alternatives outside the permitted boundary.
+
+The second exact-head review retained two P1 findings: a fabricated interpolated
+prefix could satisfy the join heuristic, and a canonical regex in throw text
+could validate a weak active predicate. The final permitted cycle parses the
+complete join right hand side, checks only the active predicate operand, and
+keeps CMake escape decoding separate from raw PowerShell regex semantics. Its
+focused native shell contract again passes all five executable cases. A fourth
+fix cycle is prohibited; this candidate is frozen for final exact-head review.
 
 This follow-up is a fresh scoped continuation of the prior review and retains the three-cycle guard. An independent exact-head review is required before the draft PR can claim the P1 is clear.
 

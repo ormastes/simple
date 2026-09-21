@@ -24,6 +24,8 @@ a fail-closed error path.
 | LLVM 23.1.x `clang-cl.exe` under the default local root with a fail-closed exact version predicate | no finding |
 | PR1216 CI workspace root with its clang-cl pattern mapping, and another relocated official 23.1.x root with a direct exact predicate | no finding |
 | Unknown alias, missing compiler-version validation, exact predicate over unrelated text, or a bare `--version` token | deny `W-WIN-CC-001` |
+| Canonical target `CC` alias through validated `CC`, and a real join/sed transformation of queried output | no finding |
+| Diagnostic-only derived text, fabricated array or interpolated-prefix join, exact regex only in a diagnostic, quoted target `GITHUB_ENV` export, wildcard or doubled PowerShell dots, `123.1.x`, `23.1.xbad`, or an added LLVM 18 regex alternative | deny `W-WIN-CC-001` |
 | Cargo MSVC `linker = "link.exe"` | no finding; this is a Rust linker setting |
 | Linux Cargo settings, comments, documentation, vendor files, and Linux paths inside an MSVC-named checkout | no finding |
 | Current Windows shell, CMake, and Cargo inputs | no finding |
@@ -39,8 +41,5 @@ The executable source is
   no self-hosted runner available.
 - No pass or fail result is claimed here. The Rust seed fallback is prohibited
   for this check.
-- Exact-head static review is HOLD with P0=0/P1=4: canonical target alias
-  tracing, metadata/diagnostic-only predicate binding, quoted target
-  `GITHUB_ENV` export classification, and literal-dot/family-boundary regex
-  validation need a fresh scoped correction. Independent report SHA-256:
-  `517cb50dfbc00a4b7e3f4edbc6d5354a41efa4a7d140e820bfb6e0b3bd5f2234`.
+- The focused native shell contract passes all five executable selection cases.
+- Exact-head static review is pending for the scoped four-finding correction.

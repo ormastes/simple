@@ -63,7 +63,8 @@ fn is_cxx_selection(line: text) -> bool:
         lower.starts_with("cxx_") or lower.starts_with("set(cmake_cxx_compiler ") or
         lower.starts_with("cmake_cxx_compiler=") or
         lower.contains("-dcmake_cxx_compiler=") or
-        lower.contains("\"cxx=") or lower.contains("'cxx=")
+        lower.contains("\"cxx=") or lower.contains("'cxx=") or
+        lower.contains("\"cxx_") or lower.contains("'cxx_")
 
 fn is_c_compiler_selection(line: text) -> bool:
     val lower = line.lower()
@@ -78,7 +79,8 @@ fn is_c_compiler_selection(line: text) -> bool:
         lower.starts_with("c_compiler:") or lower.starts_with("set(cmake_c_compiler ") or
         lower.starts_with("cmake_c_compiler=") or
         lower.contains("-dcmake_c_compiler=") or lower.starts_with("compiler:") or
-        lower.contains("\"cc=") or lower.contains("'cc=")
+        lower.contains("\"cc=") or lower.contains("'cc=") or
+        lower.contains("\"cc_") or lower.contains("'cc_")
 
 fn has_forbidden_windows_c_driver(line: text) -> bool:
     val lower = line.lower()
@@ -118,7 +120,7 @@ fn has_root_bound_driver_alias(content: text) -> bool:
 fn normalized_symbol_words(line: text) -> text:
     var normalized = line.lower()
     for separator in ["=", "\"", "'", "(", ")", "[", "]", "{", "}",
-                      ";", "|", "!", ",", "&", "@"]:
+                      ";", "|", "!", ",", "&", "@", "$", ":", "`"]:
         normalized = normalized.replace(separator, " ")
     normalized
 
@@ -158,9 +160,56 @@ fn is_version_predicate_line(lower: text) -> bool:
         lower.contains("grep -e") or lower.starts_with("case "))
 
 fn has_llvm_231_family_pattern(line: text) -> bool:
-    val lower = line.replace("\\", "").lower()
-    (lower.contains("clang version") and lower.contains("23.1.") and
-        (lower.contains("[0-9]") or lower.contains("(?:s|$)")))
+    # PowerShell single-quoted and shell regexes preserve every backslash.
+    # Do not normalize these: doubled slashes change PowerShell semantics.
+    val lower = line.lower()
+    # Match the complete quoted canonical regex, not independent substrings.
+    # This prevents an appended alternative or suffix from broadening it.
+    val powershell_pattern = lower.contains(
+        "'clang version 23\\.1\\.[0-9]+(?:\\s|$)'") or lower.contains(
+        "\"clang version 23\\.1\\.[0-9]+(?:\\s|$)\"")
+    val sed_pattern = lower.contains(
+        "'s/^clang version \\(23\\.1\\.[0-9][0-9]*\\)\\([[:space:]].*\\)\\{0,1\\}$/\\1/p'") or lower.contains(
+        "'1s/^clang version \\(23\\.1\\.[0-9][0-9]*\\)\\([[:space:]].*\\)\\{0,1\\}$/\\1/p'")
+    powershell_pattern or sed_pattern
+
+fn has_cmake_llvm_231_family_pattern(line: text) -> bool:
+    # CMake source doubles regex escapes inside its quoted string language.
+    val lower = line.lower().replace("\\\\", "\\")
+    lower.contains("\"^clang version 23\\.1\\.[0-9]+([ \\r\\n]|$)\"")
+
+fn is_pure_join_of_query(line: text, query_symbols: [text]) -> bool:
+    if not line.contains("="):
+        return false
+    val rhs = line.split("=")[1].trim().lower()
+    for symbol in query_symbols:
+        if rhs == "$" + symbol + " -join \"`n\"" or
+           rhs == "$" + symbol + " -join '`n'":
+            return true
+    false
+
+fn is_version_evidence_transform(line: text, query_symbols: [text]) -> bool:
+    val lower = line.lower()
+    val shell_filter = lower.contains("printf ") and lower.contains("sed -n")
+    val pure_join = is_pure_join_of_query(lower, query_symbols)
+    val transforms_output = shell_filter or pure_join
+    val diagnostic_only = lower.contains("diagnostic") or
+        lower.contains("metadata") or lower.contains("attestation") or
+        lower.contains("write-host") or lower.contains("echo ") or
+        lower.contains("clang version") or lower.contains("23.1")
+    transforms_output and not diagnostic_only
+
+fn has_exact_version_predicate_operand(lower: text, has_indirect_pattern: bool) -> bool:
+    if lower.contains("-notmatch"):
+        val operand = lower.split("-notmatch")[1].split("{")[0]
+        return has_llvm_231_family_pattern(operand) or
+            (has_indirect_pattern and operand.contains("$check.pattern"))
+    if lower.contains(" matches ") or lower.contains("matches \""):
+        val operand = lower.split("matches")[1]
+        return has_cmake_llvm_231_family_pattern(operand)
+    if lower.contains("sed -n"):
+        return has_llvm_231_family_pattern(lower)
+    false
 
 fn has_clang_driver_pattern_binding(content: text) -> bool:
     for raw_line in content.split("\n"):
@@ -202,16 +251,16 @@ fn has_bound_llvm_231_version_predicate(content: text) -> bool:
     for raw_line in content.split("\n"):
         val lower = line_without_comment(raw_line).lower()
         val target = assignment_target(lower)
-        if target != "" and line_has_any_symbol(lower, query_symbols):
+        if target != "" and line_has_any_symbol(lower, query_symbols) and
+           is_version_evidence_transform(lower, query_symbols):
             bound_symbols.push(target)
 
     var has_bound_exact_predicate = false
     for raw_line in content.split("\n"):
-        val lower = line_without_comment(raw_line).replace("\\", "").lower()
+        val lower = line_without_comment(raw_line).lower()
         if is_version_predicate_line(lower) and
            line_has_any_symbol(lower, bound_symbols):
-            if has_llvm_231_family_pattern(lower) or
-               (has_indirect_pattern and lower.contains("$check.pattern")):
+            if has_exact_version_predicate_operand(lower, has_indirect_pattern):
                 has_bound_exact_predicate = true
     (saw_query and query_symbols.len() > 0 and
         has_bound_exact_predicate)
@@ -235,16 +284,45 @@ fn has_validated_llvm_231_authority(content: text) -> bool:
         has_bound_llvm_231_version_predicate(content) and
         has_fail_closed_version_check(content))
 
-fn has_validated_llvm_231_driver(line: text, has_llvm_231_authority: bool) -> bool:
+fn assignment_rhs_symbol(line: text) -> text:
+    if not line.contains("="):
+        return ""
+    val rhs = line.split("=")[1]
+    var symbol = ""
+    for word in normalized_symbol_words(rhs).split(" "):
+        if word != "":
+            symbol = word
+    symbol
+
+fn is_direct_validated_driver_assignment(line: text) -> bool:
+    val lower = line.replace("\\", "/").lower()
+    ((lower.contains("clang-cl") or lower.contains("clang.exe")) and
+        (lower.contains("llvm_root") or lower.contains("llvm_win_root") or
+         lower.contains("_simple_win_bin"))) or
+        assignment_rhs_symbol(lower) == "_simple_win_cc"
+
+fn has_validated_driver_alias(content: text, alias: text) -> bool:
+    if alias == "_simple_win_cc":
+        return true
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).lower()
+        if assignment_target(lower) == alias and
+           is_direct_validated_driver_assignment(lower):
+            return true
+    false
+
+fn has_validated_llvm_231_driver(
+    line: text, content: text, has_llvm_231_authority: bool
+) -> bool:
     if not has_llvm_231_authority:
         return false
     val lower = line.replace("\\", "/").lower()
     val direct_root_driver = ((lower.contains("clang-cl") or lower.contains("clang.exe")) and
         (lower.contains("llvm_root") or lower.contains("llvm_win_root") or
          lower.contains("_simple_win_bin")))
-    (direct_root_driver or
-        lower.ends_with("=$_simple_win_cc") or lower.ends_with("=\"$_simple_win_cc\"") or
-        lower.ends_with("='$_simple_win_cc'"))
+    (direct_root_driver or is_direct_validated_driver_assignment(lower) or
+        (assignment_target(lower).starts_with("cc_") and
+         has_validated_driver_alias(content, assignment_rhs_symbol(lower))))
 
 fn windows_c_compiler_selection_finding(line_num: i64, message: text) -> StaticLintFinding:
     StaticLintFinding(
@@ -285,7 +363,8 @@ fn check_windows_c_compiler_selection_lint_rule(
                 if has_forbidden_windows_c_driver(line):
                     findings.push(windows_c_compiler_selection_finding(
                         line_num, "Windows C compiler selection uses a forbidden driver"))
-                elif not has_validated_llvm_231_driver(line, has_llvm_231_authority):
+                elif not has_validated_llvm_231_driver(
+                    line, unit.content, has_llvm_231_authority):
                     findings.push(windows_c_compiler_selection_finding(
                         line_num, "Windows C compiler selection lacks LLVM 23.1.x root validation"))
         line_num = line_num + 1
