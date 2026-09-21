@@ -56,3 +56,18 @@ a hostile site renderer from disclosing the same-UID broker's robust futex-list
 address. The focused host C containment gate passes. Installed pure-Simple
 READY/frame evidence remains compiler-blocked and no bootstrap/seed substitute
 is accepted.
+
+## 2026-09-21 admission-gate repair
+
+The namespace self-check had remained behind the retired
+`SPL_HAS_BROWSER_RENDERER_NAMESPACES` switch. Its translation unit therefore
+had no `main`, so `check-browser-renderer-sandbox-seccomp.shs` could not link
+the mandatory namespace phase. The check now calls the actual
+`browser_renderer_preinit` path with the broker's fixed argv and empty
+environment, then proves that `rt_browser_renderer_namespaces_active()` agrees
+with the observed `/proc/self/ns/net` identity. A denied namespace request is
+reported as `unavailable`; a claimed active namespace must change identity.
+
+This restores source-level admission evidence for the pre-exec stage. The
+installed pure-Simple ready/frame artifact remains the outstanding release
+evidence described above.
