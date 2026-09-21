@@ -295,6 +295,69 @@ impl<'a> MirLowerer<'a> {
         Ok(())
     }
 
+    /// Apply the interpreter's authored bool-parameter boundary before MIR
+    /// optimizations or a native ABI can narrow the argument to an i8.
+    ///
+    /// A declared bool parameter preserves a real bool, maps nil/None to
+    /// false, and maps every other present value (including integer zero and
+    /// empty text) to true. The tree interpreter applies the same rule while
+    /// binding arguments in `present_value_as_bool_arg`.
+    fn coerce_args_for_bool_params(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+        arg_regs: &mut [VReg],
+    ) -> MirLowerResult<()> {
+        let params = if let Some(registry) = self.type_registry {
+            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
+                params.clone()
+            } else if let HirExprKind::Global(name) = &callee.kind {
+                self.function_param_types.get(name).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if let HirExprKind::Global(name) = &callee.kind {
+            self.function_param_types.get(name).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        for (index, arg_reg) in arg_regs.iter_mut().enumerate() {
+            if params.get(index) != Some(&TypeId::BOOL) {
+                continue;
+            }
+            let Some(arg) = args.get(index) else {
+                continue;
+            };
+            if arg.ty == TypeId::BOOL || (arg.ty == TypeId::ANY && matches!(arg.kind, HirExprKind::Bool(_))) {
+                continue;
+            }
+
+            *arg_reg = if arg.ty == TypeId::NIL || matches!(arg.kind, HirExprKind::Nil) {
+                self.lower_bool_expr(false)?
+            } else if arg.ty == TypeId::ANY
+                || self
+                    .type_registry
+                    .and_then(|registry| registry.get(arg.ty))
+                    .is_some_and(|ty| matches!(ty, HirType::Pointer { .. }))
+            {
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_is_some"),
+                        args: vec![*arg_reg],
+                    });
+                    dest
+                })?
+            } else {
+                self.lower_bool_expr(true)?
+            };
+        }
+        Ok(())
+    }
+
     pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
         if let HirExprKind::Global(name) = &callee.kind {
             if let Some((receiver_name, method_name)) = name.rsplit_once('.') {
@@ -398,6 +461,7 @@ impl<'a> MirLowerer<'a> {
             }
 
             if self.function_value_globals.contains(name) {
+                self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
                 self.box_args_for_any_params(callee, args, &mut arg_regs)?;
                 let callee_reg = self.lower_global_expr(name.clone(), callee.ty)?;
                 let (param_types, return_type) = self.function_signature_for_callee(callee, args);
@@ -707,6 +771,7 @@ impl<'a> MirLowerer<'a> {
             // NOTE: DI injection at MIR level was causing signature mismatches
             // because functions were registered with all params but calls tried to inject again
 
+            self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
             self.box_args_for_any_params(callee, args, &mut arg_regs)?;
 
             // Colliding private helpers were emitted under mangled names (see
