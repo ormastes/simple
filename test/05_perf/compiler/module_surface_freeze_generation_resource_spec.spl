@@ -1,0 +1,52 @@
+"""Bounded memory and timing profile for import-rich module-surface freeze."""
+use std.spec.{describe, it, expect}
+use std.io_runtime.{time_now_monotonic_ms}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserImport}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName}
+
+extern fn rt_heap_live_bytes() -> i64
+
+fn import_rich_builder() -> ModuleSurfaceBuilder:
+    var builder = ModuleSurfaceBuilder.new()
+    var surface_index = 0
+    while surface_index < 96:
+        val name = "pkg.mod{surface_index}"
+        var surface = ModuleSurface.empty(name)
+        var imports: [ParserImport] = []
+        var offsets: [i64] = [0]
+        var import_index = 0
+        while import_index < 6:
+            imports.push(ParserImport(
+                module: "pkg.mod0", items: [], is_lazy: false,
+                span: Span.empty()))
+            offsets.push(0)
+            import_index = import_index + 1
+        surface.imports = imports
+        surface.import_item_offsets = offsets
+        val added = builder.add_surface_canonical_identity(
+            surface, name, "src/pkg/mod{surface_index}.spl")
+        assert(added.is_ok())
+        surface_index = surface_index + 1
+    builder
+
+describe "module-surface freeze generation resource profile":
+    it "shares one stable generation across imports within bounded memory and time":
+        var builder = import_rich_builder()
+        val registry = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {}, ordered_names: [],
+            ordered_indices: [], generation: 0, frozen: false)
+        val before_bytes = rt_heap_live_bytes()
+        val started_ms = time_now_monotonic_ms()
+        val finish_error = builder.finish_into(registry)
+        val elapsed_ms = time_now_monotonic_ms() - started_ms
+        val added_bytes = rt_heap_live_bytes() - before_bytes
+        expect(finish_error).to_equal("")
+        expect(registry.surfaces.len()).to_equal(96)
+        val expected_generation = registry.surfaces[0].import_resolution_traces[0].dir_generation
+        for surface in registry.surfaces:
+            expect(surface.import_resolution_traces.len()).to_equal(6)
+            for trace in surface.import_resolution_traces:
+                expect(trace.dir_generation).to_equal(expected_generation)
+        expect(added_bytes).to_be_less_than(67108864)
+        expect(elapsed_ms).to_be_less_than(30001)
