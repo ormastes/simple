@@ -32,6 +32,11 @@ turn defaults to the historical `build/freebsd/vm` location. Parent directories
 are created before use, so a caller can place every mutable artifact in an
 isolated directory while retaining separately selected base-image and ISO paths.
 
+The parent directory of an explicitly nested `QEMU_CLOUDINIT_ISO` override is
+also created before ISO generation. This closes the remaining isolated-path
+failure where the override was valid but `genisoimage` could not create its
+output file. The integration contract covers this path without starting QEMU.
+
 Focused verification:
 
 ```text
