@@ -643,3 +643,17 @@ provider and other generator specs. That declaration was corrected to `bool`.
 The source ABI gate now passes. An interpreter unit run attempted with the
 available ARM Rust bootstrap seed exited 1 amid unrelated repository warnings;
 it is not accepted as pure-Simple verification or deployment evidence.
+
+Follow-up review narrowed the gate's MIR assertions to the body of
+`expand_text_abi_args`: it now requires operand inspection, a successful split
+guard, and preservation of an unsplit operand there. The gate reports
+`env_runtime_abi_runtime=not_checked` unless its optional binary probe runs.
+Its check for the unit spec is source-presence evidence only; the failed seed
+test above remains failed, and this gate does not prove native behavior.
+
+SOSIX compatibility was checked separately. `src/os/sosix` has no public
+`env_set` or `rt_env_set` declaration, provider, or caller. Its only process
+environment use is the host configuration adapter's `rt_env_get(key: text) ->
+text?` read. The SFFI generator's setter result change therefore does not
+alter a SOSIX public signature or provider contract; SOSIX has no setter
+callers requiring adaptation.

@@ -35,6 +35,21 @@ reject_fixed() {
     fi
 }
 
+require_in_function() {
+    file=$1
+    function_name=$2
+    needle=$3
+    label=$4
+    [ -f "$file" ] || fail "missing $file"
+    if ! awk -v function_name="$function_name" '
+        $0 ~ "^[[:space:]]*me " function_name "\\(" { inside = 1; next }
+        inside && $0 ~ "^[[:space:]]*me [[:alnum:]_]+\\(" { exit }
+        inside { print }
+    ' "$file" | grep -Fq "$needle"; then
+        fail "$label ($file)"
+    fi
+}
+
 # Canonical machine-word declarations and C header/provider.
 require_fixed src/compiler_rust/compiler/src/codegen/runtime_sffi.rs \
     'RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64])' \
@@ -80,9 +95,16 @@ require_fixed src/compiler/50.mir/text_extern_abi.spl \
 require_fixed src/compiler/50.mir/text_extern_abi.spl \
     'fn text_arg_indices(func_name: text) -> [i64]?:' \
     'Pure-Simple MIR registry lacks text argument indices'
-require_fixed src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl \
-    'if val pair = split:' \
-    'Pure-Simple MIR lowering lacks the text operand split guard'
+require_in_function src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl \
+    expand_text_abi_args 'val split = self.emit_text_ptr_len_pair(original)' \
+    'Pure-Simple MIR text expansion does not inspect the original operand'
+require_in_function src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl \
+    expand_text_abi_args 'if val pair = split:' \
+    'Pure-Simple MIR text expansion lacks its split-result guard'
+require_in_function src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl \
+    expand_text_abi_args 'result = result.push(original)' \
+    'Pure-Simple MIR text expansion does not preserve an unsplit raw operand'
+# This confirms the regression source exists; it does not execute the spec.
 require_fixed test/01_unit/compiler/backend/text_extern_abi_ptr_len_registry_spec.spl \
     'raw four-word rt_env_set must not be split again' \
     'Pure-Simple MIR regression does not cover the raw environment bridge'
@@ -125,4 +147,7 @@ elif [ "$#" -ne 0 ]; then
 fi
 
 echo "env_runtime_abi_source=pass"
-echo "PASS — rt_env_get/set ABI is consistent across source owners"
+if [ "${1:-}" != "--binary" ]; then
+    echo "env_runtime_abi_runtime=not_checked"
+fi
+echo "PASS — rt_env_get/set source ABI contracts are consistent"
