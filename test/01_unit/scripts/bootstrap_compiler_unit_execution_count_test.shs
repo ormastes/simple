@@ -1,0 +1,144 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+phase_runner="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/compiler-unit-execution-count.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+  echo "bootstrap_compiler_unit_execution_count_test: FAIL ($*)" >&2
+  exit 1
+}
+
+# Exercise the production function without invoking a compiler. Keep the
+# extraction narrow so edits to the function are tested here rather than a
+# copied implementation drifting independently.
+sed -n '/^run_compiler_unit_tests() {$/,/^}$/p' "$phase_runner" \
+  >"$tmp/production-function.sh"
+grep -Fq 'run_compiler_unit_tests() {' "$tmp/production-function.sh" ||
+  fail production-function-not-found
+. "$tmp/production-function.sh"
+
+source_root="$tmp/source"
+mkdir -p "$source_root/test/01_unit/compiler/loader" \
+  "$source_root/scripts/bootstrap" "$tmp/home" "$tmp/cache"
+: >"$source_root/test/01_unit/compiler/loader/fixture_spec.spl"
+cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
+  "$source_root/scripts/bootstrap/validate-test-runner-json.pl"
+
+cat >"$source_root/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+chmod +x "$source_root/scripts/bootstrap/run-process-group-timeout.shs"
+
+test_runner="$tmp/fake-test-runner"
+cat >"$test_runner" <<'EOF'
+#!/bin/sh
+case "${FIXTURE_RESULT:?}" in
+  pass)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  lookalike)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[{"path":"\\\"total_passed\\\":1"}]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  zero)
+    echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  failed)
+    echo '{"success":true,"spec":{"success":false,"total_passed":0,"total_failed":1,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  outer_false)
+    echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  malformed)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1'
+    ;;
+  duplicate)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[{"total_passed":1}]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  overflow)
+    echo '{"success":true,"spec":{"success":true,"total_passed":9999999999,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  absent)
+    :
+    ;;
+  nonzero)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    exit 17
+    ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$test_runner"
+
+compiler_cli="$tmp/fake-cli"
+: >"$compiler_cli"
+command_owner_receipt="$tmp/command-owner.env"
+: >"$command_owner_receipt"
+home="$tmp/home"
+cache="$tmp/cache"
+spec_timeout_seconds=10
+
+validate_command_owner_receipt() {
+  [ "$1" = "$command_owner_receipt" ]
+}
+
+run_case() {
+  fixture_result=$1
+  expected_status=$2
+  case_root="$tmp/case-$fixture_result"
+  logs="$case_root/logs"
+  mkdir -p "$logs"
+  summary="$case_root/summary.env"
+  : >"$summary"
+  FIXTURE_RESULT=$fixture_result
+  export FIXTURE_RESULT
+  actual_status=0
+  run_compiler_unit_tests "$test_runner" "$command_owner_receipt" ||
+    actual_status=$?
+  [ "$actual_status" = "$expected_status" ] ||
+    fail "$fixture_result-status-$actual_status-want-$expected_status"
+}
+
+run_case pass 0
+grep -Fq 'task=compiler_unit_tests|result=PASS|status=0' "$summary" ||
+  fail passing-row-not-admitted
+pass_summary=$summary
+
+run_case lookalike 0
+grep -Fq 'task=compiler_unit_tests|result=PASS|status=0' "$summary" ||
+  fail quoted-key-lookalike-rejected
+
+run_case zero 1
+awk -F '\t' '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "FAIL" && \
+  $3 == 92 && $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } \
+  END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
+  fail zero-execution-row-admitted
+
+run_case failed 1
+awk -F '\t' '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "FAIL" && \
+  $3 == 93 && $4 == 1 && $5 == 0 && $6 == 1 { found=1 } \
+  END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
+  fail failed-json-row-admitted
+
+for malformed_case in outer_false malformed duplicate overflow absent nonzero; do
+  case "$malformed_case" in
+    outer_false) expected_row_status=93 ;;
+    nonzero) expected_row_status=17 ;;
+    *) expected_row_status=91 ;;
+  esac
+  run_case "$malformed_case" 1
+  awk -F '\t' -v wanted="$expected_row_status" \
+    '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "FAIL" && $3 == wanted \
+      { found=1 } END { exit !found }' \
+    "$logs/compiler_unit_tests.inventory.tsv" ||
+    fail "$malformed_case-row-was-admitted"
+done
+
+grep -Fq 'spec_count=1|passed_count=1|timeout_count=0|crash_count=0' \
+  "$pass_summary" || fail passing-summary-counts-not-exact
+
+echo 'bootstrap_compiler_unit_execution_count_test: PASS'
