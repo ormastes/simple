@@ -1,4 +1,25 @@
 # macOS Full-CLI GUI Admission Process Proof
+## Update 2026-09-21 — focused contracts pass on macOS arm64
+
+Status: OPEN (P3) — live Endpoint Security admission remains unavailable.
+
+At source revision `20245f731dbe12f3eb93943e2dc3c2f4fc22d76c`, all four
+prepared-host focused contracts below returned exit 0 on macOS arm64:
+
+- `macos_gui_execution_history_boundary_contract.shs`
+- `macos_gui_full_cli_provenance_contract.shs`
+- `macos_gpu_trusted_build_admission_contract.shs`
+- `macos_es_history_collector_contract.shs`
+
+The collector contract compiled and linked the real Swift source with
+`-lEndpointSecurity -lbsm -framework Security`, executed its test-only state
+machine, and passed the builder's immutable snapshot and admission-tamper
+self-test. This clears both previously unrerun focused gates described in the
+historical record below. The tracked policy still has unassigned signing
+identity and `status=unavailable`; build-candidate and verify correctly return
+125. Live ES process history, prepared/admitted signing identities, and GUI
+qualification remain open and are not implied by these source-contract passes.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -71,4 +92,3 @@ the provisioned identities and artifact, run:
 sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs
 sh scripts/check/check-macos-vulkan-web-live-evidence.shs
 ```
-

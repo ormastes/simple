@@ -14,6 +14,7 @@
 #   - test_runner_execute.spl (this file): core execution modes (interpreter, SMF, native, safe)
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+export use std.nogc_sync_mut.test_runner.resource_policy.{safe_mode_caps}
 use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
@@ -62,7 +63,9 @@ fn _run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [t
     val effective_memory = if memory_bytes > 0: memory_bytes elif enforce_class_defaults: defaults.max_tree_charge_bytes else: 0
     val effective_cpu = if cpu_ms > 0: cpu_ms elif enforce_class_defaults: defaults.max_cpu_ms else: 0
     val effective_fds = if max_fds > 0: max_fds elif enforce_class_defaults: defaults.max_fds else: 0
-    val effective_pids = if max_pids > 0: max_pids elif enforce_class_defaults: defaults.max_pids else: 0
+    # The caller has already resolved the process policy. Zero means inherit
+    # the host limit, including when the other class defaults remain enabled.
+    val effective_pids = max_pids
     val budget = ResourceBudget(
         max_wall_ms: timeout_ms, max_cpu_ms: effective_cpu,
         max_tree_charge_bytes: effective_memory, max_direct_child_rss_bytes: effective_memory,
@@ -1322,10 +1325,11 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
-    val memory_bytes = 512 * 1024 * 1024
-    val cpu_seconds = 30
-    val max_fds = 256
-    val max_procs = 64
+    val caps = safe_mode_caps(options.no_limits, options.max_procs)
+    val memory_bytes = caps.0
+    val cpu_seconds = caps.1
+    val max_fds = caps.2
+    val max_procs = caps.3
 
     var run_args: [text] = [file_path]
     if options.gc_log:
@@ -1333,7 +1337,7 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val scoped_child = _run_scoped_child(ExecutionResourceClass.System, binary, run_args, timeout_ms, memory_bytes, cpu_seconds * 1000, max_fds, max_procs, true)
+    val scoped_child = _run_scoped_child(ExecutionResourceClass.System, binary, run_args, timeout_ms, memory_bytes, cpu_seconds * 1000, max_fds, max_procs, not options.no_limits)
     val result = scoped_child.result
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
