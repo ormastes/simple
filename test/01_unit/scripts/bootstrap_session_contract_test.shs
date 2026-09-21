@@ -9,10 +9,23 @@ TMPDIR=$work perl -MPOSIX - "$root" "$work/session-exec" <<'PERL'
 use strict;
 use warnings;
 use Time::HiRes qw(time);
+use Digest::SHA;
 my ($root, $helper) = @ARGV;
 POSIX::setsid() >= 0 or die "test setsid: $!\n";
 $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = "$$";
 $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} = $helper;
+# This isolated syscall fixture owns its session and publishes its own local
+# admission. It is not a production outer-guard or authentication fixture.
+sub sha {
+    open(my $fh, '<', $_[0]) or die $!;
+    return Digest::SHA->new(256)->addfile($fh)->hexdigest;
+}
+open(my $admission, '>', "$helper.admission.env") or die $!;
+print $admission "schema=simple-bootstrap-session-v1\nstatus=active\nroot_pid=$$\nsession_id=$$\n" .
+    "session_helper=$helper\nsession_helper_sha=" . sha($helper) . "\n" .
+    "session_helper_source_sha=" . sha("$root/scripts/bootstrap/bootstrap-session-exec.c") . "\n";
+close($admission);
+chmod(0400, "$helper.admission.env") or die $!;
 my $checks = 0;
 sub check { my ($ok, $name) = @_; die "FAIL: $name\n" unless $ok; ++$checks; }
 sub status { system @_; return $? >> 8; }
