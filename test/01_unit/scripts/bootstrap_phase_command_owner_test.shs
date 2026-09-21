@@ -11,6 +11,8 @@ mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
   "$tmp/work" "$tmp/stage2-admitted" "$tmp/bin"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
   "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
+cp "$root/scripts/bootstrap/windows-process-group-rss.awk" \
+  "$tmp/source/scripts/bootstrap/windows-process-group-rss.awk"
 cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
   "$tmp/source/scripts/bootstrap/validate-test-runner-json.pl"
 : >"$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib"
@@ -48,7 +50,11 @@ cat >"$tmp/tool" <<'EOF'
 printf '%s\t%s\t%s\n' "$(basename "$0")" "${SIMPLE_BINARY:-}" "$*" >>"$PHASE_EXECUTIONS"
 case "${1:-}" in
   test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl)
-    [ "${SIMPLE_BIN:-}" = "${SIMPLE_BINARY:-}" ] || exit 24 ;;
+    [ "${SIMPLE_BIN:-}" = "${SIMPLE_BINARY:-}" ] || exit 24
+    # The positive RSS assertion needs a live sample window on Windows.
+    # Negative routing cases below do not incur this fixture-only delay.
+    [ "${PHASE_RSS_SAMPLE_WINDOW:-0}" != 1 ] || sleep 2
+    ;;
 esac
 [ -z "${SIMPLE_MCP_TEST_BINARY:-}" ] ||
   printf 'mcp_test_binary\t%s\t%s\n' "$SIMPLE_MCP_TEST_BINARY" "$*" >>"$PHASE_EXECUTIONS"
@@ -156,8 +162,10 @@ hosted_runtime_sha256=$runtime_sha
 EOF
 
 status=0
+rss_sample_window=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) rss_sample_window=1 ;; esac
 PATH="$tmp/bin:$PATH" PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
-PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+PHASE_TOOL="$tmp/tool" PHASE_RSS_SAMPLE_WINDOW="$rss_sample_window" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
   sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
     --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
     --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
@@ -185,10 +193,10 @@ grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/
   "$tmp/executions" || fail "loader compile oracle was not bound to the full CLI"
 grep -Fq 'timing_scope=post-admission-excludes-git-lfs-checkout' "$tmp/work/summary.env" ||
   fail "post-admission timing scope was not retained"
-case "$(uname -s)" in
-  Linux*|MINGW*|MSYS*|CYGWIN*) rss_value='[1-9][0-9]*' ;;
-  Darwin*|*BSD*) rss_value='([1-9][0-9]*|unavailable)' ;;
-  *) rss_value='([1-9][0-9]*|unavailable)' ;;
+case "$(sed -n 's/^max_rss_measurement=//p' "$tmp/work/summary.env")" in
+  gnu-time-rusage-kib|proc-group-rss-kib) rss_value='[1-9][0-9]*' ;;
+  unavailable) rss_value=unavailable ;;
+  *) fail "unknown RSS measurement authority" ;;
 esac
 for measured_task in compiler_bootstrap_tests compiler_bootstrap_compile_tests \
     loader_interpreter_tests loader_compile_tests; do

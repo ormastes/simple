@@ -68,8 +68,24 @@ Each task summary retains `elapsed_seconds` and `max_rss_kib` when GNU time
 rusage is available; inventory TSV rows retain their own RSS and the suite row
 retains the maximum. `timing_scope=post-admission-excludes-git-lfs-checkout`
 separates repository checkout/LFS materialization from compiler and test time.
-Git-for-Windows hosts retain process-tree RSS from MSYS `/proc`. BSD and macOS
-hosts without GNU rusage report `max_rss_kib=unavailable` explicitly.
+Git-for-Windows hosts retain sampled process-group RSS from MSYS `/proc`
+(`max_rss_measurement=proc-group-rss-kib`). Its RSS units are 4 KiB; `getconf
+PAGESIZE` reports allocation granularity on this host and is not the RSS unit.
+The sampler selects the timeout wrapper's unique direct-child session leader,
+deduplicates PIDs, checks group membership, and validates wrapper/leader
+identities before and after each sample. It excludes the watchdog, ambient
+groups and processes that create a separate session outside the timeout group.
+This is a sampled peak of summed resident sets, including shared pages in each
+member, not private memory or an exact kernel high-water mark. Short-lived
+groups can produce `max_rss_kib=unavailable`; invalid identities cannot produce
+a numeric zero. BSD and macOS hosts without GNU rusage also report unavailable.
+
+The canonical sampler regression owner is
+`test/01_unit/scripts/bootstrap_windows_rss_contract_test.shs`. Its fixtures
+cover the 64 KiB/4 KiB mismatch, process names with parentheses, duplicate PIDs,
+unrelated/nested groups, stale membership, ambiguous leaders and zombie or
+invalid process authority. The portable loader guard is owned by
+`test/01_unit/scripts/bootstrap_phase2_portable_loader_contract_test.shs`.
 
 ### Phase 2 post-admission runtime
 
