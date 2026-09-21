@@ -25,9 +25,17 @@ printf 'target.txt' >"$repo/alias"
 blob=$(git -C "$repo" hash-object -w --stdin <"$repo/alias")
 git -C "$repo" add target.txt
 git -C "$repo" update-index --add --cacheinfo "120000,$blob,alias"
+mkdir "$repo/target-dir"
+printf 'nested payload\n' >"$repo/target-dir/nested.txt"
+printf 'target-dir' >"$repo/directory-alias"
+directory_blob=$(git -C "$repo" hash-object -w --stdin <"$repo/directory-alias")
+git -C "$repo" add target-dir/nested.txt
+git -C "$repo" update-index --add --cacheinfo "120000,$directory_blob,directory-alias"
 git -C "$repo" commit -qm fixture
 
-receipt="$tmp/out/receipt.env"
+# Cover both the already-existing directory handle and the handle returned by
+# exclusive native directory creation, with a Unicode receipt basename.
+for receipt in "$tmp/out/receipt.env" "$tmp/out/created dir/雪.env"; do
 log="$tmp/materializer.log"
 sh "$root/scripts/setup/materialize-symlinks-windows.shs" \
     --strict-missing --receipt "$receipt" "$repo" >"$log" 2>&1 || {
@@ -38,7 +46,8 @@ grep -Fqx 'result=complete' "$receipt"
 grep -Fqx 'pending_count=0' "$receipt"
 test "$(stat -c '%d:%i' "$repo/alias")" = "$(stat -c '%d:%i' "$repo/target.txt")"
 test "$(cat "$repo/alias")" = 'payload'
-test "$(find "$tmp/out" -maxdepth 1 -name '.materializer-*.tmp' | wc -l | tr -d ' ')" -eq 0
+test "$(cat "$repo/directory-alias/nested.txt")" = 'nested payload'
+test "$(find "$(dirname "$receipt")" -maxdepth 1 -name '.materializer-*.tmp' | wc -l | tr -d ' ')" -eq 0
 
 # Publication is no-replace: an existing receipt remains byte-for-byte intact.
 cp "$receipt" "$tmp/receipt.before"
@@ -48,4 +57,5 @@ if sh "$root/scripts/setup/materialize-symlinks-windows.shs" \
     exit 1
 fi
 cmp "$receipt" "$tmp/receipt.before"
+done
 echo 'PASS: Windows receipt publication uses direct native write/flush and no-replace cleanup'

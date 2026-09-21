@@ -341,7 +341,7 @@ public static class MaterializerApi {
     [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle h,
         out IoStatus status, byte[] information, uint length, int informationClass);
     [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
-    static SafeFileHandle CreateDirectoryHeld(string path) {
+    static SafeFileHandle CreateDirectoryHeld(string path, bool writeAccess = false) {
         string native = @"\??\" + Path.GetFullPath(path);
         IntPtr buffer = Marshal.StringToHGlobalUni(native), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
         try {
@@ -349,7 +349,11 @@ public static class MaterializerApi {
             Marshal.StructureToPtr(u, name, false);
             var a = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Name = name, Attributes = 0x40 };
             SafeFileHandle h; IoStatus io;
-            int status = NtCreateFile(out h, 0x40100080, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
+            // Parent authority needs only attributes and synchronization:
+            // GENERIC_WRITE conflicts with receipt rename into a new parent.
+            // Junction creation separately needs write access to set its tag.
+            uint access = writeAccess ? 0x40100080u : 0x00100080u;
+            int status = NtCreateFile(out h, access, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
             if (status < 0) { if (h != null) h.Dispose(); throw new IOException("directory.create-exclusive:ntstatus=" + status); }
             return h;
         } finally { Marshal.FreeHGlobal(name); Marshal.FreeHGlobal(buffer); }
@@ -535,7 +539,7 @@ public static class MaterializerApi {
         Buffer.BlockCopy(BitConverter.GetBytes((ushort)print.Length), 0, data, 14, 2);
         Buffer.BlockCopy(substitute, 0, data, 16, substitute.Length);
         Buffer.BlockCopy(print, 0, data, 18 + substitute.Length, print.Length);
-        using (var h = CreateDirectoryHeld(link)) {
+        using (var h = CreateDirectoryHeld(link, true)) {
             int returned;
             if (!DeviceIoControl(h, 0x000900A4, data, data.Length, null, 0, out returned, IntPtr.Zero))
                 throw Error("api.set-junction-tag");
