@@ -50,6 +50,17 @@ stopped after a 15-second bounded retry and the fixed check timed out at
 25 seconds. The passing evidence is the ordinary native ownership probe;
 sanitizer coverage remains unverified on this host.
 
+## Release-flag verification hardening
+
+Review reproduced a false pass with `CFLAGS=-DNDEBUG`: standard C assertions
+were removed, including join and spawn expressions inside them. The probe now
+uses unconditional `CHECK` failures and performs join/spawn outside checks.
+The gate also executes an intentional failed check and rejects a zero exit or
+missing failure diagnostic. Running the repaired gate with `CFLAGS=-DNDEBUG`
+passes all five lifecycle cases and detects the negative control. The SSpec
+includes this release-flag invocation as a second executable scenario; its
+self-hosted execution remains pending for the CLI reason above.
+
 This fixes record lifetime for a single handle owner. It does not claim that
 the legacy handle table permits concurrent free/join/read of the same handle,
 nor does it establish safe cross-thread transfer of arbitrary captured values.
