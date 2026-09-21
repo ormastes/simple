@@ -1,0 +1,42 @@
+#!/bin/sh
+# Run the import-rich freeze fixture with an external, process-tree RSS profile.
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 SELF_HOSTED_SIMPLE OUTPUT_DIR" >&2
+    exit 2
+fi
+compiler=$1
+output=$2
+case $compiler in
+    /*) ;;
+    *) echo "compiler path must be absolute" >&2; exit 2 ;;
+esac
+case $output in
+    /*) ;;
+    *) echo "output path must be absolute" >&2; exit 2 ;;
+esac
+mkdir -p "$output"
+receipt=$output/module-surface-freeze.rss.env
+log=$output/module-surface-freeze.test.log
+
+SIMPLE_LIB=src SIMPLE_COMPILER_PHASE_PROFILE=0 SIMPLE_COMPILER_TRACE=0 \
+    perl scripts/resource/process-tree-rss-watchdog.pl \
+        --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=120 \
+        --session-mode=new --receipt="$receipt" -- \
+        "$compiler" test \
+        test/05_perf/compiler/module_surface_freeze_generation_resource_spec.spl \
+        --mode=interpreter >"$log" 2>&1
+
+status=$(awk -F= '$1 == "status" { print $2 }' "$receipt")
+peak=$(awk -F= '$1 == "peak_rss_kib" { print $2 }' "$receipt")
+[ "$status" = complete ] || { echo "resource run failed: $status" >&2; exit 1; }
+case $peak in
+    ''|*[!0-9]*) echo "missing RSS peak" >&2; exit 1 ;;
+esac
+# Ordinary compilation target: strictly below one decimal GB.
+[ "$peak" -lt 976562 ] || {
+    echo "freeze fixture exceeded 1 GB RSS target: ${peak} KiB" >&2
+    exit 1
+}
+echo "PASS freeze fixture peak_rss_kib=$peak receipt=$receipt"
