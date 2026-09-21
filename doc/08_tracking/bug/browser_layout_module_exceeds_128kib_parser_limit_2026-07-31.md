@@ -4,6 +4,38 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+## Repair guide (2026-09-21 exact-origin lane)
+
+The authoritative repair lane starts from `origin/main` commit
+`e0dd873da1b7828389db4eb60e82972cc8245313`.  Before editing, its four red
+parser inputs measure:
+
+| file | bytes | top-level definitions |
+|---|---:|---:|
+| `..._renderer.spl` | 136,007 | 101 |
+| `..._core.spl` | 222,967 | 131 |
+| `..._layout.spl` | 233,606 | 132 |
+| `..._paint_layout.spl` | 175,476 | 89 |
+
+`..._decl_apply.spl` is also added to the guard: at 130,751 bytes it has only
+321 bytes of headroom even though it is not yet red.
+
+This repair is a structural, lossless split.  Every moved top-level definition
+must retain its complete body byte-for-byte.  The conservation receipt records
+the original owner, new owner, exact source-slice comparison, and public
+visibility for every definition.  The comparison may ignore only the module
+import prelude and trailing blank lines at a new module boundary.  The sum of
+bytes in the original modules and their new helpers must not decrease.  This
+catches the prior failed split that silently discarded 663 lines.
+
+New helpers must follow the existing one-way layer chain and remain reachable
+through the original module names.  The size guard must discover every
+`simple_web_html_layout_renderer*.spl` source instead of maintaining another
+fixed filename list.  Acceptance requires the same canonical parser/check
+command before and after, with wall time and peak RSS recorded for identical
+sources; peak RSS may not regress.  The bug database row remains `open` until
+the admitted compiler/runtime checks and the exact-head review pass.
+
 **Status:** OPEN — pre-existing on `origin/main`, NOT introduced by the change
 that found it.
 **Guard:** `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_module_split_spec.spl`,
@@ -71,4 +103,3 @@ touching it must be sequenced after that lane. Status stays
 change per file (verified by total-byte-count non-decrease, per the warning
 above about a prior split that silently dropped 663 lines) — not something to
 attempt inside a mixed bug-sweep pass. No code changed by this note.
-
