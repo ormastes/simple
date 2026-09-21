@@ -49,15 +49,12 @@ inventory, each discovered compiler spec is executed, Stage 3/4 command owners
 are receipt bound, zero-output or zero-execution JSON fails, and Darwin uses
 the portable loader oracle.
 
-**P1 prerequisite:** `run_repository_full_tests` currently extracts the last
-JSON-looking line with `grep`/`sed`, unlike focused and compiler inventory rows
-that use `validate-test-runner-json.pl`. The three gates above do not prove that
-repository-full rows reject ambiguous or multiple terminal JSON documents.
-Before Stage 3/4 full results can be trusted, route repository-full rows through
-the strict validator and add a contract test covering zero, malformed,
-ambiguous/multiple, skipped-only, failed, and valid single terminal JSON. Until
-that lands and passes, classify `repository_full_tests` evidence as untrusted
-and the intensive matrix as incomplete even if `overall=PASS` is printed.
+**Resolved P1 prerequisite:** `run_repository_full_tests` now routes every
+repository row through `validate-test-runner-json.pl`, matching focused and
+compiler inventory rows. The command-owner contract gate includes hostile
+duplicate-key and multiple-terminal-row fixtures and requires both to fail
+canonical validation. Trust repository-full results only after that gate passes
+in the same source checkout used for Phase 3/4 verification.
 
 ## Canonical phase verification
 
@@ -126,6 +123,6 @@ artifact, hash mismatch, malformed JSON, skipped-only/zero-execution output,
 or an ABI diagnostic in a help probe as failure. Interpreter results are the
 semantic ground truth because SMF/compiled modes have known false-green risks;
 the compile-mode rows are required differential evidence and do not replace
-the interpreter rows. This PASS definition becomes authoritative for the full
-repository inventory only after the P1 strict JSON parser prerequisite above is
-satisfied.
+the interpreter rows. This PASS definition is authoritative for the full
+repository inventory only when the resolved strict-JSON contract gate above
+passes in the verification checkout.
