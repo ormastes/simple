@@ -41,7 +41,7 @@ int main(void) {
         return 1;
     }
 
-    bool active = rt_browser_renderer_namespaces_active();
+    bool active = rt_browser_renderer_sandbox_netns_active();
     bool changed = strcmp(before, after) != 0;
     if (active != changed) {
         printf("rt_browser_renderer_namespace_selfcheck: FAIL "

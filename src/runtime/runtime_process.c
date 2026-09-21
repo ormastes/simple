@@ -958,6 +958,10 @@ bool rt_browser_renderer_sandbox_enter(void) {
     return false;
 }
 
+bool rt_browser_renderer_sandbox_netns_active(void) {
+    return false;
+}
+
 const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
     win_browser_renderer_stdin_buf[0] = '\0';
     if (max_bytes <= 0) return win_browser_renderer_stdin_buf;
@@ -2434,6 +2438,13 @@ bool rt_browser_renderer_namespaces_active(void) {
     return s_browser_renderer_namespaces_active;
 }
 
+/* Public runtime.h compatibility accessor.  The sandbox-facing name is kept
+ * stable for native callers; its value is the measured namespace posture,
+ * never an inferred result from successful stage-two entry. */
+bool rt_browser_renderer_sandbox_netns_active(void) {
+    return rt_browser_renderer_namespaces_active();
+}
+
 typedef void (*BrowserRendererPreinitFn)(int, char**, char**);
 
 static void browser_renderer_preinit(int argc, char** argv, char** envp) {
@@ -2678,6 +2689,10 @@ bool rt_browser_renderer_sandbox_enter(void) {
 #else
 
 bool rt_browser_renderer_sandbox_enter(void) {
+    return false;
+}
+
+bool rt_browser_renderer_sandbox_netns_active(void) {
     return false;
 }
 
