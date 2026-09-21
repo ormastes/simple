@@ -1,6 +1,6 @@
 # GPU FFI loader probes Linux sonames on macOS (and `spl_dlopen` raises where `DynLib.load` expects nil)
 
-- Status: OPEN (2026-09-19) — found by the fix-wave-2 gated-specs lane; not fixed there (spec-files-only constraint)
+- Status: SOURCE FIXED (2026-09-21); macOS on-device validation pending
 - Found: 2026-09-19
 - Component: `src/lib/nogc_sync_mut/gpu/engine2d/ffi_dispatch.spl` (`gpu_lib_candidates`, :60-84), `src/lib/nogc_sync_mut/sffi/dynamic.spl` (:121-128), seed runtime `spl_dlopen`
 - Binary: deployed Rust seed (macOS aarch64)
@@ -25,3 +25,24 @@ Concrete impact (2026-09-19, macOS host with Vulkan installed at `/opt/homebrew/
 ## Related
 
 - `gated_specs_are_tautology_shells_2026-08-09` (the lane that surfaced this; its 2 remaining reds are this defect)
+
+## 2026-09-21 source repair and verification
+
+Both `ffi_dispatch.spl` and its `sffi_dispatch.spl` twin now derive candidates
+from `std.io_runtime.platform_name()`, whose runtime implementation returns
+`macos` on Apple hosts. Candidate mapping is tested independently of host OS,
+and a live host case checks the same runtime identity path. The checked loader
+now returns an error immediately when `spl_dlopen_checked` returns a nonzero
+status. It retains the direct-return fallback only for status zero with an
+unobserved output handle, the documented interpreter writeback-loss case.
+
+`ffi_dispatch_platform_spec.spl` was red (3/3 examples failed: missing Darwin
+mapping helper and missing bare soname raised); after the repair it passed 4/4
+in interpreter mode on Linux. This proves the mapping and nil failure path on
+Linux. A macOS run of the existing CUDA and Vulkan specs is still required to
+prove the originally observed host behavior.
+
+The public `gpu_lib_candidates`, `try_load_gpu_lib`, `DynLib.load`, and
+`DynLib.load_checked` signatures are unchanged. SimpleOS keeps the static
+selection from `SIMPLE_OS_KERNEL`; the candidate lookup is only used on hosted
+dynamic paths. SOSIX app and host interfaces are untouched.
