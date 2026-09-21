@@ -1,0 +1,147 @@
+#!/bin/sh
+# Run a bounded post-bootstrap test matrix against an admitted FreeBSD Phase 2
+# compiler. The base verifier owns compiler/runtime admission and tool builds;
+# this runner adds real interpreter, native compiler, and module-loader probes.
+
+set -u
+
+die() {
+    echo "freebsd-phase2-tests: $*" >&2
+    exit 2
+}
+
+list_tasks() {
+    cat <<'EOF'
+base_phase_matrix
+interpreter_module_load
+native_module_build
+native_module_execute
+interpreter_regression
+loader_regression
+EOF
+}
+
+if [ "${1:-}" = --list-tasks ]; then
+    [ "$#" -eq 1 ] || die "--list-tasks accepts no other options"
+    list_tasks
+    exit 0
+fi
+
+[ "$(uname -s 2>/dev/null || :)" = FreeBSD ] ||
+    die "this runner is native-FreeBSD-only"
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) ||
+    die "cannot locate repository root"
+source_root=$root
+work_root=
+timeout_seconds=${SIMPLE_FREEBSD_PHASE2_TEST_TIMEOUT:-900}
+
+for arg in "$@"; do
+    case "$arg" in
+        --work-root=*) work_root=${arg#*=} ;;
+        --source-root=*) source_root=${arg#*=} ;;
+    esac
+done
+
+[ -n "$work_root" ] || die "--work-root is required"
+case "$timeout_seconds" in
+    ''|*[!0-9]*|0) die "SIMPLE_FREEBSD_PHASE2_TEST_TIMEOUT must be a positive integer" ;;
+esac
+
+mkdir -p "$work_root" || die "cannot create work root"
+work_root=$(CDPATH= cd -- "$work_root" && pwd -P) || die "cannot resolve work root"
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "cannot resolve source root"
+logs="$work_root/post-phase2-logs"
+fixture="$work_root/post-phase2-fixture"
+summary="$work_root/post-phase2-summary.env"
+home="$work_root/post-phase2-home"
+tmp="$work_root/post-phase2-tmp"
+cache="$work_root/post-phase2-cache"
+mkdir -p "$logs" "$fixture" "$home" "$tmp" "$cache" || die "cannot isolate test state"
+
+# Tool artifacts are identity-scoped by the delegated verifier.  Remove only
+# prior outputs so a reused work root cannot make discovery ambiguous; retain
+# its compiler caches for bounded rebuilds.
+rm -rf "$work_root/outputs/compiler-tools" ||
+    die "cannot clear stale compiler-tool outputs"
+
+: >"$summary"
+echo "schema=freebsd-phase2-post-bootstrap-tests-v1" >>"$summary"
+
+base_status=0
+(cd "$source_root" && sh scripts/bootstrap/bootstrap-phase-verification.shs "$@") || base_status=$?
+printf 'task=base_phase_matrix|result=%s|status=%s\n' \
+    "$(if [ "$base_status" -eq 0 ]; then echo PASS; else echo FAIL; fi)" "$base_status" >>"$summary"
+[ "$base_status" -eq 0 ] || die "base phase verification failed; see $work_root/summary.env"
+
+find_one_tool() {
+    name=$1
+    matches="$tmp/$name.matches"
+    find "$work_root/outputs/compiler-tools" -type f -name "$name" -print 2>/dev/null | LC_ALL=C sort >"$matches"
+    count=$(wc -l <"$matches" | tr -d ' ')
+    [ "$count" = 1 ] || die "expected exactly one $name artifact, found $count"
+    sed -n '1p' "$matches"
+}
+
+compiler_cli=$(find_one_tool simple_cli)
+test_runner=$(find_one_tool simple_test_runner)
+[ -x "$compiler_cli" ] || die "full CLI artifact is not executable"
+[ -x "$test_runner" ] || die "test runner artifact is not executable"
+
+cat >"$fixture/phase2_loader_dep.spl" <<'EOF'
+fn phase2_answer() -> i64:
+    6 * 7
+EOF
+cat >"$fixture/main.spl" <<'EOF'
+use phase2_loader_dep.{phase2_answer}
+
+fn main():
+    print phase2_answer()
+EOF
+
+run_task() {
+    task=$1
+    shift
+    log="$logs/$task.log"
+    started=$(date +%s)
+    status=0
+    (
+        cd "$source_root" || exit 125
+        HOME="$home" TMPDIR="$tmp" SIMPLE_LIB="$source_root/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+            "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+                "$timeout_seconds" 15 "$@"
+    ) >"$log" 2>&1 || status=$?
+    ended=$(date +%s)
+    result=PASS
+    [ "$status" -eq 0 ] || result=FAIL
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s\n' \
+        "$task" "$result" "$status" "$((ended - started))" "$log" >>"$summary"
+    [ "$status" -eq 0 ] || return "$status"
+}
+
+run_task interpreter_module_load "$compiler_cli" run "$fixture/main.spl" \
+    --mode=interpreter --clean ||
+    die "interpreter module-load probe failed"
+[ "$(tr -d '\r\n' <"$logs/interpreter_module_load.log")" = 42 ] ||
+    die "interpreter module-load probe did not print 42"
+
+probe="$fixture/phase2-module-probe"
+run_task native_module_build "$compiler_cli" native-build "$fixture/main.spl" \
+    --threads 1 --cache-dir "$cache/native-module-build" --output "$probe" ||
+    die "native module build failed"
+[ -x "$probe" ] || die "native module build produced no executable"
+run_task native_module_execute "$probe" || die "native module probe failed"
+[ "$(tr -d '\r\n' <"$logs/native_module_execute.log")" = 42 ] ||
+    die "native module probe did not print 42"
+
+run_task interpreter_regression "$test_runner" \
+    test/01_unit/compiler/interpreter/block_scoped_use_resolves_spec.spl \
+    --mode=interpreter --unstable || die "interpreter regression failed"
+run_task loader_regression "$test_runner" \
+    test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl \
+    --mode=interpreter --unstable || die "loader regression failed"
+
+echo "overall=PASS" >>"$summary"
+echo "freebsd_phase2_tests_status=pass"
+echo "freebsd_phase2_tests_summary=$summary"
