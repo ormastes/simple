@@ -33,4 +33,60 @@ status=0
 PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/stalled.env" -- \
     /bin/sh -c 'touch "$1"' sh "$tmp/started" >"$tmp/stalled.log" 2>&1 || status=$?
 [ "$status" -eq 89 ] && [ ! -e "$tmp/started" ] || fail 'hung sampler released command'
-echo 'PASS: sampling cadence, late completion timeout and hung startup sampler'
+
+# Simulate cold executable admission independently of host load. Link the delay
+# into the real helper so its SID observations and pinned binary remain real.
+cat >"$tmp/admission-delay.c" <<'EOF'
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+__attribute__((constructor)) static void delay_first_admission(void) {
+    const char *marker = getenv("RSS_GUARD_TEST_MARKER");
+    const char *delay = getenv("RSS_GUARD_TEST_DELAY");
+    if (!marker || !delay) return;
+    int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return;
+    close(fd);
+    sleep((unsigned)atoi(delay));
+}
+EOF
+cat >"$tmp/cc" <<'EOF'
+#!/bin/sh
+exec "$RSS_GUARD_TEST_CC" "$@" "$RSS_GUARD_TEST_SOURCE"
+EOF
+chmod +x "$tmp/cc"
+export RSS_GUARD_TEST_CC RSS_GUARD_TEST_SOURCE RSS_GUARD_TEST_MARKER RSS_GUARD_TEST_DELAY
+RSS_GUARD_TEST_CC=$(command -v "${CC:-cc}")
+RSS_GUARD_TEST_SOURCE=$tmp/admission-delay.c
+RSS_GUARD_TEST_MARKER=$tmp/cold-success
+RSS_GUARD_TEST_DELAY=3
+CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold.env" -- /bin/sleep .25
+grep -Fxq 'status=complete' "$tmp/cold.env" || fail 'cold admission did not complete'
+grep -Fxq 'session_helper_integrity=verified' "$tmp/cold.env" || fail 'cold helper was not verified'
+awk -F= '/^sample_gap_max_ms=/ { if ($2 >= 130) exit 1 }' "$tmp/cold.env" || fail 'cold admission entered sample clock'
+
+# A genuine ps failure after cold admission must keep its measurement receipt.
+cat >"$tmp/bin/ps" <<'EOF'
+#!/bin/sh
+exit 77
+EOF
+RSS_GUARD_TEST_MARKER=$tmp/cold-measurement
+status=0
+PATH="$tmp/bin:$PATH" CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold-failure.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/cold-started" >"$tmp/cold-failure.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$tmp/cold-started" ] || fail 'cold measurement failure released command'
+grep -Fxq 'status=rss-measurement-failed' "$tmp/cold-failure.env" || fail 'cold admission masked measurement failure'
+
+# The larger startup budget remains bounded and never releases a stalled helper.
+RSS_GUARD_TEST_MARKER=$tmp/cold-stalled
+RSS_GUARD_TEST_DELAY=10
+begin=$(date +%s)
+status=0
+CC="$tmp/cc" perl "$guard" --receipt="$tmp/cold-stalled.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/cold-stalled-started" >"$tmp/cold-stalled.log" 2>&1 || status=$?
+elapsed=$(($(date +%s) - begin))
+[ "$status" -eq 89 ] && [ ! -e "$tmp/cold-stalled-started" ] || fail 'stalled helper released command'
+[ "$elapsed" -lt 9 ] || fail "stalled helper exceeded startup bound: $elapsed seconds"
+grep -Fxq 'status=session-helper-install-failed' "$tmp/cold-stalled.env" || fail 'missing stalled helper receipt'
+echo 'PASS: sampling cadence, timeout/grace, hung sampler and bounded cold helper admission'
