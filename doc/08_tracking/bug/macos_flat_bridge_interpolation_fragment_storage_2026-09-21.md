@@ -54,3 +54,29 @@ available`; logs:
 The focused SSpec, compiler/lib checks, and MCP/native smoke remain pending
 an admitted runnable toolchain. No full bootstrap was run. The shared bug/TODO
 databases and files owned by the preceding repair commits were not edited.
+
+## Allocation regression follow-up
+
+The regression now includes an 8,192-character suffix in a completed
+interpolation identifier and checks the complete converted identifier value.
+A second case calls the production bridge with 32-byte and 65,536-byte
+unfinished regions, measuring each call with the production
+`std.nogc_sync_mut.sffi.host.heap_array_capacity_bytes` facade. The input text
+and span are constructed before either measurement. Because no closing brace
+is present, neither call invokes the inner expression parser.
+
+The test requires nonnegative capacity deltas and at most 4 KiB more array
+storage for the large input. The old `inner_parts` algorithm retains at least
+65,536 text slots (512 KiB on the native runtime), while the corrected scanner
+retains only its constant-sized result array. This observable allocation
+assertion complements the source-shape guard; it does not depend on searching
+production text. A live 2,048-element integer array calibrates the counter and
+requires at least 16 KiB of reported growth, so inert accounting cannot turn
+the test green.
+
+This allocation case requires the native runtime's array-capacity accounting
+and no automatic collection during the measured call. A runtime without the
+counter must report an unavailable-symbol/qualification failure; it must not
+skip the assertion or substitute zero. The added cases have not been executed:
+the admitted Stage2 `check` command remains unsupported and no admitted SSpec
+runner was supplied. Before/after runtime failure/pass remains pending.
