@@ -2,50 +2,83 @@
 use std.spec.{describe, it, expect, step}
 use compiler.hir.reexport_diagnostic_policy.{hir_reexport_chase_unresolved_receipt}
 use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use std.nogc_sync_mut.env.variables.{env_set, env_unset}
 
 extern fn rt_heap_registry_count() -> i64
+extern fn rt_heap_live_bytes() -> i64
 extern fn rt_time_now_nanos() -> i64
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 
-fn profile_receipts(count: i64, enabled: bool) -> [i64]:
+fn profile_fixed_caller(count: i64, lowering: HirLowering) -> [i64]:
     assert(rt_transient_array_scope_begin())
     val before = rt_heap_registry_count()
+    val live_before = rt_heap_live_bytes()
+    val started = rt_time_now_nanos()
+    var emitted = 0
+    var i = 0
+    while i < count:
+        if lowering.report_reexport_chase_unresolved(
+            "lib.nogc_async_mut.io.platform_event", "Result", "Result",
+            "src/lib/nogc_async_mut/io/platform_event.spl"):
+            emitted = emitted + 1
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - started
+    val objects = rt_heap_registry_count() - before
+    val live_bytes = rt_heap_live_bytes() - live_before
+    assert(rt_transient_array_scope_end())
+    [elapsed, objects, live_bytes, emitted]
+
+fn profile_parent_renderer(count: i64) -> [i64]:
+    assert(rt_transient_array_scope_begin())
+    val before = rt_heap_registry_count()
+    val live_before = rt_heap_live_bytes()
     val started = rt_time_now_nanos()
     var rendered_bytes = 0
     var i = 0
     while i < count:
-        val receipt = hir_reexport_chase_unresolved_receipt(
-            enabled,
-            "lib.nogc_async_mut.io.platform_event", "Result", "Result",
-            "src/lib/nogc_async_mut/io/platform_event.spl")
-        rendered_bytes = rendered_bytes + receipt.len()
+        rendered_bytes = rendered_bytes + hir_reexport_chase_unresolved_receipt(
+            true, "lib.nogc_async_mut.io.platform_event", "Result", "Result",
+            "src/lib/nogc_async_mut/io/platform_event.spl").len()
         i = i + 1
     val elapsed = rt_time_now_nanos() - started
     val objects = rt_heap_registry_count() - before
+    val live_bytes = rt_heap_live_bytes() - live_before
     assert(rt_transient_array_scope_end())
-    [elapsed, objects, rendered_bytes]
+    [elapsed, objects, live_bytes, rendered_bytes]
 
 describe "HIR re-export diagnostic resource profile":
     it "keeps disabled miss receipts bounded without a timing regression":
-        step("Resolve the production environment policy once in a lowering context")
-        val lowering = HirLowering.new()
-        val production_enabled = lowering.reexport_chase_unresolved_diag_enabled
-        step("Warm disabled and explicitly enabled diagnostic paths")
-        profile_receipts(8, production_enabled)
-        profile_receipts(8, true)
-        step("Measure the Stage 3 default path and an enabled negative control")
-        val small = profile_receipts(10000, production_enabled)
-        val large = profile_receipts(20000, production_enabled)
-        val enabled = profile_receipts(2000, true)
-        print "[hir-reexport-diagnostic] small={small} large={large} enabled={enabled} units=ns,objects,bytes"
-        step("Require no rendered default output and bounded live allocations")
-        expect(production_enabled).to_equal(false)
-        expect(small[2]).to_equal(0)
-        expect(large[2]).to_equal(0)
-        expect(enabled[2]).to_be_greater_than(500000)
-        expect(small[1] <= 8 and large[1] <= 8).to_equal(true)
-        expect(enabled[1]).to_be_greater_than(1000)
-        step("Prevent disabled-path performance and scaling regressions")
-        expect(large[0] <= small[0] * 3 + 20000000).to_equal(true)
-        expect(large[0]).to_be_less_than(1000000000)
+        step("Construct the production caller with an explicitly unset diagnostic environment")
+        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
+        var lowering = HirLowering.new()
+        expect(lowering.reexport_chase_unresolved_diag_enabled).to_equal(false)
+        step("Warm fixed production caller and parent renderer")
+        profile_fixed_caller(8, lowering)
+        profile_parent_renderer(8)
+        step("Repeat parent and fixed profiles at 10k and 20k misses")
+        val fixed_small = profile_fixed_caller(10000, lowering)
+        val fixed_large = profile_fixed_caller(20000, lowering)
+        val parent_small = profile_parent_renderer(10000)
+        val parent_large = profile_parent_renderer(20000)
+        step("Measure a bounded enabled production caller including stderr emission")
+        expect(env_set("SIMPLE_BOOTSTRAP_DIAG", "1")).to_equal(true)
+        var enabled_lowering = HirLowering.new()
+        val enabled_actual = profile_fixed_caller(32, enabled_lowering)
+        expect(env_unset("SIMPLE_BOOTSTRAP_DIAG")).to_equal(true)
+        print "[hir-reexport-diagnostic] fixed_small={fixed_small} fixed_large={fixed_large} parent_small={parent_small} parent_large={parent_large} enabled_actual={enabled_actual} units=ns,objects,heap-bytes,output"
+        step("Require fixed caller allocation and live-heap improvement over parent")
+        expect(fixed_small[3]).to_equal(0)
+        expect(fixed_large[3]).to_equal(0)
+        expect(fixed_small[1] <= 8 and fixed_large[1] <= 8).to_equal(true)
+        expect(parent_small[1]).to_be_greater_than(5000)
+        expect(parent_large[1]).to_be_greater_than(parent_small[1])
+        expect(parent_large[2]).to_be_greater_than(fixed_large[2])
+        expect(parent_large[3]).to_be_greater_than(5000000)
+        step("Prevent fixed and enabled-parent timing regressions")
+        expect(fixed_large[0] <= fixed_small[0] * 3 + 20000000).to_equal(true)
+        expect(fixed_large[0]).to_be_less_than(1000000000)
+        expect(parent_large[0]).to_be_less_than(5000000000)
+        expect(enabled_actual[3]).to_equal(32)
+        expect(enabled_actual[0]).to_be_less_than(1000000000)
