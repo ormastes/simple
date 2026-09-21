@@ -20,6 +20,8 @@ set -eu
 #   QEMU_USER            VM user (default: freebsd)
 #   QEMU_MEM             RAM (default: 8G)
 #   QEMU_CPUS            CPUs (default: 4)
+#   QEMU_BUILD_JOBS      Bootstrap jobs (default: 1)
+#   SIMPLE_FREEBSD_SELFHOST_JOBS Overrides QEMU_BUILD_JOBS
 #   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 1800; pristine images
 #                        may run freebsd-update before nuageinit/sshd)
 #   QEMU_ROOT_SSH_TIMEOUT Root SSH wait seconds after user SSH (default: 120)
@@ -39,7 +41,7 @@ QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
-QEMU_BUILD_JOBS="${SIMPLE_FREEBSD_SELFHOST_JOBS:-1}"
+QEMU_BUILD_JOBS="${SIMPLE_FREEBSD_SELFHOST_JOBS:-${QEMU_BUILD_JOBS:-1}}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
@@ -611,7 +613,9 @@ pass "Overlay created (30G): $OVERLAY_IMAGE"
 
 # Detect KVM
 ACCEL="tcg"
-CPU_MODEL="qemu64"
+# Both bootstrap LLVM backends emit x86-64-v3. qemu64 lacks AVX2 and
+# makes the generated Stage 2 compiler fault before even --version.
+CPU_MODEL="max"
 case "${HOST_ARCH:-$(uname -m 2>/dev/null || true)}" in
     x86_64|amd64)
         if [ -w /dev/kvm ] 2>/dev/null; then
@@ -722,6 +726,21 @@ else
     fail "No root/sudo/doas available (root SSH timed out, no sudo/doas)"
 fi
 
+check_guest_avx2() {
+    # Compile the detector for baseline x86-64 so unsupported guests can
+    # reject cleanly. Clang's builtin also checks OS support for AVX state.
+    if ! $VM_SSH "probe=\$(mktemp /tmp/simple-avx2-probe.XXXXXX) &&
+        trap 'rm -f \"\$probe\"' EXIT HUP INT TERM &&
+        printf '%s\\n' 'int main(void) { __builtin_cpu_init(); return __builtin_cpu_supports(\"avx2\") ? 0 : 1; }' |
+        clang -x c -march=x86-64 -o \"\$probe\" - && \"\$probe\""; then
+        fail "Guest AVX2 execution support is required by bootstrap LLVM (CPU model: $CPU_MODEL)"
+    fi
+    pass "Guest AVX2 execution support verified"
+}
+
+info "Bootstrap resources: ${QEMU_CPUS} vCPUs, ${QEMU_MEM} RAM, ${QEMU_BUILD_JOBS} jobs"
+check_guest_avx2
+
 copy_guest_bootstrap_logs() {
     host_log_dir="$PROVENANCE_DIR"
     rm -rf "$host_log_dir"
@@ -746,6 +765,7 @@ copy_guest_bootstrap_logs() {
 # ── Smoke / Full ───────────────────────────────────────────────────────
 printf '[7/7] Bootstrap (%s)\n' "$MODE"
 
+
 if [ "$MODE" = "smoke" ]; then
     # Smoke: verify clang exists and can compile a trivial C program
     CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
@@ -762,6 +782,7 @@ if [ "$MODE" = "smoke" ]; then
             fail "clang not available"
         fi
     fi
+
 
     # Test trivial C compilation
     $VM_SSH "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
