@@ -835,9 +835,14 @@ run_blocked_resume 'receipt tamper'
 # frozen identity before any stale PASS can be reused.
 printf 'fn journal_helper() -> i64: 2\n' >"$fake_root/src/app/journal_support/nonentry.spl"
 source_drift_status=0
+source_drift_output="$fixture/expected-resume-config-mismatch.log"
 # shellcheck disable=SC2086
-"$runner" --matrix-id=full --resume $common_args || source_drift_status=$?
+"$runner" --matrix-id=full --resume $common_args >"$source_drift_output" 2>&1 || source_drift_status=$?
 [ "$source_drift_status" -eq 2 ] || fail "non-entry source drift returned $source_drift_status"
+grep -Fxq 'stage4-tooling-matrix: resume config identity mismatch' "$source_drift_output" ||
+  fail "non-entry source drift omitted the expected resume mismatch diagnostic"
+printf 'EXPECTED_RESUME_MISMATCH_RESULT status=%s output=%s\n' \
+  "$source_drift_status" "$source_drift_output"
 grep -Fxq 'overall=FAIL' "$summary" || fail "source drift retained a stale aggregate"
 grep -Fxq 'admission_eligible=false' "$summary" || fail "source drift exposed admission"
 grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "source drift exposed compiler-file zero"
@@ -914,17 +919,37 @@ cmp -s "$fixture/jobs1-order" "$fixture/jobs1-matrix-order" || fail "jobs=1 pare
 # from reaching terminal receipts.
 timeout_matrix_status=0
 export FAKE_SLEEP_TASK=link_cli FAKE_SLEEP_SECONDS=30
+timeout_probe_output="$fixture/case-timeout.log"
 # shellcheck disable=SC2086
 "$runner" --matrix-id=case-timeout --scope=link-only $common_args \
-  --timeout-seconds=1 --build-jobs=3 || timeout_matrix_status=$?
+  --timeout-seconds=10 --build-jobs=3 >"$timeout_probe_output" 2>&1 || timeout_matrix_status=$?
 unset FAKE_SLEEP_TASK FAKE_SLEEP_SECONDS
 [ "$timeout_matrix_status" -eq 1 ] || fail "per-case timeout matrix returned $timeout_matrix_status"
 timeout_state="$fake_root/build/mini_builds/stage4_tooling_case-timeout/state"
-grep -Fxq 'result=TIMEOUT' "$timeout_state/link_cli.env" || fail "timed-out case was not classified"
-grep -Fxq 'result=PASS' "$timeout_state/link_mcp.env" || fail "timeout stopped independent MCP case"
-grep -Fxq 'result=PASS' "$timeout_state/link_lsp.env" || fail "timeout stopped independent LSP case"
-grep -Fxq 'terminal_count=3' "$fake_root/build/mini_builds/stage4_tooling_case-timeout/summary.env" ||
-  fail "timeout matrix did not continue to the end"
+printf 'CASE_TIMEOUT_OUTPUT_BEGIN file=%s\n' "$timeout_probe_output"
+cat "$timeout_probe_output"
+printf 'CASE_TIMEOUT_OUTPUT_END\n'
+for timeout_task in link_cli link_mcp link_lsp; do
+  timeout_receipt="$timeout_state/$timeout_task.env"
+  [ -f "$timeout_receipt" ] || fail "case-timeout omitted $timeout_task receipt"
+done
+timeout_cli_result=$(sed -n 's/^result=//p' "$timeout_state/link_cli.env")
+timeout_cli_status=$(sed -n 's/^status=//p' "$timeout_state/link_cli.env")
+timeout_mcp_result=$(sed -n 's/^result=//p' "$timeout_state/link_mcp.env")
+timeout_mcp_status=$(sed -n 's/^status=//p' "$timeout_state/link_mcp.env")
+timeout_lsp_result=$(sed -n 's/^result=//p' "$timeout_state/link_lsp.env")
+timeout_lsp_status=$(sed -n 's/^status=//p' "$timeout_state/link_lsp.env")
+printf 'CASE_TIMEOUT_RESULT task=link_cli result=%s status=%s\n' "$timeout_cli_result" "$timeout_cli_status"
+printf 'CASE_TIMEOUT_RESULT task=link_mcp result=%s status=%s\n' "$timeout_mcp_result" "$timeout_mcp_status"
+printf 'CASE_TIMEOUT_RESULT task=link_lsp result=%s status=%s\n' "$timeout_lsp_result" "$timeout_lsp_status"
+timeout_sibling_states="cli=$timeout_cli_result/$timeout_cli_status mcp=$timeout_mcp_result/$timeout_mcp_status lsp=$timeout_lsp_result/$timeout_lsp_status"
+[ "$timeout_cli_result:$timeout_cli_status:$timeout_mcp_result:$timeout_mcp_status:$timeout_lsp_result:$timeout_lsp_status" = \
+  'TIMEOUT:124:PASS:0:PASS:0' ] || fail "case-timeout unexpected sibling states: $timeout_sibling_states"
+timeout_summary="$fake_root/build/mini_builds/stage4_tooling_case-timeout/summary.env"
+timeout_terminal_count=$(sed -n 's/^terminal_count=//p' "$timeout_summary")
+[ "$timeout_terminal_count" -eq 3 ] ||
+  fail "timeout matrix terminal_count=$timeout_terminal_count (expected 3); $timeout_sibling_states"
+printf 'CASE_TIMEOUT_SUMMARY terminal_count=%s\n' "$timeout_terminal_count"
 
 run_signal_cleanup_contract
 
