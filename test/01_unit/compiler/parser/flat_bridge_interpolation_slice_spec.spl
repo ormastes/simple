@@ -4,8 +4,8 @@ an array of single-character fragments during its scan.
 
 use std.spec.*
 use std.io_runtime.{file_read}
-use std.nogc_sync_mut.sffi.host.{heap_array_capacity_bytes}
-use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.sffi.host.{heap_registry_count}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{parser_set_had_error}
 use compiler.common.diagnostics.span.{Span}
@@ -22,7 +22,7 @@ fn reset_interpolation_parser():
 fn timed_bridge_batch(value: text, rounds: i64) -> (i64, i64):
     val span = Span.default()
     var checksum = 0
-    val started = time_now_monotonic_ms()
+    val started = time_now_nanos()
     for index in 0..rounds:
         val parts = flat_bridge_build_string_interps(value, span)
         if parts.len() != 1:
@@ -33,7 +33,7 @@ fn timed_bridge_batch(value: text, rounds: i64) -> (i64, i64):
                     return (-1, -1)
                 checksum = checksum + name.len()
             case _: return (-1, -1)
-    (time_now_monotonic_ms() - started, checksum)
+    (time_now_nanos() - started, checksum)
 
 describe "flat bridge interpolation fragment slicing":
     it "preserves expression order and span across adjacent regions":
@@ -65,41 +65,41 @@ describe "flat bridge interpolation fragment slicing":
             case ExprKind.Ident(actual): expect(actual).to_equal(name)
             case _: expect(false).to_equal(true)
 
-    it "bounds retained array storage for a large unfinished interpolation":
-        # Requires native runtime array-capacity accounting. This is a real
-        # allocation oracle, not RSS: text allocations are a different kind.
-        # An unfinished region never invokes the inner expression parser, so
-        # its arrays cannot mask the bridge's fragment-storage contribution.
+    it "retains no fragment accumulator container for a large unfinished interpolation":
+        # Native runtime's live-object registry is implemented by both owners.
+        # Equal-length scans make the same character/next-character slices;
+        # neither invokes the inner parser. Warm short-string caches first.
         reset_interpolation_parser()
         val span = Span.default()
-        val short_value = OPEN_BRACE + "x".repeat(32)
+        val plain_value = "x".repeat(65537)
         val large_value = OPEN_BRACE + "x".repeat(65536)
+        expect(flat_bridge_build_string_interps("xxx", span).len()).to_equal(0)
+        expect(flat_bridge_build_string_interps(OPEN_BRACE + "xx", span).len()).to_equal(0)
 
-        # Fail closed if this runtime's accounting is absent or inert.
-        val calibration_before = heap_array_capacity_bytes()
-        var calibration: [i64] = []
-        for index in 0..2048:
-            calibration.push(index)
-        val calibration_after = heap_array_capacity_bytes()
-        expect(calibration_after - calibration_before >= 2048 * 8).to_equal(true)
+        # Fail closed if registry accounting is absent or inert. Keep this
+        # actual array alive across the subsequent measurements.
+        val calibration_before = heap_registry_count()
+        val calibration: [i64] = [17, 23]
+        val calibration_after = heap_registry_count()
+        expect(calibration_after > calibration_before).to_equal(true)
 
-        val short_before = heap_array_capacity_bytes()
-        val short_parts = flat_bridge_build_string_interps(short_value, span)
-        val short_after = heap_array_capacity_bytes()
-        val large_before = heap_array_capacity_bytes()
+        val plain_before = heap_registry_count()
+        val plain_parts = flat_bridge_build_string_interps(plain_value, span)
+        val plain_after = heap_registry_count()
+        val large_before = heap_registry_count()
         val large_parts = flat_bridge_build_string_interps(large_value, span)
-        val large_after = heap_array_capacity_bytes()
+        val large_after = heap_registry_count()
 
-        expect(short_parts.len()).to_equal(0)
+        expect(plain_parts.len()).to_equal(0)
         expect(large_parts.len()).to_equal(0)
-        val short_bytes = short_after - short_before
-        val large_bytes = large_after - large_before
-        expect(short_bytes >= 0 and large_bytes >= 0).to_equal(true)
-        # Before the repair, 65,536 retained text slots alone need 512 KiB.
-        # Permit a fixed 4 KiB difference for result-array capacity rounding.
-        expect(large_bytes <= short_bytes + 4096).to_equal(true)
-        expect(calibration.len()).to_equal(2048)
-        expect(calibration[2047]).to_equal(2047)
+        val plain_objects = plain_after - plain_before
+        val large_objects = large_after - large_before
+        expect(plain_objects > 0 and large_objects > 0).to_equal(true)
+        # An unfinished region returns a fresh empty result: one extra array.
+        # The old scanner additionally allocated/reset inner_parts on '{',
+        # making this difference two and retaining the 65,536-slot buffer.
+        expect(large_objects).to_equal(plain_objects + 1)
+        expect(calibration[0] + calibration[1]).to_equal(40)
 
     it "keeps large completed interpolation scanning within a linear scaling budget":
         reset_interpolation_parser()
@@ -107,7 +107,7 @@ describe "flat bridge interpolation fragment slicing":
         # six-character expression for parsing. Build inputs outside timing.
         val small = OPEN_BRACE + " ".repeat(8192) + "marker" + CLOSE_BRACE
         val large = OPEN_BRACE + " ".repeat(16384) + "marker" + CLOSE_BRACE
-        expect(time_now_monotonic_ms() > 0).to_equal(true)
+        expect(time_now_nanos() > 0).to_equal(true)
         val warm_small = timed_bridge_batch(small, 1)
         val warm_large = timed_bridge_batch(large, 1)
         expect(warm_small.1).to_equal(6)
@@ -121,20 +121,22 @@ describe "flat bridge interpolation fragment slicing":
         for sample in 0..3:
             val first = timed_bridge_batch(if sample == 1: large else: small, 4)
             val second = timed_bridge_batch(if sample == 1: small else: large, 4)
-            expect(first.0 >= 0 and second.0 >= 0).to_equal(true)
+            # Nanosecond provider must advance at least 1 us per four-call
+            # batch. Frozen clocks and zero-duration samples fail closed.
+            expect(first.0 >= 1000 and second.0 >= 1000).to_equal(true)
             expect(first.1).to_equal(24)
             expect(second.1).to_equal(24)
             checksum = checksum + first.1 + second.1
-            val small_ms = if sample == 1: second.0 else: first.0
-            val large_ms = if sample == 1: first.0 else: second.0
-            if small_ms < small_best:
-                small_best = small_ms
-            if large_ms < large_best:
-                large_best = large_ms
+            val small_ns = if sample == 1: second.0 else: first.0
+            val large_ns = if sample == 1: first.0 else: second.0
+            if small_ns < small_best:
+                small_best = small_ns
+            if large_ns < large_best:
+                large_best = large_ns
         expect(checksum).to_equal(144)
         # Expected work doubles. Permit 3x plus 25 ms for timer granularity
         # and shared-host variation; allocation growth has its own hard gate.
-        expect(large_best <= small_best * 3 + 25).to_equal(true)
+        expect(large_best <= small_best * 3 + 25000000).to_equal(true)
 
     it "skips escaped braces and accepts a following expression":
         reset_interpolation_parser()
