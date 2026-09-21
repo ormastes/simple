@@ -10,22 +10,13 @@ path and that its typed error taxonomy (`LoadFailed`/`MissingSymbol`/
 bin/simple test test/01_unit/compiler/backend_plugin/dynamic_loader_spec.spl
 
 ## Compatibility and limitations
-The full "closes the library when the entry symbol is missing" integration
-path (a real shared-library artifact that loads but does not export
-`simple_backend_plugin_v1`) needs a host-specific provider binary that is not
-available offline in this spec; this file instead proves the fail-closed
-error taxonomy (`DynamicBackendPluginLoadError.MissingSymbol` code/diagnostic
-contract) that the loader's missing-symbol branch constructs and returns.
-Unsupported: real dlopen success paths (no committed fixture provider
-exports the v1 entry symbol).
+The fixture builder compiles two tiny C providers for the current host. On
+Windows it admits only the pinned LLVM 23.1.1 `clang-cl.exe` binary and checks
+its SHA-256 before compiling. The provider entry is resolved but never called.
 
 ## Verification guidance and troubleshooting
-Every scenario but one calls the real loader function or a real error-enum
-method rather than inspecting the loader's own source text. The exception is
-"pins the staged-artifact and build-id transport boundary (source text)",
-which was carried in from main by the 2026-09-06 merge to keep the staged
-transport contract guarded; it carries a TODO to convert it. A failure names
-the returned error code; cross-reference
+Every scenario calls the real staging or loader boundary against a compiled
+shared library. A failure names the returned error code; cross-reference
 `src/compiler/70.backend/backend_plugin/dynamic_loader.spl` for the
 code<->variant mapping.
 """
@@ -34,12 +25,34 @@ code<->variant mapping.
 
 use std.spec
 use std.spec.step
-use std.fs.{read_file}
-use std.sffi.dynamic.{DynLib}
+use std.io.{env_set, process_run}
+use std.nogc_sync_mut.io_runtime.{
+    dir_exists, dir_list, file_exists, file_hash_sha256_or_empty, file_read,
+    file_write, host_os
+}
 use compiler.backend_plugin.dynamic_loader.*
 
-val DYNAMIC_LOADER_SOURCE =
-    "src/compiler/70.backend/backend_plugin/dynamic_loader.spl"
+val DYNAMIC_LOADER_FIXTURE_BUILDER =
+    "test/fixtures/backend_plugin/build_dynamic_loader_fixtures.sh"
+
+fn fixture_value(output: text, key: text) -> text:
+    val prefix = key + "="
+    for line in output.split("\n"):
+        if line.starts_with(prefix):
+            return line.slice(prefix.len(), line.len())
+    ""
+
+fn fixture_shell() -> text:
+    if host_os() == "windows":
+        return "C:/msys64/usr/bin/sh.exe"
+    "sh"
+
+fn staging_directory_count() -> i64:
+    var count = 0
+    for path in dir_list("."):
+        if path.contains("simple-backend-plugin"):
+            count = count + 1
+    count
 
 describe "dynamic backend provider library lease":
     it "resolves only the exact v1 entry symbol through canonical DynLib":
@@ -60,43 +73,54 @@ describe "dynamic backend provider library lease":
             case Err(error): error.code()
         expect(load_code).to_equal("BACKEND_PLUGIN_LOAD_FAILED")
 
-    # TODO: [sspec][P2] convert to real execution. This scenario text-pins the
-    # staged-artifact + build-id transport contract landed on main by
-    # 848f626638b ("feat(stage3): surgical extraction of PR #235 — secure
-    # stage3 bootstrap + backend transport onto current main"). It is retained
-    # verbatim through the #370 merge because dropping it would leave that
-    # just-landed contract with no guard at all; it is the one scenario in this
-    # file that still inspects source text, and it is why the file no longer
-    # scores raw=100. Closing it needs a real staged provider artifact.
-    it "pins the staged-artifact and build-id transport boundary (source text)":
+    it "stages immutable provider bytes before loading":
         # @req REQ-DYNLOADER-001
-        step("Read the loader source and pin the staged-load boundary")
-        val source = read_file(DYNAMIC_LOADER_SOURCE)
-        expect(source).to_contain("use std.sffi.dynamic.")
-        expect(source).to_contain("DynLib")
-        expect(source).to_contain("DynLib.load_checked(staged.staged_path)")
-        expect(source).to_contain(
-            "stage_dynamic_backend_plugin_artifact_v1(provider_path)")
-        expect(source).to_contain("loaded_build_id != staged.build_id")
-        expect(source).to_contain(
-            "library.sym_checked(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)"
-        )
-        expect(source.contains("extern fn")).to_be(false)
-        expect(source.contains(".call0(")).to_be(false)
-        expect(source.contains(".call_n(")).to_be(false)
-        expect(source.contains("spl_wffi_call")).to_be(false)
+        step("Compile a real C provider with the admitted host compiler")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "immutable"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        expect(provider_path == "").to_be(false)
+
+        step("Stage and identify the exact provider bytes")
+        var staged = stage_dynamic_backend_plugin_artifact_v1(
+            provider_path).ok().unwrap()
+        expect(staged.staged_path == provider_path).to_be(false)
+        expect(staged.build_id).to_equal(
+            file_hash_sha256_or_empty(staged.staged_path))
+
+        step("Mutate the selected source after staging")
+        expect(file_write(provider_path, "mutated-after-staging")).to_equal(true)
+        expect(file_hash_sha256_or_empty(provider_path) == staged.build_id).to_be(false)
+        expect(file_hash_sha256_or_empty(staged.staged_path)).to_equal(
+            staged.build_id)
+        val staging_dir = staged.staging_dir
+        expect(staged.close()).to_equal(true)
+        expect(dir_exists(staging_dir)).to_be(false)
 
     it "fails closed and closes the library when the entry symbol is missing":
         # @req REQ-DYNLOADER-002
-        step("Construct the typed error the loader's missing-symbol branch returns")
-        val missing = DynamicBackendPluginLoadError.MissingSymbol(
-            "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1 + " in test-provider.so: undefined symbol"
-        )
-        # @capture(statistics): missing-symbol error taxonomy
-        step("Verify the missing-symbol variant reports the stable dispatch code")
-        expect(missing.code()).to_equal("BACKEND_PLUGIN_MISSING_SYMBOL")
-        step("Verify the missing-symbol variant retains the diagnostic detail")
-        expect(missing.diagnostic()).to_contain(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+        step("Compile a loadable C provider without the required entry symbol")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "missing"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "MISSING")
+        val before = staging_directory_count()
+
+        step("Load the provider through the real checked DynLib path")
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(provider_path)
+        val missing_code = match result:
+            case Ok(_): "unexpected-ok"
+            case Err(load_error): load_error.code()
+        val missing_detail = match result:
+            case Ok(_): ""
+            case Err(load_error): load_error.diagnostic()
+        expect(missing_code).to_equal("BACKEND_PLUGIN_MISSING_SYMBOL")
+        expect(missing_detail).to_contain(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+        expect(staging_directory_count()).to_equal(before)
 
     it "retains the raw address only as a lease for the typed bridge":
         # @req REQ-DYNLOADER-003
@@ -122,22 +146,33 @@ describe "dynamic backend provider library lease":
         step("Verify the unsupported variant retains its diagnostic detail")
         expect(unsupported.diagnostic()).to_equal("typed descriptor ABI is unavailable")
 
-    it "reports the retained library handle only while the lease is open":
+    it "loads the exact symbol and clears the admitted handle on close":
         # @req REQ-DYNLOADER-002
-        step("Construct an open lease over a synthetic library handle")
-        val open_lease = DynamicBackendPluginLease(
-            DynLib(handle: 7, path: ""), "/provider.so", "/stage", "d", 4096, false
-        )
-        # @capture(statistics): admitted handle for an open lease
-        step("Verify the admitted handle is the retained dlopen handle")
-        expect(open_lease.admitted_handle()).to_equal(7)
+        step("Compile and load a real C provider exporting the exact v1 symbol")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "lease"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        val selected_build_id = file_hash_sha256_or_empty(provider_path)
+        val unload_marker = fixture_value(output, "UNLOAD")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        expect(file_exists(unload_marker)).to_equal(false)
+        var lease = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(provider_path).ok().unwrap()
+        expect(lease.symbol_name()).to_equal(
+            DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+        expect(lease.provider_path == provider_path).to_equal(false)
+        expect(lease.build_id).to_equal(selected_build_id)
+        expect(file_hash_sha256_or_empty(lease.provider_path)).to_equal(
+            lease.build_id)
+        expect(lease.admitted_handle()).to_be_greater_than(0)
+        expect(dir_exists(lease.staging_dir)).to_equal(true)
 
-        # Constructed closed rather than mutated; no provider code is invoked
-        # and `.close()` is never called on a synthetic handle.
-        step("Construct an already-closed lease over the same handle")
-        val closed_lease = DynamicBackendPluginLease(
-            DynLib(handle: 7, path: ""), "/provider.so", "/stage", "d", 4096, true
-        )
-        # @capture(statistics): admitted handle after close
-        step("Verify a closed lease reports a non-positive, fail-closed handle")
-        expect(closed_lease.admitted_handle()).to_equal(0)
+        step("Close the admitted lease and remove its private stage")
+        val staging_dir = lease.staging_dir
+        expect(lease.close()).to_equal(true)
+        expect(lease.admitted_handle()).to_equal(0)
+        expect(dir_exists(staging_dir)).to_be(false)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)
