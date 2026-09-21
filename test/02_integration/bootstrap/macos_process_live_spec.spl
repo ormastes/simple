@@ -2,7 +2,9 @@
 # through a system-only PATH rather than relying on Homebrew-installed tools.
 use std.spec
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout_live}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 describe "macOS bootstrap live process runner":
     it "preserves quoted arguments, captured streams and exit status without stdbuf":
@@ -26,3 +28,21 @@ describe "macOS bootstrap live process runner":
         expect(restored).to_equal(true)
         expect(code).to_equal(-1)
         expect(err).to_contain("[TIMEOUT:")
+
+    it "quotes both shell layers and removes capture files in an unusual TMPDIR":
+        val original_temp = env_get("TMPDIR")
+        val temp_root = if original_temp == "": "/tmp" else: original_temp
+        val process_temp = "{temp_root}/process-live-{getpid()} single' double\" dollar$ backtick` slash\\"
+        val created = dir_create(process_temp, false)
+        expect(created).to_equal(true)
+        val changed = env_set("TMPDIR", process_temp)
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "printf quoted-temp; printf diagnostic >&2; exit 7"], 10000)
+        val restored = env_set("TMPDIR", original_temp)
+        # A nonrecursive removal proves every capture and group file was removed.
+        val cleaned = dir_remove(process_temp, false)
+        expect(changed).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(out).to_equal("quoted-temp")
+        expect(err).to_equal("diagnostic")
+        expect(code).to_equal(7)
+        expect(cleaned).to_equal(true)
