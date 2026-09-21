@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+detector="$root/scripts/setup/platform-detect.shs"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/llvm23-platform-detect.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+make_prefix() {
+  prefix=$1
+  version=$2
+  mkdir -p "$prefix/bin" "$prefix/lib"
+  cat >"$prefix/bin/llvm-config" <<EOF
+#!/bin/sh
+case "\${1-}" in
+  --version) printf '%s\n' '$version' ;;
+  --prefix) printf '%s\n' '$prefix' ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "$prefix/bin/llvm-config"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) printf dll >"$prefix/bin/LLVM-C.dll" ;;
+    *) printf shared >"$prefix/lib/libLLVM-23.so" ;;
+  esac
+}
+
+make_prefix "$tmp/llvm23" 23.1.1
+make_prefix "$tmp/llvm230" 23.1.0
+make_prefix "$tmp/llvm18" 18.1.8
+
+(
+  unset LLVM_VERSIONS LLVM_SYS_230_PREFIX
+  LLVM_SYS_231_PREFIX="$tmp/llvm23"
+  export LLVM_SYS_231_PREFIX
+  . "$detector"
+  [ "$LLVM_VERSIONS" = 23 ] || fail default-is-not-23
+  [ "$LLVM_FOUND" = 1 ] || fail llvm23-not-found
+  [ "$LLVM_VERSION" = 23 ] || fail wrong-version
+  [ "$LLVM_PREFIX" = "$tmp/llvm23" ] || fail wrong-prefix
+  [ "$LLVM_SYS_231_PREFIX" = "$tmp/llvm23" ] || fail wrong-rust-prefix
+  LLVM_FOUND=0
+  if _llvm_try_prefix "$tmp/llvm230" 23; then fail older-23-admitted; fi
+  if _llvm_try_prefix "$tmp/llvm18" 23; then fail llvm18-admitted; fi
+)
+
+grep -Fq 'if [ "$LLVM_VERSION" != 23 ]; then' "$bootstrap" ||
+  fail bootstrap-does-not-reject-other-major
+grep -Fq 'LLVM 23.1.1 not found' "$bootstrap" ||
+  fail bootstrap-error-not-pinned
+echo 'bootstrap_llvm23_platform_detection_test: PASS'

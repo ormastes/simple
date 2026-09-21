@@ -2129,6 +2129,10 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # (scripts/setup/platform-detect.shs, sourced above), which also exports the
   # LLVM_SYS_231_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
+    if [ "$LLVM_VERSION" != 23 ]; then
+      echo "error: LLVM backend requires LLVM 23.1.1, found LLVM ${LLVM_VERSION}" >&2
+      exit 1
+    fi
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
     llvm_features="--features llvm"
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
@@ -2141,7 +2145,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "error: LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18})" >&2
+    echo "error: LLVM 23.1.1 not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
