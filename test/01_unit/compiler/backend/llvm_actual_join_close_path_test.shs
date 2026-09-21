@@ -1,0 +1,72 @@
+#!/bin/sh
+set -u
+
+compiler=${PHASE2_COMPILER:-${1:-}}
+runtime_path=${PHASE2_RUNTIME_PATH:-${2:-}}
+if [ -z "$compiler" ] || [ ! -x "$compiler" ]; then
+    echo "FAIL: pass an executable Phase 2 compiler as argument 1 or PHASE2_COMPILER" >&2
+    exit 2
+fi
+if [ -z "$runtime_path" ] || [ ! -d "$runtime_path" ]; then
+    echo "FAIL: pass the admitted runtime capsule as argument 2 or PHASE2_RUNTIME_PATH" >&2
+    exit 2
+fi
+if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+    echo "SKIP: arm64 macOS native ABI fixture"
+    exit 0
+fi
+
+work=build/test/llvm_actual_join_close_path
+source_file=src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl
+tail_file=test/fixtures/compiler/llvm_actual_join_close_path_tail.spl
+fixture=$work/arena_actual_copy.spl
+runtime_object=$work/runtime_stubs.o
+alias_object=$work/host_aliases.o
+artifact=$work/arena_actual_join
+log=$work/build.log
+receipt=$work/receipt.txt
+mkdir -p "$work/cache"
+cat "$source_file" "$tail_file" > "$fixture"
+clang -c test/fixtures/compiler/llvm_actual_join_runtime_stubs.c -o "$runtime_object"
+clang -c test/fixtures/compiler/llvm_actual_join_host_aliases_arm64_macos.s -o "$alias_object"
+
+SIMPLE_LINK_OBJECTS="$PWD/$runtime_object:$PWD/$alias_object" /usr/bin/time -l \
+    "$compiler" native-build --timeout 300 --runtime-bundle host-gpu \
+    --runtime-path "$runtime_path" --source src/lib --source "$work" \
+    --entry-closure --entry "$fixture" --threads 1 --cache-dir "$work/cache" \
+    --output "$artifact" >"$log" 2>&1
+build_status=$?
+if [ "$build_status" -ne 0 ]; then
+    cat "$log" >&2
+    exit "$build_status"
+fi
+
+run_output=$($artifact 2>&1)
+run_status=$?
+if [ "$run_status" -ne 0 ] || [ "$run_output" != ACTUAL-JOIN-CLOSE-FAIL-PASS ]; then
+    echo "FAIL: actual join output=$run_output status=$run_status" >&2
+    exit 1
+fi
+
+max_rss_bytes=$(awk '/maximum resident set size/{print $1}' "$log" | tail -1)
+elapsed_seconds=$(awk '/ real /{print $1}' "$log" | tail -1)
+case "$max_rss_bytes" in
+    ''|*[!0-9]*) echo "FAIL: missing Darwin max RSS" >&2; exit 1 ;;
+esac
+if [ "$max_rss_bytes" -ge 1073741824 ]; then
+    echo "FAIL: max RSS $max_rss_bytes exceeds 1 GiB" >&2
+    exit 1
+fi
+
+{
+    echo schema=llvm-actual-join-close-path-v1
+    echo result=PASS
+    echo behavior=ACTUAL-JOIN-CLOSE-FAIL-PASS
+    echo elapsed_seconds=$elapsed_seconds
+    echo max_rss_bytes=$max_rss_bytes
+    shasum -a 256 "$compiler" "$source_file" "$tail_file" \
+        test/fixtures/compiler/llvm_actual_join_runtime_stubs.c \
+        test/fixtures/compiler/llvm_actual_join_host_aliases_arm64_macos.s \
+        "$fixture" "$artifact"
+} >"$receipt"
+cat "$receipt"
