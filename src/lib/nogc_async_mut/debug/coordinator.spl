@@ -6,6 +6,7 @@ use compiler.core.*
 use std.nogc_async_mut.mcp.session.{SessionManager, TargetType, SessionState}
 use std.debug.formats.debug_types.{SourceLocation, DebugFunction, DebugVariable}
 use std.debug.formats.debug_provider.{DebugInfoProvider}
+use std.debug.debug_info_bridge.{DebugInfoBridge}
 
 # DebugBackend trait - all backends implement this interface
 trait DebugBackend:
@@ -62,15 +63,43 @@ class LocationInfo:
     static fn at(file: String, line: Int, function_name: String) -> LocationInfo:
         LocationInfo(file: file, line: line, column: 0, function_name: function_name)
 
+# Concrete dispatch owner for optional backend slots.  Native lowering keeps
+# this class identity after Option matching; the wrapped trait remains typed.
+class DebugBackendBridge:
+    backend: DebugBackend
+
+    static fn wrap(backend: DebugBackend) -> DebugBackendBridge:
+        DebugBackendBridge(backend: backend)
+
+impl DebugBackendBridge:
+    fn attach(program_path: String, args: [String]) -> Result<Nil, String>: self.backend.attach(program_path, args)
+    fn detach() -> Result<Nil, String>: self.backend.detach()
+    fn run() -> Result<Nil, String>: self.backend.run()
+    fn pause() -> Result<Nil, String>: self.backend.pause()
+    fn resume() -> Result<Nil, String>: self.backend.resume()
+    fn step_over() -> Result<Nil, String>: self.backend.step_over()
+    fn step_in() -> Result<Nil, String>: self.backend.step_in()
+    fn step_out() -> Result<Nil, String>: self.backend.step_out()
+    fn add_breakpoint(file: String, line: Int) -> Result<Int, String>: self.backend.add_breakpoint(file, line)
+    fn remove_breakpoint(file: String, line: Int) -> Result<Nil, String>: self.backend.remove_breakpoint(file, line)
+    fn stack_trace() -> Result<[FrameInfo], String>: self.backend.stack_trace()
+    fn locals() -> Result<[VarInfo], String>: self.backend.locals()
+    fn evaluate(expr: String) -> Result<String, String>: self.backend.evaluate(expr)
+    fn current_location() -> Result<LocationInfo, String>: self.backend.current_location()
+
 # Debug Coordinator - routes commands to the correct backend
 class DebugCoordinator:
     session_manager: SessionManager
-    interpreter_backend: Option<DebugBackend>
-    smf_backend: Option<DebugBackend>
-    native_backend: Option<DebugBackend>
-    remote_backend: Option<DebugBackend>
-    replay_backend: Option<DebugBackend>
-    info_provider: Option<DebugInfoProvider>
+    interpreter_backend: Option<DebugBackendBridge>
+    smf_backend: Option<DebugBackendBridge>
+    native_backend: Option<DebugBackendBridge>
+    remote_backend: Option<DebugBackendBridge>
+    replay_backend: Option<DebugBackendBridge>
+    # Keep the optional payload concrete.  Pattern binding an Option whose
+    # payload is a trait currently erases the receiver owner before native
+    # lowering, so calls such as addr_to_source were misclassified as builtin
+    # calls.  The bridge preserves the trait dispatch behind a concrete owner.
+    info_provider: Option<DebugInfoBridge>
 
     static fn with_session_manager(sm: SessionManager) -> DebugCoordinator:
         DebugCoordinator(
@@ -86,22 +115,22 @@ class DebugCoordinator:
 impl DebugCoordinator:
     # Register a backend
     me register_interpreter(backend: DebugBackend):
-        self.interpreter_backend = Some(backend)
+        self.interpreter_backend = Some(DebugBackendBridge.wrap(backend))
 
     me register_smf(backend: DebugBackend):
-        self.smf_backend = Some(backend)
+        self.smf_backend = Some(DebugBackendBridge.wrap(backend))
 
     me register_replay(backend: DebugBackend):
-        self.replay_backend = Some(backend)
+        self.replay_backend = Some(DebugBackendBridge.wrap(backend))
 
     me register_native(backend: DebugBackend):
-        self.native_backend = Some(backend)
+        self.native_backend = Some(DebugBackendBridge.wrap(backend))
 
     me register_remote(backend: DebugBackend):
-        self.remote_backend = Some(backend)
+        self.remote_backend = Some(DebugBackendBridge.wrap(backend))
 
     me register_info_provider(provider: DebugInfoProvider):
-        self.info_provider = Some(provider)
+        self.info_provider = Some(DebugInfoBridge.wrap(provider))
 
     fn resolve_source(addr: i64) -> SourceLocation?:
         match self.info_provider:
@@ -124,7 +153,7 @@ impl DebugCoordinator:
             case nil: []
 
     # Get the backend for a session
-    fn get_backend(session_id: String) -> Result<DebugBackend, String>:
+    fn get_backend(session_id: String) -> Result<DebugBackendBridge, String>:
         match self.session_manager.get_session(session_id):
             case Some(session):
                 match session.target_type:
