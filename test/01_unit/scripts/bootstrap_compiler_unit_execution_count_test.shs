@@ -14,8 +14,10 @@ fail() {
 # Exercise the production function without invoking a compiler. Keep the
 # extraction narrow so edits to the function are tested here rather than a
 # copied implementation drifting independently.
-sed -n '/^run_compiler_unit_tests() {$/,/^}$/p' "$phase_runner" \
+sed -n '/^validate_test_runner_json_log() {$/,/^}$/p' "$phase_runner" \
   >"$tmp/production-function.sh"
+sed -n '/^run_compiler_unit_tests() {$/,/^}$/p' "$phase_runner" \
+  >>"$tmp/production-function.sh"
 grep -Fq 'run_compiler_unit_tests() {' "$tmp/production-function.sh" ||
   fail production-function-not-found
 . "$tmp/production-function.sh"
@@ -26,6 +28,8 @@ mkdir -p "$source_root/test/01_unit/compiler/loader" \
 : >"$source_root/test/01_unit/compiler/loader/fixture_spec.spl"
 cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
   "$source_root/scripts/bootstrap/validate-test-runner-json.pl"
+cp "$root/scripts/bootstrap/phase3-test-skip-policy.shs" \
+  "$source_root/scripts/bootstrap/phase3-test-skip-policy.shs"
 
 cat >"$source_root/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
 #!/bin/sh
@@ -47,8 +51,14 @@ case "${FIXTURE_RESULT:?}" in
   zero)
     echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     ;;
+  development)
+    echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
   failed)
     echo '{"success":true,"spec":{"success":false,"total_passed":0,"total_failed":1,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+  pending)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":1,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     ;;
   outer_false)
     echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
@@ -96,6 +106,11 @@ run_case() {
   : >"$summary"
   FIXTURE_RESULT=$fixture_result
   export FIXTURE_RESULT
+  : >"$source_root/test/01_unit/compiler/loader/fixture_spec.spl"
+  if [ "$fixture_result" = development ]; then
+    printf '%s\n' '# @tag: in-development' \
+      >"$source_root/test/01_unit/compiler/loader/fixture_spec.spl"
+  fi
   actual_status=0
   run_compiler_unit_tests "$test_runner" "$command_owner_receipt" ||
     actual_status=$?
@@ -114,15 +129,26 @@ grep -Fq 'task=compiler_unit_tests|result=PASS|status=0' "$summary" ||
 
 run_case zero 1
 awk -F '\t' '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "FAIL" && \
-  $3 == 92 && $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } \
+  $3 == 94 && $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } \
   END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
-  fail zero-execution-row-admitted
+  fail untagged-zero-execution-row-admitted
+
+run_case development 0
+awk -F '\t' '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "SKIP" && \
+  $3 == 0 && $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } \
+  END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
+  fail tagged-development-row-not-categorized
 
 run_case failed 1
 awk -F '\t' '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "FAIL" && \
   $3 == 93 && $4 == 1 && $5 == 0 && $6 == 1 { found=1 } \
   END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
   fail failed-json-row-admitted
+
+run_case pending 1
+awk -F '\t' '$1 ~ /loader\/fixture_spec[.]spl$/ && $2 == "FAIL" && \
+  $3 == 93 && $4 == 1 { found=1 } END { exit !found }' \
+  "$logs/compiler_unit_tests.inventory.tsv" || fail pending-json-row-admitted
 
 for malformed_case in outer_false malformed duplicate overflow absent nonzero; do
   case "$malformed_case" in
@@ -138,7 +164,7 @@ for malformed_case in outer_false malformed duplicate overflow absent nonzero; d
     fail "$malformed_case-row-was-admitted"
 done
 
-grep -Fq 'spec_count=1|passed_count=1|timeout_count=0|crash_count=0' \
+grep -Fq 'spec_count=1|passed_count=1|skipped_spec_count=0|category_count=2|timeout_count=0|crash_count=0' \
   "$pass_summary" || fail passing-summary-counts-not-exact
 
 echo 'bootstrap_compiler_unit_execution_count_test: PASS'

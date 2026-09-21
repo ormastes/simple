@@ -8,10 +8,12 @@ set -u
 
 usage() {
   cat >&2 <<'EOF'
-usage: phase3-nested-test-inventory.shs discover SOURCE_ROOT [POLICY_FILE]
+usage: phase3-nested-test-inventory.shs discover SOURCE_ROOT [POLICY_FILE] [RECEIPT_FILE]
 
 Writes canonical Phase 3 TSV rows to stdout.  POLICY_FILE defaults to
 scripts/bootstrap/phase3-nested-test-policy.tsv below SOURCE_ROOT.
+When RECEIPT_FILE is supplied, successful discovery atomically records every
+recursive module path, pinned/actual commit, and policy classification.
 EOF
   exit 64
 }
@@ -21,7 +23,7 @@ fail() {
   exit 1
 }
 
-[ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+[ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage
 [ "$1" = discover ] || usage
 source_root=$2
 [ -d "$source_root" ] || fail "source-root-missing: $source_root"
@@ -29,6 +31,16 @@ source_root=$(CDPATH= cd -- "$source_root" && pwd -P) ||
   fail "source-root-unresolvable: $source_root"
 policy=${3:-$source_root/scripts/bootstrap/phase3-nested-test-policy.tsv}
 [ -f "$policy" ] || fail "policy-missing: $policy"
+receipt=${4:-}
+if [ -n "$receipt" ]; then
+  receipt_parent=$(dirname -- "$receipt")
+  [ -d "$receipt_parent" ] || fail "receipt-parent-missing: $receipt_parent"
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] ||
+      fail "receipt-path-not-regular: $receipt"
+    rm -f -- "$receipt" || fail "receipt-cannot-clear: $receipt"
+  fi
+fi
 
 tmp_root=${TMPDIR:-/tmp}
 scratch=$(mktemp -d "$tmp_root/phase3-nested-inventory.XXXXXX") ||
@@ -36,8 +48,10 @@ scratch=$(mktemp -d "$tmp_root/phase3-nested-inventory.XXXXXX") ||
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 rows=$scratch/rows.tsv
 seen_policy=$scratch/seen-policy.txt
+receipt_rows=$scratch/receipt-rows.tsv
 : >"$rows"
 : >"$seen_policy"
+: >"$receipt_rows"
 scan_serial=0
 
 tab=$(printf '\t')
@@ -63,7 +77,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   module_path=$2
   reason=$3
   case "$category" in
-    no-tests|platform-ineligible) ;;
+    required-no-tests|optional-no-tests|platform-ineligible) ;;
     *) fail "policy-invalid-category-$policy_line: $category" ;;
   esac
   case "$module_path" in
@@ -94,6 +108,7 @@ scan_repo() {
   local sr_expected sr_relative sr_inventory_path sr_checkout
   local sr_expected_checkout sr_expected_parent sr_expected_leaf sr_actual_top
   local sr_actual sr_tests sr_tests_raw sr_test sr_policy sr_category sr_reason
+  local sr_receipt_category sr_receipt_reason
   local sr_kind sr_status_file old_ifs
   sr_repo=$1
   sr_prefix=$2
@@ -159,7 +174,6 @@ scan_repo() {
       fail "nested-module-status-unreadable: $sr_inventory_path"
     [ ! -s "$sr_status_file" ] ||
       fail "nested-module-dirty: $sr_inventory_path"
-
     sr_tests=$scratch/tests.$sr_serial
     sr_tests_raw=$scratch/tests-raw.$sr_serial
     : >"$sr_tests"
@@ -186,10 +200,16 @@ scan_repo() {
       sr_reason=$2
       mark_policy_seen "$sr_inventory_path"
     fi
+    sr_receipt_category=${sr_category:--}
+    sr_receipt_reason=${sr_reason:--}
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$sr_inventory_path" "$sr_expected" "$sr_actual" \
+      "$sr_receipt_category" "$sr_receipt_reason" >>"$receipt_rows"
 
     if [ -s "$sr_tests" ]; then
       case "$sr_category" in
-        no-tests) fail "no-tests-policy-contradicted: $sr_inventory_path" ;;
+        required-no-tests|optional-no-tests)
+          fail "no-tests-policy-contradicted: $sr_inventory_path" ;;
         platform-ineligible)
           while IFS= read -r sr_test; do
             case "$sr_test" in *.shs) sr_kind=shell-unit ;; *) sr_kind=simple-spec ;; esac
@@ -209,7 +229,10 @@ scan_repo() {
       esac
     else
       case "$sr_category" in
-        no-tests|platform-ineligible)
+        required-no-tests)
+          printf 'nested\trequired-no-tests\tnested\texecute\t%s\t-\n' \
+            "$sr_inventory_path" >>"$rows" ;;
+        optional-no-tests|platform-ineligible)
           printf 'nested\t%s\tnested\tskip\t%s\t%s\n' \
             "$sr_category" "$sr_inventory_path" "$sr_reason" >>"$rows" ;;
         '') fail "nested-module-empty-without-policy: $sr_inventory_path" ;;
@@ -230,6 +253,24 @@ while IFS="$tab" read -r category module_path reason; do
   [ "$(grep -Fxc -- "$module_path" "$seen_policy" || :)" -eq 1 ] ||
     fail "policy-stale-or-unused: $module_path"
 done <"$policy_rows"
+
+if [ -n "$receipt" ]; then
+  receipt_parent=$(dirname -- "$receipt")
+  receipt_leaf=$(basename -- "$receipt")
+  receipt_tmp=$(mktemp "$receipt_parent/.${receipt_leaf}.tmp.XXXXXX") ||
+    fail "receipt-temp-create-failed: $receipt"
+  {
+    printf 'path\tpinned_sha\tactual_sha\tpolicy_category\tpolicy_reason\n'
+    LC_ALL=C sort -t "$tab" -k1,1 -u "$receipt_rows"
+  } >"$receipt_tmp" || {
+    rm -f -- "$receipt_tmp"
+    fail "receipt-write-failed: $receipt"
+  }
+  mv -f -- "$receipt_tmp" "$receipt" || {
+    rm -f -- "$receipt_tmp"
+    fail "receipt-publish-failed: $receipt"
+  }
+fi
 
 printf 'surface\tcategory\trunner\tdisposition\tpath\treason\n'
 LC_ALL=C sort -t "$tab" -k5,5 -u "$rows"

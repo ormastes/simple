@@ -8,11 +8,21 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
   "$tmp/source/test/01_unit/compiler" "$tmp/source/test/02_integration/app" \
+  "$tmp/source/test/01_unit/lib" "$tmp/source/src/lib" "$tmp/source/tools" \
   "$tmp/work" "$tmp/stage2-admitted" "$tmp/bin"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
   "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
 cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
   "$tmp/source/scripts/bootstrap/validate-test-runner-json.pl"
+cp "$root/scripts/bootstrap/phase3-expanded-test-runner.shs" \
+  "$root/scripts/bootstrap/phase3-test-inventory.shs" \
+  "$root/scripts/bootstrap/phase3-test-skip-policy.shs" \
+  "$root/scripts/bootstrap/phase3-nested-test-inventory.shs" \
+  "$root/scripts/bootstrap/validate-jest-json.pl" \
+  "$tmp/source/scripts/bootstrap/"
+printf 'category\tpath\treason\n' \
+  >"$tmp/source/scripts/bootstrap/phase3-nested-test-policy.tsv"
+git -C "$tmp/source" init -q
 : >"$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib"
 runtime_sha=$(sha256sum "$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib" | awk '{print $1}')
 cat >"$tmp/runtime/hosted-runtime.env" <<EOF
@@ -28,6 +38,7 @@ chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
 : >"$tmp/source/test/01_unit/compiler/fixture_spec.spl"
 : >"$tmp/source/test/01_unit/compiler/fixture_test.spl"
 : >"$tmp/source/test/02_integration/app/mcp_stdio_integration_spec.spl"
+: >"$tmp/source/test/01_unit/lib/expanded_fixture_spec.spl"
 
 # Git-for-Windows reports NTFS paths as 755/644 even after chmod.  The
 # production verifier receives POSIX modes on supported bootstrap hosts; this
@@ -85,7 +96,14 @@ if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
 fi
 case " $* " in
   *' --json '*)
-    if [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
+    if [ "${PHASE_VACUOUS_BOOTSTRAP:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/bootstrap ]; then
+      :
+    elif [ "${PHASE_DUPLICATE_FULL_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
       echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     elif [ "${PHASE_FALSE_SPEC_SUCCESS:-0}" = 1 ] && \
@@ -166,9 +184,9 @@ grep -Fq -- '--entry src/app/test_runner_new/main.spl' "$tmp/invocations" ||
   fail "test runner was not built"
 grep -Eq -- "^simple_cli[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+check src/compiler$" "$tmp/executions" ||
   fail "check was not routed through the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "interpreter test was not bound to the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "compile test was not bound to the full CLI"
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential$" \
   "$tmp/executions" || fail "compile integration test was not bound to the full CLI"
@@ -177,6 +195,12 @@ if grep -Eq -- '^compiler.snapshot[[:space:]]+check' "$tmp/executions" ||
   fail "bootstrap compiler capsule was invoked as a full CLI"
 fi
 grep -Fq 'overall=PASS' "$tmp/work/summary.env" || fail "fixture matrix did not pass"
+grep -F 'task=compiler_bootstrap_tests|' "$tmp/work/summary.env" | \
+  grep -Fq 'executed=1|passed=1|failed=0|skipped=0' ||
+  fail "interpreter bootstrap row lacks non-vacuous counters"
+grep -F 'task=compiler_bootstrap_compile_tests|' "$tmp/work/summary.env" | \
+  grep -Fq 'executed=1|passed=1|failed=0|skipped=0' ||
+  fail "compile bootstrap row lacks non-vacuous counters"
 receipt=$(find "$tmp/work/outputs/compiler-tools" -name 'command-owners.*.env' -type f | head -n 1)
 [ -n "$receipt" ] || fail "command-owner receipt was not written"
 case "$(uname -s)" in
@@ -212,8 +236,10 @@ grep -F 'task=mcp_behavior_compile|' "$tmp/work/summary.env" |
   fail "MCP compile behavior was not command-owner checked"
 grep -Fq 'task=repository_full_tests|result=PASS|status=0' "$tmp/work/summary.env" ||
   fail "Phase 4 repository inventory did not pass"
-grep -Fq 'spec_count=3|passed_count=3|timeout_count=0|crash_count=0' \
+grep -Fq 'spec_count=4|passed_count=4|skipped_spec_count=0|category_count=2|timeout_count=0|crash_count=0' \
   "$tmp/work/summary.env" || fail "Phase 4 repository inventory counts are not exact"
+grep -Fq 'task=phase3_expanded_tests|result=PASS|status=0' "$tmp/work/summary.env" ||
+  fail "expanded Phase 3 inventory did not pass"
 grep -Fq 'task=mcp_behavior|result=PASS|status=0' "$tmp/work/summary.env" ||
   fail "Stage4 MCP behavior did not pass"
 grep -F 'task=mcp_behavior|' "$tmp/work/summary.env" | \
@@ -327,15 +353,35 @@ PHASE_TOOL="$tmp/tool" \
 [ "$status" -ne 0 ] || fail "skipped-only repository row was admitted"
 grep -Fq 'fixture_test.spl' "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
   fail "skipped-only fixture is absent from inventory"
-awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 92 && \
+awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 94 && \
   $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } END { exit !found }' \
   "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
   fail "skipped-only fixture did not fail with zero executed examples"
 
+# An exit-zero bootstrap-directory test without terminal JSON is a false pass.
+# Both interpreter and compile rows must fail closed before Phase 3 admission.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_VACUOUS_BOOTSTRAP=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/vacuous-bootstrap-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "vacuous bootstrap interpreter/compiler rows were admitted"
+for bootstrap_task in compiler_bootstrap_tests compiler_bootstrap_compile_tests; do
+  grep -Fq "task=$bootstrap_task|result=FAIL|status=91" \
+    "$tmp/vacuous-bootstrap-work/summary.env" ||
+    fail "$bootstrap_task did not reject missing terminal JSON"
+done
+
 # Test each terminal JSON guard independently. Wrappers can flatten process
 # status to zero, so outer success, spec success, and failure count must each
 # be sufficient to reject a row.
-for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS PHASE_NONZERO_FAILED_COUNT; do
+for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS \
+    PHASE_NONZERO_FAILED_COUNT PHASE_DUPLICATE_FULL_JSON; do
   : >"$tmp/executions"
   status=0
   failed_work="$tmp/failed-json-$failed_mode"
@@ -347,8 +393,16 @@ for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS PHASE_NONZ
       --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
       --runtime-path="$tmp/runtime" --work-root="$failed_work" --timeout-seconds=30 || status=$?
   [ "$status" -ne 0 ] || fail "zero-exit failed JSON mode $failed_mode was admitted"
-  awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 93 && \
-    $4 == 1 { found=1 } END { exit !found }' \
+  expected_json_status=93
+  expected_executed=1
+  if [ "$failed_mode" = PHASE_DUPLICATE_FULL_JSON ]; then
+    expected_json_status=91
+    expected_executed=0
+  fi
+  awk -F '\t' -v wanted_status="$expected_json_status" \
+    -v wanted_executed="$expected_executed" \
+    '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == wanted_status && \
+    $4 == wanted_executed { found=1 } END { exit !found }' \
     "$failed_work/logs/repository_full_tests.inventory.tsv" ||
     fail "zero-exit failed JSON mode $failed_mode did not terminalize as a failure"
 done

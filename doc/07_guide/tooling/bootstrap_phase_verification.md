@@ -52,6 +52,43 @@ failures in the inventory and summary. A nonzero runner status is preserved.
 
 `scripts/bootstrap/validate-test-runner-json.pl` owns the strict JSON boundary;
 the shell runner records only its admitted passed/failed/skipped counters.
+The interpreter and compile bootstrap-directory smoke rows use the same
+`--assert-ran --json` contract and retain their counters in `summary.env`.
+The repository-wide Phase 3 inventory also routes every row through this
+validator; a later valid-looking verdict cannot hide an earlier duplicate,
+malformed, truncated, failed, or zero-execution terminal row.
+
+Full Stage 3 and Stage 4 verification then builds
+`phase3_expanded_tests.inventory.tsv`. It covers canonical tests under
+`test/01_unit`, `test/02_integration`, `test/03_system`, and `test/feature`;
+embedded `describe` owners under `src/lib`; package-owned tests under `tools`;
+Markdown and Simple-comment doctests; and tests in recursively tracked Git
+submodules. Historical `test/unit`, `test/integration`, and `test/system`
+mirrors are excluded so a logical test has one owner. Repository rows already
+proved by `repository_full_tests.results.tsv` are reused rather than rerun.
+
+Each remaining physical owner has one terminal result. Simple rows use the
+strict test-runner JSON validator. Jest rows use the strict Jest JSON
+validator. The doctest bootstrap owner runs untargeted `test --whole` so its
+Markdown and source-comment lanes retain the default whole-tree roots, and it
+must emit its explicit per-lane counts plus PASS verdict.
+The final `phase3_expanded_tests.surface-counts.tsv` reports category count,
+logical execute rows, policy skip rows, executed examples, and skipped
+examples for every discovered surface.
+
+Nested-module discovery requires every tracked gitlink to be initialized at
+the exact commit recorded by its parent index and clean before it emits a row.
+`phase3_expanded_tests.nested-receipt.tsv` retains path, pinned SHA, actual
+SHA, policy category, and reason. A required module without tests emits an
+executable presence contract. Only an explicitly listed optional or platform
+ineligible module may become a policy skip; a missing, uninitialized,
+mismatched, dirty, or unclassified empty module fails discovery.
+
+A Simple spec with skipped examples is admissible only when the whole file is
+skipped and its sole tag directive is `# @tag: in-development`. Mixed
+executed/skipped results, untagged skips, unknown tags, duplicate directives,
+and noncanonical spellings fail closed. Aggregate directory smoke rows cannot
+prove a per-file category, so any skip in those rows is also a failure.
 
 ## Why an umbrella exists
 
