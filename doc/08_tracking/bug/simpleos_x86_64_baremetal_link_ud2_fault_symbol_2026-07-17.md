@@ -113,3 +113,23 @@ on unrelated `HeapHeader.gc_flags`/`BYTE_PACKED` and
 `runtime_array_from_abi` errors; the kernel/QEMU gate remains unverified here.
 The fix changes neither SOSIX contracts nor providers or callers: it is the
 x86_64 interrupt-handler C boundary only.
+
+## Fatal-call ABI repair (2026-09-21)
+
+Astra architecture review found a second defect in the restored fatal path:
+`_rich_fault_entry` restores nine scratch registers (72 bytes) before calling
+the C `spl_x86_on_kernel_ud2_fault` hook. That changes `%rsp` alignment relative
+to the preceding `_rich_fault_print` call. The handler now loads the saved RIP,
+reserves one word, and then calls the hook, restoring the SysV AMD64 entry
+alignment. The focused contract asserts the load-before-pad ordering and passes:
+
+```text
+sh test/01_unit/os/simpleos_ud2_fault_link_contract_test.shs
+ud2_fault_link_contract=pass
+```
+
+The canonical QEMU gate was attempted with the bootstrap seed but stopped during
+native kernel compilation at an unrelated unresolved `VirtioGpuDriver` symbol,
+before QEMU launch. A minimal Multiboot fixture linked successfully, but this
+host's QEMU `-kernel` path rejects the ELF64 image and the installed GRUB
+rescue flow lacks `mformat`; no guest-pass receipt is claimed. P1 remains OPEN.
