@@ -19,11 +19,11 @@ a fail-closed error path.
 | Selection or input | Expected result |
 | --- | --- |
 | `CC=gcc`, `export CC=gcc`, PowerShell `$env:CC`, batch `set`, YAML `CC:`, and `GITHUB_ENV` assignments | deny `W-WIN-CC-001` |
-| target-qualified `CC_x86_64_pc_windows_msvc`, legacy `cl`, `clang++`, or `CXX` | deny `W-WIN-CC-001` |
+| raw, exported, or batch target-qualified `CC_x86_64_pc_windows_msvc`/`CXX_x86_64_pc_windows_msvc`, legacy `cl`, `clang++`, or `CXX` | deny `W-WIN-CC-001` |
 | Windows GNU Cargo target or MinGW/GCC driver under that target | deny `W-WIN-CC-001` |
 | LLVM 23.1.x `clang-cl.exe` under the default local root with a fail-closed exact version predicate | no finding |
-| PR1216 CI workspace root and another relocated official 23.1.x root with root-bound driver, exact predicate, and attestation | no finding |
-| Unknown alias, missing compiler-version validation, unrelated 23.1.x predicate, or a bare `--version` token | deny `W-WIN-CC-001` |
+| PR1216 CI workspace root with its clang-cl pattern mapping, and another relocated official 23.1.x root with a direct exact predicate | no finding |
+| Unknown alias, missing compiler-version validation, exact predicate over unrelated text, or a bare `--version` token | deny `W-WIN-CC-001` |
 | Cargo MSVC `linker = "link.exe"` | no finding; this is a Rust linker setting |
 | Linux Cargo settings, comments, documentation, vendor files, and Linux paths inside an MSVC-named checkout | no finding |
 | Current Windows shell, CMake, and Cargo inputs | no finding |

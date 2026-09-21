@@ -1,6 +1,6 @@
 # Windows C compiler authority review
 
-STATUS: WARN for complete admission. The shell/native portion has focused passing evidence and the lint authority P1 is repaired; self-hosted verification remains pending.
+STATUS: HOLD for complete admission. The shell/native portion has focused passing evidence and two exact-head lint P1 findings have candidate repairs; independent exact-head rereview and self-hosted verification remain pending.
 
 ## Current change
 
@@ -22,6 +22,8 @@ The paired C probe uses the same source, C11 language, O2 optimization, and DLL 
 ## Repaired lint authority P1
 
 The lint provider's source-authority test now recognizes the official LLVM 23.1.x Windows MSVC distribution independently of its install root, including the PR1216 workspace cache. It requires a root-bound driver, an executed version query, an exact 23.1.x predicate, and fail-closed rejection. A bare `--version` token or untrusted compiler alias remains denied. PR1216 itself is unchanged by this lane.
+
+The first exact-head follow-up review found that exported target-specific CC/CXX names bypassed assignment classification and that a valid-looking predicate could inspect unrelated text. The candidate repair recognizes exported and batch target-specific names and traces the queried compiler's captured output through one derived assignment before accepting the exact family expression, either directly or through the PR1216 clang-cl pattern mapping. Focused fixtures retain both failures as regressions, including an unused exact metadata pattern beside a weak predicate over the real output.
 
 This follow-up is a fresh scoped continuation of the prior review and retains the three-cycle guard. An independent exact-head review is required before the draft PR can claim the P1 is clear.
 

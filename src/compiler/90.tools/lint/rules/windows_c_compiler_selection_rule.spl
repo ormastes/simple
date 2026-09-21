@@ -56,8 +56,10 @@ fn line_without_comment(line: text) -> text:
 fn is_cxx_selection(line: text) -> bool:
     val lower = line.lower()
     lower.starts_with("cxx=") or lower.starts_with("cxx:") or
-        lower.starts_with("export cxx=") or lower.starts_with("set cxx=") or
-        lower.starts_with("set \"cxx=") or lower.starts_with("$env:cxx") or
+        lower.starts_with("export cxx=") or lower.starts_with("export cxx_") or
+        lower.starts_with("set cxx=") or lower.starts_with("set cxx_") or
+        lower.starts_with("set \"cxx=") or lower.starts_with("set \"cxx_") or
+        lower.starts_with("$env:cxx") or
         lower.starts_with("cxx_") or lower.starts_with("set(cmake_cxx_compiler ") or
         lower.starts_with("cmake_cxx_compiler=") or
         lower.contains("-dcmake_cxx_compiler=") or
@@ -68,8 +70,10 @@ fn is_c_compiler_selection(line: text) -> bool:
     if lower.contains("linker") or lower.contains("ld="):
         return false
     lower.starts_with("cc=") or lower.starts_with("cc:") or
-        lower.starts_with("export cc=") or lower.starts_with("set cc=") or
-        lower.starts_with("set \"cc=") or lower.starts_with("$env:cc") or
+        lower.starts_with("export cc=") or lower.starts_with("export cc_") or
+        lower.starts_with("set cc=") or lower.starts_with("set cc_") or
+        lower.starts_with("set \"cc=") or lower.starts_with("set \"cc_") or
+        lower.starts_with("$env:cc") or
         lower.starts_with("cc_") or lower.starts_with("c_compiler=") or
         lower.starts_with("c_compiler:") or lower.starts_with("set(cmake_c_compiler ") or
         lower.starts_with("cmake_c_compiler=") or
@@ -111,30 +115,106 @@ fn has_root_bound_driver_alias(content: text) -> bool:
             return true
     false
 
-fn has_llvm_231_version_command(content: text) -> bool:
-    val has_root_alias = has_root_bound_driver_alias(content)
-    for raw_line in content.split("\n"):
-        val lower = line_without_comment(raw_line).lower()
-        if lower.contains("--version") and
-           (lower.contains("clang") or lower.contains("_simple_win_cc") or
-            lower.contains("cmake_c_compiler") or
-            (has_root_alias and lower.contains("$tool"))):
+fn normalized_symbol_words(line: text) -> text:
+    var normalized = line.lower()
+    for separator in ["=", "\"", "'", "(", ")", "[", "]", "{", "}",
+                      ";", "|", "!", ",", "&", "@"]:
+        normalized = normalized.replace(separator, " ")
+    normalized
+
+fn assignment_target(line: text) -> text:
+    if not line.contains("="):
+        return ""
+    val lhs = line.split("=")[0]
+    var target = ""
+    for word in normalized_symbol_words(lhs).split(" "):
+        if word != "":
+            target = word
+    target
+
+fn line_has_symbol(line: text, symbol: text) -> bool:
+    if symbol == "":
+        return false
+    for word in normalized_symbol_words(line).split(" "):
+        if word == symbol:
             return true
     false
 
-fn has_exact_llvm_231_version_predicate(content: text) -> bool:
-    var has_family_pattern = false
-    var has_predicate = false
+fn line_has_any_symbol(line: text, symbols: [text]) -> bool:
+    for symbol in symbols:
+        if line_has_symbol(line, symbol):
+            return true
+    false
+
+fn is_llvm_version_query_line(lower: text, has_root_alias: bool) -> bool:
+    (lower.contains("--version") and
+        (lower.contains("clang") or lower.contains("_simple_win_cc") or
+         lower.contains("cmake_c_compiler") or
+         (has_root_alias and lower.contains("$tool"))))
+
+fn is_version_predicate_line(lower: text) -> bool:
+    (lower.contains("-notmatch") or lower.contains(" matches ") or
+        lower.contains("matches \"") or lower.contains("sed -n") or
+        lower.contains("grep -e") or lower.starts_with("case "))
+
+fn has_llvm_231_family_pattern(line: text) -> bool:
+    val lower = line.replace("\\", "").lower()
+    (lower.contains("clang version") and lower.contains("23.1.") and
+        (lower.contains("[0-9]") or lower.contains("(?:s|$)")))
+
+fn has_clang_driver_pattern_binding(content: text) -> bool:
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).lower()
+        if lower.contains("clang-cl.exe") and lower.contains("pattern") and
+           has_llvm_231_family_pattern(lower):
+            return true
+    false
+
+fn has_bound_llvm_231_version_predicate(content: text) -> bool:
+    val has_root_alias = has_root_bound_driver_alias(content)
+    val has_indirect_pattern = has_clang_driver_pattern_binding(content)
+    var query_symbols: [text] = []
+    var saw_query = false
+    var in_version_process = false
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).lower()
+        if lower.contains("execute_process") and
+           is_llvm_version_query_line(lower, has_root_alias):
+            saw_query = true
+            in_version_process = true
+        elif is_llvm_version_query_line(lower, has_root_alias):
+            saw_query = true
+            val target = assignment_target(lower)
+            if target != "":
+                query_symbols.push(target)
+        if in_version_process and lower.contains("output_variable "):
+            val output = lower.split("output_variable ")[1]
+            for word in normalized_symbol_words(output).split(" "):
+                if word != "":
+                    query_symbols.push(word)
+                    break
+        if in_version_process and lower.ends_with(")"):
+            in_version_process = false
+
+    var bound_symbols: [text] = []
+    for symbol in query_symbols:
+        bound_symbols.push(symbol)
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).lower()
+        val target = assignment_target(lower)
+        if target != "" and line_has_any_symbol(lower, query_symbols):
+            bound_symbols.push(target)
+
+    var has_bound_exact_predicate = false
     for raw_line in content.split("\n"):
         val lower = line_without_comment(raw_line).replace("\\", "").lower()
-        if lower.contains("clang version") and lower.contains("23.1.") and
-           (lower.contains("[0-9]") or lower.contains("(?:s|$)")):
-            has_family_pattern = true
-        if lower.contains("-notmatch") or lower.contains(" matches ") or
-           lower.contains("matches \"") or lower.contains("sed -n") or
-           lower.contains("grep -e") or lower.starts_with("case "):
-            has_predicate = true
-    has_family_pattern and has_predicate
+        if is_version_predicate_line(lower) and
+           line_has_any_symbol(lower, bound_symbols):
+            if has_llvm_231_family_pattern(lower) or
+               (has_indirect_pattern and lower.contains("$check.pattern")):
+                has_bound_exact_predicate = true
+    (saw_query and query_symbols.len() > 0 and
+        has_bound_exact_predicate)
 
 fn has_fail_closed_version_check(content: text) -> bool:
     var checks_status = false
@@ -152,8 +232,7 @@ fn has_fail_closed_version_check(content: text) -> bool:
 fn has_validated_llvm_231_authority(content: text) -> bool:
     (has_official_llvm_231_distribution(content) and
         has_root_bound_driver_alias(content) and
-        has_llvm_231_version_command(content) and
-        has_exact_llvm_231_version_predicate(content) and
+        has_bound_llvm_231_version_predicate(content) and
         has_fail_closed_version_check(content))
 
 fn has_validated_llvm_231_driver(line: text, has_llvm_231_authority: bool) -> bool:
