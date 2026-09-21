@@ -3,11 +3,12 @@
 - **Date:** 2026-07-20
 - **Area:** AES-256 key schedule / CTR-mode implementation exercised via
   `test/unit/lib/crypto/aes_ctr_nist_spec.spl`
-- **Severity:** high (real cryptographic KAT mismatch, curve/mode-specific).
-- **Status:** OPEN. **Do not touch the expected vector** — NIST SP 800-38A
-  F.5.5/F.5.6 values are canonical.
+- **Priority:** P1 at filing; no production cryptographic defect was found.
+- **Status:** RESOLVED 2026-09-21. The test fixture, rather than the AES
+  implementation, had incorrect expected bytes. The expected vector was
+  corrected against [NIST SP 800-38A, F.5.5/F.5.6](https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38a.pdf).
 
-## Symptom
+## Original symptom
 
 ```
 SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple \
@@ -30,7 +31,7 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simpl
 4 examples, 2 failures. AES-128-CTR (F.5.1/F.5.2, same CTR-mode wrapper,
 different key size) is byte-exact correct.
 
-## Root-cause hypothesis
+## Original root-cause hypothesis (refuted)
 
 The first 29 bytes of the AES-256-CTR output match the NIST vector exactly,
 then diverge (byte 30 onward: `202` vs `191`, etc.) — i.e. the CTR-mode
@@ -44,9 +45,22 @@ than AES-128's 10-round schedule) surfacing only after enough
 rounds/blocks are processed — not further localized to a specific round
 constant or Rcon table entry in this triage pass.
 
-## What NOT to do
+## Root cause and evidence
 
-Do not touch the expected NIST SP 800-38A F.5.5/F.5.6 byte arrays.
+The Linux aarch64 run on 2026-09-21 returned the exact NIST ciphertext:
+`601ec313775789a5b7a7f504bbf3d228 f443e3ca4d62b59aca84e990cacaf5c5
+2b0930daa23de94ce87017ba2d84988d dfc9c58db67aada613c2dd08457941a6`.
+The fixture instead expected `...cabf3622`, followed by two entirely different
+blocks. The first 29 matching bytes and later divergence came from the mistaken
+fixture, not AES-256 key expansion or counter handling. Production code was
+already correct and was not changed.
+
+- Before correction: `SIMPLE_LIB=src SIMPLE_RUST_SEED_WARNING=0 timeout 120
+  /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple test
+  test/unit/lib/crypto/aes_ctr_nist_spec.spl --no-session-daemon` returned
+  `4 examples, 2 failures`; the actual AES-256 bytes matched NIST F.5.5.
+- After correction: the same spec returned `4 examples, 0 failures`.
+- Runtime SHA-256: `11a4cb54e47f29da3a39eda169c656af856221f1f965792a411a0ac95b05c6b3`.
 
 ## Affected specs
 
