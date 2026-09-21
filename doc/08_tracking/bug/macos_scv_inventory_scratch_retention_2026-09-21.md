@@ -48,6 +48,24 @@ worktree. The third run enabled `SIMPLE_NO_STUB_FALLBACK=1`.
 
 ## Remaining acceptance
 
+### Follow-up MIR reproduction, 2026-09-21
+
+At PR head `f2419dda909`, the same admitted Phase 2 producer reached MIR for
+the 16-module fixture closure, then looped in `MirLowering.bind_local`.
+A macOS process sample captured the insertion probe calling `rt_array_get`;
+resident memory was 643,152 KiB at 41 seconds. The diagnostic was terminated.
+The index was promoted correctly, but `reset_function_local_tracking` cleared
+its authoritative key/value arrays without clearing `local_symbol_index_slots`.
+Occupied buckets accumulated across functions until insertion had no empty
+bucket. The reset now clears the index together with its arrays. The existing
+reset assertion and a 32-function bucket-occupancy regression cover the defect.
+Executable validation requires a producer rebuilt with this compiler correction.
+
+This reproduction used `--threads 8` with the explicit diagnostic
+`SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct`; it does not qualify the full
+jobs=8 SCV coordinator. The normal coordinator correctly refused this new
+worktree before compilation because its SCV journal had not been initialized.
+
 The native fixture authors 256 repeated event scopes with digest/lifetime
 checks, nested-scope refusal, a 2,048-entry reversed batch, and duplicate
 generation checks. Its `--baseline` mode retains unscoped per-file work for
