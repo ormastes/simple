@@ -217,12 +217,16 @@ elif [ -x /usr/bin/time ] &&
      LC_ALL=C /usr/bin/time -l -o "$rss_probe" true >/dev/null 2>&1 &&
      grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]+maximum resident set size[[:space:]]*$' "$rss_probe"; then
   rss_time=/usr/bin/time
-  rss_time_style=darwin
+  case "$(uname -s)" in
+    Darwin) rss_time_style=darwin ;;
+    FreeBSD) rss_time_style=bsd-kib ;;
+  esac
 fi
 rm -f "$rss_probe"
 case "$rss_time_style" in
   gnu) rss_measurement=gnu-time-rusage-kib ;;
   darwin) rss_measurement=darwin-time-rusage-bytes-normalized-kib ;;
+  bsd-kib) rss_measurement=bsd-time-rusage-kib ;;
   *) rss_measurement=unavailable ;;
 esac
 echo "max_rss_measurement=$rss_measurement" >>"$summary"
@@ -237,7 +241,7 @@ run_measured_timeout() {
       "$rss_time" -f '%M' -o "$metric_file" \
         "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
         "$measured_timeout" "$measured_grace" "$@" ;;
-    darwin)
+    darwin|bsd-kib)
       LC_ALL=C "$rss_time" -l -o "$metric_file" \
         "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
         "$measured_timeout" "$measured_grace" "$@" ;;
@@ -258,6 +262,10 @@ read_max_rss_kib() {
     darwin)
       metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
         printf "%.0f\n", int(($1 + 1023) / 1024)
+      }' "$metric_file" | tail -n 1) ;;
+    bsd-kib)
+      metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        print $1
       }' "$metric_file" | tail -n 1) ;;
     *) metric=$(tail -n 1 "$metric_file" 2>/dev/null || :) ;;
   esac
@@ -1099,6 +1107,10 @@ else
   if [ "$compiler_cli_ready" -eq 1 ] && [ "$test_runner_ready" -eq 1 ] && \
      [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
      [ -n "$command_owner_receipt" ]; then
+    loader_oracle=test/01_unit/compiler/loader/module_loader_relocation_spec.spl
+    case "$(uname -s)" in
+      Darwin) loader_oracle=test/01_unit/compiler/loader/module_load_intent_spec.spl ;;
+    esac
     run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
@@ -1116,12 +1128,12 @@ else
     run_matrix_task loader_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=interpreter --unstable \
+      "$loader_oracle" --mode=interpreter --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon --sequential --json
     run_matrix_task loader_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=compile --unstable \
+      "$loader_oracle" --mode=compile --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon --sequential --json
     if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then
       matrix_failed=1
