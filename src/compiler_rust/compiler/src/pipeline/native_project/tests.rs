@@ -8169,6 +8169,34 @@ fn test_cache_persist_failure_is_best_effort() {
     ));
 }
 
+#[cfg(windows)]
+#[test]
+fn test_cache_object_persists_and_reads_beyond_windows_max_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let base_len = temp.path().to_string_lossy().encode_utf16().count();
+    // A 242-character parent is creatable without extended-path support;
+    // its keyed leaf crosses MAX_PATH like the failing compiler cache.
+    let padding = 241usize.checked_sub(base_len).expect("test temp root is too long");
+    let parent = temp.path().join("p".repeat(padding));
+    assert_eq!(parent.to_string_lossy().encode_utf16().count(), 242);
+    fs::create_dir_all(&parent).unwrap();
+    let cache_path = parent.join("0123456789abcdef.o");
+    assert!(cache_path.to_string_lossy().encode_utf16().count() >= 260);
+
+    let (arch, format) = super::expected_cached_object_identity();
+    let object = object::write::Object::new(format, arch, object::Endianness::Little)
+        .write()
+        .unwrap();
+    super::compiler::persist_compiled_object(&cache_path, &object).unwrap();
+    assert_eq!(super::read_usable_cached_object(&cache_path), Some(object.clone()));
+    // A repeated publication replaces the same keyed leaf and cleans its temp.
+    let replacement = b"replacement object bytes";
+    super::compiler::persist_compiled_object(&cache_path, replacement).unwrap();
+    let io_path = super::cache_object_io_path(&cache_path).unwrap();
+    assert_eq!(fs::read(&io_path).unwrap(), replacement);
+    assert_eq!(fs::read_dir(io_path.parent().unwrap()).unwrap().count(), 1);
+}
+
 #[test]
 fn test_cache_rejects_relocatable_object_for_wrong_architecture() {
     let temp = tempfile::tempdir().unwrap();

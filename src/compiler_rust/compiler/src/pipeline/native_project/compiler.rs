@@ -180,14 +180,16 @@ fn persist_llvm_codegen_success(
 }
 
 pub(super) fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), String> {
-    let parent = cache_path
+    let io_path = super::cache_object_io_path(cache_path)
+        .map_err(|e| format!("resolve cache object path: {e}"))?;
+    let parent = io_path
         .parent()
         .ok_or_else(|| format!("cache object has no parent: {}", cache_path.display()))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("create cache temp: {e}"))?;
     temp.write_all(object).map_err(|e| format!("write cache temp: {e}"))?;
-    match temp.persist(cache_path) {
+    match temp.persist(&io_path) {
         Ok(_) => Ok(()),
-        Err(e) => match std::fs::read(cache_path) {
+        Err(e) => match std::fs::read(&io_path) {
             Ok(existing) if existing == object => Ok(()),
             _ => Err(format!("persist cache object: {}", e.error)),
         },
