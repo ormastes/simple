@@ -22,8 +22,37 @@ forbid() {
 require 'headRefOid' 'the exact PR head lookup'
 require '.user.login == \"github-actions[bot]\"' 'the approval bot identity filter'
 require '.commit_id == \"$head\"' 'the exact head commit filter'
-require '.state == \"APPROVED\"' 'a non-dismissed APPROVED state filter'
+require 'gh api --paginate --slurp' 'complete review pagination'
+require '| last | .state' 'latest-review state selection'
 forbid '--json reviewDecision' 'the aggregate reviewDecision signal'
+forbid '.state == \"APPROVED\"' 'approval filtering before latest-review selection'
+
+query='[.[][] | select(.user.login == "github-actions[bot]" and .commit_id == "head-new")] | last | .state // ""'
+fixture='[[
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-new","state":"APPROVED"},
+  {"user":{"login":"human"},"commit_id":"head-new","state":"APPROVED"}
+],[
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-old","state":"APPROVED"},
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-new","state":"CHANGES_REQUESTED"}
+]]'
+state=$(printf '%s\n' "$fixture" | jq -r "$query")
+[ "$state" = CHANGES_REQUESTED ] || { echo "FAIL: superseding review was ignored" >&2; exit 1; }
+
+fixture='[[
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-new","state":"APPROVED"}
+],[
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-new","state":"DISMISSED"}
+]]'
+state=$(printf '%s\n' "$fixture" | jq -r "$query")
+[ "$state" = DISMISSED ] || { echo "FAIL: dismissed latest review was ignored" >&2; exit 1; }
+
+fixture='[[
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-old","state":"APPROVED"}
+],[
+  {"user":{"login":"github-actions[bot]"},"commit_id":"head-new","state":"APPROVED"}
+]]'
+state=$(printf '%s\n' "$fixture" | jq -r "$query")
+[ "$state" = APPROVED ] || { echo "FAIL: approval on a subsequent page was missed" >&2; exit 1; }
 
 [ "$fail" -eq 0 ] || exit 1
 echo "PASS: PR approval verification is bound to the bot review on the exact PR head"
