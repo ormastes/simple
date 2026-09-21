@@ -3367,22 +3367,10 @@ impl MirLowering:
                     if float_rounding_receiver:
                         var b_rounding = self.builder
                         var float_rounding_symbol = "rt_math_floor"
-                        var float_rounding_arg = unresolved_receiver_local
                         if method == "floor":
                             float_rounding_symbol = "rt_math_floor"
                         if method == "ceil":
                             float_rounding_symbol = "rt_math_ceil"
-                        if method == "round":
-                            # Match std.io.math.math_round's portable
-                            # half-up definition: floor(x + 0.5).  Keeping the
-                            # expression in MIR makes the same semantics reach
-                            # LLVM, interpreter, loader, and SoSIX providers
-                            # without adding a provider-specific ABI symbol.
-                            float_rounding_arg = b_rounding.emit_binop(
-                                MirBinOp.Add,
-                                mir_operand_copy(unresolved_receiver_local),
-                                mir_operand_const_float(0.5),
-                                MirType.f64())
                         val float_rounding_op = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str(float_rounding_symbol),
                             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -3393,12 +3381,60 @@ impl MirLowering:
                         ))
                         val float_rounding_result = b_rounding.emit_call(
                             float_rounding_op,
-                            [mir_operand_copy(float_rounding_arg)],
+                            [mir_operand_copy(unresolved_receiver_local)],
                             MirType.f64()
                         )
-                        self.builder = b_rounding
                         if val rounded_local = float_rounding_result:
+                            if method == "round":
+                                # Match std.io.math.math_round exactly: floor
+                                # first, compare the ORIGINAL remainder, then
+                                # add one only on the true branch.  Rewriting
+                                # this as floor(x + 0.5) loses the decision at
+                                # binary64 precision boundaries.  A branch is
+                                # intentional: returning the unmodified floor
+                                # result preserves negative zero bit-for-bit.
+                                val rounding_remainder = b_rounding.emit_binop(
+                                    MirBinOp.Sub,
+                                    mir_operand_copy(unresolved_receiver_local),
+                                    mir_operand_copy(rounded_local),
+                                    MirType.f64())
+                                val rounding_increment = b_rounding.emit_binop(
+                                    MirBinOp.Ge,
+                                    mir_operand_copy(rounding_remainder),
+                                    mir_operand_const_float(0.5),
+                                    MirType.bool())
+                                val increment_block = b_rounding.new_block(
+                                    Some("f64_round_increment"))
+                                val keep_block = b_rounding.new_block(
+                                    Some("f64_round_keep_floor"))
+                                val merge_block = b_rounding.new_block(
+                                    Some("f64_round_merge"))
+                                val final_rounding = b_rounding.new_temp(
+                                    MirType.f64())
+                                b_rounding.terminate_if(
+                                    mir_operand_copy(rounding_increment),
+                                    increment_block, keep_block)
+
+                                b_rounding.switch_to_block(increment_block)
+                                val incremented_rounding = b_rounding.emit_binop(
+                                    MirBinOp.Add,
+                                    mir_operand_copy(rounded_local),
+                                    mir_operand_const_float(1.0),
+                                    MirType.f64())
+                                b_rounding.emit_copy(
+                                    final_rounding, incremented_rounding)
+                                b_rounding.terminate_goto(merge_block)
+
+                                b_rounding.switch_to_block(keep_block)
+                                b_rounding.emit_copy(final_rounding, rounded_local)
+                                b_rounding.terminate_goto(merge_block)
+
+                                b_rounding.switch_to_block(merge_block)
+                                self.builder = b_rounding
+                                return final_rounding
+                            self.builder = b_rounding
                             return rounded_local
+                        self.builder = b_rounding
 
                 # Primitive/text `.to_text()` and `.to_string()` share the
                 # existing interpolation renderer, but only after custom
