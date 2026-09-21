@@ -14,6 +14,8 @@ use compiler.common.diagnostics.span.{Span}
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_nanos() -> i64
 
 fn scratch_scope_builder() -> ModuleSurfaceBuilder:
     var builder = ModuleSurfaceBuilder.new()
@@ -29,7 +31,70 @@ fn scratch_scope_builder() -> ModuleSurfaceBuilder:
     builder.add_surface_canonical_identity(leaf, "scratch.leaf", leaf.canonical_path)
     builder
 
+# Measure only resolution, excluding builder setup and SSpec assertions.
+# Native registry deltas include retained output and unreclaimed scratch.
+fn export_scratch_profile(rounds: i64, streaming: bool, ambiguous: bool) -> [i64]:
+    var elapsed = 0
+    var retained = 0
+    for round in 0..rounds:
+        var builder = scratch_scope_builder()
+        if ambiguous:
+            var duplicate = ModuleSurface.empty("scratch.other")
+            duplicate.canonical_path = "scratch/other.spl"
+            duplicate.callable_names = ["visible"]
+            builder.add_surface_canonical_identity(duplicate, "scratch.other", duplicate.canonical_path)
+            builder.surfaces[0].imports.push(Import(
+                module: "scratch.other", items: [], is_lazy: false, span: Span.empty()))
+        val before = rt_heap_registry_count()
+        val started = rt_time_now_nanos()
+        val resolved = if streaming: builder.resolve_export_origins_streaming() else: builder.resolve_export_origins()
+        elapsed = elapsed + rt_time_now_nanos() - started
+        retained = retained + rt_heap_registry_count() - before
+        assert(resolved.is_err() == ambiguous)
+        if ambiguous:
+            val message = resolved.unwrap_err()
+            # A subsequent resolver must not invalidate the retained diagnostic.
+            var next = scratch_scope_builder()
+            assert(next.resolve_export_origins_streaming().is_ok())
+            assert(message.contains("ambiguous explicit facade export"))
+        else:
+            val origin = module_surface_export_origin_index_lookup(
+                builder.surfaces[0].export_origin_index, "visible")
+            assert(origin.found)
+            assert(origin.owner_module == "scratch.leaf")
+            assert(origin.source_name == "answer")
+            assert(origin.resolution_kind == "glob")
+        val began = rt_transient_array_scope_begin()
+        val ended = if began: rt_transient_array_scope_end() else: false
+        assert(began and ended)
+    [elapsed, retained]
+
+fn check_export_scratch_profile(ambiguous: bool):
+    val warm = export_scratch_profile(1, true, ambiguous)
+    val baseline = export_scratch_profile(32, false, ambiguous)
+    val small = export_scratch_profile(8, true, ambiguous)
+    val large = export_scratch_profile(32, true, ambiguous)
+    print "[export-profile] ambiguity={ambiguous} baseline={baseline} small={small} large={large} units=ns,objects"
+    assert(warm[0] > 0 and baseline[0] > 0 and small[0] > 0 and large[0] > 0)
+    assert(baseline[1] > 0 and small[1] > 0 and large[1] > 0)
+    assert(large[1] < baseline[1])
+    # Same work with reclamation must not impose a gross time regression;
+    # 4x work has a separate scaling guard with 100ms scheduling headroom.
+    assert(large[0] < baseline[0] * 16 + 100000000)
+    assert(large[0] < small[0] * 12 + 100000000)
+    assert(large[0] < 10000000000)
+
 describe("streaming export-origin scratch scopes", fn():
+    it("bounds fixpoint resolution time while reducing retained scratch", fn():
+        step("Compare delayed-alias resolution with and without scope reclamation")
+        check_export_scratch_profile(false)
+    )
+
+    it("bounds ambiguity cleanup time while reducing retained scratch", fn():
+        step("Compare ambiguity cleanup and retained diagnostics at two workload sizes")
+        check_export_scratch_profile(true)
+    )
+
     it("preserves a delayed alias through per-surface reclamation and fixpoint revisits", fn():
         step("Resolve the facade before the leaf supplying its aliased export")
         var builder = scratch_scope_builder()

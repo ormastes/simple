@@ -1,0 +1,56 @@
+"""
+Reciprocal memory/performance regression for the ASCII str_split fast path.
+Run with a qualified native SSpec runner exposing production heap registry
+counters and transient scopes. Interpreter execution cannot establish this
+contract. A zero counter or clock fails rather than silently passing.
+Input construction and assertions are outside the measured split interval.
+"""
+# @tag: unit, native, memory, performance
+# @req REQ-EXPORT-SCRATCH-001
+use std.spec.{describe, it, expect, step}
+use common.string_core.{str_split}
+
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn ascii_split_profile(doublings: i64) -> [i64]:
+    var payload = "abcdefgh"
+    for size in 0..doublings:
+        payload = payload + payload
+    val input = payload + ",é,"
+    var elapsed = 0
+    var allocations = 0
+    for round in 0..16:
+        val before = rt_heap_registry_count()
+        val began = rt_transient_array_scope_begin()
+        assert(began)
+        val started = rt_time_now_nanos()
+        val fields = str_split(input, ",")
+        elapsed = elapsed + rt_time_now_nanos() - started
+        val allocated = rt_heap_registry_count() - before
+        val correct = fields.len() == 3 and fields[0] == payload and fields[1] == "é" and fields[2] == ""
+        val ended = rt_transient_array_scope_end()
+        val remaining = rt_heap_registry_count() - before
+        assert(ended and correct)
+        # Array plus output strings: independent of input byte length. The
+        # former slice-per-byte path exceeds this budget by thousands.
+        assert(allocated > 0 and allocated <= 12)
+        assert(remaining <= 2)
+        allocations = allocations + allocated
+    [elapsed, allocations]
+
+describe("ASCII split allocation and time profile", fn():
+    it("allocates by field count and scales with bytes scanned", fn():
+        step("Warm the native splitter, then split 8KiB and 32KiB UTF-8 records")
+        val warm = ascii_split_profile(2)
+        val small = ascii_split_profile(10)
+        val large = ascii_split_profile(12)
+        print "[ascii-split-profile] small={small} large={large} units=ns,objects"
+        expect(warm[0] > 0 and small[0] > 0 and large[0] > 0).to_equal(true)
+        expect(large[1] <= small[1] + 16).to_equal(true)
+        expect(large[0] < small[0] * 12 + 100000000).to_equal(true)
+        expect(large[0] < 10000000000).to_equal(true)
+    )
+)

@@ -4,6 +4,21 @@ Executable specification:
 `test/01_unit/compiler/hir/hir_resolution_cache_transient_owner_spec.spl`.
 Requirement: REQ-HIR-CACHE-SCOPE-001.
 
+## Reciprocal allocation and timing profile
+
+Warm one module, then measure 8 and 32 module scopes. Each module adds one
+retained resolution row and 256 importer-specific misses. Production
+`rt_heap_registry_count` must observe at least 256 churn objects and at least
+256 reclaimed objects, with fewer than 128 objects retained per module.
+Promotion must report positive bytes below 64 KiB per module. All cache rows,
+including the first row, remain readable after the final scope.
+
+The 32-module workload must finish below 10 seconds and below 12 times the
+8-module duration plus 100 ms scheduling headroom. Output records nanoseconds,
+retained objects, and promoted bytes. These are coarse regression limits,
+not claimed measured baselines. Native execution and threshold calibration
+remain pending; interpreter counters do not qualify as native evidence.
+
 ## Retain resolution facts across modules
 
 1. Create one frozen surface registry and a reusable HIR lowerer.
