@@ -80,3 +80,21 @@ counter must report an unavailable-symbol/qualification failure; it must not
 skip the assertion or substitute zero. The added cases have not been executed:
 the admitted Stage2 `check` command remains unsupported and no admitted SSpec
 runner was supplied. Before/after runtime failure/pass remains pending.
+
+## Reciprocal performance gate
+
+The same executable SSpec now includes a production-API scaling check for
+8 KiB and 16 KiB completed fragments. Each fragment contains leading spaces
+followed by `marker`, so the bridge scans N versus 2N characters while the
+inner parser receives the same identifier after trimming. Inputs are built
+before timing. Every result must contain exactly one `Ident("marker")`, and
+the measured batches must produce semantic checksum 144.
+
+The test uses the production monotonic-millisecond facade, warms each size,
+then takes exactly three alternating-order samples of four calls per size.
+It compares each size's best sample and requires `large_ms <= 3 * small_ms +
+25`. This permits timer granularity and shared-host scheduling variation
+above expected 2x scan work. It is a scaling regression guard, not a measured
+speedup claim or an absolute latency target. The strict allocation assertion
+remains a separate gate. Runtime execution remains pending the admitted
+runner; no shell timing result is substituted for this executable test.
