@@ -1,0 +1,79 @@
+#!/bin/sh
+# Exercise a retained owner and each failure gate without touching a bootstrap cache.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/lock-revalidation.XXXXXX")
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
+TMPDIR=$work
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH TMPDIR
+. "$root/scripts/check/lib/portable-process-lock.shs"
+fail() { printf 'FAIL: %s; evidence=%s\n' "$1" "$work" >&2; exit 1; }
+check_rejected() {
+  reason=$1
+  if portable_lock_handle_is_owned "$claim" >"$work/check.log" 2>&1; then
+    fail "ownership accepted after $reason"
+  fi
+  grep -F "ownership check failed: $reason" "$work/check.log" >/dev/null ||
+    fail "missing $reason diagnostic"
+}
+
+portable_lock_acquire "$work/locks" authority 2 || fail 'acquire failed'
+claim=$PORTABLE_LOCK_HANDLE
+stable="$work/locks/.authority.lock"
+portable_lock_handle_is_owned "$claim" || fail 'new owner rejected'
+sleep 2
+portable_lock_handle_is_owned "$claim" || fail 'retained owner rejected'
+
+# A transient snapshot failure must not authorize the caller.
+eval "$(sed -n '/^portable_lock_actual_process_identity()/,/^}/p' \
+  "$root/scripts/check/lib/portable-process-lock.shs" | \
+  sed '1s/portable_lock_actual_process_identity/portable_lock_real_process_identity/')"
+portable_lock_actual_process_identity() { return 1; }
+check_rejected 'owner snapshot unavailable'
+portable_lock_actual_process_identity() { portable_lock_real_process_identity; }
+
+portable_lock_actual_process_identity || fail 'snapshot recovery failed'
+actual_start=$PORTABLE_LOCK_OWNER_START_HEX
+actual_pgid=$PORTABLE_LOCK_OWNER_PGID
+actual_pid=$PORTABLE_LOCK_OWNER_PID
+portable_lock_actual_process_identity() {
+  PORTABLE_LOCK_OWNER_PID=$((actual_pid + 1))
+  PORTABLE_LOCK_OWNER_START_HEX=$actual_start
+  PORTABLE_LOCK_OWNER_PGID=$actual_pgid
+}
+check_rejected 'owner PID changed'
+portable_lock_actual_process_identity() {
+  PORTABLE_LOCK_OWNER_PID=$actual_pid
+  PORTABLE_LOCK_OWNER_START_HEX=00
+  PORTABLE_LOCK_OWNER_PGID=$actual_pgid
+}
+check_rejected 'owner start changed'
+portable_lock_actual_process_identity() {
+  PORTABLE_LOCK_OWNER_PID=$actual_pid
+  PORTABLE_LOCK_OWNER_START_HEX=$actual_start
+  PORTABLE_LOCK_OWNER_PGID=$((actual_pgid + 1))
+}
+check_rejected 'owner PGID changed'
+portable_lock_actual_process_identity() { portable_lock_real_process_identity; }
+
+mv "$claim" "$work/saved-claim"
+check_rejected 'claim missing or invalid'
+mv "$work/saved-claim" "$claim"
+portable_lock_handle_is_owned "$claim" || fail 'restored claim rejected'
+
+mv "$stable" "$work/saved-stable"
+check_rejected 'stable identity unavailable'
+printf 'successor\n' >"$work/successor"
+ln "$work/successor" "$stable"
+check_rejected 'hard-link identity changed'
+if portable_lock_release "$claim" >"$work/release.log" 2>&1; then
+  fail 'release removed a successor lock'
+fi
+[ -f "$stable" ] && grep -qx successor "$stable" ||
+  fail 'successor lock was changed'
+rm "$stable"
+mv "$work/saved-stable" "$stable"
+portable_lock_release "$claim" || fail 'restored owner could not release'
+[ ! -e "$stable" ] || fail 'released lock remains'
+printf 'PASS: retained owner, snapshot/identity denial and successor protection; evidence=%s\n' "$work"

@@ -359,22 +359,50 @@ portable_lock_acquire() {
 
 portable_lock_handle_is_owned() {
   portable_lock_owned_handle=$1
-  portable_lock_actual_process_identity || return 1
-  portable_lock_load_claim "${portable_lock_owned_handle}" || return 1
-  [ "${PORTABLE_LOCK_LOADED_PID}" = "${PORTABLE_LOCK_OWNER_PID}" ] &&
-    [ "${PORTABLE_LOCK_LOADED_START}" = \
-      "${PORTABLE_LOCK_OWNER_START_HEX}" ] &&
-    [ "${PORTABLE_LOCK_LOADED_PGID}" = "${PORTABLE_LOCK_OWNER_PGID}" ] ||
+  if ! portable_lock_actual_process_identity; then
+    echo "portable-lock: ownership check failed: owner snapshot unavailable" >&2
     return 1
+  fi
+  if ! portable_lock_load_claim "${portable_lock_owned_handle}"; then
+    echo "portable-lock: ownership check failed: claim missing or invalid" >&2
+    return 1
+  fi
+  if [ "${PORTABLE_LOCK_LOADED_PID}" != "${PORTABLE_LOCK_OWNER_PID}" ]; then
+    printf 'portable-lock: ownership check failed: owner PID changed (claim=%.32s observed=%.32s)\n' \
+      "${PORTABLE_LOCK_LOADED_PID}" "${PORTABLE_LOCK_OWNER_PID}" >&2
+    return 1
+  fi
+  if [ "${PORTABLE_LOCK_LOADED_START}" != \
+    "${PORTABLE_LOCK_OWNER_START_HEX}" ]; then
+    printf 'portable-lock: ownership check failed: owner start changed (claim=%.128s observed=%.128s)\n' \
+      "${PORTABLE_LOCK_LOADED_START}" "${PORTABLE_LOCK_OWNER_START_HEX}" >&2
+    return 1
+  fi
+  if [ "${PORTABLE_LOCK_LOADED_PGID}" != "${PORTABLE_LOCK_OWNER_PGID}" ]; then
+    printf 'portable-lock: ownership check failed: owner PGID changed (claim=%.32s observed=%.32s)\n' \
+      "${PORTABLE_LOCK_LOADED_PGID}" "${PORTABLE_LOCK_OWNER_PGID}" >&2
+    return 1
+  fi
   portable_lock_owned_root=${portable_lock_owned_handle%/*}
   portable_lock_owned_stable=\
 "${portable_lock_owned_root}/.${PORTABLE_LOCK_LOADED_NAME}.lock"
   portable_lock_owned_claim_identity=$(portable_lock_identity \
-    "${portable_lock_owned_handle}" 2>/dev/null) || return 1
+    "${portable_lock_owned_handle}" 2>/dev/null) || {
+    echo "portable-lock: ownership check failed: claim identity unavailable" >&2
+    return 1
+  }
   portable_lock_owned_stable_identity=$(portable_lock_identity \
-    "${portable_lock_owned_stable}" 2>/dev/null) || return 1
-  [ "${portable_lock_owned_claim_identity}" = \
-    "${portable_lock_owned_stable_identity}" ]
+    "${portable_lock_owned_stable}" 2>/dev/null) || {
+    echo "portable-lock: ownership check failed: stable identity unavailable" >&2
+    return 1
+  }
+  if [ "${portable_lock_owned_claim_identity}" != \
+    "${portable_lock_owned_stable_identity}" ]; then
+    printf 'portable-lock: ownership check failed: hard-link identity changed (claim=%.64s stable=%.64s)\n' \
+      "${portable_lock_owned_claim_identity}" \
+      "${portable_lock_owned_stable_identity}" >&2
+    return 1
+  fi
 }
 
 portable_lock_release() {
