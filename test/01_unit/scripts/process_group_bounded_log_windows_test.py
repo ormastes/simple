@@ -57,6 +57,22 @@ def dead(pid):
         kernel.CloseHandle(process)
 
 
+def terminate(pid):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    process = kernel.OpenProcess(0x0001, False, pid)
+    if not process:
+        raise OSError(ctypes.get_last_error(), "open external writer")
+    try:
+        if not kernel.TerminateProcess(process, 1):
+            raise OSError(ctypes.get_last_error(), "terminate external writer")
+    finally:
+        kernel.CloseHandle(process)
+
+
 def main():
     if os.name != "nt":
         raise RuntimeError("this regression requires actual Windows execution")
@@ -67,7 +83,7 @@ def main():
     work = Path(tempfile.mkdtemp(prefix="collector-regression-", dir=evidence))
     checks = []
 
-    def run(name, mode, target=None, expected=0, cap=4096, timeout=5, collector=helper):
+    def run(name, mode, target=None, expected=0, cap=4096, timeout=5, collector=helper, environment=None):
         command = [sys.executable, str(collector), f"--output-parent={work}",
                    f"--log-leaf={name}.log", f"--receipt-leaf={name}.env",
                    f"--max-bytes={cap}", f"--timeout-seconds={timeout}",
@@ -75,7 +91,7 @@ def main():
                    sys.executable, str(Path(__file__).resolve()), "--fixture", mode,
                    str(target or work / f"{name}.target")]
         started = time.monotonic()
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20, env=environment)
         (work / f"{name}.driver.log").write_bytes(result.stdout)
         assert result.returncode == expected, (name, result.returncode, result.stdout.decode(errors="replace"))
         elapsed = round(time.monotonic() - started, 3)
@@ -96,6 +112,36 @@ def main():
         normal = run("normal", "normal", expected=7)
         assert normal["native_exit_status"] == "7" and normal["reason"] == "child-exit"
         assert (work / "normal.log").read_bytes() == b"stdout\nstderr\n"
+
+        # An inherited stdout writer can outlive every process in the bounded
+        # job (for example when a native tool delegates to an external service).
+        # The generated collector creates that writer before assigning its real
+        # child to the job, so it is genuinely outside job containment.
+        stale_pipe = work / "stale-pipe.py"
+        original = helper.read_text(encoding="utf-8")
+        old = "            startup = StartupInfo()\n"
+        assert original.count(old) == 1
+        injection = '''            if os.environ.get("COLLECTOR_TEST_EXTERNAL_PIPE_WRITER") == "1":
+                writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                          stdout=write_fd, stderr=write_fd, close_fds=True)
+                Path(os.environ["COLLECTOR_TEST_EXTERNAL_PIPE_WRITER_PID"]).write_text(str(writer.pid), encoding="ascii")
+'''
+        stale_pipe.write_text(original.replace(old, injection + old), encoding="utf-8")
+        writer_pid = work / "stale-pipe.writer.pid"
+        environment = os.environ.copy()
+        environment["COLLECTOR_TEST_EXTERNAL_PIPE_WRITER"] = "1"
+        environment["COLLECTOR_TEST_EXTERNAL_PIPE_WRITER_PID"] = str(writer_pid)
+        try:
+            stale = run("stale-pipe", "normal", expected=7, collector=stale_pipe, environment=environment)
+            assert stale["native_exit_status"] == "7" and stale["reason"] == "child-exit"
+            assert (work / "stale-pipe.log").read_bytes() == b"stdout\nstderr\n"
+            assert writer_pid.is_file() and not dead(int(writer_pid.read_text(encoding="ascii")))
+        finally:
+            if writer_pid.is_file():
+                pid = int(writer_pid.read_text(encoding="ascii"))
+                if not dead(pid):
+                    terminate(pid)
+
         for mode, expected in (("descendant", 124), ("overflow", 125)):
             pid_file = work / f"{mode}.pid"
             receipt = run(mode, mode, pid_file, expected=expected, cap=1024, timeout=2)
