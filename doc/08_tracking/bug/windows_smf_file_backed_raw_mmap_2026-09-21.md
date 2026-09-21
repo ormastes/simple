@@ -1,6 +1,6 @@
 # Windows SMF file-backed raw mapping
 
-Status: FIXED (2026-09-21)
+Status: FIX IMPLEMENTED; CI AND ADMISSION REVIEW PENDING (2026-09-21)
 
 ## Failure
 
