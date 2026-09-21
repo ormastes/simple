@@ -31,7 +31,11 @@ resume_stage4_prepare() {
   output=$(bootstrap_stage3_canonical_path "$1") || return 1
   root=$2 platform=$3 planner_receipt=$(bootstrap_stage3_canonical_file "$4") || return 1
   preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+  preflight_seed="$root/src/compiler_rust/target/bootstrap/simple"
+  case "$platform" in *windows*) preflight_seed="${preflight_seed}.exe" ;; esac
+  preflight_expected_config="platform=${platform};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
   sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+    --seed="$preflight_seed" --expect-config="$preflight_expected_config" \
     --verify-receipt="$preflight_receipt" || {
     echo "error: Stage 4 continuation lacks current authoritative preflight evidence" >&2
     return 1

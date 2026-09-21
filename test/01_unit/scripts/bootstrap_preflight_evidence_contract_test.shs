@@ -15,30 +15,95 @@ sh -n "$resume"
 sh -n "$resume4"
 sh "$checker" --selftest >/dev/null
 
-# A console PASS or a receipt that skipped the cargo authority check is never
-# admissible evidence, even when every other field looks structurally valid.
-cat >"$tmp/skipped.env" <<'EOF'
+cat >"$tmp/seed" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo 'Simple Language vfixture' ;;
+  run) echo 'PROBE_BYTEORDER=little,big' ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$tmp/seed"
+config='platform=test;backend=llvm;mode=dynload;lane=full-bootstrap'
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_source_snapshot "$tmp/source" "$root"
+bootstrap_stage3_git_state "$root" "$tmp/git"
+printf '%s' "$config" >"$tmp/config"
+cat >"$tmp/skipped.env" <<EOF
 schema=simple-bootstrap-preflight-v1
 status=pass
-git_head=0000000000000000000000000000000000000000
-source_snapshot_sha256=0000000000000000000000000000000000000000000000000000000000000000
-git_state_sha256=0000000000000000000000000000000000000000000000000000000000000000
-config_hex=78
-config_sha256=0000000000000000000000000000000000000000000000000000000000000000
-seed_sha256=0000000000000000000000000000000000000000000000000000000000000000
-checker_sha256=0000000000000000000000000000000000000000000000000000000000000000
+git_head=$(git -C "$root" rev-parse --verify HEAD)
+source_snapshot_sha256=$(hash_file "$tmp/source")
+git_state_sha256=$(hash_file "$tmp/git")
+config_hex=$(perl -e 'print unpack("H*", <STDIN>)' <"$tmp/config")
+config_sha256=$(hash_file "$tmp/config")
+seed_sha256=$(hash_file "$tmp/seed")
+checker_sha256=$(hash_file "$checker")
 cargo_mode=skipped
 EOF
-if sh "$checker" --verify-receipt="$tmp/skipped.env" >/dev/null 2>&1; then
+
+# An otherwise valid receipt remains inadmissible when the cargo authority
+# check was skipped.
+if sh "$checker" --seed="$tmp/seed" --expect-config="$config" \
+  --verify-receipt="$tmp/skipped.env" >/dev/null 2>&1; then
   echo "bootstrap preflight evidence: admitted skipped cargo receipt" >&2
+  exit 1
+fi
+
+# Valid control: model the production checked result without invoking Cargo in
+# this bounded receipt-contract test.
+sed 's/^cargo_mode=skipped$/cargo_mode=checked/' "$tmp/skipped.env" >"$tmp/valid.env"
+chmod 400 "$tmp/valid.env"
+sh "$checker" --seed="$tmp/seed" --expect-config="$config" \
+  --verify-receipt="$tmp/valid.env" >/dev/null
+
+if sh "$checker" --seed="$tmp/seed" --expect-config="${config};drift=true" \
+  --verify-receipt="$tmp/valid.env" >/dev/null 2>&1; then
+  echo "bootstrap preflight evidence: admitted configuration mismatch" >&2
+  exit 1
+fi
+
+sed 's/^seed_sha256=.*/seed_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+  "$tmp/valid.env" >"$tmp/stale.env"
+if sh "$checker" --seed="$tmp/seed" --expect-config="$config" \
+  --verify-receipt="$tmp/stale.env" >/dev/null 2>&1; then
+  echo "bootstrap preflight evidence: admitted stale selected-seed hash" >&2
+  exit 1
+fi
+
+ln -s "$tmp/valid.env" "$tmp/symlink.env"
+if sh "$checker" --seed="$tmp/seed" --expect-config="$config" \
+  --verify-receipt="$tmp/symlink.env" >/dev/null 2>&1; then
+  echo "bootstrap preflight evidence: admitted symlink receipt" >&2
+  exit 1
+fi
+
+cat "$tmp/valid.env" >"$tmp/duplicate.env"
+echo status=pass >>"$tmp/duplicate.env"
+if sh "$checker" --seed="$tmp/seed" --expect-config="$config" \
+  --verify-receipt="$tmp/duplicate.env" >/dev/null 2>&1; then
+  echo "bootstrap preflight evidence: admitted duplicate manifest key" >&2
   exit 1
 fi
 
 lock_line=$(grep -n 'bootstrap_lock_handle=${PORTABLE_LOCK_HANDLE}' "$entry" | cut -d: -f1)
 produce_line=$(grep -n 'bootstrap-preflight.shs.*\\' "$entry" | tail -n 1 | cut -d: -f1)
-stage_line=$(grep -n '^bootstrap_progress_pid=' "$entry" | head -n 1 | cut -d: -f1)
+cleanup_line=$(grep -n "trap 'bootstrap_cleanup" "$entry" | cut -d: -f1)
+stage_line=$(grep -n '^echo "Running bootstrap pipeline' "$entry" | cut -d: -f1)
 [ "$lock_line" -lt "$produce_line" ]
+[ "$cleanup_line" -lt "$produce_line" ]
 [ "$produce_line" -lt "$stage_line" ]
+grep -Fq -- '--seed="${seed_bin}"' "$entry"
 
 verify_line=$(grep -n -- '--verify-receipt="$bootstrap_preflight_receipt"' "$resume" | cut -d: -f1)
 build_line=$(grep -n 'native-build --target' "$resume" | head -n 1 | cut -d: -f1)
@@ -48,5 +113,9 @@ build_line=$(grep -n 'native-build --target' "$resume" | head -n 1 | cut -d: -f1
 [ "$(grep -c 'preflight_receipt_sha256=' "$resume")" -ge 1 ]
 [ "$(grep -c 'preflight_receipt_sha256=' "$resume4")" -eq 1 ]
 [ "$(grep -c -- '--verify-receipt="$preflight_receipt"' "$resume4")" -eq 1 ]
+grep -Fq -- '--expect-config="$bootstrap_preflight_expected_config"' "$resume"
+grep -Fq 'bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence' "$resume"
+grep -Fq -- '--expect-config="$preflight_expected_config"' "$resume4"
+grep -Fq 'Stage 4 continuation lacks current authoritative preflight evidence' "$resume4"
 
 echo "bootstrap_preflight_evidence_contract=true"

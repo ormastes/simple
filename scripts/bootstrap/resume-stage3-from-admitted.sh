@@ -50,14 +50,6 @@ bootstrap_stage3_resume_output_path "$source_output" "$root" \
   "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
   bootstrap_stage3_error "OUTPUT_DIR is not a canonical allowlisted directory: $source_output"
 output=$BOOTSTRAP_STAGE3_RESUME_OUTPUT
-bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
-sh "$root/scripts/check/check-bootstrap-preflight.shs" \
-  --verify-receipt="$bootstrap_preflight_receipt" || {
-  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
-  exit 64
-}
-SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
-export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
 [ -n "$planner_admission" ] || {
   echo "bootstrap-policy-error: planner-admission-v2-required" >&2; exit 64;
@@ -408,6 +400,16 @@ stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
+bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
+sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
+  --verify-receipt="$bootstrap_preflight_receipt" || {
+  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
+  exit 64
+}
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 # The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
 # every env VALUE and the argv verbatim -- not from a hand-written copy of
 # bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves

@@ -908,25 +908,6 @@ portable_lock_acquire "${bootstrap_lock_root}" "${bootstrap_lock_name}" \
   exit 1
 }
 bootstrap_lock_handle=${PORTABLE_LOCK_HANDLE}
-
-# A full bootstrap is long enough that advisory console output is not durable
-# evidence.  Run the canonical readiness detector while output ownership is
-# held, bind its PASS to the exact source/Git/configuration, and retain the
-# immutable receipt beside the admitted stages.  Recovery lanes verify this
-# receipt before executing and carry its hash into their status receipts.
-if [ "${full_bootstrap}" -eq 1 ]; then
-  bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
-  rm -f "${bootstrap_preflight_receipt}"
-  bootstrap_preflight_config="backend=${backend};target=${target:-host};jobs=${jobs:-default};strategy=${bootstrap_strategy};mode=${bootstrap_mode};profile=${execution_profile};stop_after_stage2=${stop_after_stage2};stop_after_stage3=${stop_after_stage3}"
-  sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
-    --config="${bootstrap_preflight_config}" \
-    --receipt="${bootstrap_preflight_receipt}" || {
-    echo "error: authoritative bootstrap preflight failed; no stage was started" >&2
-    exit 1
-  }
-  SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=${bootstrap_preflight_receipt}
-  export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
-fi
 bootstrap_progress_pid=
 deploy_lock_handle=
 bootstrap_deploy_tx_active=0
@@ -2608,6 +2589,26 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   seed_fingerprint_details="${seed_stamp}.details.env"
   seed_fingerprint_observation_details=\
 "${output_dir}/rust-authority-fingerprint-current.details.env"
+fi
+
+# Cargo is itself the producer of the selected Rust seed, so the authoritative
+# preflight must run after that seed is rebuilt/published and before any
+# pure-Simple compiler stage starts. The cleanup traps and output lock are
+# already active here, making every refusal release ownership correctly.
+if [ "${full_bootstrap}" -eq 1 ]; then
+  bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
+  rm -f "${bootstrap_preflight_receipt}"
+  bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
+  sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
+    --seed="${seed_bin}" --config="${bootstrap_preflight_config}" \
+    --receipt="${bootstrap_preflight_receipt}" || {
+    echo "error: authoritative bootstrap preflight failed; no pure-Simple stage was started" >&2
+    exit 1
+  }
+  SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=${bootstrap_preflight_receipt}
+  SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG=${bootstrap_preflight_config}
+  export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT \
+    SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
