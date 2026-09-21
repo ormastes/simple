@@ -67,10 +67,10 @@ describe "self-hosted native struct field access":
     # model is broken. Measured on the unfixed binary: with the vars inherited
     # this scenario PASSES vacuously; with them stripped it reads
     # 6873726019372056632 at byte_offset 32.
-    it "reads an erased-receiver field from the receiver's own allocation":
+    it "rejects an erased receiver with conflicting narrow and wide layouts":
         # @req REQ-SSPEC-SYSTEM
-        step("reads an erased-receiver field from the receiver's own allocation")
-        step("Write a one-field receiver alongside a wider struct sharing the field name")
+        step("rejects an erased receiver with conflicting narrow and wide layouts")
+        step("Write distinct narrow and wide sentinels that share a field name at different slots")
         expect(dir_create_all(BUILD_DIR)).to_equal(true)
         expect(file_write(
             ERASED_SOURCE_PATH,
@@ -80,51 +80,52 @@ describe "self-hosted native struct field access":
             "struct ZzBig:\n" +
             "    p0: i64\n" +
             "    p1: i64\n" +
+            "    zzq: i64\n" +
             "    p2: i64\n" +
             "    p3: i64\n" +
-            "    zzq: i64\n" +
             "\n" +
             "fn read_zzq(o: any) -> i64:\n" +
             "    return o.zzq\n" +
             "\n" +
             "fn main():\n" +
-            "    var s = ZzSmall(zzq: 42)\n" +
-            "    print(read_zzq(s))\n"
+            "    var s = ZzSmall(zzq: 7)\n" +
+            "    var w = ZzBig(p0: 11, p1: 13, zzq: 42, p2: 17, p3: 19)\n" +
+            "    print(read_zzq(w))\n"
         )).to_equal(true)
 
-        step("Run it through the JIT lowering path")
+        step("Run it through the JIT lowering path and require an ambiguity refusal")
         val erased = shell(
             "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
-            "bin/simple run " + ERASED_SOURCE_PATH + " 2>/dev/null"
+            "bin/simple run " + ERASED_SOURCE_PATH + " 2>&1"
         )
-        expect(erased.exit_code).to_equal(0)
+        expect(erased.exit_code == 0).to_equal(false)
 
-        step("Observe the receiver's own field value, not adjacent heap bytes")
-        expect(erased.stdout.trim()).to_equal("42")
+        step("Observe that neither narrow nor wide sentinel is guessed")
+        expect(erased.stdout).to_contain("Cannot infer field")
 
     # @manual scenario evidence
     # Generalization: the same shape with the declaration order reversed and a
     # third candidate at a middle index, so a green verdict cannot be an
     # artifact of type-registry iteration order.
-    it "resolves the erased-receiver field independently of declaration order":
+    it "rejects conflicting erased-receiver layouts independently of declaration order":
         # @req REQ-SSPEC-SYSTEM
-        step("resolves the erased-receiver field independently of declaration order")
-        step("Declare the wide candidates BEFORE the one-field receiver")
+        step("rejects conflicting erased-receiver layouts independently of declaration order")
+        step("Declare a wide target and narrow sentinel in reverse order")
         expect(dir_create_all(BUILD_DIR)).to_equal(true)
         expect(file_write(
             ORDER_SOURCE_PATH,
             "struct ZzWide:\n" +
             "    q0: i64\n" +
             "    q1: i64\n" +
+            "    zzr: i64\n" +
             "    q2: i64\n" +
             "    q3: i64\n" +
             "    q4: i64\n" +
-            "    zzr: i64\n" +
             "\n" +
             "struct ZzMid:\n" +
             "    m0: i64\n" +
-            "    m1: i64\n" +
             "    zzr: i64\n" +
+            "    m1: i64\n" +
             "\n" +
             "struct ZzTiny:\n" +
             "    zzr: i64\n" +
@@ -134,15 +135,16 @@ describe "self-hosted native struct field access":
             "\n" +
             "fn main():\n" +
             "    var t = ZzTiny(zzr: 7)\n" +
-            "    print(read_zzr(t))\n"
+            "    var w = ZzWide(q0: 1, q1: 2, zzr: 42, q2: 3, q3: 4, q4: 5)\n" +
+            "    print(read_zzr(w))\n"
         )).to_equal(true)
 
-        step("Run it through the JIT lowering path")
+        step("Run it through the JIT lowering path and require an ambiguity refusal")
         val ordered = shell(
             "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
-            "bin/simple run " + ORDER_SOURCE_PATH + " 2>/dev/null"
+            "bin/simple run " + ORDER_SOURCE_PATH + " 2>&1"
         )
-        expect(ordered.exit_code).to_equal(0)
+        expect(ordered.exit_code == 0).to_equal(false)
 
-        step("Observe the one-field receiver's own value")
-        expect(ordered.stdout.trim()).to_equal("7")
+        step("Observe that the dynamic layout remains fail-closed after order reversal")
+        expect(ordered.stdout).to_contain("Cannot infer field")

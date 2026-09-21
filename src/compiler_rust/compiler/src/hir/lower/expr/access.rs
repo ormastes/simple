@@ -367,7 +367,11 @@ impl Lowerer {
                 // that `get_field_info` uses in its ANY branch but applied
                 // here in the fallback chain where it was previously skipped
                 // because `candidate_struct_names` was empty.
-                if receiver_is_dynamic && candidate_struct_names.is_empty() && !self.is_ambiguous_global_field(field) {
+                if receiver_is_dynamic
+                    && candidate_struct_names.is_empty()
+                    && !self.has_local_field_candidate(field, false)
+                    && !self.is_ambiguous_global_field(field)
+                {
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
                         if crate::hir::lower::trace_field_get_enabled() {
                             let fpath = self
@@ -403,60 +407,25 @@ impl Lowerer {
                     // degrade the expression type to ANY so method
                     // dispatch stays bare and tag-dispatches at runtime.
                     let ambiguous_field = self.is_ambiguous_global_field(field);
-                    if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}");
-                        }
-                        return Ok(HirExpr {
-                            kind: HirExprKind::FieldAccess {
-                                receiver: recv_hir,
-                                field_index,
-                            },
-                            ty: if ambiguous_field { TypeId::ANY } else { field_ty },
-                        });
-                    }
-                    let mut best: Option<(usize, TypeId, usize)> = None;
-                    for (_, search_ty) in self.module.types.iter() {
-                        if let HirType::Struct { fields, .. } = search_ty {
-                            for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
-                                if field_name == field {
-                                    let count = fields.len();
-                                    // Smallest index wins -- memory-safe, see the
-                                    // proof on `get_field_info`'s TypeId::ANY
-                                    // branch in type_resolver.rs.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
-                                        best = Some((idx, *field_ty, count));
-                                    }
-                                }
+                    if !self.has_local_field_candidate(field, false) {
+                        if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                            if crate::hir::lower::trace_field_get_enabled() {
+                                let fpath = self
+                                    .current_file
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
+                                eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}");
                             }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::FieldAccess {
+                                    receiver: recv_hir,
+                                    field_index,
+                                },
+                                ty: if ambiguous_field { TypeId::ANY } else { field_ty },
+                            });
                         }
-                    }
-                    if let Some((field_index, field_ty, _)) = best {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] NKM-LOCALBEST/{field} idx={field_index} in {fpath}");
-                        }
-                        return Ok(HirExpr {
-                            kind: HirExprKind::FieldAccess {
-                                receiver: recv_hir,
-                                field_index,
-                            },
-                            ty: if ambiguous_field { TypeId::ANY } else { field_ty },
-                        });
                     }
                     if std::env::var("SIMPLE_DEBUG_FIELD_FAIL").is_ok() {
                         eprintln!(
