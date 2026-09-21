@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <linux/time_types.h>  /* __kernel_timespec */
@@ -43,7 +44,9 @@ enum {
     BUF_OP_READ    = 2,
     BUF_OP_CONNECT = 3,
     BUF_OP_OPEN    = 4,
-    BUF_OP_TIMEOUT = 5
+    BUF_OP_TIMEOUT = 5,
+    BUF_OP_SEND    = 6,
+    BUF_OP_WRITE   = 7
 };
 
 typedef struct buf_entry {
@@ -84,14 +87,14 @@ static inline int64_t hash_slot(int64_t op_id, int64_t cap)
     return (int64_t)(h >> (64 - 20)) & (cap - 1);  /* cap is power of 2 */
 }
 
-static void bufs_grow(uring_driver* ud)
+static bool bufs_grow(uring_driver* ud)
 {
     int64_t old_cap = ud->bufs_cap;
     buf_entry* old  = ud->bufs;
 
     int64_t new_cap = old_cap ? old_cap * 2 : 64;
     buf_entry* tbl  = (buf_entry*)calloc((size_t)new_cap, sizeof(buf_entry));
-    if (!tbl) return;
+    if (!tbl) return false;
 
     /* rehash */
     for (int64_t i = 0; i < old_cap; i++) {
@@ -105,14 +108,20 @@ static void bufs_grow(uring_driver* ud)
     ud->bufs     = tbl;
     ud->bufs_cap = new_cap;
     free(old);
+    return true;
 }
 
-static void bufs_put(uring_driver* ud, int64_t op_id, char* buf,
+static bool bufs_ensure(uring_driver* ud)
+{
+    if (ud->bufs_cap == 0 || ud->bufs_count * 10 >= ud->bufs_cap * 6)
+        return bufs_grow(ud);
+    return true;
+}
+
+static bool bufs_put(uring_driver* ud, int64_t op_id, char* buf,
                      int64_t len, int op_type, char* path)
 {
-    /* grow if load factor > 0.6 */
-    if (ud->bufs_count * 10 >= ud->bufs_cap * 6)
-        bufs_grow(ud);
+    if (!bufs_ensure(ud)) return false;
 
     int64_t slot = hash_slot(op_id, ud->bufs_cap);
     while (ud->bufs[slot].op_id != 0)
@@ -124,6 +133,7 @@ static void bufs_put(uring_driver* ud, int64_t op_id, char* buf,
     ud->bufs[slot].op_type = op_type;
     ud->bufs[slot].path    = path;
     ud->bufs_count++;
+    return true;
 }
 
 /* Find and remove entry. Returns the entry (with op_id=0 if not found). */
@@ -166,14 +176,14 @@ static buf_entry bufs_take(uring_driver* ud, int64_t op_id)
 
 /* ---- sendfile op helpers ---- */
 
-static void sf_push(uring_driver* ud, int64_t op_id, int64_t sock_fd,
+static bool sf_push(uring_driver* ud, int64_t op_id, int64_t sock_fd,
                     int64_t file_fd, int64_t offset, int64_t len)
 {
     if (ud->sf_count >= ud->sf_cap) {
         int64_t new_cap = ud->sf_cap ? ud->sf_cap * 2 : 16;
         sendfile_op* new_arr = (sendfile_op*)realloc(
             ud->sf_ops, (size_t)new_cap * sizeof(sendfile_op));
-        if (!new_arr) return;
+        if (!new_arr) return false;
         ud->sf_ops = new_arr;
         ud->sf_cap = new_cap;
     }
@@ -184,6 +194,7 @@ static void sf_push(uring_driver* ud, int64_t op_id, int64_t sock_fd,
         .offset  = offset,
         .len     = len
     };
+    return true;
 }
 
 /* Find sendfile op by op_id, remove it, return a copy.  Returns op with op_id=0 if not found. */
@@ -219,14 +230,8 @@ static inline uring_driver* UD(spl_driver* d)
 /* Get an SQE, returns NULL and sets errno if the ring is full */
 static struct io_uring_sqe* get_sqe(uring_driver* ud)
 {
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&ud->ring);
-    if (!sqe) {
-        /* SQ is full; flush first, then retry */
-        io_uring_submit(&ud->ring);
-        ud->pending_submits = 0;
-        sqe = io_uring_get_sqe(&ud->ring);
-    }
-    return sqe;
+    /* Keep batching explicit: callers own the submit/flush boundary. */
+    return io_uring_get_sqe(&ud->ring);
 }
 
 /* ===================================================================
@@ -260,6 +265,8 @@ static void uring_destroy(spl_driver* d)
 static int64_t uring_submit_accept(spl_driver* d, int64_t listen_fd)
 {
     uring_driver* ud = UD(d);
+    if (listen_fd < 0)
+        return -EINVAL;
     struct io_uring_sqe* sqe = get_sqe(ud);
     if (!sqe) return -EAGAIN;
 
@@ -276,10 +283,11 @@ static int64_t uring_submit_connect(spl_driver* d, int64_t fd,
                                     const char* addr, int64_t port)
 {
     uring_driver* ud = UD(d);
-    struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) return -EAGAIN;
+    if (!addr) return -EINVAL;
+    if (!bufs_ensure(ud)) return -ENOMEM;
 
-    /* Allocate sockaddr_in and fill it */
+    /* The sockaddr is retained until its CQE, so the SQE never borrows the
+     * caller's address string. */
     struct sockaddr_in* sa = (struct sockaddr_in*)calloc(1, sizeof(*sa));
     if (!sa) return -ENOMEM;
 
@@ -290,12 +298,21 @@ static int64_t uring_submit_connect(spl_driver* d, int64_t fd,
         return -EINVAL;
     }
 
+    struct io_uring_sqe* sqe = get_sqe(ud);
+    if (!sqe) {
+        free(sa);
+        return -EAGAIN;
+    }
+
     int64_t id = next_id(d);
     io_uring_prep_connect(sqe, (int)fd, (struct sockaddr*)sa, sizeof(*sa));
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
     /* Track the sockaddr so we can free it after completion */
-    bufs_put(ud, id, (char*)sa, (int64_t)sizeof(*sa), BUF_OP_CONNECT, NULL);
+    if (!bufs_put(ud, id, (char*)sa, (int64_t)sizeof(*sa), BUF_OP_CONNECT, NULL)) {
+        free(sa);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -305,6 +322,9 @@ static int64_t uring_submit_connect(spl_driver* d, int64_t fd,
 static int64_t uring_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size)
 {
     uring_driver* ud = UD(d);
+
+    if (buf_size <= 0 || (uint64_t)buf_size > UINT_MAX) return -EINVAL;
+    if (!bufs_ensure(ud)) return -ENOMEM;
 
     char* buf = (char*)malloc((size_t)buf_size);
     if (!buf) return -ENOMEM;
@@ -319,7 +339,10 @@ static int64_t uring_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size)
     io_uring_prep_recv(sqe, (int)fd, buf, (unsigned)buf_size, 0);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    bufs_put(ud, id, buf, buf_size, BUF_OP_RECV, NULL);
+    if (!bufs_put(ud, id, buf, buf_size, BUF_OP_RECV, NULL)) {
+        free(buf);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -330,14 +353,27 @@ static int64_t uring_submit_send(spl_driver* d, int64_t fd,
                                  const char* data, int64_t len)
 {
     uring_driver* ud = UD(d);
+    if (len < 0 || (uint64_t)len > UINT_MAX || (len > 0 && !data)) return -EINVAL;
+    if (!bufs_ensure(ud)) return -ENOMEM;
+
+    char* copy = (char*)malloc((size_t)(len > 0 ? len : 1));
+    if (!copy) return -ENOMEM;
+    if (len > 0) memcpy(copy, data, (size_t)len);
+
     struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) return -EAGAIN;
+    if (!sqe) {
+        free(copy);
+        return -EAGAIN;
+    }
 
     int64_t id = next_id(d);
-    io_uring_prep_send(sqe, (int)fd, data, (unsigned)len, 0);
+    io_uring_prep_send(sqe, (int)fd, copy, (unsigned)len, 0);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    /* Caller owns data lifetime; nothing to track */
+    if (!bufs_put(ud, id, copy, len, BUF_OP_SEND, NULL)) {
+        free(copy);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -349,10 +385,16 @@ static int64_t uring_submit_sendfile(spl_driver* d, int64_t sock_fd,
                                      int64_t len)
 {
     uring_driver* ud = UD(d);
-    struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) return -EAGAIN;
-
+    if (sock_fd < 0 || file_fd < 0 || offset < 0 || len < 0)
+        return -EINVAL;
     int64_t id = next_id(d);
+    if (!sf_push(ud, id, sock_fd, file_fd, offset, len))
+        return -ENOMEM;
+    struct io_uring_sqe* sqe = get_sqe(ud);
+    if (!sqe) {
+        sf_take(ud, id);
+        return -EAGAIN;
+    }
 
     /*
      * io_uring gained native splice/sendfile support in Linux 5.6+,
@@ -365,7 +407,6 @@ static int64_t uring_submit_sendfile(spl_driver* d, int64_t sock_fd,
     io_uring_prep_nop(sqe);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    sf_push(ud, id, sock_fd, file_fd, offset, len);
     ud->pending_submits++;
     return id;
 }
@@ -376,6 +417,9 @@ static int64_t uring_submit_read(spl_driver* d, int64_t fd,
                                  int64_t buf_size, int64_t offset)
 {
     uring_driver* ud = UD(d);
+
+    if (buf_size <= 0 || (uint64_t)buf_size > UINT_MAX || offset < 0) return -EINVAL;
+    if (!bufs_ensure(ud)) return -ENOMEM;
 
     char* buf = (char*)malloc((size_t)buf_size);
     if (!buf) return -ENOMEM;
@@ -390,7 +434,10 @@ static int64_t uring_submit_read(spl_driver* d, int64_t fd,
     io_uring_prep_read(sqe, (int)fd, buf, (unsigned)buf_size, (uint64_t)offset);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    bufs_put(ud, id, buf, buf_size, BUF_OP_READ, NULL);
+    if (!bufs_put(ud, id, buf, buf_size, BUF_OP_READ, NULL)) {
+        free(buf);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -402,14 +449,27 @@ static int64_t uring_submit_write(spl_driver* d, int64_t fd,
                                   int64_t offset)
 {
     uring_driver* ud = UD(d);
+    if (len <= 0 || (uint64_t)len > UINT_MAX || !data || offset < 0) return -EINVAL;
+    if (!bufs_ensure(ud)) return -ENOMEM;
+
+    char* copy = (char*)malloc((size_t)len);
+    if (!copy) return -ENOMEM;
+    memcpy(copy, data, (size_t)len);
+
     struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) return -EAGAIN;
+    if (!sqe) {
+        free(copy);
+        return -EAGAIN;
+    }
 
     int64_t id = next_id(d);
-    io_uring_prep_write(sqe, (int)fd, data, (unsigned)len, (uint64_t)offset);
+    io_uring_prep_write(sqe, (int)fd, copy, (unsigned)len, (uint64_t)offset);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    /* Caller owns data lifetime */
+    if (!bufs_put(ud, id, copy, len, BUF_OP_WRITE, NULL)) {
+        free(copy);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -420,6 +480,7 @@ static int64_t uring_submit_open(spl_driver* d, const char* path,
                                  int64_t flags, int64_t mode)
 {
     uring_driver* ud = UD(d);
+    if (!path || !bufs_ensure(ud)) return path ? -ENOMEM : -EINVAL;
 
     char* path_copy = strdup(path);
     if (!path_copy) return -ENOMEM;
@@ -434,7 +495,10 @@ static int64_t uring_submit_open(spl_driver* d, const char* path,
     io_uring_prep_openat(sqe, AT_FDCWD, path_copy, (int)flags, (mode_t)mode);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    bufs_put(ud, id, NULL, 0, BUF_OP_OPEN, path_copy);
+    if (!bufs_put(ud, id, NULL, 0, BUF_OP_OPEN, path_copy)) {
+        free(path_copy);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -476,6 +540,8 @@ static int64_t uring_submit_fsync(spl_driver* d, int64_t fd)
 static int64_t uring_submit_timeout(spl_driver* d, int64_t timeout_ms)
 {
     uring_driver* ud = UD(d);
+    if (timeout_ms < 0) return -EINVAL;
+    if (!bufs_ensure(ud)) return -ENOMEM;
 
     struct __kernel_timespec* ts =
         (struct __kernel_timespec*)calloc(1, sizeof(*ts));
@@ -494,7 +560,10 @@ static int64_t uring_submit_timeout(spl_driver* d, int64_t timeout_ms)
     io_uring_prep_timeout(sqe, ts, 0, 0);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    bufs_put(ud, id, (char*)ts, (int64_t)sizeof(*ts), BUF_OP_TIMEOUT, NULL);
+    if (!bufs_put(ud, id, (char*)ts, (int64_t)sizeof(*ts), BUF_OP_TIMEOUT, NULL)) {
+        free(ts);
+        return -ENOMEM;
+    }
     ud->pending_submits++;
     return id;
 }
@@ -507,9 +576,13 @@ static int64_t uring_flush(spl_driver* d)
     int ret = io_uring_submit(&ud->ring);
     if (ret < 0)
         return (int64_t)ret;
-
-    int64_t submitted = ud->pending_submits;
-    ud->pending_submits = 0;
+    /* liburing reports the number actually submitted. Keep any remainder in
+     * the explicit batch accounting if the kernel accepts only part of it. */
+    int64_t submitted = (int64_t)ret;
+    if (submitted >= ud->pending_submits)
+        ud->pending_submits = 0;
+    else
+        ud->pending_submits -= submitted;
     return submitted;
 }
 
@@ -552,6 +625,18 @@ static int64_t uring_poll(spl_driver* d, spl_completion* out, int64_t max,
         int64_t op_id  = (int64_t)io_uring_cqe_get_data64(cqe);
         int64_t result = (int64_t)cqe->res;
         int64_t flags  = (int64_t)cqe->flags;
+
+        /* Cancellation CQEs carry user_data=0.  They are control-plane
+         * completions and must never become a phantom operation result. */
+        if (op_id == 0) {
+            io_uring_cqe_seen(&ud->ring, cqe);
+            if (count < max) {
+                ret = io_uring_peek_cqe(&ud->ring, &cqe);
+                if (ret < 0) break;
+                continue;
+            }
+            break;
+        }
 
         /* Check if this is a sendfile NOP */
         sendfile_op sf = sf_take(ud, op_id);
@@ -608,9 +693,12 @@ static bool uring_cancel(spl_driver* d, int64_t op_id)
 
     io_uring_prep_cancel64(sqe, (uint64_t)op_id, 0);
     io_uring_sqe_set_data64(sqe, 0);  /* cancel completions use id=0 */
-
-    int ret = io_uring_submit(&ud->ring);
-    return ret >= 0;
+    /* Keep cancellation in the same submit/flush batch as every other
+     * operation.  Submitting here made flush() report a stale count and
+     * allowed a caller to observe a cancellation before its requested batch
+     * was published. */
+    ud->pending_submits++;
+    return true;
 }
 
 /* ---- query functions ---- */
@@ -630,7 +718,9 @@ static spl_backend_type uring_backend_type_fn(spl_driver* d)
 static bool uring_supports_sendfile(spl_driver* d)
 {
     (void)d;
-    return true;  /* supported via sendfile(2) syscall fallback */
+    /* The compatibility path performs sendfile(2) from poll(), which is a
+     * blocking syscall.  Do not advertise it as an asynchronous capability. */
+    return false;
 }
 
 static bool uring_supports_zero_copy(spl_driver* d)
@@ -714,8 +804,13 @@ spl_driver* spl_driver_create_uring(int64_t queue_depth)
     ud->sf_count        = 0;
     ud->sf_cap          = 0;
 
-    /* Pre-allocate the buffer hash table */
-    bufs_grow(ud);
+    /* Pre-allocate the buffer hash table. A live driver must never have a
+     * zero-capacity table because completion tracking owns submitted buffers. */
+    if (!bufs_grow(ud)) {
+        io_uring_queue_exit(&ud->ring);
+        free(ud);
+        return NULL;
+    }
 
     return &ud->base;
 }

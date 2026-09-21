@@ -391,8 +391,31 @@ fn compile_c_runtime_sources() {
         c_sources.push("hosted_win32.c");
     }
 
+    // Linux SOSIX owns a real io_uring provider in the runtime C layer.  Keep
+    // the dependency hermetic: the small liburing subset is vendored in this
+    // repository, so discovery must never consult system pkg-config or link
+    // a host liburing that can disagree with the headers.  The Rust facade
+    // below remains the owner of the rt_driver_* ABI; the C layer contributes
+    // only the spl_driver vtable and backend implementation.
+    let linux_uring = target_os == "linux";
+    if linux_uring {
+        c_sources.push("platform/async_driver.c");
+        c_sources.push("platform/async_linux_uring.c");
+        c_sources.push("vendor/liburing/src/queue.c");
+        c_sources.push("vendor/liburing/src/register.c");
+        c_sources.push("vendor/liburing/src/setup.c");
+        c_sources.push("vendor/liburing/src/syscall.c");
+    }
+
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false).cargo_metadata(false);
+    if linux_uring {
+        build.include(runtime_c_dir.join("platform"));
+        build.include(runtime_c_dir.join("vendor/liburing/include"));
+        build.define("SPL_HAS_IO_URING", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
+    }
     build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
     // See the runtime_audio.c comment above: this crate doesn't compile
     // runtime.c, so spl_array_get/spl_as_float are unavailable here.
