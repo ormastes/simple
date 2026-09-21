@@ -26,6 +26,7 @@ $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
 my $leader = 0;
 my %known;
 my %groups;
+my $identity_lost = 0;
 my ($peak, $samples, $child_status, $interrupted);
 $peak = $samples = $interrupted = 0;
 my $started = time;
@@ -58,8 +59,16 @@ sub snapshot {
 sub members {
     my ($all) = @_;
     for my $group (keys %groups) {
-        delete $groups{$group} if exists($all->{$group}) &&
-            $all->{$group}{identity} ne $groups{$group};
+        my @current = grep { $all->{$_}{group} == $group } keys %$all;
+        my $anchor = exists($all->{$group}) &&
+            $all->{$group}{identity} eq $groups{$group};
+        my $continuity = grep { exists($known{$_}) &&
+            $known{$_} eq $all->{$_}{identity} } @current;
+        if ((!$anchor && !$continuity) ||
+            (exists($all->{$group}) && $all->{$group}{identity} ne $groups{$group})) {
+            $identity_lost = 1 if @current;
+            delete $groups{$group};
+        }
     }
     my %selected;
     for my $pid (keys %$all) {
@@ -92,33 +101,48 @@ sub reap {
     $child_status = $? if $got == $leader;
 }
 
+sub signal_verified {
+    my ($signal, $all) = @_;
+    my @live = members($all);
+    # A negative group signal requires a still-observed leader identity. When
+    # a group leader is gone, signal only individually validated descendants.
+    for my $group (keys %groups) {
+        next unless exists($all->{$group}) &&
+            $all->{$group}{identity} eq $groups{$group};
+        kill $signal, -$group;
+    }
+    kill $signal, @live if @live;
+    return @live;
+}
+
 sub quiesce {
-    # Freeze before terminating: TERM handlers can otherwise fork new survivors.
-    # Rediscover after STOP until three empty samples establish quiescence.
     my $empty = 0;
     for (1..100) {
-        kill 'STOP', -$leader;
-        kill 'STOP', -$_ for keys %groups;
         my $all = eval { snapshot() };
         if (!$all) {
             alarm 0;
-            kill 'KILL', $ps_pid if $ps_pid > 0;
-            # Kill the anchored group even if sampling is broken. Cached PIDs
-            # alone are unsafe to signal after reuse; escaped identities cannot
-            # be validated here, so report containment unverified and fail closed.
+            # The direct child is not reaped until all signaling is finished,
+            # so its PID anchors this group even when measurement is unavailable.
+            # No cached escaped PID or PGID is safe to signal without validation.
             kill 'KILL', -$leader;
-            kill 'KILL', -$_ for keys %groups;
-            reap();
+            kill 'KILL', $leader;
             return 0;
         }
-        my @live = members($all);
-        kill 'STOP', @live if @live;
-        kill 'KILL', -$leader;
-        kill 'KILL', -$_ for keys %groups;
-        kill 'KILL', @live if @live;
-        reap();
+        my @live = signal_verified('STOP', $all);
+        if (@live) {
+            # Discover children forked just before STOP while their parents
+            # remain alive/frozen, before KILL can reparent them.
+            my $frozen = eval { snapshot() };
+            if (!$frozen) {
+                alarm 0;
+                kill 'KILL', -$leader;
+                kill 'KILL', $leader;
+                return 0;
+            }
+            signal_verified('KILL', $frozen);
+        }
         $empty = @live ? 0 : $empty + 1;
-        return 1 if $empty >= 3;
+        return !$identity_lost if $empty >= 3;
         sleep 0.02;
     }
     return 0;
@@ -193,11 +217,9 @@ while (1) {
     if ($opt{'timeout-seconds'} && time - $started >= $opt{'timeout-seconds'}) {
         ($status, $code) = ('timeout', 124); last;
     }
-    reap();
-    if (defined $child_status) {
-        $code = ($child_status & 127) ? 128 + ($child_status & 127) : $child_status >> 8;
-        last;
-    }
+    # Keep the direct child unreaped as the root PGID identity anchor. A
+    # zombie is completion evidence; obtain its exact wait status after cleanup.
+    last if exists($all->{$leader}) && $all->{$leader}{zombie};
     my $remaining = $opt{'interval-ms'} / 1000 - (time - $sample_started);
     sleep($remaining) if $remaining > 0;
 }
@@ -205,8 +227,9 @@ close $gate_write unless $released;
 if ($code == 124 || $interrupted) {
     # Preserve the timeout wrapper's TERM/grace contract for artifact flushing.
     # RSS breaches use immediate STOP/KILL because allocations must stop.
-    kill 'TERM', -$leader;
-    kill 'TERM', -$_ for keys %groups;
+    my $term_snapshot = eval { snapshot() };
+    if ($term_snapshot) { signal_verified('TERM', $term_snapshot) }
+    else { alarm 0; ($status, $code) = ('rss-measurement-failed', 89) }
     my $grace_end = time + $opt{'term-grace-seconds'};
     while (time < $grace_end) {
         my $all = eval { snapshot() };
@@ -220,6 +243,11 @@ if ($code == 124 || $interrupted) {
     }
 }
 my $quiet = quiesce();
+for (1..100) { reap(); last if defined $child_status; sleep 0.02 }
+if ($status eq 'complete' && defined $child_status) {
+    $code = ($child_status & 127) ? 128 + ($child_status & 127) : $child_status >> 8;
+}
+$quiet = 0 unless defined $child_status;
 if (!$quiet && $code != 89) { ($status, $code) = ('rss-containment-unverified', 89) }
 receipt($status, $code, $quiet);
 exit $code;
