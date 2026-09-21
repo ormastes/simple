@@ -602,14 +602,25 @@ impl<'a> MirLowerer<'a> {
                             arg_regs[0]
                         }
                     } else {
-                        // Create an array with all args as the payload
+                        // The native rt_array_new ABI takes one capacity argument.
+                        // A zero-argument call leaves the platform argument register
+                        // holding a stale value, which can request an impossible
+                        // allocation and turn this enum's payload into nil.
+                        let capacity = i64::try_from(arg_regs.len()).map_err(|_| {
+                            MirLowerError::Unsupported("enum payload exceeds native array capacity".into())
+                        })?;
                         let array_reg = self.with_func(|func, current_block| {
+                            let capacity_reg = func.new_vreg();
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::ConstInt {
+                                dest: capacity_reg,
+                                value: capacity,
+                            });
                             block.instructions.push(MirInst::Call {
                                 dest: Some(dest),
                                 target: CallTarget::from_name("rt_array_new"),
-                                args: vec![],
+                                args: vec![capacity_reg],
                             });
                             dest
                         })?;
