@@ -3,8 +3,20 @@
 # reject both: receiver and control-flow tokens must never become globals.
 
 use std.spec.step
+use std.editor.services.debug_session_dap.{EditorDebugDapClient}
 
 extern fn rt_file_read_text(path: text) -> text
+
+fn llvm_ownership_close_fails() -> bool:
+    false
+
+fn llvm_ownership_join_after_close() -> bool:
+    val completed = true
+    if completed:
+        if llvm_ownership_close_fails(): pass
+        else:
+            return false
+    true
 
 describe "LLVM source symbol ownership regressions":
     it "keeps the later DAP receiver methods inside an explicit impl owner":
@@ -20,3 +32,14 @@ describe "LLVM source symbol ownership regressions":
         val source = rt_file_read_text("src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl") ?? ""
         expect(source).to_contain("else:\n            return unavailable_exact_join(-1, deadline_ticks)")
         expect(source).to_not_contain("else: return unavailable_exact_join(-1, deadline_ticks)")
+
+    it "executes receiver calls through the restored DAP owner":
+        step("executes receiver calls through the restored DAP owner")
+        var client = EditorDebugDapClient.new()
+        expect(client.is_process_backed()).to_equal(false)
+        client.start()
+        expect(client.send_request("initialize", "{}")).to_equal(1)
+
+    it "returns the failed-close result without treating return as a global":
+        step("returns the failed-close result without treating return as a global")
+        expect(llvm_ownership_join_after_close()).to_equal(false)
