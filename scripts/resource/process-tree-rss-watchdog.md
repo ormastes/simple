@@ -36,8 +36,12 @@ the repository does not enforce a prohibition on that behavior.
 `quiescent=1` means the observed descendants and retained process groups are
 empty. It does not establish absence of all possible escaped descendants.
 Receipts explicitly include `containment_scope=observed-descendants-and-process-groups`
-and `hard_memory_limit=0`. If sampling remains broken, cleanup kills known
-groups but cannot validate cached escaped PIDs; it returns 89 and records
+and `hard_memory_limit=0`. The direct child remains unreaped until signaling
+ends, anchoring the root process group against PID reuse. Escaped group signals
+require a fresh, matching leader identity; other observed descendants are
+signaled individually after validation. If sampling remains broken, cleanup
+kills only the anchored root group because cached escaped identities cannot
+be validated; it returns 89 and records
 `quiescent=0`. A configured threshold also permits growth between samples.
 Strict host protection needs an independently admitted OS containment mechanism
 (for example, a kernel-enforced aggregate limit), not this receipt alone.
@@ -46,7 +50,8 @@ Strict host protection needs an independently admitted OS containment mechanism
 
 The unit fixtures cover below/above cap, observed escaped groups, concurrent
 forking, orphan cleanup, startup refusal, sampling failure while running,
-invalid limits, preserved stdin, timeout/grace, and retry receipt preservation.
+invalid limits, preserved stdin, timeout/grace, retry receipt preservation,
+PID/PGID reuse, and retention of the root identity sentinel.
 Existing phase command-owner and Stage 1 native authority tests passed on
 macOS arm64. The latter now canonicalizes its temporary path to account for
 macOS `/var` versus `/private/var` aliases.
