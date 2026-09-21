@@ -1,0 +1,44 @@
+#!/bin/sh
+# Keep Windows CI aligned with the Clang-only bootstrap C-tool authority.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+workflow="$root/.github/workflows/windows-build.yml"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+for expected_binding in \
+    'LLVM_VERSION: 23.1.1' \
+    'LLVM_ARCHIVE_SHA256: c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462' \
+    'clang version 23\.1\.1' \
+    'LLVM version 23\.1\.1' \
+    'LLD 23\.1\.1' \
+    'CC=$env:LLVM_ROOT\bin\clang-cl.exe' \
+    'CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe' \
+    'rust-target: x86_64-pc-windows-msvc' \
+    'linker-flavor: msvc'; do
+    grep -F "$expected_binding" "$workflow" >/dev/null ||
+        fail "Windows CI binding missing: $expected_binding"
+done
+
+for forbidden_binding in \
+    'toolchain: mingw' \
+    'windows-gnu' \
+    '=gcc' \
+    '=g++' \
+    '=cl.exe' \
+    'CXX=' \
+    'clang++'; do
+    if grep -Fiq "$forbidden_binding" "$workflow"; then
+        fail "Windows CI retained forbidden compiler authority: $forbidden_binding"
+    fi
+done
+
+msvc_bind_line=$(grep -nF -- '- name: Bind MSVC Clang compiler' "$workflow" | cut -d: -f1)
+seed_build_line=$(grep -nF -- '- name: Build Rust seed' "$workflow" | cut -d: -f1)
+[ -n "$msvc_bind_line" ] && [ "$msvc_bind_line" -lt "$seed_build_line" ] ||
+    fail 'MSVC Clang binding does not precede the seed build'
+printf 'PASS: Windows CI binds verified LLVM 23.1.1 clang-cl before the Rust seed build and excludes alternate authorities\n'
