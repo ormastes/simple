@@ -4,6 +4,7 @@ an array of single-character fragments during its scan.
 
 use std.spec.*
 use std.io_runtime.{file_read}
+use std.nogc_sync_mut.sffi.host.{heap_array_capacity_bytes}
 use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{parser_set_had_error}
 use compiler.common.diagnostics.span.{Span}
@@ -37,6 +38,51 @@ describe "flat bridge interpolation fragment slicing":
         reset_interpolation_parser()
         val value = OPEN_BRACE + "pick(" + OPEN_BRACE + "1: 2" + CLOSE_BRACE + ")" + CLOSE_BRACE
         expect(flat_bridge_build_string_interps(value, Span.default()).len()).to_equal(1)
+
+    it "preserves a large completed interpolation identifier":
+        reset_interpolation_parser()
+        val name = "variable_" + "x".repeat(8192)
+        val parts = flat_bridge_build_string_interps(OPEN_BRACE + name + CLOSE_BRACE, Span.default())
+        expect(parts.len()).to_equal(1)
+        match parts[0].expr.kind:
+            case ExprKind.Ident(actual): expect(actual).to_equal(name)
+            case _: expect(false).to_equal(true)
+
+    it "bounds retained array storage for a large unfinished interpolation":
+        # Requires native runtime array-capacity accounting. This is a real
+        # allocation oracle, not RSS: text allocations are a different kind.
+        # An unfinished region never invokes the inner expression parser, so
+        # its arrays cannot mask the bridge's fragment-storage contribution.
+        reset_interpolation_parser()
+        val span = Span.default()
+        val short_value = OPEN_BRACE + "x".repeat(32)
+        val large_value = OPEN_BRACE + "x".repeat(65536)
+
+        # Fail closed if this runtime's accounting is absent or inert.
+        val calibration_before = heap_array_capacity_bytes()
+        var calibration: [i64] = []
+        for index in 0..2048:
+            calibration.push(index)
+        val calibration_after = heap_array_capacity_bytes()
+        expect(calibration_after - calibration_before >= 2048 * 8).to_equal(true)
+
+        val short_before = heap_array_capacity_bytes()
+        val short_parts = flat_bridge_build_string_interps(short_value, span)
+        val short_after = heap_array_capacity_bytes()
+        val large_before = heap_array_capacity_bytes()
+        val large_parts = flat_bridge_build_string_interps(large_value, span)
+        val large_after = heap_array_capacity_bytes()
+
+        expect(short_parts.len()).to_equal(0)
+        expect(large_parts.len()).to_equal(0)
+        val short_bytes = short_after - short_before
+        val large_bytes = large_after - large_before
+        expect(short_bytes >= 0 and large_bytes >= 0).to_equal(true)
+        # Before the repair, 65,536 retained text slots alone need 512 KiB.
+        # Permit a fixed 4 KiB difference for result-array capacity rounding.
+        expect(large_bytes <= short_bytes + 4096).to_equal(true)
+        expect(calibration.len()).to_equal(2048)
+        expect(calibration[2047]).to_equal(2047)
 
     it "skips escaped braces and accepts a following expression":
         reset_interpolation_parser()
