@@ -1,0 +1,191 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tool=${PHASE2_CAPSULE_TOOL:-"$root/scripts/bootstrap/phase2-runtime-capsule.shs"}
+phase_verifier=${PHASE2_PHASE_VERIFIER:-"$root/scripts/bootstrap/bootstrap-phase-verification.shs"}
+tmp=$(mktemp -d)
+windows_host=0
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) windows_host=1 ;; esac
+
+permissions() {
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -File "$(cygpath -w "$root/scripts/bootstrap/phase2-capsule-permissions.ps1")" \
+    -Action "$1" -Path "$(cygpath -w "$2")"
+}
+
+thaw() {
+  [ "$windows_host" = 0 ] || permissions thaw "$1"
+  chmod -R u+w "$1"
+}
+
+freeze() {
+  if [ "$windows_host" = 1 ]; then
+    permissions freeze "$1"
+  else
+    chmod 500 "$1" "$1/deps"
+    find "$1" -type f -exec chmod 400 {} +
+    [ ! -f "$1/simple" ] || chmod 500 "$1/simple"
+    [ ! -f "$1/simple.exe" ] || chmod 500 "$1/simple.exe"
+  fi
+}
+
+trap 'thaw "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $1" >&2; exit 1; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+value() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+
+# Source only the consumer's declarations. This executes the production
+# validator without starting a phase build or running any compiler artifact.
+sed '/^phase=""/,$d' "$phase_verifier" >"$tmp/consumer-functions.sh"
+. "$tmp/consumer-functions.sh"
+
+mkdir -p "$tmp/admitted" "$tmp/windows/deps" "$tmp/posix/deps"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/admitted/simple.exe"
+chmod 755 "$tmp/admitted/simple.exe"
+printf hosted >"$tmp/windows/deps/libspl_hosted_runtime-fixture.rlib"
+cp "$tmp/windows/deps/libspl_hosted_runtime-fixture.rlib" "$tmp/posix/deps/"
+
+make_authority() {
+  dir=$1
+  layout=$2
+  hosted_sha=$(hash_file "$dir/deps/libspl_hosted_runtime-fixture.rlib")
+  {
+    echo schema=simple-bootstrap-hosted-runtime-authority-v1
+    echo status=frozen
+    echo relative_path=deps/libspl_hosted_runtime-fixture.rlib
+    echo sha256="$hosted_sha"
+  } >"$dir/hosted-runtime.env"
+  case "$layout" in
+    windows-msvc)
+      native="$dir/simple_native_all.lib"
+      stamp="$dir/simple.exe.inputs.sha256"
+      backfill="$dir/simple_compiler_backfill.lib" ;;
+    posix)
+      native="$dir/libsimple_native_all.a"
+      stamp="$dir/simple.inputs.sha256"
+      backfill="$dir/libsimple_compiler_backfill.a" ;;
+  esac
+  printf native >"$native"
+  printf backfill >"$backfill"
+  {
+    echo schema=simple-bootstrap-seed-artifact-stamp-v2
+    echo inputs_fingerprint=fixture
+    echo seed_sha256=fixture
+    echo native_all_sha256="$(hash_file "$native")"
+    echo backfill_status=present
+    echo backfill_sha256="$(hash_file "$backfill")"
+  } >"$stamp"
+}
+
+make_authority "$tmp/windows" windows-msvc
+make_authority "$tmp/posix" posix
+compiler=$tmp/admitted/simple.exe
+expected_sha=$(hash_file "$compiler")
+source_root=$root
+
+fresh_windows() {
+  $tool publish "$compiler" "$tmp/windows" "$tmp/$1-output"
+}
+
+fresh_posix() {
+  $tool publish "$compiler" "$tmp/posix" "$tmp/$1-output"
+}
+
+consumer_accepts() {
+  runtime_cache_identity=
+  validate_hosted_runtime_authority "$1"
+}
+
+reject_both() {
+  capsule=$1
+  reason=$2
+  if $tool verify "$capsule" >/dev/null 2>&1; then
+    fail "capsule verifier accepted $reason"
+  fi
+  if consumer_accepts "$capsule" >/dev/null 2>&1; then
+    fail "phase consumer accepted $reason"
+  fi
+}
+
+windows_capsule=$(fresh_windows canonical-windows)
+$tool verify "$windows_capsule"
+consumer_accepts "$windows_capsule" || fail 'canonical v2 Windows producer-to-consumer roundtrip failed'
+
+# Convert a canonical v2 POSIX fixture into the legacy v1 representation. Its
+# identity deliberately excludes the v2 layout discriminator.
+make_v1_posix() {
+  capsule=$(fresh_posix "$1")
+  thaw "$capsule"
+  receipt=$capsule/phase2-runtime-capsule.env
+  compiler_sha=$(value compiler_sha256 "$receipt")
+  native_sha=$(value native_all_sha256 "$receipt")
+  hosted_receipt_sha=$(value hosted_authority_receipt_sha256 "$receipt")
+  stamp_sha=$(value seed_authority_stamp_sha256 "$receipt")
+  backfill_sha=$(value backfill_sha256 "$capsule/simple.inputs.sha256")
+  identity=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha" | sha256sum | awk '{print $1}')
+  sed -e 's/^schema=.*/schema=simple-phase2-runtime-capsule-v1/' \
+    -e '/^artifact_layout=/d' \
+    -e "s/^capsule_identity_sha256=.*/capsule_identity_sha256=$identity/" \
+    "$receipt" >"$tmp/receipt.new"
+  mv "$tmp/receipt.new" "$receipt"
+  freeze "$capsule"
+  echo "$capsule"
+}
+
+v1_capsule=$(make_v1_posix legacy-posix)
+$tool verify "$v1_capsule"
+consumer_accepts "$v1_capsule" || fail 'legacy v1 POSIX capsule compatibility regressed'
+
+# This is the former split brain: the helper selected POSIX from schema v1,
+# while the consumer selected Windows from the contradictory layout field.
+contradictory=$(make_v1_posix contradictory-v1)
+thaw "$contradictory"
+printf 'artifact_layout=windows-msvc\n' >>"$contradictory/phase2-runtime-capsule.env"
+cp "$contradictory/simple" "$contradictory/simple.exe"
+cp "$contradictory/libsimple_native_all.a" "$contradictory/simple_native_all.lib"
+cp "$contradictory/simple.inputs.sha256" "$contradictory/simple.exe.inputs.sha256"
+freeze "$contradictory"
+reject_both "$contradictory" 'v1 receipt with a Windows layout declaration'
+
+for mutation in missing-layout duplicate-layout unsupported-layout wrong-schema; do
+  capsule=$(fresh_windows "$mutation")
+  thaw "$capsule"
+  receipt=$capsule/phase2-runtime-capsule.env
+  case "$mutation" in
+    missing-layout) sed '/^artifact_layout=/d' "$receipt" >"$tmp/receipt.new" ;;
+    duplicate-layout) cat "$receipt" >"$tmp/receipt.new"; echo artifact_layout=windows-msvc >>"$tmp/receipt.new" ;;
+    unsupported-layout) sed 's/^artifact_layout=.*/artifact_layout=unknown/' "$receipt" >"$tmp/receipt.new" ;;
+    wrong-schema) sed 's/^schema=.*/schema=unknown/' "$receipt" >"$tmp/receipt.new" ;;
+  esac
+  mv "$tmp/receipt.new" "$receipt"
+  freeze "$capsule"
+  reject_both "$capsule" "$mutation receipt"
+done
+
+for mutation in compiler native stamp; do
+  capsule=$(fresh_windows "wrong-$mutation-hash")
+  thaw "$capsule"
+  case "$mutation" in
+    compiler) printf tamper >>"$capsule/simple.exe" ;;
+    native) printf tamper >>"$capsule/simple_native_all.lib" ;;
+    stamp) printf tamper >>"$capsule/simple.exe.inputs.sha256" ;;
+  esac
+  freeze "$capsule"
+  reject_both "$capsule" "wrong $mutation hash"
+done
+
+missing_compiler=$(fresh_windows missing-compiler-path)
+thaw "$missing_compiler"
+mv "$missing_compiler/simple.exe" "$missing_compiler/not-simple.exe"
+freeze "$missing_compiler"
+reject_both "$missing_compiler" 'wrong compiler filename'
+
+renamed=$(fresh_windows renamed-capsule-path)
+thaw "$renamed"
+renamed_path="$(dirname "$renamed")/not-the-compiler-sha"
+mv "$renamed" "$renamed_path"
+freeze "$renamed_path"
+reject_both "$renamed_path" 'wrong SHA-addressed capsule path'
+
+echo 'PASS: Phase2 capsule producer and consumer agree on v1 POSIX and canonical v2 layouts'
