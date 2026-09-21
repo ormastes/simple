@@ -8,12 +8,17 @@ Status: fixed 2026-09-21
 `bootstrap-progress-watch.shs` now selects a single-snapshot `ps` backend when
 `/proc/<pid>/stat` is unavailable. It reconstructs the descendant and process
 group sets from PID/PPID/PGID, sums RSS in KiB, and differences cumulative CPU
-time between samples. Linux retains the existing procfs implementation.
+time between samples. Each CPU baseline is bound to the process `lstart` birth
+identity so PID reuse cannot inherit prior work. An unreadable snapshot or one
+missing the watched root emits unknown metrics plus a scan miss and does not
+write baseline state. Linux retains the existing procfs implementation.
 
 The portable regression starts a sleeping shell with a live child and requires
 exactly two tree members, positive child-inclusive RSS, and distinct root RSS.
 It runs on Darwin without Linux's unsupported `ps --ppid` option. The test
-passed on macOS arm64 with the pre-fix zero-process path replaced.
+also deterministically covers snapshot failure, a busy child CPU delta, PID
+reuse, process-group membership, and exclusion of the nested watcher subtree.
+It passed on macOS arm64 with the pre-fix zero-process path replaced.
 
 ## Symptom
 
