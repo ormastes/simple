@@ -2787,8 +2787,9 @@ impl LlvmBackend {
                     let is_f32 = matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32));
                     let float_ty = if is_f32 { self.context_ref().f32_type() } else { self.context_ref().f64_type() };
                     let suffix = if is_f32 { "f32" } else { "f64" };
-                    let operation = if method == "round" { "nearbyint" } else { method };
-                    let intrinsic_name = format!("llvm.{operation}.{suffix}");
+                    // Rust's f64::round and the interpreter round half away
+                    // from zero. LLVM nearbyint rounds ties to even.
+                    let intrinsic_name = format!("llvm.{method}.{suffix}");
                     let recv = self.get_vreg(receiver, vreg_map)?;
                     let recv = self.coerce_value_to_type(recv, Some(float_ty.into()), builder)?;
                     let intrinsic_ty = float_ty.fn_type(&[float_ty.into()], false);
@@ -3937,7 +3938,7 @@ mod tests {
                 assert!(ir.contains("i64 0)"), "ord must read codepoint zero: {ir}");
             }
         }
-        for (method, intrinsic) in [("floor", "floor"), ("ceil", "ceil"), ("round", "nearbyint")] {
+        for (method, intrinsic) in [("floor", "floor"), ("ceil", "ceil"), ("round", "round")] {
             let mut f = MirFunction::new(format!("float_{method}"), crate::hir::TypeId::F64,
                 simple_parser::ast::Visibility::Public);
             f.blocks[0].instructions.push(MirInst::ConstFloat { dest: VReg(0), value: 1.5 });
@@ -3950,6 +3951,33 @@ mod tests {
             assert!(ir.contains(&format!("@llvm.{intrinsic}.f64(")), "{method}: {ir}");
         }
         backend.verify().unwrap();
+    }
+
+    #[test]
+    fn scalar_round_halfway_values_execute_away_from_zero() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("scalar_round_halfway").unwrap();
+        for (name, value) in [("positive_halfway", 2.5), ("negative_halfway", -2.5)] {
+            let mut f = MirFunction::new(name.to_string(), crate::hir::TypeId::F64,
+                simple_parser::ast::Visibility::Public);
+            f.blocks[0].instructions.push(MirInst::ConstFloat { dest: VReg(0), value });
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: "f64.round".to_string(), args: vec![],
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&f).unwrap();
+        }
+        backend.verify().unwrap();
+        let module = backend.module.borrow();
+        let engine = module.as_ref().unwrap()
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
+        unsafe {
+            let positive = engine.get_function::<unsafe extern "C" fn() -> f64>("positive_halfway").unwrap();
+            let negative = engine.get_function::<unsafe extern "C" fn() -> f64>("negative_halfway").unwrap();
+            assert_eq!(positive.call(), 3.0);
+            assert_eq!(negative.call(), -3.0);
+        }
     }
 
     #[test]
