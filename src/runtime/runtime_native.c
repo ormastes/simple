@@ -1760,6 +1760,13 @@ static int rt_core_transient_raw_grow(void) {
     size_t next_cap = rt_core_transient_raw_alloc_cap == 0
         ? 256
         : rt_core_transient_raw_alloc_cap * 2;
+    /* Reclaim retired slots without retaining a larger table for every HIR
+     * module. Grow only when live allocations need the additional capacity. */
+    if (rt_core_transient_raw_alloc_cap != 0 &&
+        rt_core_transient_raw_alloc_tombs > rt_core_transient_raw_alloc_len &&
+        (rt_core_transient_raw_alloc_len + 1) * 10 < rt_core_transient_raw_alloc_cap * 5) {
+        next_cap = rt_core_transient_raw_alloc_cap;
+    }
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
     RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
         next_cap, sizeof(RtCoreTransientRawAlloc));
@@ -6237,7 +6244,10 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     }
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
             >= rt_struct_alloc_cap * 7) {
-        if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
+        if (rt_struct_alloc_tombs > rt_struct_alloc_len &&
+            (rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 5) {
+            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
+        } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
         } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
