@@ -44,6 +44,8 @@ SELFTEST_ONLY=0
 RECEIPT_PATH=
 VERIFY_RECEIPT=
 PREFLIGHT_CONFIG=unspecified
+EXPECTED_CONFIG=
+SEED_PATH="$ROOT/bin/simple"
 for a in "$@"; do
   case "$a" in
     --no-cargo) NO_CARGO=1 ;;
@@ -51,7 +53,9 @@ for a in "$@"; do
     --receipt=*) RECEIPT_PATH=${a#*=} ;;
     --verify-receipt=*) VERIFY_RECEIPT=${a#*=} ;;
     --config=*) PREFLIGHT_CONFIG=${a#*=} ;;
-    *) echo "usage: $0 [--no-cargo] [--selftest] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
+    --expect-config=*) EXPECT_CONFIG=${a#*=} ;;
+    --seed=*) SEED_PATH=${a#*=} ;;
+    *) echo "usage: $0 [--no-cargo] [--selftest] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT] [--expect-config=TEXT] [--seed=PATH]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
   esac
 done
 
@@ -92,18 +96,19 @@ verify_receipt() {
   [ "$(manifest_value schema "$_receipt")" = simple-bootstrap-preflight-v1 ] || return 1
   [ "$(manifest_value status "$_receipt")" = pass ] || return 1
   [ "$(manifest_value cargo_mode "$_receipt")" = checked ] || return 1
+  [ -n "$EXPECTED_CONFIG" ] || return 1
+  printf '%s' "$EXPECTED_CONFIG" >"$TMP/expected-config" || return 1
+  _expected_config_hex=$(perl -e 'print unpack("H*", <STDIN>)' <"$TMP/expected-config") || return 1
+  [ "$(manifest_value config_hex "$_receipt")" = "$_expected_config_hex" ] || return 1
+  [ "$(manifest_value config_sha256 "$_receipt")" = "$(hash_file "$TMP/expected-config")" ] || return 1
+  [ "$(manifest_value seed_sha256 "$_receipt")" = "$(hash_file "$SEED_PATH")" ] || return 1
+  [ "$(manifest_value checker_sha256 "$_receipt")" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || return 1
   _bindings="$TMP/verify-bindings"
   mkdir "$_bindings" || return 1
   capture_bindings "$_bindings" || return 1
-  _config_hex=$(manifest_value config_hex "$_receipt") || return 1
-  case "$_config_hex" in *[!0-9a-f]* ) return 1 ;; esac
-  perl -e 'print pack("H*", $ARGV[0])' "$_config_hex" >"$_bindings/config" || return 1
   [ "$(manifest_value git_head "$_receipt")" = "$(cat "$_bindings/head")" ] || return 1
   [ "$(manifest_value source_snapshot_sha256 "$_receipt")" = "$(hash_file "$_bindings/source")" ] || return 1
   [ "$(manifest_value git_state_sha256 "$_receipt")" = "$(hash_file "$_bindings/git")" ] || return 1
-  [ "$(manifest_value config_sha256 "$_receipt")" = "$(hash_file "$_bindings/config")" ] || return 1
-  [ "$(manifest_value seed_sha256 "$_receipt")" = "$(hash_file "$ROOT/bin/simple")" ] || return 1
-  [ "$(manifest_value checker_sha256 "$_receipt")" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || return 1
 }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
@@ -210,7 +215,7 @@ if [ -n "$RECEIPT_PATH" ]; then
   capture_bindings "$TMP/start-bindings" || {
     echo "ERROR — could not bind preflight source and git state before checks"; exit 2;
   }
-  START_SEED_SHA=$(hash_file "$ROOT/bin/simple") || exit 2
+  START_SEED_SHA=$(hash_file "$SEED_PATH") || exit 2
   START_CHECKER_SHA=$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs") || exit 2
 fi
 
@@ -218,7 +223,7 @@ CHECKED=0; SKIPPED=0; FAILS=""
 
 # ---- 1. seed binary present + banner ----
 CHECKED=$((CHECKED+1))
-"$ROOT/bin/simple" --version > "$TMP/ver" 2>&1
+"$SEED_PATH" --version > "$TMP/ver" 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ] || ! banner_ok "$TMP/ver"; then
   FAILS="$FAILS seed-banner"
@@ -248,7 +253,15 @@ CHECKED=$((CHECKED+1))
 PROBE_DIR="$ROOT/build/preflight_probe.$$"
 mkdir -p "$PROBE_DIR"
 write_probe_spl "$PROBE_DIR/probe.spl"
-( cd "$ROOT" && timeout 300 bin/simple run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
+if command -v timeout >/dev/null 2>&1; then
+  PREFLIGHT_TIMEOUT=$(command -v timeout)
+elif command -v gtimeout >/dev/null 2>&1; then
+  PREFLIGHT_TIMEOUT=$(command -v gtimeout)
+else
+  echo "ERROR — nothing was checked (timeout or gtimeout is required)"
+  exit 2
+fi
+( cd "$ROOT" && "$PREFLIGHT_TIMEOUT" 300 "$SEED_PATH" run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ] || ! probe_ok "$TMP/probe.out"; then
   FAILS="$FAILS blocker-probe"
@@ -308,7 +321,7 @@ if [ -n "$RECEIPT_PATH" ]; then
     cmp -s "$TMP/start-bindings/git" "$_bindings/git" &&
     cmp -s "$TMP/start-bindings/head" "$_bindings/head" &&
     cmp -s "$TMP/start-bindings/config" "$_bindings/config" &&
-    [ "$START_SEED_SHA" = "$(hash_file "$ROOT/bin/simple")" ] &&
+    [ "$START_SEED_SHA" = "$(hash_file "$SEED_PATH")" ] &&
     [ "$START_CHECKER_SHA" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || {
     echo "ERROR — source, Git state, configuration, seed, or checker changed during preflight"; exit 2;
   }
@@ -321,7 +334,7 @@ if [ -n "$RECEIPT_PATH" ]; then
     echo git_state_sha256="$(hash_file "$_bindings/git")"
     echo config_hex="$(perl -e 'print unpack("H*", <STDIN>)' <"$_bindings/config")"
     echo config_sha256="$(hash_file "$_bindings/config")"
-    echo seed_sha256="$(hash_file "$ROOT/bin/simple")"
+    echo seed_sha256="$(hash_file "$SEED_PATH")"
     echo checker_sha256="$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")"
     if [ "$NO_CARGO" -eq 1 ]; then echo cargo_mode=skipped; else echo cargo_mode=checked; fi
   } >"$_receipt_tmp" || exit 2
