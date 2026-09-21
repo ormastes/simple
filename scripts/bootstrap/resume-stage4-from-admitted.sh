@@ -30,6 +30,13 @@ resume_stage4_snapshot() {
 resume_stage4_prepare() {
   output=$(bootstrap_stage3_canonical_path "$1") || return 1
   root=$2 platform=$3 planner_receipt=$(bootstrap_stage3_canonical_file "$4") || return 1
+  preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+  sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+    --verify-receipt="$preflight_receipt" || {
+    echo "error: Stage 4 continuation lacks current authoritative preflight evidence" >&2
+    return 1
+  }
+  preflight_receipt=$(bootstrap_stage3_canonical_file "$preflight_receipt") || return 1
   bootstrap_planner_v2_verify "$planner_receipt" "$root" || {
     echo "error: Stage 4 planner admission v2 did not verify" >&2; return 1;
   }
@@ -86,6 +93,8 @@ resume_stage4_prepare() {
     echo planner_receipt_path="$planner_receipt"
     echo planner_receipt_sha256="$(bootstrap_stage3_hash_file "$planner_receipt")"
     echo planner_stage4_binding_sha256="$expected_binding"
+    echo preflight_receipt_path="$preflight_receipt"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file "$preflight_receipt")"
     echo source_fingerprint="$source_sha"
     echo backend="$backend"
     echo stage3_provenance_path="$manifest"
