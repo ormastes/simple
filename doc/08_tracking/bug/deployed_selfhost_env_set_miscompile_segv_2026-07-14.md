@@ -624,3 +624,22 @@ rather than fixed. Status remains OPEN (P1).
 correct four-argument `rt_env_set` call sequence. That claim needs the redeploy
 this lane could not perform, and must not be assumed from the source-side
 `rt_env_set` signature alone.
+
+## 2026-09-21 ARM-host follow-up — source gate repaired, deployment still open
+
+The currently tracked `release/x86_64-unknown-linux-gnu/simple` is no longer
+the reported `04a38e21…` artifact: it hashes to `d0976e84…` and contains a
+four-argument `rt_env_set` provider by x86-64 disassembly. This is a Rust-built
+binary, so it is not proof of the required pure-Simple full CLI deployment.
+The ARM64 host cannot run it directly, and QEMU user mode lacks the x86-64
+dynamic loader on this host. The P1 therefore remains OPEN.
+
+The source ABI gate initially failed on stale assertions for the old MIR
+semantic-arity helper. Its current lowering uses text operand splitting and
+the existing unit spec covers both the semantic two-text call and raw four-word
+bridge. After the gate was updated, it exposed a real mismatch: the system
+SFFI generator specified `rt_env_set` as `void`, unlike the canonical `bool`
+provider and other generator specs. That declaration was corrected to `bool`.
+The source ABI gate now passes. An interpreter unit run attempted with the
+available ARM Rust bootstrap seed exited 1 amid unrelated repository warnings;
+it is not accepted as pure-Simple verification or deployment evidence.
