@@ -21,6 +21,13 @@ trap 'rm -f "$files"' EXIT HUP INT TERM
 find "$bug" "$todo" -type f -name '*.md' -print > "$files" || exit 2
 LC_ALL=C sort -o "$files" "$files"
 LC_ALL=C awk -v root="$root" -v bugdb="$bug/bug_db.sdn" -v tododb="$todo/todo_db.sdn" '
+BEGIN {
+    # Explicit document aliases only. Date punctuation is not a general alias:
+    # these three documents were reviewed against the older authoritative row.
+    bug_alias["check_stage3_recovery_authority_arity_drift_2026-09-17"]="check_stage3_recovery_authority_arity_drift_2026_09_17"
+    bug_alias["gpu_ffi_loader_probes_linux_sonames_on_macos_2026-09-19"]="gpu_ffi_loader_probes_linux_sonames_on_macos_2026_09_19"
+    bug_alias["windows_bootstrap_cmp_authority_missing_2026-09-09"]="windows_bootstrap_cmp_authority_missing"
+}
 function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
 function finding(kind, path, detail) {
     gsub(/[\t\r\n]/, " ", detail)
@@ -48,6 +55,12 @@ function unresolved(s) {
     s=tolower(trim(s))
     return s ~ /^(open|blocked|pending|unresolved|deferred|in[- ]progress|partial|partially)([^a-z]|$)/
 }
+function lifecycle(s) {
+    s=tolower(trim(s))
+    if (s ~ /^blocked([^a-z]|$)/) return "blocked"
+    if (s ~ /^open([^a-z]|$)/) return "open"
+    return ""
+}
 function date_key(s) {
     # Candidate diagnostic only: a near-match never grants registration.
     gsub(/_/, "-", s)
@@ -74,7 +87,12 @@ FILENAME==bugdb || FILENAME==tododb {
     } else {
         if (id in todos) finding("duplicate-todo-id", id, "todos")
         todos[id]=1
-        if (n==expected) todo_files[f[6]]=1
+        if (n==expected) {
+            todo_files[f[6]]=1
+            todo_file_rows[f[6]]++
+            todo_status[f[6]]=tolower(trim(f[10]))
+            todo_blocker[f[6]]=trim(f[9])
+        }
     }
     next
 }
@@ -83,7 +101,13 @@ FILENAME==bugdb || FILENAME==tododb {
     isbug=(index(rel,"doc/08_tracking/bug/")==1)
     base=path; sub(/^.*\//,"",base)
     id=base; sub(/\.md$/,"",id)
-    if (isbug) documents[id]=1
+    canonical=id
+    if (isbug && (id in bug_alias)) canonical=bug_alias[id]
+    if (isbug) {
+        documents[canonical]=1
+        if (id!=canonical && (id in bugs) && (canonical in bugs))
+            finding("duplicate-bug-semantic-id",rel,"alias-id=" id ";canonical-id=" canonical)
+    }
     if (base=="README.md" || base=="recent_bugs.md" || base ~ /^triage_|^bug_report/) next
     found=0; value=""; fence=0; generated=0; lineno=0; markers=0
     while ((rc=(getline line < path))>0) {
@@ -106,14 +130,22 @@ FILENAME==bugdb || FILENAME==tododb {
         finding("todo-marker-without-row",rel,"no explicit Status; owner triage required")
     if (!found || !unresolved(value)) next
     explicit++
-    if (isbug && !(id in bugs)) {
+    if (isbug && !(canonical in bugs)) {
         near=candidates[date_key(id)]
         detail="Status: " value
         if (near!="") detail=detail ";candidate-id=" near
         finding("unregistered-bug-document",rel,detail)
     }
-    if (!isbug && !(rel in todo_files))
-        finding("unregistered-todo-document",rel,"Status: " value)
+    if (!isbug) {
+        if (!(rel in todo_files)) {
+            finding("unregistered-todo-document",rel,"Status: " value)
+        } else if (todo_file_rows[rel]==1 && lifecycle(value)=="blocked") {
+            if (todo_status[rel]!="blocked")
+                finding("todo-status-mismatch",rel,"document=blocked;database=" todo_status[rel])
+            else if (todo_blocker[rel]=="")
+                finding("todo-blocker-missing",rel,"blocked TODO requires a nonempty blocker")
+        }
+    }
 }
 END {
     for (id in bugs) if (!(id in documents))

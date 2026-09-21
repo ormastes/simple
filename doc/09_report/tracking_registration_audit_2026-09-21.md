@@ -47,8 +47,9 @@ invent severity, owner, or implementation state for the remainder.
 ## Findings retained for owner triage
 
 - 357 exact-ID document/DB lifecycle contradictions. Both values are retained.
-- 46 bug rows without an exact basename document; 18 have a date-spelling
-  candidate. Some remaining rows cite another document or source-only evidence.
+- 43 bug rows without an exact basename document after three reviewed semantic
+  aliases are applied. Some remaining rows cite another document or source-only
+  evidence.
 - Three date-alias collisions: `stage3_current_source_hir_rss_termination_2026-08-14`,
   `compiled_checker_asm_volatile_indent_gap_2026-08-03`, and
   `llvm_constants_lost_ret_zero_2026-08-01`. Each has both underscore-date and
@@ -94,14 +95,18 @@ The TODO README's incorrect legacy/deprecated notice is replaced with the actual
 canonical directory and numeric-ID contract.
 
 At the user's direction, the remaining unresolved document backlog is now
-attached to the canonical databases: 846 bug documents are registered in
-`bugs_active`, and 15 TODO documents receive stable numeric rows. Together with
-the three rows above, this registers all 864 unresolved documents identified by
-the baseline audit. An authored P0-P3 value is retained when present. Where the
-document has no priority, P3 is an explicit schema placeholder marked
-`untriaged`; it is not a severity or closure decision. Every new row remains
-open and points back to its document as the evidence owner. Existing lifecycle
-values remain unchanged. The bug database CRC32 is now `1699616582`.
+attached to the canonical databases: 843 bug documents receive new rows in
+`bugs_active`, three bug documents use explicit reviewed aliases to their older
+authoritative rows, and 15 TODO documents receive stable numeric rows. Together
+with the three rows above, this attaches all 864 unresolved documents identified
+by the baseline audit without shadowing the older P1/P2 lifecycle records. An
+authored P0-P3 value is retained when present. Where the document has no
+priority, P3 is an explicit schema placeholder marked `untriaged`; it is not a
+severity or closure decision. TODOs 322, 323, 324, 327, 328, and 330 are restored
+to `blocked` with nonempty blockers matching their source records. The unrelated
+pre-existing `sffi_v2_provider_admission` status mismatch remains for owner
+triage. Other lifecycle values remain unchanged. The final bug database CRC32
+is `1764979789`.
 
 ## Executable regression and evidence
 
@@ -113,15 +118,18 @@ The prior status guard reports PASS for a fixture containing a registered OPEN
 record plus an unregistered BLOCKED record. The new owner detects that orphan
 and also covers recursive plain/lowercase OPEN, TODO documents, source-only
 TODO rows, curated TODO rows, token boundaries, fenced examples, marker-only
-notes, reverse links, exact date identity, malformed fields, cross-table duplicate
-IDs, and missing database errors. Fifteen executable fixtures pass.
+notes, reverse links, exact date identity, three reviewed semantic aliases,
+semantic duplicate rejection, blocked TODO status/blocker consistency, the five
+additional exact generated-row lifecycle repairs, malformed fields, cross-table
+duplicate IDs, and missing database errors. Twenty-five executable fixtures pass.
 
-The post-registration production audit remains intentionally FAIL: 2,550 rows,
-4,550 non-index documents, and 66 findings. All document-to-database attachment
-gaps are closed. The remaining findings are 46 database rows without an exact
-document and 20 malformed pre-existing rows. They are reverse-link/schema repair
-work rather than missing database attachment. This audit is not enabled as a new
-CI merge gate over that backlog.
+The post-repair production audit remains intentionally FAIL: 2,547 rows, 4,550
+non-index documents, and 64 findings. All document-to-database attachment gaps
+are closed. The remaining findings are 43 database rows without an exact
+document, 20 malformed pre-existing rows, and one pre-existing blocked TODO
+document whose database row still says open. That status conflict predates this
+registration change and remains for owner triage. This audit is not enabled as a
+new CI merge gate over that backlog.
 
 The final MSYS audit took 14.41 seconds and reported maximum
 RSS 125,496 KiB through `/usr/bin/time -v`, while independent fixture/DB checks
@@ -133,8 +141,8 @@ fixture results do not establish acceptance of any tracked implementation.
 Retained local evidence is under `build/tracking-audit/`: original inventory,
 related-platform inventory, registration fixture log, the prior guard's orphan
 log, full audit output, resource measurement, unique-ID gate, and CRC reseal log.
-The earlier unique-ID check passed over 3,039 rows in six SDN tables. The
-post-registration audit parses 2,550 bug/TODO rows without duplicate-ID findings.
+The earlier unique-ID check passed over 3,039 rows in six SDN tables. The final
+audit parses 2,547 bug/TODO rows without exact or semantic duplicate-ID findings.
 The direct-env guard passes; tracked executable specs under `doc/06_spec` remain
 zero.
 Independent admission review and CI gates remain required before merge.
