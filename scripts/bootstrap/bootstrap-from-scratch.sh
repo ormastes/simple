@@ -1986,6 +1986,10 @@ bootstrap_native_build_main() {
     --entry src/app/cli/main.spl \
     --runtime-path "${bootstrap_runtime_authority_path}" \
     -o "${output}"
+  perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
+    --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+    --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+    --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -3220,6 +3224,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "  Stage 2: one worker timed out; retrying once with the same producer-scoped cache"
     cp "${stage2_native_log}" \
       "${stage2_tmp_absolute}/stage2-native-build.before-cache-retry.log"
+    cp "${stage2_native_log}.rss.env" \
+      "${stage2_tmp_absolute}/stage2-native-build.before-cache-retry.log.rss.env" || exit 89
     set +e
     bootstrap_run_stage2_native
     stage2_status=$?
