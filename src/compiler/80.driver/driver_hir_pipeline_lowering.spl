@@ -52,9 +52,9 @@ use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_register_source_alias_v1
 }
-extern fn rt_transient_array_scope_begin() -> bool
-extern fn rt_transient_array_scope_pause() -> bool
-extern fn rt_transient_heap_promote(value: Any) -> bool
+use compiler.hir.hir_lowering.transient_ownership.{
+    transient_scope_begin, transient_scope_pause, transient_promote
+}
 extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_stdout_flush()
 
@@ -130,7 +130,7 @@ fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
-        if not rt_transient_array_scope_begin():
+        if not transient_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
         driver_register_parser_module_source_aliases_v1(module, source.path)
@@ -141,11 +141,11 @@ impl CompilerDriver:
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
         # its diagnostics, and frontend registries escape this file boundary.
-        if not rt_transient_array_scope_pause():
+        if not transient_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        if not rt_transient_heap_promote(hir_module):
+        if not transient_promote(hir_module):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
