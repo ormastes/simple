@@ -44,6 +44,10 @@ rows fail before launch; Phase 1/2 results are never release evidence.
 `bootstrap-phase-verification.shs --strategy=full` runs each
 `test/01_unit/compiler/**/*_spec.spl` row, including loader specs, through the
 phase-owned standalone test runner and full CLI. Exit code zero is insufficient.
+The compiler inventory is the complete `*_spec.spl` tree. The separate
+`*_test.spl` compiler files include standalone `run` harnesses and are not
+admitted by this inventory; their execution needs a distinct same-generation
+test receipt before claiming coverage of every compiler test file.
 Each row uses `--assert-ran` and isolated caches, emits exactly one complete
 terminal JSON object, and must report outer and spec success, zero failures,
 canonical bounded counters, and at least one executed example. Malformed,

@@ -52,16 +52,16 @@ export PLATFORM_TRIPLE PLATFORM_ARCH PLATFORM_OS PLATFORM_ABI
 # platform-parameterized, no hardcoded single version or path.
 #
 # LLVM_VERSIONS is the preference order of major versions to accept (first one
-# found wins). Default pins to 18 (the version the Rust llvm-sys crate expects);
-# extend to e.g. "18 19 20" — or set the env before sourcing — to opt into newer
-# toolchains once the build supports them, without touching this logic.
+# found wins). The default is LLVM 23, matching the Rust compiler binding.
+# LLVM 23 must report the exact package version 23.1.1.
 #
 # Resolves ONCE and feeds the env both downstream worlds consult, so the shell
 # build and the Simple runtime share a single resolution:
-#   LLVM_SYS_<major>0_PREFIX -> Rust build (llvm-sys)
+#   LLVM_SYS_231_PREFIX      -> Rust LLVM 23.1 binding
+#   LLVM_SYS_<major>0_PREFIX -> other llvm-sys versions
 #   SIMPLE_LLVM_PATH         -> Simple runtime loader (src/lib/.../sffi/llvm_loader.spl)
 # Sets: LLVM_FOUND (0/1), LLVM_VERSION, LLVM_PREFIX, LLVM_LIBDIR, LLVM_LIB.
-: "${LLVM_VERSIONS:=18}"
+: "${LLVM_VERSIONS:=23}"
 
 LLVM_FOUND=0
 LLVM_VERSION=""
@@ -114,8 +114,11 @@ _llvm_try_prefix() {
   elif [ -x "$1/bin/llvm-config.exe" ]; then
     _prefix_cfg="$1/bin/llvm-config.exe"
   fi
-  if [ -n "${_prefix_cfg}" ]; then
-    case "$(${_prefix_cfg} --version 2>/dev/null)" in
+  if [ "$2" = 23 ]; then
+    [ -n "${_prefix_cfg}" ] || return 1
+    [ "$("${_prefix_cfg}" --version 2>/dev/null)" = 23.1.1 ] || return 1
+  elif [ -n "${_prefix_cfg}" ]; then
+    case "$("${_prefix_cfg}" --version 2>/dev/null)" in
       $2.*) ;;
       *) return 1 ;;
     esac
@@ -133,8 +136,13 @@ _llvm_try_prefix() {
 }
 
 for _v in ${LLVM_VERSIONS}; do
-  # 0) explicit, version-named override prefix (e.g. LLVM_SYS_180_PREFIX)
-  eval "_ov=\${LLVM_SYS_${_v}0_PREFIX:-}"
+  case "$_v" in *[!0-9]*|'') continue ;; esac
+  # LLVM 23.1 uses 231 in the llvm-sys environment key.
+  case "$_v" in
+    23) _prefix_env=LLVM_SYS_231_PREFIX ;;
+    *) _prefix_env=LLVM_SYS_${_v}0_PREFIX ;;
+  esac
+  eval "_ov=\${${_prefix_env}:-}"
   if [ -n "${_ov}" ] && _llvm_try_prefix "${_ov}" "${_v}"; then break; fi
 
   # 1) llvm-config (portable): versioned, then bare if it reports this major
@@ -163,7 +171,10 @@ done
 if [ "${LLVM_FOUND}" = "1" ]; then
   # Export the version-named prefix the Rust build expects, plus the resolved
   # library for the Simple runtime loader (honors a pre-set SIMPLE_LLVM_PATH).
-  export "LLVM_SYS_${LLVM_VERSION}0_PREFIX=${LLVM_PREFIX}"
+  case "$LLVM_VERSION" in
+    23) export "LLVM_SYS_231_PREFIX=${LLVM_PREFIX}" ;;
+    *) export "LLVM_SYS_${LLVM_VERSION}0_PREFIX=${LLVM_PREFIX}" ;;
+  esac
   [ -n "${SIMPLE_LLVM_PATH:-}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
 fi
 export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB
