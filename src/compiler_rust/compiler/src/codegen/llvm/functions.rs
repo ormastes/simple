@@ -2886,6 +2886,13 @@ impl LlvmBackend {
                     "byte_at" => Some("rt_string_byte_at"),
                     "push" => Some("rt_array_push"),
                     "pop" => Some("rt_array_pop"),
+                    // Keep the LLVM bootstrap table synchronized with the
+                    // Cranelift and pure-Simple lowerers. `write_span` is an
+                    // array-only mutator whose expression result is the count
+                    // copied, so the ordinary runtime-call result path below
+                    // is correct; interpreter write-back remains owned by its
+                    // dedicated mutating-method channel.
+                    "write_span" => Some("rt_array_write_span"),
                     "clear" => Some("rt_array_clear"),
                     "join" => Some("rt_string_join"),
                     // "strip"/"trimmed" synonyms for "trim" (this table's own
@@ -4213,6 +4220,41 @@ mod tests {
         let ir = backend.get_ir().unwrap();
         assert!(ir.contains("@rt_dict_remove"), "missing runtime remove:\n{ir}");
         assert!(!ir.contains("Dict.remove"), "raw Dict.remove leaked:\n{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn static_array_write_span_uses_runtime_symbol() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("static_array_write_span_runtime").unwrap();
+
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for (dest, value) in [(VReg(0), 101), (VReg(1), 202), (VReg(2), 1), (VReg(3), 0), (VReg(4), 2)] {
+            func.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(5)),
+            receiver: VReg(0),
+            func_name: "Array.write_span".to_string(),
+            args: vec![VReg(1), VReg(2), VReg(3), VReg(4)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(5)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @rt_array_write_span(i64"),
+            "missing runtime write_span call:\n{ir}"
+        );
+        assert!(
+            !ir.contains("Array.write_span"),
+            "raw Array.write_span leaked into LLVM IR:\n{ir}"
+        );
         backend.verify().unwrap();
     }
 
