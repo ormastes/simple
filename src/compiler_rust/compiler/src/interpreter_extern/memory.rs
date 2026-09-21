@@ -22,6 +22,21 @@ static HOSTED_ALLOC_SIZES: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::ne
 /// Live bytes currently held by hosted `rt_alloc` allocations.
 static HOSTED_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum WindowsRawMappingKind {
+    Anonymous,
+    File,
+}
+
+#[cfg(windows)]
+static WINDOWS_RAW_MAPPINGS: OnceLock<Mutex<HashMap<usize, WindowsRawMappingKind>>> = OnceLock::new();
+
+#[cfg(windows)]
+fn windows_raw_mappings() -> &'static Mutex<HashMap<usize, WindowsRawMappingKind>> {
+    WINDOWS_RAW_MAPPINGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn hosted_alloc_sizes() -> &'static Mutex<HashMap<usize, usize>> {
     HOSTED_ALLOC_SIZES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -880,7 +895,142 @@ pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFileEx, UnmapViewOfFile, VirtualAlloc, VirtualProtect, FILE_MAP_COPY,
+        FILE_MAP_EXECUTE, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ,
+        PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
+
+    if args.len() != 6 {
+        return Err(CompileError::runtime("rt_mmap_raw requires 6 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    let prot = args[2].as_int()?;
+    let flags = args[3].as_int()?;
+    let fd = args[4].as_int()?;
+    let offset = args[5].as_int()?;
+    if length <= 0 || offset < 0 || (prot & 0x6) == 0x6 || (prot & !0x7) != 0 {
+        return Ok(Value::Int(-1));
+    }
+
+    let (pointer, kind) = if fd == -1 {
+        let protection = match prot {
+            0 => PAGE_NOACCESS,
+            1 => PAGE_READONLY,
+            2 | 3 => PAGE_READWRITE,
+            4 => PAGE_EXECUTE,
+            5 => PAGE_EXECUTE_READ,
+            _ => return Ok(Value::Int(-1)),
+        };
+        let pointer = unsafe {
+            VirtualAlloc(
+                if addr == 0 {
+                    std::ptr::null()
+                } else {
+                    addr as usize as *const _
+                },
+                length as usize,
+                MEM_COMMIT | MEM_RESERVE,
+                protection,
+            )
+        };
+        (pointer, WindowsRawMappingKind::Anonymous)
+    } else {
+        let shared = (flags & 0x1) != 0;
+        let private_map = (flags & 0x2) != 0;
+        if fd < 0 || shared == private_map {
+            return Ok(Value::Int(-1));
+        }
+        let Some(file) = super::file_io::windows_raw_fd_file(fd) else {
+            return Ok(Value::Int(-1));
+        };
+        let (section_protection, view_access) = if (prot & 0x2) != 0 {
+            if private_map {
+                (PAGE_WRITECOPY, FILE_MAP_COPY)
+            } else {
+                (PAGE_READWRITE, FILE_MAP_WRITE)
+            }
+        } else if (prot & 0x4) != 0 {
+            (PAGE_EXECUTE_READ, FILE_MAP_READ | FILE_MAP_EXECUTE)
+        } else {
+            (PAGE_READONLY, FILE_MAP_READ)
+        };
+        let section = unsafe {
+            CreateFileMappingW(
+                file.as_raw_handle() as _,
+                std::ptr::null(),
+                section_protection,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if section.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let view = unsafe {
+            MapViewOfFileEx(
+                section,
+                view_access,
+                ((offset as u64) >> 32) as u32,
+                (offset as u64 & 0xffff_ffff) as u32,
+                length as usize,
+                if addr == 0 {
+                    std::ptr::null()
+                } else {
+                    addr as usize as *const _
+                },
+            )
+        };
+        unsafe { CloseHandle(section) };
+        if view.Value.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let final_protection = match prot {
+            0 => Some(PAGE_NOACCESS),
+            2 => Some(if private_map { PAGE_WRITECOPY } else { PAGE_READWRITE }),
+            4 => Some(PAGE_EXECUTE),
+            _ => None,
+        };
+        if let Some(protection) = final_protection {
+            let mut old_protection = 0;
+            if unsafe { VirtualProtect(view.Value, length as usize, protection, &mut old_protection) } == 0 {
+                unsafe { UnmapViewOfFile(view) };
+                return Ok(Value::Int(-1));
+            }
+        }
+        if (prot & 0x4) != 0
+            && unsafe {
+                FlushInstructionCache(
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    view.Value,
+                    length as usize,
+                )
+            } == 0
+        {
+            unsafe { UnmapViewOfFile(view) };
+            return Ok(Value::Int(-1));
+        }
+        (view.Value, WindowsRawMappingKind::File)
+    };
+
+    if pointer.is_null() {
+        return Ok(Value::Int(-1));
+    }
+    windows_raw_mappings()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(pointer as usize, kind);
+    Ok(Value::Int(pointer as usize as i64))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_mmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_mmap_raw is unavailable on this host"))
 }
@@ -899,7 +1049,46 @@ pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
+    use windows_sys::Win32::System::Memory::{UnmapViewOfFile, VirtualFree, MEM_RELEASE, MEMORY_MAPPED_VIEW_ADDRESS};
+
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_munmap_raw requires 2 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let address = addr as usize;
+    let kind = windows_raw_mappings()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&address);
+    let Some(kind) = kind else {
+        return Ok(Value::Int(-1));
+    };
+    let status = unsafe {
+        match kind {
+            WindowsRawMappingKind::Anonymous => VirtualFree(address as *mut _, 0, MEM_RELEASE),
+            WindowsRawMappingKind::File => UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: address as *mut _,
+            }),
+        }
+    };
+    if status == 0 {
+        windows_raw_mappings()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(address, kind);
+        Ok(Value::Int(-1))
+    } else {
+        Ok(Value::Int(0))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_munmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_munmap_raw is unavailable on this host"))
 }
