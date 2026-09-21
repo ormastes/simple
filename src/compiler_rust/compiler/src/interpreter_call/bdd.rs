@@ -453,6 +453,73 @@ pub(crate) fn exec_block_value(
     }
 }
 
+fn localize_bdd_return(result: Result<Value, CompileError>) -> Result<Value, CompileError> {
+    match result {
+        Err(CompileError::BlockReturn(value)) => Ok(value),
+        other => other,
+    }
+}
+
+/// Execute a BDD block against the example environment itself.
+///
+/// Ordinary BDD bodies run from a captured snapshot so their local writes are
+/// isolated. A hook and its example must also share one current environment:
+/// before_each writes need to be visible to the body, and after_each writes to
+/// enclosing captures need to be available to the next example. The caller
+/// controls isolation by choosing when to copy dirty names back.
+fn exec_bdd_block_into(
+    block: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    use super::block_execution::exec_block_closure_into;
+
+    match block {
+        Value::Lambda {
+            params,
+            body,
+            env: captured,
+        } => {
+            if params.is_empty() {
+                if let Expr::DoBlock(nodes) = body.as_ref() {
+                    return localize_bdd_return(exec_block_closure_into(
+                        nodes,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    ));
+                }
+            }
+            exec_block_value(
+                Value::Lambda {
+                    params,
+                    body,
+                    env: captured,
+                },
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+        }
+        Value::BlockClosure { nodes, .. } => localize_bdd_return(exec_block_closure_into(
+            &nodes,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )),
+        other => exec_block_value(other, env, functions, classes, enums, impl_methods),
+    }
+}
+
 /// Short type name for a Value, for diagnostics.
 fn value_kind_name(v: &Value) -> &'static str {
     match v {
@@ -866,16 +933,20 @@ pub(super) fn eval_bdd_builtin(
             // Use cached hooks to avoid O(n²) performance with deeply nested contexts
             let before_hooks = get_before_each_hooks_cached();
             for hook in before_hooks {
-                exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods)?;
+                exec_bdd_block_into(hook, &mut test_env, functions, classes, enums, impl_methods)?;
             }
 
-            let result = exec_block_value(block, &mut test_env, functions, classes, enums, impl_methods);
+            let result = exec_bdd_block_into(block, &mut test_env, functions, classes, enums, impl_methods);
 
             // Use cached hooks to avoid O(n²) performance with deeply nested contexts
+            // and persist only writes made by after_each. The example body and
+            // before_each setup remain isolated in test_env.
+            test_env.clear_dirty();
             let after_hooks = get_after_each_hooks_cached();
             for hook in after_hooks {
-                let _ = exec_block_value(hook, &mut test_env, functions, classes, enums, impl_methods);
+                let _ = exec_bdd_block_into(hook, &mut test_env, functions, classes, enums, impl_methods);
             }
+            crate::interpreter::block_exec::copy_back_block_writes(&test_env, env);
             // test_env is dropped here, freeing memory used by this test
 
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
