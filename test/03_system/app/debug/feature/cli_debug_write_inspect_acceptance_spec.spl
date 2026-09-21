@@ -1,0 +1,132 @@
+# Purpose and audience: executable system acceptance for Debug Evidence Bundle V1 operators.
+# @cover src/app/cli_debug/evidence_write_v1.spl 0%
+# @cover src/app/cli_debug/evidence_inspect_v1.spl 0%
+# @tag: system, debug, evidence
+# @req REQ-DEBUG-EVIDENCE-CLI-001 REQ-DEBUG-EVIDENCE-CLI-002
+
+"""# Debug evidence write and inspect CLI acceptance
+
+The production `simple debug` command must write a Debug Evidence Bundle V1
+from a real artifact and inspect that same retained bundle successfully. The
+acceptance boundary is the admitted Simple executable, not direct calls into
+the writer or inspector modules.
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{
+    process_run, dir_create_all, dir_remove_all, file_write, file_read,
+    file_exists, file_hash_sha256, is_dir, env_get, cwd, host_arch, host_os,
+    time_now_unix_micros,
+}
+use std.io_runtime.{getpid}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+val BUILD_ID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val FIXTURE = "debug-evidence-cli-acceptance\n"
+
+fn _receipt_value(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var matches = 0
+    for line in receipt.split("\n"):
+        if line.starts_with(prefix):
+            value = line.substring(prefix.len(), line.len()).trim()
+            matches = matches + 1
+    if matches == 1: value else: ""
+
+fn _host_target() -> text:
+    var arch = host_arch()
+    if arch == "amd64": arch = "x86_64"
+    if arch == "arm64": arch = "aarch64"
+    val os = host_os()
+    if os == "windows": return arch + "-pc-windows-msvc"
+    if os == "linux": return arch + "-unknown-linux-gnu"
+    if os == "macos" or os == "darwin": return arch + "-apple-darwin"
+    ""
+
+fn _admitted_simple() -> text:
+    val binary = env_get("SIMPLE_ADMITTED_RUNTIME").trim()
+    val expected_hash = env_get("SIMPLE_ADMITTED_RUNTIME_SHA256").trim()
+    val receipt_path = env_get("SIMPLE_ADMITTED_RUNTIME_RECEIPT").trim()
+    val expected_receipt_hash = env_get("SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256").trim()
+    val expected_target = env_get("SIMPLE_ADMITTED_RUNTIME_TARGET").trim()
+    expect(binary != "").to_equal(true)
+    expect(receipt_path != "").to_equal(true)
+    expect(file_exists(binary)).to_equal(true)
+    expect(file_exists(receipt_path)).to_equal(true)
+    expect(sha256_lower_hex_valid(expected_hash)).to_equal(true)
+    expect(sha256_lower_hex_valid(expected_receipt_hash)).to_equal(true)
+    expect(expected_target != "").to_equal(true)
+    expect(expected_target).to_equal(_host_target())
+    expect(file_hash_sha256(binary)).to_equal(expected_hash)
+    expect(file_hash_sha256(receipt_path)).to_equal(expected_receipt_hash)
+
+    val receipt = file_read(receipt_path)
+    expect(_receipt_value(receipt, "schema")).to_equal("simple-runtime-provenance-v1")
+    expect(_receipt_value(receipt, "status")).to_equal("admitted")
+    expect(_receipt_value(receipt, "implementation")).to_equal("pure-simple")
+    expect(_receipt_value(receipt, "artifact_sha256")).to_equal(expected_hash)
+    expect(_receipt_value(receipt, "target_triple")).to_equal(expected_target)
+
+    val (version_out, version_err, version_code) = process_run(binary, ["--version"])
+    val version = (version_out + version_err).trim()
+    expect(version_code).to_equal(0)
+    expect(version != "").to_equal(true)
+    expect(version.contains("bootstrap seed only")).to_equal(false)
+    expect(version.contains("Rust-built")).to_equal(false)
+    expect(_receipt_value(receipt, "version_output")).to_equal(version)
+    binary
+
+fn _scratch_root() -> text:
+    cwd() + "/build/test-artifacts/debug_cli_write_inspect/" +
+        str(getpid()) + "_" + str(time_now_unix_micros())
+
+describe "simple debug write then inspect evidence bundle":
+    it "round trips one artifact through the real production CLI":
+        step("prepare a unique artifact and an absent bundle root")
+        val scratch = _scratch_root()
+        val bundle = scratch + "/bundle"
+        val source = scratch + "/source.bin"
+        expect(file_exists(scratch)).to_equal(false)
+        expect(is_dir(scratch)).to_equal(false)
+        expect(dir_create_all(scratch)).to_equal(true)
+        expect(file_write(source, FIXTURE)).to_equal(true)
+
+        step("write the bundle through the admitted simple debug CLI")
+        val simple = _admitted_simple()
+        val (write_out, write_err, write_code) = process_run(simple, [
+            "debug", "write", bundle, "--build-id", BUILD_ID, source,
+        ])
+        expect(write_code).to_equal(0)
+        expect(write_out + write_err).to_contain("Evidence bundle: " + bundle)
+        expect(write_out + write_err).to_contain("Artifacts: 1")
+
+        step("prove retained bytes and the normalized capability receipt")
+        val retained = bundle + "/artifacts/source.bin"
+        val capsule_path = bundle + "/normalized/state_capsule.sdn"
+        expect(file_exists(bundle + "/manifest.sdn")).to_equal(true)
+        expect(file_exists(retained)).to_equal(true)
+        val source_hash = file_hash_sha256(source)
+        val retained_hash = file_hash_sha256(retained)
+        expect(sha256_lower_hex_valid(source_hash)).to_equal(true)
+        expect(retained_hash).to_equal(source_hash)
+        expect(file_read(source)).to_equal(FIXTURE)
+        expect(file_read(retained)).to_equal(FIXTURE)
+        val capsule = file_read(capsule_path)
+        expect(capsule).to_contain("analyze: Unverified(")
+        expect(capsule).to_contain("resume_forward: Unverified(")
+        expect(capsule).to_contain("exact_replay: Unverified(")
+        expect(capsule).to_contain("reverse_execution: Unverified(")
+        expect(capsule).to_contain("counterfactual_fork: Unverified(")
+        expect(capsule).to_contain("profile_correlation: Unverified(")
+
+        step("inspect the exact same bundle through the admitted CLI")
+        val (inspect_out, inspect_err, inspect_code) = process_run(simple, [
+            "debug", "inspect", bundle,
+        ])
+        expect(inspect_code).to_equal(0)
+        expect(inspect_out + inspect_err).to_contain("Evidence bundle: " + bundle)
+        expect(inspect_out + inspect_err).to_contain("Build ID: " + BUILD_ID)
+        expect(inspect_out + inspect_err).to_contain("Artifacts: 1")
+
+        dir_remove_all(scratch)
