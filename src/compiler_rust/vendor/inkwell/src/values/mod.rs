@@ -16,15 +16,31 @@ mod int_value;
 mod metadata_value;
 mod phi_value;
 mod ptr_value;
+mod scalable_vec_value;
 mod struct_value;
 mod traits;
 mod vec_value;
+
+#[cfg(any(
+    feature = "llvm18-1",
+    feature = "llvm19-1",
+    feature = "llvm20-1",
+    feature = "llvm21-1",
+    feature = "llvm22-1",
+    feature = "llvm23-1"
+))]
+pub(crate) mod operand_bundle;
 
 #[cfg(not(any(
     feature = "llvm15-0",
     feature = "llvm16-0",
     feature = "llvm17-0",
-    feature = "llvm18-0"
+    feature = "llvm18-1",
+    feature = "llvm19-1",
+    feature = "llvm20-1",
+    feature = "llvm21-1",
+    feature = "llvm22-1",
+    feature = "llvm23-1",
 )))]
 mod callable_value;
 
@@ -32,39 +48,55 @@ mod callable_value;
     feature = "llvm15-0",
     feature = "llvm16-0",
     feature = "llvm17-0",
-    feature = "llvm18-0"
+    feature = "llvm18-1",
+    feature = "llvm19-1",
+    feature = "llvm20-1",
+    feature = "llvm21-1",
+    feature = "llvm22-1",
+    feature = "llvm23-1",
 )))]
 pub use crate::values::callable_value::CallableValue;
 
-use crate::support::{to_c_str, LLVMString};
+#[llvm_versions(18..)]
+pub use crate::values::instruction_value::FastMathFlags;
+#[llvm_versions(18..)]
+pub use crate::values::operand_bundle::OperandBundle;
+
+use crate::support::{LLVMString, to_c_str};
 pub use crate::values::array_value::ArrayValue;
-pub use crate::values::basic_value_use::BasicValueUse;
-pub use crate::values::call_site_value::CallSiteValue;
+pub use crate::values::basic_value_use::{BasicValueUse, Operand};
+pub use crate::values::call_site_value::{CallSiteValue, ValueKind};
 pub use crate::values::enums::{AggregateValueEnum, AnyValueEnum, BasicMetadataValueEnum, BasicValueEnum};
 pub use crate::values::float_value::FloatValue;
 pub use crate::values::fn_value::FunctionValue;
 pub use crate::values::generic_value::GenericValue;
 pub use crate::values::global_value::GlobalValue;
-#[llvm_versions(7..)]
+
 pub use crate::values::global_value::UnnamedAddress;
-pub use crate::values::instruction_value::{InstructionOpcode, InstructionValue, OperandIter, OperandUseIter};
+pub use crate::values::instruction_value::{
+    AtomicError, InstructionOpcode, InstructionValue, InstructionValueError, OperandIter, OperandUseIter,
+};
 pub use crate::values::int_value::IntValue;
-pub use crate::values::metadata_value::{MetadataValue, FIRST_CUSTOM_METADATA_KIND_ID};
+pub use crate::values::metadata_value::{FIRST_CUSTOM_METADATA_KIND_ID, MetadataValue};
 pub use crate::values::phi_value::IncomingIter;
 pub use crate::values::phi_value::PhiValue;
 pub use crate::values::ptr_value::PointerValue;
+pub use crate::values::scalable_vec_value::ScalableVectorValue;
 pub use crate::values::struct_value::FieldValueIter;
 pub use crate::values::struct_value::StructValue;
 pub use crate::values::traits::AsValueRef;
-pub use crate::values::traits::{AggregateValue, AnyValue, BasicValue, FloatMathValue, IntMathValue, PointerMathValue};
+pub use crate::values::traits::{
+    AggregateValue, AnyValue, BasicValue, FloatMathValue, IntMathValue, PointerMathValue, VectorBaseValue,
+};
 pub use crate::values::vec_value::VectorValue;
 
 #[llvm_versions(18..)]
 pub use llvm_sys::LLVMTailCallKind;
 
 use llvm_sys::core::{
-    LLVMDumpValue, LLVMGetFirstUse, LLVMGetSection, LLVMIsAInstruction, LLVMIsConstant, LLVMIsNull, LLVMIsUndef,
-    LLVMPrintTypeToString, LLVMPrintValueToString, LLVMReplaceAllUsesWith, LLVMSetSection, LLVMTypeOf,
+    LLVMDumpValue, LLVMGetFirstUse, LLVMGetSection, LLVMGetValueName2, LLVMIsAInstruction, LLVMIsConstant, LLVMIsNull,
+    LLVMIsUndef, LLVMPrintTypeToString, LLVMPrintValueToString, LLVMReplaceAllUsesWith, LLVMSetSection,
+    LLVMSetValueName2, LLVMTypeOf,
 };
 use llvm_sys::prelude::{LLVMTypeRef, LLVMValueRef};
 
@@ -120,34 +152,13 @@ impl<'ctx> Value<'ctx> {
     fn set_name(self, name: &str) {
         let c_string = to_c_str(name);
 
-        #[cfg(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0"))]
-        {
-            use llvm_sys::core::LLVMSetValueName;
-
-            unsafe {
-                LLVMSetValueName(self.value, c_string.as_ptr());
-            }
-        }
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
-        {
-            use llvm_sys::core::LLVMSetValueName2;
-
-            unsafe { LLVMSetValueName2(self.value, c_string.as_ptr(), name.len()) }
-        }
+        unsafe { LLVMSetValueName2(self.value, c_string.as_ptr(), c_string.to_bytes().len()) }
     }
 
     // get_name should *not* return a LLVMString, because it is not an owned value AFAICT
     // TODO: Should make this take ownership of self. But what is the lifetime of the string? 'ctx?
     fn get_name(&self) -> &CStr {
-        #[cfg(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0"))]
         let ptr = unsafe {
-            use llvm_sys::core::LLVMGetValueName;
-
-            LLVMGetValueName(self.value)
-        };
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
-        let ptr = unsafe {
-            use llvm_sys::core::LLVMGetValueName2;
             let mut len = 0;
 
             LLVMGetValueName2(self.value, &mut len)
@@ -219,7 +230,7 @@ impl<'ctx> Value<'ctx> {
         #[cfg(target_os = "macos")]
         let mapped_section = section.map(|s| {
             if s.contains(",") {
-                format!("{}", s)
+                s.to_string()
             } else {
                 format!(",{}", s)
             }

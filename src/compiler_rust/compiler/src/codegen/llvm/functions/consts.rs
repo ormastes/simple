@@ -77,7 +77,7 @@ impl LlvmBackend {
             let call = builder
                 .build_call(string_new, &[zero.into(), zero.into()], "str_new")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
-            if let Some(ret) = call.try_as_basic_value().left() {
+            if let Some(ret) = call.try_as_basic_value().basic() {
                 vreg_map.insert(dest, ret);
             }
         } else {
@@ -96,7 +96,7 @@ impl LlvmBackend {
             let call = builder
                 .build_call(string_new, &[str_ptr_int.into(), str_len.into()], "str_new")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
-            if let Some(ret) = call.try_as_basic_value().left() {
+            if let Some(ret) = call.try_as_basic_value().basic() {
                 vreg_map.insert(dest, ret);
             }
         }

@@ -228,7 +228,7 @@ impl LlvmBackend {
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
                             let raw = call_site
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                                 .into_int_value();
                             builder
@@ -253,7 +253,7 @@ impl LlvmBackend {
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
                             let raw = call_site
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                                 .into_int_value();
                             builder
@@ -473,7 +473,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_math_pow", &e))?;
                         let pow_result = call_site
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| f64_type.const_zero().into())
                             .into_float_value();
                         let result = if common_ty == f64_type {
@@ -511,7 +511,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
                         let raw = call_site
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into())
                             .into_int_value();
                         let cmp = builder
@@ -537,7 +537,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
                         let raw = call_site
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into())
                             .into_int_value();
                         let cmp = builder
@@ -589,7 +589,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_eq", &e))?;
                     let eq_val = call_site
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         .into_int_value();
                     let cmp = builder
@@ -607,7 +607,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_neq", &e))?;
                     let neq_val = call_site
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         .into_int_value();
                     let cmp = builder

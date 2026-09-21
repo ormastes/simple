@@ -73,6 +73,8 @@ impl PartialEq<Self> for Attribute {
         }
 
         if self.is_type() && other.is_type() {
+            // Seems to be some clippy bug here, but it's not clear why.
+            #[allow(clippy::unit_cmp)]
             return self.get_enum_kind_id() == other.get_enum_kind_id()
                 && self.get_type_value() == other.get_type_value();
         }
@@ -190,7 +192,7 @@ impl Attribute {
     ///
     /// assert_eq!(enum_attribute.get_enum_kind_id(), 0);
     /// ```
-    #[llvm_versions(..=11)]
+    #[cfg(feature = "llvm11-0")]
     pub fn get_enum_kind_id(self) -> u32 {
         assert!(self.get_enum_kind_id_is_valid()); // FIXME: SubTypes
 
@@ -234,7 +236,7 @@ impl Attribute {
         unsafe { LLVMGetEnumAttributeKind(self.attribute) }
     }
 
-    #[llvm_versions(..=11)]
+    #[cfg(feature = "llvm11-0")]
     fn get_enum_kind_id_is_valid(self) -> bool {
         self.is_enum()
     }
@@ -340,7 +342,7 @@ impl Attribute {
     /// assert_ne!(type_attribute.get_type_value(), context.i64_type().as_any_type_enum());
     /// ```
     #[llvm_versions(12..)]
-    pub fn get_type_value(&self) -> AnyTypeEnum {
+    pub fn get_type_value(&self) -> AnyTypeEnum<'_> {
         assert!(self.is_type()); // FIXME: SubTypes
 
         unsafe { AnyTypeEnum::new(LLVMGetTypeAttributeValue(self.attribute)) }

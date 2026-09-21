@@ -495,7 +495,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
                 let ptr = ptr_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 let len_call = builder
@@ -503,7 +503,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
                 let len = len_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 expanded.push(ptr.into());
@@ -2034,7 +2034,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
                 len_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into())
             };
             let step_val = i64_type.const_int(1, false);
@@ -2059,7 +2059,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
             };
             if let Some(d) = dest {
-                if let Some(ret_val) = slice_call.try_as_basic_value().left() {
+                if let Some(ret_val) = slice_call.try_as_basic_value().basic() {
                     vreg_map.insert(d, ret_val);
                 } else {
                     vreg_map.insert(d, i64_type.const_int(0, false).into());
@@ -2171,7 +2171,7 @@ impl LlvmBackend {
                 .build_call(rt_func, &arg_vals, "rt_redirect")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt redirect call", &e))?;
             if let Some(d) = dest {
-                if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                     let ret_val = if returns_bool {
                         self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
                     } else {
@@ -2227,7 +2227,7 @@ impl LlvmBackend {
                         crate::error::factory::llvm_build_failed("qualified text_dot_from_char_code call", &e)
                     })?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     }
                 }
@@ -2246,7 +2246,7 @@ impl LlvmBackend {
                     .build_call(rt_func, &[recv.into(), zero.into()], "qualified_ord")
                     .map_err(|e| crate::error::factory::llvm_build_failed("qualified ord call", &e))?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     }
                 }
@@ -2340,7 +2340,7 @@ impl LlvmBackend {
                 let len_call = builder
                     .build_call(len_func, &[other.into()], "array_merge_len")
                     .map_err(|e| crate::error::factory::llvm_build_failed("array merge len call", &e))?;
-                let count = len_call.try_as_basic_value().left().ok_or_else(|| {
+                let count = len_call.try_as_basic_value().basic().ok_or_else(|| {
                     crate::error::factory::llvm_build_failed("array merge len value", "rt_len returned no value")
                 })?;
 
@@ -2413,7 +2413,7 @@ impl LlvmBackend {
                             .build_call(rt_func, &arg_vals, "qualified_rt_redirect")
                             .map_err(|e| crate::error::factory::llvm_build_failed("qualified rt redirect call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 let ret_val = if returns_bool {
                                     self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
                                 } else {
@@ -2454,7 +2454,7 @@ impl LlvmBackend {
                     .build_call(rt_func, &[recv.into()], "direct_enum_payload")
                     .map_err(|e| crate::error::factory::llvm_build_failed("direct enum payload call", &e))?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     } else {
                         vreg_map.insert(d, i64_type.const_int(0, false).into());
@@ -2483,7 +2483,7 @@ impl LlvmBackend {
                     .build_call(rt_func, &[recv.into(), enum_id.into(), disc.into()], "direct_enum_variant")
                     .map_err(|e| crate::error::factory::llvm_build_failed("direct enum variant call", &e))?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         let ret_val = self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?;
                         vreg_map.insert(d, ret_val);
                     } else {
@@ -2744,21 +2744,21 @@ impl LlvmBackend {
                             .build_call(rt_string_data, &[(*val).into()], "boxed_text_ptr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap()
                             .into_int_value();
                         let len = builder
                             .build_call(rt_string_len, &[(*val).into()], "boxed_text_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap()
                             .into_int_value();
                         let value = builder
                             .build_call(rt_string_new, &[ptr.into(), len.into()], "boxed_text_value")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap();
                         boxed.push(value.into());
                     } else {
@@ -2787,14 +2787,14 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
                         let ptr_val = ptr_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         let len_call = builder
                             .build_call(rt_string_len, &[(*val).into()], "str_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
                         let len_val = len_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         expanded.push(ptr_val.into());
                         expanded.push(len_val.into());
@@ -2833,7 +2833,7 @@ impl LlvmBackend {
 
         // Store result if there's a destination
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 let final_ret = if sffi_name == "rt_pool_join" {
                     let raw = self
                         .coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
@@ -2949,7 +2949,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("indirect call", &e))?;
 
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     } else {
                         let default_val = self.runtime_int_type().const_int(0, false);
@@ -3015,7 +3015,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
             let argv_raw = alloc_call
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?
                 .into_int_value();
             let argv_ptr = builder
@@ -3039,7 +3039,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(bool_fn, &[value.into()], "boxed_bool")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_bool call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed(
                                     "rt_value_bool result",
                                     &"missing return value",
@@ -3058,7 +3058,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[extended.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
@@ -3074,7 +3074,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[extended.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
@@ -3087,7 +3087,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[value.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
@@ -3100,7 +3100,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(float_fn, &[value.into()], "boxed_float")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_float call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed(
                                     "rt_value_float result",
                                     &"missing return value",
@@ -3143,7 +3143,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 vreg_map.insert(d, ret_val);
             } else {
                 let default_val = self.runtime_int_type().const_int(0, false);
@@ -3177,7 +3177,7 @@ impl LlvmBackend {
             .build_call(interp_eval, &[expr_index_val.into()], "eval")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             vreg_map.insert(dest, ret_val);
         } else {
             let default_val = self.runtime_int_type().const_int(0, false);

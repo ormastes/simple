@@ -298,7 +298,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("wrap membership needle", &e))?;
         Ok(call
             .try_as_basic_value()
-            .left()
+            .basic()
             .unwrap_or_else(|| i64_type.const_int(0, false).into()))
     }
 
@@ -384,7 +384,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_float", &e))?;
         let ret = call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CompileError::semantic("rt_value_float returned no value".to_string()))?
             .into_int_value();
         Ok(ret)
@@ -432,7 +432,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_float", &e))?;
         Ok(call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CompileError::semantic("rt_value_as_float returned no value".to_string()))?
             .into_float_value())
     }
@@ -1486,7 +1486,7 @@ impl LlvmBackend {
                                 .build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
                                 .map_err(|e| format!("pattern string_new: {e}"))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             // rt_string_eq(a, b) -> i64
                             let rt_string_eq = module.get_function("rt_string_eq").unwrap_or_else(|| {
@@ -1497,7 +1497,7 @@ impl LlvmBackend {
                                 .build_call(rt_string_eq, &[subject_val.into(), lit_str.into()], "pat_str_eq")
                                 .map_err(|e| format!("pattern string_eq: {e}"))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                                 .into_int_value()
                         }
@@ -1531,7 +1531,7 @@ impl LlvmBackend {
                             .build_call(rt_enum_disc, &[subject_val.into()], "disc")
                             .map_err(|e| format!("pattern disc: {e}"))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
                         let rt_enum_id = module.get_function("rt_enum_id").unwrap_or_else(|| {
@@ -1542,7 +1542,7 @@ impl LlvmBackend {
                             .build_call(rt_enum_id, &[subject_val.into()], "enum_id")
                             .map_err(|e| format!("pattern enum id: {e}"))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(u64::MAX, false).into())
                             .into_int_value();
                         let expected = {
@@ -1597,7 +1597,7 @@ impl LlvmBackend {
                                     .build_call(rt_enum_payload, &[current.into()], "payload")
                                     .map_err(|e| format!("pattern bind payload: {e}"))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             }
                             crate::mir::BindingStep::TupleIndex(idx) => {
@@ -1610,7 +1610,7 @@ impl LlvmBackend {
                                     .build_call(rt_tuple_get, &[current.into(), idx_val.into()], "tuple_el")
                                     .map_err(|e| format!("pattern bind tuple: {e}"))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             }
                             crate::mir::BindingStep::FieldName(_) => {
@@ -1630,7 +1630,7 @@ impl LlvmBackend {
                         .build_call(raw_fn, &[result.into()], "u64_payload")
                         .map_err(|e| CompileError::Semantic(format!("u64 payload call: {e}")))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or(result);
                 }
                 vreg_map.insert(*dest, result);
@@ -1651,7 +1651,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "disc")
                     .map_err(|e| CompileError::Semantic(format!("enum disc call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1669,7 +1669,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "payload")
                     .map_err(|e| CompileError::Semantic(format!("enum payload call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1707,7 +1707,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("enum unit call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1748,7 +1748,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("enum with call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1767,7 +1767,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "union_disc")
                     .map_err(|e| CompileError::Semantic(format!("union disc call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1785,7 +1785,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "union_payload")
                     .map_err(|e| CompileError::Semantic(format!("union payload call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1810,7 +1810,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), val.into()], "union_wrap")
                     .map_err(|e| CompileError::Semantic(format!("union wrap call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1858,7 +1858,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("option some: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1889,7 +1889,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("option none: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1921,7 +1921,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("result ok: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1953,7 +1953,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("result err: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1977,7 +1977,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "try_unwrap")
                     .map_err(|e| CompileError::Semantic(format!("try unwrap: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -2133,7 +2133,7 @@ impl LlvmBackend {
                         let call = builder
                             .build_call(func, &[int_val.into()], "box_int")
                             .map_err(|e| crate::error::factory::llvm_build_failed("box_int call", &e))?;
-                        let boxed = call.try_as_basic_value().left().ok_or_else(|| {
+                        let boxed = call.try_as_basic_value().basic().ok_or_else(|| {
                             crate::error::factory::llvm_build_failed("box_int call", &"rt_value_int returned void")
                         })?;
                         vreg_map.insert(*dest, boxed);
@@ -2166,7 +2166,7 @@ impl LlvmBackend {
                     let call = builder
                         .build_call(func, &[int_val.into()], "unbox_int")
                         .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int call", &e))?;
-                    let unboxed = call.try_as_basic_value().left().ok_or_else(|| {
+                    let unboxed = call.try_as_basic_value().basic().ok_or_else(|| {
                         crate::error::factory::llvm_build_failed("unbox_int call", &"rt_value_unbox_int returned void")
                     })?;
                     vreg_map.insert(*dest, unboxed.into_int_value().into());
@@ -2252,7 +2252,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
                 let mut result = empty_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 for part in parts {
@@ -2283,7 +2283,7 @@ impl LlvmBackend {
                                 .build_call(lit_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new_literal", &e))?;
                             call.try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                         FStringPart::Expr(vreg) => {
@@ -2302,7 +2302,7 @@ impl LlvmBackend {
                                 .build_call(value_to_string, &[coerced.into()], "expr_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_to_string", &e))?;
                             call.try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                         FStringPart::ExprWithFormat(vreg, format_spec) => {
@@ -2337,7 +2337,7 @@ impl LlvmBackend {
                                 )
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_format_string", &e))?;
                             call.try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                     };
@@ -2347,7 +2347,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_concat", &e))?;
                     result = concat_call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
                 }
 
@@ -2417,7 +2417,7 @@ impl LlvmBackend {
                 if let Some(d) = dest {
                     let value = call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_zero().into());
                     vreg_map.insert(*d, value);
                 }
@@ -2464,7 +2464,11 @@ impl LlvmBackend {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
+                        let target_ty = declared_param_types
+                            .get(i)
+                            .copied()
+                            .and_then(|ty| ty.try_into().ok())
+                            .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         arg_vals.push(casted.into());
                     }
@@ -2482,7 +2486,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("qualified method call", &e))?
                     };
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -2536,7 +2540,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin method redirect", &e))?;
                         let mut result = rt_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         if compare_zero {
                             let as_int = self
@@ -2572,7 +2576,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
                     let end_val = len_call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
                     let step_val = i64_type.const_int(1, false);
                     // rt_slice(collection, start, end, step) takes 4 args
@@ -2596,7 +2600,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
                     };
                     if let Some(d) = dest {
-                        if let Some(ret_val) = slice_call.try_as_basic_value().left() {
+                        if let Some(ret_val) = slice_call.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -2638,7 +2642,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_to_int_dynamic", &e))?;
                         let dyn_val = dyn_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         if let Some(d) = dest {
                             vreg_map.insert(*d, dyn_val);
@@ -2751,7 +2755,7 @@ impl LlvmBackend {
                         .build_call(rt_func, &[recv_casted.into()], "char_from_code")
                         .map_err(|e| crate::error::factory::llvm_build_failed("char_from_code call", &e))?;
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         }
                     }
@@ -3031,7 +3035,7 @@ impl LlvmBackend {
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 vreg_map.insert(*d, ret_val);
                             }
                         }
@@ -3091,7 +3095,7 @@ impl LlvmBackend {
                         if in_place {
                             let recv_val = self.get_vreg(receiver, vreg_map)?;
                             vreg_map.insert(*d, recv_val);
-                        } else if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        } else if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             let ret_val = if returns_bool {
                                 self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
                             } else {
@@ -3325,7 +3329,11 @@ impl LlvmBackend {
                     let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
+                        let target_ty = declared_param_types
+                            .get(i)
+                            .copied()
+                            .and_then(|ty| ty.try_into().ok())
+                            .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
                     }
@@ -3355,19 +3363,19 @@ impl LlvmBackend {
                                     .build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap();
                                 let len = builder
                                     .build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap();
                                 let boxed = builder
                                     .build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap();
                                 arg_vals.push(boxed.into());
                             } else {
@@ -3389,13 +3397,13 @@ impl LlvmBackend {
                                     .build_call(rt_string_data, &[(*val).into()], "sffi_text_ptr")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                                 let len = builder
                                     .build_call(rt_string_len, &[(*val).into()], "sffi_text_len")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                                 arg_vals.push(ptr.into());
                                 arg_vals.push(len.into());
@@ -3422,7 +3430,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     };
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3541,7 +3549,7 @@ impl LlvmBackend {
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice builtin call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 vreg_map.insert(*d, ret_val);
                             }
                         }
@@ -3564,7 +3572,7 @@ impl LlvmBackend {
                         .build_call(rt_func, &arg_vals, "bcall")
                         .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3586,7 +3594,7 @@ impl LlvmBackend {
                             .build_call(func, &arg_vals, "bcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 vreg_map.insert(*d, ret_val);
                             } else {
                                 vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3669,7 +3677,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
                 };
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(*d, ret_val);
                     } else {
                         vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3709,7 +3717,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc", &e))?;
                         let closure_i64 = alloc_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .ok_or_else(|| CompileError::semantic("rt_alloc did not return closure storage"))?;
                         let closure_ptr = builder
                             .build_int_to_ptr(

@@ -1688,7 +1688,7 @@ bootstrap_stage_sanity() (
   # shell `where llc`, and the LLVM object stage returned "llc not found" --
   # surfacing only as "backend object-path status 1".
   sanity_llvm_bin=${SIMPLE_LLVM_BIN:-}
-  sanity_llvm_prefix=${LLVM_SYS_180_PREFIX:-}
+  sanity_llvm_prefix=${LLVM_SYS_231_PREFIX:-}
   sanity_include=${INCLUDE:-}
   sanity_lib=${LIB:-}
   sanity_libpath=${LIBPATH:-}
@@ -1722,8 +1722,8 @@ bootstrap_stage_sanity() (
     export SIMPLE_LLVM_BIN
   fi
   if [ -n "${sanity_llvm_prefix}" ]; then
-    LLVM_SYS_180_PREFIX=${sanity_llvm_prefix}
-    export LLVM_SYS_180_PREFIX
+    LLVM_SYS_231_PREFIX=${sanity_llvm_prefix}
+    export LLVM_SYS_231_PREFIX
   fi
   if [ -n "${sanity_build_timeout}" ]; then
     COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
@@ -2122,12 +2122,12 @@ if [ -e "${rust_authority_current_marker}.transaction" ]; then
 fi
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect LLVM 18 availability for LLVM backends.
+# Detect the pinned LLVM 23.1.1 provider for LLVM backends.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
   # (scripts/setup/platform-detect.shs, sourced above), which also exports the
-  # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
+  # LLVM_SYS_231_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
     llvm_features="--features llvm"
@@ -2311,6 +2311,14 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-prefix=//p'
   )
+  rust_llvm_version=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-version=//p'
+  )
+  rust_llvm_link_kind=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-link-kind=//p'
+  )
   rust_llvm_sdkroot=$(
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-sdkroot=//p'
@@ -2323,6 +2331,23 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-library-path=//p'
   )
+  if [ "${rust_llvm_status}" = enabled ]; then
+    [ "${rust_llvm_major}" = 23 ] || {
+      echo "error: Rust LLVM authority must be major 23, got ${rust_llvm_major}" >&2
+      exit 1
+    }
+    if [ -n "${rust_llvm_version}" ] &&
+       [ "${rust_llvm_version}" != 23.1.1 ]; then
+      echo "error: Rust LLVM authority must be 23.1.1, got ${rust_llvm_version}" >&2
+      exit 1
+    fi
+    if [ "${os}" = windows ] &&
+       [ "${rust_llvm_link_kind}" != dynamic-c-api ]; then
+      echo "error: Windows Rust LLVM authority must use dynamic-c-api" >&2
+      exit 1
+    fi
+    rust_llvm_path="${rust_llvm_prefix}/bin:${PATH}"
+  fi
 fi
 
 rust_authority_workspace_prepared=0
@@ -2395,7 +2420,7 @@ run_rust_authority_cargo() {
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
-        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
@@ -2405,7 +2430,7 @@ run_rust_authority_cargo() {
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
@@ -2415,7 +2440,7 @@ run_rust_authority_cargo() {
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
-        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
@@ -2425,7 +2450,7 @@ run_rust_authority_cargo() {
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" \
@@ -3113,7 +3138,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_run_stage2_native() {
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
-      "LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-}" \
+      "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \

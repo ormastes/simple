@@ -8,14 +8,14 @@ use llvm_sys::execution_engine::{
 
 use crate::context::Context;
 use crate::module::Module;
-use crate::support::{to_c_str, LLVMString};
+use crate::support::{LLVMString, to_c_str};
 use crate::targets::TargetData;
 use crate::values::{AnyValue, AsValueRef, FunctionValue, GenericValue};
 
 use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::marker::PhantomData;
-use std::mem::{forget, size_of, transmute_copy, MaybeUninit};
+use std::mem::{MaybeUninit, forget, size_of, transmute_copy};
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -96,15 +96,17 @@ pub struct ExecutionEngine<'ctx> {
 
 impl<'ctx> ExecutionEngine<'ctx> {
     pub unsafe fn new(execution_engine: Rc<LLVMExecutionEngineRef>, jit_mode: bool) -> Self {
-        assert!(!execution_engine.is_null());
+        unsafe {
+            assert!(!execution_engine.is_null());
 
-        // REVIEW: Will we have to do this for LLVMGetExecutionEngineTargetMachine too?
-        let target_data = LLVMGetExecutionEngineTargetData(*execution_engine);
+            // REVIEW: Will we have to do this for LLVMGetExecutionEngineTargetMachine too?
+            let target_data = LLVMGetExecutionEngineTargetData(*execution_engine);
 
-        ExecutionEngine {
-            execution_engine: Some(ExecEngineInner(execution_engine, PhantomData)),
-            target_data: Some(TargetData::new(target_data)),
-            jit_mode,
+            ExecutionEngine {
+                execution_engine: Some(ExecEngineInner(execution_engine, PhantomData)),
+                target_data: Some(TargetData::new(target_data)),
+                jit_mode,
+            }
         }
     }
 
@@ -122,15 +124,15 @@ impl<'ctx> ExecutionEngine<'ctx> {
         **self.execution_engine_rc()
     }
 
-    /// This function probably doesn't need to be called, but is here due to
-    /// linking(?) requirements. Bad things happen if we don't provide it.
-    pub fn link_in_mc_jit() {
+    // This function is noop, but required for proper MCJIT initialization and
+    // registration. Without it, LTO is free to eliminate it
+    pub(crate) fn link_in_mc_jit() {
         unsafe { LLVMLinkInMCJIT() }
     }
 
-    /// This function probably doesn't need to be called, but is here due to
-    /// linking(?) requirements. Bad things happen if we don't provide it.
-    pub fn link_in_interpreter() {
+    // This function is noop, but required for proper MCJIT initialization and
+    // registration. Without it, LTO is free to eliminate it
+    pub(crate) fn link_in_interpreter() {
         unsafe {
             LLVMLinkInInterpreter();
         }
@@ -166,7 +168,7 @@ impl<'ctx> ExecutionEngine<'ctx> {
     ///
     /// let argf = ft.const_float(64.);
     /// let call_site_value = builder.build_call(extf, &[argf.into(), argf.into()], "retv").unwrap();
-    /// let retv = call_site_value.try_as_basic_value().left().unwrap().into_float_value();
+    /// let retv = call_site_value.try_as_basic_value().unwrap_basic().into_float_value();
     ///
     /// builder.build_return(Some(&retv)).unwrap();
     ///
@@ -213,27 +215,27 @@ impl<'ctx> ExecutionEngine<'ctx> {
     pub fn remove_module(&self, module: &Module<'ctx>) -> Result<(), RemoveModuleError> {
         match *module.owned_by_ee.borrow() {
             Some(ref ee) if ee.execution_engine_inner() != self.execution_engine_inner() => {
-                return Err(RemoveModuleError::IncorrectModuleOwner)
+                return Err(RemoveModuleError::IncorrectModuleOwner);
             },
             None => return Err(RemoveModuleError::ModuleNotOwned),
             _ => (),
         }
 
         let mut new_module = MaybeUninit::uninit();
-        let mut err_string = MaybeUninit::uninit();
+        let mut err_string: *mut ::libc::c_char = ::core::ptr::null_mut();
 
         let code = unsafe {
             LLVMRemoveModule(
                 self.execution_engine_inner(),
                 module.module.get(),
                 new_module.as_mut_ptr(),
-                err_string.as_mut_ptr(),
+                &mut err_string,
             )
         };
 
         if code == 1 {
             unsafe {
-                return Err(RemoveModuleError::LLVMError(LLVMString::new(err_string.assume_init())));
+                return Err(RemoveModuleError::LLVMError(LLVMString::new(err_string)));
             }
         }
 
@@ -306,24 +308,26 @@ impl<'ctx> ExecutionEngine<'ctx> {
     where
         F: UnsafeFunctionPointer,
     {
-        if !self.jit_mode {
-            return Err(FunctionLookupError::JITNotEnabled);
+        unsafe {
+            if !self.jit_mode {
+                return Err(FunctionLookupError::JITNotEnabled);
+            }
+
+            let address = self.get_function_address(fn_name)?;
+
+            assert_eq!(
+                size_of::<F>(),
+                size_of::<usize>(),
+                "The type `F` must have the same size as a function pointer"
+            );
+
+            let execution_engine = self.execution_engine.as_ref().expect(EE_INNER_PANIC);
+
+            Ok(JitFunction {
+                _execution_engine: execution_engine.clone(),
+                inner: transmute_copy(&address),
+            })
         }
-
-        let address = self.get_function_address(fn_name)?;
-
-        assert_eq!(
-            size_of::<F>(),
-            size_of::<usize>(),
-            "The type `F` must have the same size as a function pointer"
-        );
-
-        let execution_engine = self.execution_engine.as_ref().expect(EE_INNER_PANIC);
-
-        Ok(JitFunction {
-            _execution_engine: execution_engine.clone(),
-            inner: transmute_copy(&address),
-        })
     }
 
     /// Attempts to look up a function's address by its name. May return Err if the function cannot be
@@ -332,11 +336,6 @@ impl<'ctx> ExecutionEngine<'ctx> {
     /// It is recommended to use `get_function` instead of this method when intending to call the function
     /// pointer so that you don't have to do error-prone transmutes yourself.
     pub fn get_function_address(&self, fn_name: &str) -> Result<usize, FunctionLookupError> {
-        // LLVMGetFunctionAddress segfaults in llvm 5.0 -> 8.0 when fn_name doesn't exist. This is a workaround
-        // to see if it exists and avoid the segfault when it doesn't
-        #[cfg(any(feature = "llvm5-0", feature = "llvm6-0", feature = "llvm7-0", feature = "llvm8-0"))]
-        self.get_function_value(fn_name)?;
-
         let c_string = to_c_str(fn_name);
         let address = unsafe { LLVMGetFunctionAddress(self.execution_engine_inner(), c_string.as_ptr()) };
 
@@ -387,34 +386,38 @@ impl<'ctx> ExecutionEngine<'ctx> {
         function: FunctionValue<'ctx>,
         args: &[&GenericValue<'ctx>],
     ) -> GenericValue<'ctx> {
-        let mut args: Vec<LLVMGenericValueRef> = args.iter().map(|val| val.generic_value).collect();
+        unsafe {
+            let mut args: Vec<LLVMGenericValueRef> = args.iter().map(|val| val.generic_value).collect();
 
-        let value = LLVMRunFunction(
-            self.execution_engine_inner(),
-            function.as_value_ref(),
-            args.len() as u32,
-            args.as_mut_ptr(),
-        ); // REVIEW: usize to u32 ok??
+            let value = LLVMRunFunction(
+                self.execution_engine_inner(),
+                function.as_value_ref(),
+                args.len() as u32,
+                args.as_mut_ptr(),
+            ); // REVIEW: usize to u32 ok??
 
-        GenericValue::new(value)
+            GenericValue::new(value)
+        }
     }
 
     // TODOC: Marked as unsafe because input function could very well do something unsafe. It's up to the caller
     // to ensure that doesn't happen by defining their function correctly.
     // SubType: Only for JIT EEs?
     pub unsafe fn run_function_as_main(&self, function: FunctionValue<'ctx>, args: &[&str]) -> c_int {
-        let cstring_args: Vec<_> = args.iter().map(|&arg| to_c_str(arg)).collect();
-        let raw_args: Vec<*const _> = cstring_args.iter().map(|arg| arg.as_ptr()).collect();
+        unsafe {
+            let cstring_args: Vec<_> = args.iter().map(|&arg| to_c_str(arg)).collect();
+            let raw_args: Vec<*const _> = cstring_args.iter().map(|arg| arg.as_ptr()).collect();
 
-        let environment_variables = []; // TODO: Support envp. Likely needs to be null terminated
+            let environment_variables = []; // TODO: Support envp. Likely needs to be null terminated
 
-        LLVMRunFunctionAsMain(
-            self.execution_engine_inner(),
-            function.as_value_ref(),
-            raw_args.len() as u32,
-            raw_args.as_ptr(),
-            environment_variables.as_ptr(),
-        ) // REVIEW: usize to u32 cast ok??
+            LLVMRunFunctionAsMain(
+                self.execution_engine_inner(),
+                function.as_value_ref(),
+                raw_args.len() as u32,
+                raw_args.as_ptr(),
+                environment_variables.as_ptr(),
+            ) // REVIEW: usize to u32 cast ok??
+        }
     }
 
     pub fn free_fn_machine_code(&self, function: FunctionValue<'ctx>) {
@@ -487,7 +490,7 @@ pub struct JitFunction<'ctx, F> {
     inner: F,
 }
 
-impl<'ctx, F: Copy> JitFunction<'ctx, F> {
+impl<F: Copy> JitFunction<'_, F> {
     /// Returns the raw function pointer, consuming self in the process.
     /// This function is unsafe because the function pointer may dangle
     /// if the ExecutionEngine it came from is dropped. The caller is
@@ -540,9 +543,9 @@ macro_rules! impl_unsafe_fn {
             /// preserves the `unsafe` marker for any calls.
             #[allow(non_snake_case)]
             #[inline(always)]
-            pub unsafe fn call(&self, $( $param: $param ),*) -> Output {
+            pub unsafe fn call(&self, $( $param: $param ),*) -> Output { unsafe {
                 (self.inner)($( $param ),*)
-            }
+            }}
         }
 
         impl_unsafe_fn!(@recurse $( $param ),*);
@@ -664,8 +667,8 @@ pub mod experimental {
 
     #[test]
     fn test_mangled_str() {
-        use crate::targets::{CodeModel, InitializationConfig, RelocMode, Target};
         use crate::OptimizationLevel;
+        use crate::targets::{CodeModel, InitializationConfig, RelocMode, Target};
 
         Target::initialize_native(&InitializationConfig::default()).unwrap();
 
