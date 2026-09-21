@@ -894,6 +894,12 @@ bootstrap_check_disk_space() {
   fi
 }
 bootstrap_check_disk_space || exit 1
+if [ "${full_bootstrap}" -eq 1 ]; then
+  sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" --disk-only || {
+    echo "error: bootstrap disk preflight failed before Cargo; no compiler stage was started" >&2
+    exit 1
+  }
+fi
 
 [ -z "${resume_stage4_output}" ] ||
   [ "${output_dir}" = "${scheduler_lineage_output}" ] || {
