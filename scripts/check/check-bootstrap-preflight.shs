@@ -73,6 +73,24 @@ manifest_value() {
   sed -n "s/^${_key}=//p" "$_manifest"
 }
 
+run_preflight_probe() {
+  _seconds=$1
+  shift
+  case "${BOOTSTRAP_PREFLIGHT_TIMEOUT_MODE:-auto}" in
+    auto)
+      if command -v timeout >/dev/null 2>&1; then
+        "$(command -v timeout)" "$_seconds" "$@"
+      elif command -v gtimeout >/dev/null 2>&1; then
+        "$(command -v gtimeout)" "$_seconds" "$@"
+      else
+        "$@"
+      fi
+      ;;
+    none) "$@" ;;
+    *) return 125 ;;
+  esac
+}
+
 capture_bindings() {
   _out=$1
   _facade="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -195,6 +213,17 @@ selftest() {
   if probe_ok "$TMP/p_bad"; then echo "selftest FAIL: probe must-fail fixture passed"; st_fail=1; fi
   printf 'PROBE_BYTEORDER=little,little\n' > "$TMP/p_wrong"
   if probe_ok "$TMP/p_wrong"; then echo "selftest FAIL: probe wrong-value fixture passed"; st_fail=1; fi
+  # Supported hosts may have neither GNU timeout nor Homebrew gtimeout. The
+  # canonical bootstrap wrapper executes directly there, so preflight must use
+  # the same fallback. Both fixtures terminate themselves and remain bounded.
+  BOOTSTRAP_PREFLIGHT_TIMEOUT_MODE=none \
+    run_preflight_probe 1 sh -c 'exit 0' || {
+    echo "selftest FAIL: no-timeout direct fallback rejected passing command"; st_fail=1;
+  }
+  if BOOTSTRAP_PREFLIGHT_TIMEOUT_MODE=none \
+    run_preflight_probe 1 sh -c 'exit 7'; then
+    echo "selftest FAIL: no-timeout direct fallback erased failure"; st_fail=1
+  fi
   # disk arithmetic: must-FAIL when below threshold, must-PASS above
   [ 5 -ge 3 ] || st_fail=1
   if [ 2 -ge 3 ]; then echo "selftest FAIL: disk threshold arithmetic"; st_fail=1; fi
@@ -253,15 +282,7 @@ CHECKED=$((CHECKED+1))
 PROBE_DIR="$ROOT/build/preflight_probe.$$"
 mkdir -p "$PROBE_DIR"
 write_probe_spl "$PROBE_DIR/probe.spl"
-if command -v timeout >/dev/null 2>&1; then
-  PREFLIGHT_TIMEOUT=$(command -v timeout)
-elif command -v gtimeout >/dev/null 2>&1; then
-  PREFLIGHT_TIMEOUT=$(command -v gtimeout)
-else
-  echo "ERROR — nothing was checked (timeout or gtimeout is required)"
-  exit 2
-fi
-( cd "$ROOT" && "$PREFLIGHT_TIMEOUT" 300 "$SEED_PATH" run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
+( cd "$ROOT" && run_preflight_probe 300 "$SEED_PATH" run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ] || ! probe_ok "$TMP/probe.out"; then
   FAILS="$FAILS blocker-probe"
