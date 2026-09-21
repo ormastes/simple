@@ -586,16 +586,26 @@ run_compiler_unit_tests() {
   manifest="$tmp/${task}.manifest"
   find "$source_root/test/01_unit/compiler" -type f -name '*_spec.spl' -print | LC_ALL=C sort >"$manifest"
   : >"$log"
-  printf 'spec\tresult\tstatus\n' >"$inventory"
+  row_dir="$logs/${task}.rows"
+  mkdir -p "$row_dir"
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\n' >"$inventory"
   started=$(date +%s)
   failed=0
   spec_count=0
+  passed_count=0
+  timeout_count=0
+  crash_count=0
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     spec_count=$((spec_count + 1))
     relative=${spec#"$source_root/"}
+    row_output="$row_dir/$spec_count.json.log"
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
+    executed=0
+    row_passed=0
+    row_failed=0
+    row_skipped=0
     if ! validate_command_owner_receipt "$command_owner_receipt"; then
       printf 'command-owner receipt mismatch before %s\n' "$relative" >>"$log"
       status=90
@@ -606,20 +616,45 @@ run_compiler_unit_tests() {
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
           "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-            "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable
-      ) >>"$log" 2>&1 || status=$?
+            "$spec_timeout_seconds" 15 "$test_runner" "$relative" \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon --sequential --json
+      ) >"$row_output" 2>&1 || status=$?
+      cat "$row_output" >>"$log"
       if ! validate_command_owner_receipt "$command_owner_receipt"; then
         printf 'command-owner receipt changed during %s\n' "$relative" >>"$log"
         status=90
       fi
     fi
+    if [ "$status" -eq 0 ]; then
+      row_json_status=0
+      row_counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" \
+        "$row_output" 2>>"$log") || row_json_status=$?
+      if [ -n "$row_counts" ]; then
+        row_tab=$(printf '\t')
+        row_old_ifs=$IFS
+        IFS=$row_tab
+        set -- $row_counts
+        IFS=$row_old_ifs
+        [ "$#" -eq 3 ] || row_json_status=91
+      fi
+      if [ "$#" -eq 3 ] && [ -n "$row_counts" ]; then
+        row_passed=$1
+        row_failed=$2
+        row_skipped=$3
+        executed=$((row_passed + row_failed))
+      fi
+      status=$row_json_status
+    fi
     result=FAIL
     case "$status" in
-      0) result=PASS ;;
-      124|137) result=TIMEOUT ;;
-      134|136|139) result=CRASH ;;
+      0) result=PASS; passed_count=$((passed_count + 1)) ;;
+      124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
+      134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
     esac
-    printf '%s\t%s\t%s\n' "$relative" "$result" "$status" >>"$inventory"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
+      "$row_skipped" "$row_output" >>"$inventory"
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
@@ -630,8 +665,9 @@ run_compiler_unit_tests() {
   ended=$(date +%s)
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|command_owner_receipt=%s\n' \
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
     "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" "$spec_count" \
+    "$passed_count" "$timeout_count" "$crash_count" \
     "$command_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
 }
