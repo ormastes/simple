@@ -1,0 +1,97 @@
+"""
+# SCV cold inventory resource regression
+
+Runs the native workload in fresh processes at N and 2N. The shell collector
+only measures; this executable spec owns semantic and resource assertions.
+Set SCV_PROFILE_COMPILER to an admitted pure-Simple native-build producer.
+Its adjacent provenance/sanity receipts must match the executable hash.
+The collector compiles once, rejects missing/failed evidence, and never uses
+the Rust seed. A compiler without a test command can collect evidence now;
+execute this SSpec with a refreshed self-hosted test runner for qualification.
+
+Elapsed thresholds allow 20 ms timer/scheduler noise and 50% scope overhead.
+N/2N scaling permits 3x elapsed plus 20 ms: a sustained quadratic 4x growth
+must fail once it exceeds the noise floor. RSS allowances are 16 MiB for
+process/allocator noise and 8 MiB for slope noise; every peak stays below 1 GB.
+This micro gate does not qualify the full jobs=8 Stage 3 compiler build.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run}
+
+fn scv_profile_value(report: text, key: text) -> text:
+    val prefix = "{key}="
+    var found = ""
+    var matches = 0
+    for line in report.split("\n"):
+        if line.starts_with(prefix):
+            found = line.substring(prefix.len(), line.len())
+            matches = matches + 1
+    # Missing and duplicate evidence fail closed, including zero-valued metrics.
+    expect(matches).to_equal(1)
+    found
+
+fn scv_profile_number(report: text, key: text) -> i64:
+    val raw = scv_profile_value(report, key)
+    expect(raw.len()).to_be_greater_than(0)
+    var index = 0
+    while index < raw.len():
+        val digit = raw.substring(index, index + 1)
+        expect(digit >= "0" and digit <= "9").to_equal(true)
+        index = index + 1
+    val value = raw.to_i64()
+    expect(value).to_be_greater_than(0)
+    value
+
+describe "SCV native memory fixes preserve performance and semantics":
+    it "profiles scoped hashing and batch reduction at N and 2N under the compile memory cap":
+        step("Compile the narrow dependency closure and collect eight native process measurements")
+        val (report, errors, code) = process_run("/bin/sh", ["scripts/check/check-scv-inventory-resource-profile.shs"])
+        print report
+        print errors
+        expect(code).to_equal(0)
+        expect(scv_profile_value(report, "complete")).to_equal("yes")
+        expect(scv_profile_number(report, "compile_peak_rss_bytes")).to_be_less_than(1000000000)
+        expect(scv_profile_number(report, "compile_elapsed_us")).to_be_less_than(180000000)
+        step("Validate sample sizes, native completion, and positive elapsed and peak RSS evidence")
+        for mode in ["scoped", "baseline", "batch", "sequential"]:
+            val expected_n = if mode == "scoped" or mode == "baseline": 256 else: 512
+            expect(scv_profile_number(report, "{mode}_n_count")).to_equal(expected_n)
+            expect(scv_profile_number(report, "{mode}_double_count")).to_equal(expected_n * 2)
+            for size in ["n", "double"]:
+                expect(scv_profile_number(report, "{mode}_{size}_peak_rss_bytes")).to_be_less_than(1000000000)
+                expect(scv_profile_number(report, "{mode}_{size}_elapsed_us")).to_be_less_than(60000000)
+        step("Compare all retained event facets and complete encoded inventory digests")
+        for size in ["n", "double"]:
+            val scope_digest = scv_profile_value(report, "scoped_{size}_digest")
+            val batch_digest = scv_profile_value(report, "batch_{size}_digest")
+            expect(scope_digest.len()).to_equal(324)
+            expect(batch_digest.len()).to_equal(64)
+            expect(scope_digest).to_equal(scv_profile_value(report, "baseline_{size}_digest"))
+            expect(batch_digest).to_equal(scv_profile_value(report, "sequential_{size}_digest"))
+        step("Reject elapsed regressions for reclamation and quadratic batch initialization")
+        for mode in ["scoped", "batch"]:
+            val small = scv_profile_number(report, "{mode}_n_elapsed_us")
+            val large = scv_profile_number(report, "{mode}_double_elapsed_us")
+            expect(large <= small * 3 + 20000).to_equal(true)
+        for size in ["n", "double"]:
+            val scoped = scv_profile_number(report, "scoped_{size}_elapsed_us")
+            val baseline = scv_profile_number(report, "baseline_{size}_elapsed_us")
+            expect(scoped * 2 <= baseline * 3 + 40000).to_equal(true)
+            val batch = scv_profile_number(report, "batch_{size}_elapsed_us")
+            val sequential = scv_profile_number(report, "sequential_{size}_elapsed_us")
+            expect(batch <= sequential + 20000).to_equal(true)
+        step("Check peak memory and growth against the matching unscoped/sequential baselines")
+        for size in ["n", "double"]:
+            val scoped = scv_profile_number(report, "scoped_{size}_peak_rss_bytes")
+            val baseline = scv_profile_number(report, "baseline_{size}_peak_rss_bytes")
+            expect(scoped <= baseline + 16777216).to_equal(true)
+            val batch = scv_profile_number(report, "batch_{size}_peak_rss_bytes")
+            val sequential = scv_profile_number(report, "sequential_{size}_peak_rss_bytes")
+            expect(batch <= sequential + 16777216).to_equal(true)
+        val scoped_growth = scv_profile_number(report, "scoped_double_peak_rss_bytes") - scv_profile_number(report, "scoped_n_peak_rss_bytes")
+        val baseline_growth = scv_profile_number(report, "baseline_double_peak_rss_bytes") - scv_profile_number(report, "baseline_n_peak_rss_bytes")
+        expect(scoped_growth <= baseline_growth + 8388608).to_equal(true)
+        val batch_growth = scv_profile_number(report, "batch_double_peak_rss_bytes") - scv_profile_number(report, "batch_n_peak_rss_bytes")
+        val sequential_growth = scv_profile_number(report, "sequential_double_peak_rss_bytes") - scv_profile_number(report, "sequential_n_peak_rss_bytes")
+        expect(batch_growth <= sequential_growth + 8388608).to_equal(true)
