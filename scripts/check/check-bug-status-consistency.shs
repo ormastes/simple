@@ -14,7 +14,7 @@
 # reads is text that drifts.
 #
 # Checks (all fail-closed):
-#   A no-status          doc has no parseable `Status:` line ANYWHERE in the file
+#   A no-status          database-backed doc has no parseable `Status:` line ANYWHERE in the file
 #   B open-without-row   doc says OPEN (Pn) but has no row in bug_db.sdn
 #   C db-open-doc-done   bug_db.sdn says `open`, doc says FIXED/CLOSED/DUPLICATE
 #   D db-done-doc-open   bug_db.sdn says fixed/resolved/closed, doc says OPEN (Pn)
@@ -113,13 +113,23 @@ scan() {
             close(path)
             if (generated) continue
 
-            checked++
             id = base; sub(/\.md$/, "", id)
-
-            if (!found) { bad++; print "no-status\t" base "\t(no parseable Status: line anywhere in the file)"; continue }
-
-            dc = normdoc(val)
             hasrow = (id in dbstatus)
+
+            # The tracking directory also contains investigation notes, audit
+            # reports, and generated evidence that are not bug records. They
+            # have no DB row and are not required to carry a Status field.
+            # Keep the integrity contract strict for actual DB records, and
+            # still surface a non-record that explicitly claims OPEN so it can
+            # be entered into the DB rather than silently disappearing.
+            if (!found && !hasrow) continue
+
+            dc = found ? normdoc(val) : ""
+            if (!hasrow && dc != "OPEN") continue
+
+            checked++
+            if (!found) { bad++; print "no-status\t" base "\t(database-backed doc has no parseable Status: line anywhere in the file)"; continue }
+
             dbc = hasrow ? normdb(dbstatus[id]) : ""
 
             if (dc == "OPEN" && !hasrow) {
@@ -184,7 +194,7 @@ DBEOF
 
     # 5 MUST FAIL: no parseable Status at all
     d="$tdir/f5"; mkdir -p "$d"; mk_db "$d"
-    printf '# x\n\nDate: 2026-08-17\n' > "$d/fixture_no_row.md"
+    printf '# x\n\nDate: 2026-08-17\n' > "$d/fixture_open_bug.md"
     expect "no-status" "$d" 1
 
     # 6 MUST FAIL: doc says OPEN but no db row
@@ -220,6 +230,13 @@ DBEOF
     d="$tdir/f10"; mkdir -p "$d"; mk_db "$d"
     { printf '# x\n'; i=0; while [ $i -lt 90 ]; do echo "filler line $i"; i=$((i + 1)); done; printf 'Status: FIXED\n'; } > "$d/fixture_open_bug.md"
     expect "late-status-still-conflicts" "$d" 1
+
+    # 11 an untracked investigation note is not a DB record merely because it
+    # lives next to bug records. It may omit Status without making the status
+    # gate red; an explicit OPEN still fails through fixture 6 above.
+    d="$tdir/f11"; mkdir -p "$d"; mk_db "$d"
+    printf '# investigation note\n\nEvidence only; no lifecycle state.\n' > "$d/untracked_note.md"
+    expect "untracked-no-status-is-not-a-db-record" "$d" 0
 
     rm -rf "$tdir"
     if [ "$fails" -ne 0 ]; then
