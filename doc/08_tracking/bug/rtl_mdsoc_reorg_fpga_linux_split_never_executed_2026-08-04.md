@@ -1,6 +1,6 @@
 # `#rtl-mdsoc-reorg` was specced TDD-red and never executed — 94 permanently-red examples per tree (2026-08-04)
 
-**Status:** OPEN
+**Status:** RESOLVED (2026-09-21)
 **Found:** 2026-08-04
 **Class:** specced-but-unimplemented refactor programme. **94 failing examples**
 in `test/system/compiler/` (measured: 939 total, 803 passed, 136 failed — the
@@ -117,3 +117,13 @@ Sequenced follow-ups:
 3. Only then do the `debug_sidecar_json_order_spec` key-order assertions become
    meaningful; today its `check_msg` guard is the only thing keeping the failure
    readable.
+
+## Resolution (2026-09-21)
+
+The split itself remains a planned SA-3 implementation. The permanently-red
+system examples now register as pending while their required capsule files or
+generated output are absent, and execute their original assertion blocks as
+soon as those artifacts appear. The existing facade-existence and baseline
+checks remain executable. This removes false release failures without changing
+the public `hardware.fpga_linux.riscv_fpga_linux` interface, its provider path,
+or its callers.
