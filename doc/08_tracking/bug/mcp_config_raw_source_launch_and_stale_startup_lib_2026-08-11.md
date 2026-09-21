@@ -108,13 +108,13 @@ the five binaries do not exist**:
   `bin/release/<triple>/`. Building them requires a native-build plus the same
   hash-admission/probe treatment; untested surface, spec first. Not done here.
 
-## 6. Coverage gap (why §2–§4 were not merged)
+## 6. Coverage gap (why §3–§4 remain deferred)
 
-`src/app/lsp_mcp/`, `src/app/t32_lsp_mcp/`, and `config/mcp/mcp_startup_lib.shs`
-have no tests. Repo rule: merge only where covered, else write a modern SSpec
-spec first or skip with a recorded reason. This document is that recorded
-reason. The one change that *was* merged (§1) landed with an extension to an
-existing, executable, sabotage-verified guard.
+`src/app/lsp_mcp/` and `src/app/t32_lsp_mcp/` have no tests. Repo rule: merge
+only where covered, else write a modern SSpec spec first or skip with a
+recorded reason. This document is that recorded reason. The one change that
+*was* merged (§1) landed with an extension to an existing, executable,
+sabotage-verified guard.
 
 ## 7. Not changed on purpose: `bin/simple_lsp_mcp_server.cmd`
 
@@ -160,17 +160,18 @@ wrappers — are explicitly RECORDED-not-fixed by this doc and stay OPEN; nothin
 in `src/app/simple_lsp_mcp/main.spl` implements them. **No patch available in
 `src/app/`; this is a backlog record, not a live app-code defect.**
 
-## Re-verification 2026-08-17 (app-rest lane) — section 1 FIXED, sections 2-4 LIVE
+## Re-verification 2026-08-17 (app-rest lane) — section 1 FIXED, sections 2-4 LIVE (historical)
 
 FIXED: `.mcp.json:7-8,18-19,29-30` all `exec "$PWD/bin/simple_mcp_server"` /
 `bin/simple_lsp_mcp_server` — no raw `.spl` launch remains, and the node bridge
 is gone from the LSP lane.
 
-STILL LIVE by content: `config/mcp/mcp_startup_lib.shs` (14,686 B) is still
-present and obsolete, and the orphan `src/app/lsp_mcp/main.spl` (13,877 B)
-still exists with its own dispatch (`:418` `make_error(id, -32601, ...)`).
+At that historical revision, `config/mcp/mcp_startup_lib.shs` (14,686 B) was
+still present and obsolete, and the orphan `src/app/lsp_mcp/main.spl`
+(13,877 B) still existed with its own dispatch (`:418`
+`make_error(id, -32601, ...)`).
 
-## Triage 2026-09-13
+## Triage 2026-09-13 (historical)
 
 Section 1 (raw-source MCP config launches) already confirmed FIXED by
 prior lanes. Sections 2-4 (obsolete mcp_startup_lib.shs, duplicated
@@ -178,6 +179,22 @@ JSON-RPC framing, orphan src/app/lsp_mcp/main.spl) are explicitly
 recorded as deferred pending a spec-first change on untested surface
 -- a multi-part cleanup/dedup decision, not a localized bug, and the
 doc itself declines to guess which framing implementation should
-survive. Exceeds this lane's per-item scope as a single fix. Leaving
-OPEN as recorded.
+survive. Exceeded that lane's per-item scope as a single fix; the later
+2026-09-21 lane removed only the obsolete library with a focused contract
+guard and left the remaining sections open.
 
+## Triage 2026-09-21 (Linux/POSIX wrapper lane)
+
+Section 2 is now fixed in the isolated Linux/POSIX lane: the 388-line
+`config/mcp/mcp_startup_lib.shs` source/SMF startup library was deleted after
+an executable-reference audit found no caller under `bin/`, `scripts/setup/`,
+or `config/mcp/`. The existing
+`scripts/check/check-mcp-wrapper-contract.shs` now fails if that obsolete
+library returns or if a production launch surface references it. This keeps
+the current admitted-native wrapper contract from regressing to the abandoned
+source-compile model.
+
+The row remains OPEN because section 5 is still incomplete: POSIX T32 wrapper
+artifacts (`bin/t32_mcp_server` and `bin/t32_lsp_mcp_server`) require their
+own native-build, hash-admission, and protocol smoke work. Sections 3 and 4
+also remain deferred pending their own specs.

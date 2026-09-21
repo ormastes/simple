@@ -6,6 +6,24 @@ trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 ROOT="$TMPDIR/root"
 BIN="$ROOT/bin"
 mkdir -p "$BIN"
+CONTRACT_SOURCE_ROOT="${MCP_WRAPPER_CONTRACT_SOURCE_ROOT:-.}"
+CONTRACT_SOURCE_ROOT="$(CDPATH= cd -- "$CONTRACT_SOURCE_ROOT" && pwd -P)"
+
+# The old POSIX startup library implemented the abandoned source/SMF launch
+# model.  Current wrappers must resolve admitted native artifacts directly;
+# keeping the orphan available invites a caller to reintroduce that model.
+[ ! -e "$CONTRACT_SOURCE_ROOT/config/mcp/mcp_startup_lib.shs" ] || {
+  echo "obsolete MCP startup library must remain deleted" >&2
+  exit 1
+}
+if grep -R -n -F 'mcp_startup_lib' \
+  "$CONTRACT_SOURCE_ROOT/bin" \
+  "$CONTRACT_SOURCE_ROOT/scripts/setup" \
+  "$CONTRACT_SOURCE_ROOT/config/mcp" 2>/dev/null; then
+  echo "production MCP launch surfaces still reference the obsolete startup library" >&2
+  exit 1
+fi
+
 cp scripts/lib/host-executable.shs "$BIN/.simple-host-executable.shs"
 export SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1
 
@@ -66,7 +84,12 @@ if grep -q 'src/app/simple_lsp_mcp/main.spl\|SIMPLE_EXECUTION_MODE=interpreter' 
   exit 1
 fi
 
+fixture_platform="$(. "$BIN/.simple-host-executable.shs"; simple_default_platform_triple)"
+fixture_release_label="release/$fixture_platform"
 mkdir -p "$BIN/release/x86_64-unknown-linux-gnu"
+if [ "$fixture_platform" != x86_64-unknown-linux-gnu ]; then
+  ln -s x86_64-unknown-linux-gnu "$BIN/release/$fixture_platform"
+fi
 cat > "$TMPDIR/native" <<'EOF'
 #!/bin/sh
 if [ "$#" -eq 0 ]; then
@@ -109,11 +132,11 @@ mkdir -p "$TMPDIR/outside"
 "$BIN/simple_mcp_server" --help --bogus > "$TMPDIR/mcp-help-tail.out"
 "$BIN/simple_lsp_mcp_server" --help --bogus > "$TMPDIR/lsp-help-tail.out"
 "$BIN/simple_lsp_mcp_server" --surface stdout > "$TMPDIR/lsp-surface-tail.out"
-grep -q 'release/x86_64-unknown-linux-gnu/simple_mcp_server' "$TMPDIR/mcp.out"
+grep -q "$fixture_release_label/simple_mcp_server" "$TMPDIR/mcp.out"
 grep -q 'args=alpha beta' "$TMPDIR/mcp.out"
 grep -q 'args=--stdio --bogus' "$TMPDIR/mcp-stdio-tail.out"
 grep -q 'args=--help --bogus' "$TMPDIR/mcp-help-tail.out"
-grep -q 'release/x86_64-unknown-linux-gnu/simple_lsp_mcp_server' "$TMPDIR/lsp.out"
+grep -q "$fixture_release_label/simple_lsp_mcp_server" "$TMPDIR/lsp.out"
 grep -q 'args=gamma' "$TMPDIR/lsp.out"
 grep -q 'args=--help --bogus' "$TMPDIR/lsp-help-tail.out"
 grep -q 'args=--surface stdout' "$TMPDIR/lsp-surface-tail.out"
@@ -268,7 +291,7 @@ for t32 in t32_mcp_server t32_lsp_mcp_server; do
   fi
   printf '%s\n' "$t32_hash" > "$BIN/release/x86_64-unknown-linux-gnu/$t32.sha256"
   "$BIN/$t32" alpha beta > "$TMPDIR/$t32.out"
-  grep -q "release/x86_64-unknown-linux-gnu/$t32" "$TMPDIR/$t32.out"
+  grep -q "$fixture_release_label/$t32" "$TMPDIR/$t32.out"
   grep -q 'args=alpha beta' "$TMPDIR/$t32.out"
   grep -q "cwd=$ROOT" "$TMPDIR/$t32.out"
 

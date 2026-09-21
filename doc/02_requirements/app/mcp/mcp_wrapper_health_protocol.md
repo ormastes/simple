@@ -4,7 +4,13 @@
 **Category:** Infrastructure / MCP / Reliability
 **Priority:** High
 **Proposed:** 2026-04-16
-**Status:** Partially Implemented (sentinel cache live in `mcp_startup_lib.shs`)
+**Status:** Historical proposal (superseded by the admitted-native wrapper
+contract)
+
+The original source/SMF startup-library proposal is retained as historical
+requirements context. `config/mcp/mcp_startup_lib.shs` was deleted after an
+executable-reference audit; current POSIX wrappers must not source it or
+reintroduce its abandoned fallback model.
 
 ## Problem
 
@@ -37,7 +43,8 @@ The 2026-04-16 emergency fix added an opt-in cache mechanism (`SIMPLE_MCP_DISABL
 
 ### 1. Standardize the wrapper contract
 
-Every MCP wrapper sources `config/mcp/mcp_startup_lib.shs` and calls one entry point:
+The original proposal required every MCP wrapper to source
+`config/mcp/mcp_startup_lib.shs` and call one entry point:
 ```sh
 mcp_run "$ENTRY_SPL" "$NATIVE_BIN" "$LIB_PATH" "$@"
 ```
