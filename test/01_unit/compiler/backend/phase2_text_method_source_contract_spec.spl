@@ -1,0 +1,40 @@
+# Purpose: reproduce the Phase 2 native build failures caused by text methods
+# that the bootstrap MIR/backend does not lower.
+# @cover src/app/devhub/convert_storage.spl
+# @cover src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl
+# @cover src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl
+# @cover src/lib/gc_async_mut/gpu_lane/metal_vm_executor.spl
+
+use std.spec.*
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Phase 2 text method source contract":
+    it "keeps DevHub conversion on the admitted Unicode character helper":
+        step("Read the exact source that failed the Phase 2 CLI build")
+        val body = source("src/app/devhub/convert_storage.spl")
+        expect(body.len()).to_be_greater_than(0)
+        step("Reject the known native char_count method gap")
+        expect(body.contains(".char_count()")).to_equal(false)
+        expect(body.contains("utext_chars(s)")).to_equal(true)
+
+    it "keeps every GPU VM budget parser on the admitted parse_int method":
+        val paths = [
+            "src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl",
+            "src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl",
+            "src/lib/gc_async_mut/gpu_lane/metal_vm_executor.spl"
+        ]
+        var checked = 0
+        for path in paths:
+            step("Check the exact GPU VM source: {path}")
+            val body = source(path)
+            expect(body.len()).to_be_greater_than(0)
+            expect(body.contains(".to_i64_opt()")).to_equal(false)
+            expect(body.contains("raw.trim().parse_int()")).to_equal(true)
+            checked = checked + 1
+        step("Non-vacuity: CUDA, Vulkan, and Metal were all checked")
+        expect(checked).to_equal(3)
