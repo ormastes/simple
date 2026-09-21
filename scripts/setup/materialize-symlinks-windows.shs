@@ -338,6 +338,9 @@ public static class MaterializerApi {
     [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle h, uint access,
         ref ObjectAttributes attrs, out IoStatus status, IntPtr size, uint attributes,
         uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+    [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle h,
+        out IoStatus status, byte[] information, uint length, int informationClass);
+    [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
     static SafeFileHandle CreateDirectoryHeld(string path) {
         string native = @"\??\" + Path.GetFullPath(path);
         IntPtr buffer = Marshal.StringToHGlobalUni(native), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
@@ -372,11 +375,13 @@ public static class MaterializerApi {
         if (!FlushFileBuffers(h)) throw Error("receipt.flush");
     }
     static bool RenameNoReplace(SafeFileHandle h, byte[] rename, out int error) {
-        if (SetFileInformationByHandle(h, 3, rename, (uint)rename.Length)) {
+        IoStatus io;
+        int status = NtSetInformationFile(h, out io, rename, (uint)rename.Length, 10);
+        if (status >= 0) {
             error = 0;
             return true;
         }
-        error = Marshal.GetLastWin32Error();
+        error = unchecked((int)RtlNtStatusToDosError(status));
         return false;
     }
     static bool IsTransientRenameError(int error) { return error == 32 || error == 33; }
