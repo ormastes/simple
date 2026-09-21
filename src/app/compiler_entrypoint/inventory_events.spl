@@ -5,6 +5,7 @@ use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_r
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
 
 struct CompilerInventoryRefreshV1:
     valid: bool
@@ -84,25 +85,26 @@ fn compiler_inventory_git_head_v1(root: text) -> text:
 
 fn compiler_inventory_event_push_v1(
     events: [CompileSourceEventV1], root: text, operation: text, path: text
-) -> [CompileSourceEventV1]:
-    val normalized = path.trim().replace("\\", "/")
+) -> [CompileSourceEventV1]?:
+    val trimmed = path.trim()
+    val normalized = if trimmed.contains("\\"): trimmed.replace("\\", "/") else: trimmed
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
-        return events
+        return Some(events)
     # The inventory tracks compilable sources only (.spl and simple.sdn
     # manifests). Release/development checkouts carry tens of thousands of
     # other files under src/ (vendored C, fonts, docs); admitting the first
     # one fails apply with event-invalid, and hashing them dominated
     # cold-init wall time. Filter before touching the file.
     if not compile_source_inventory_path_valid_v1(normalized):
-        return events
+        return Some(events)
     if operation == "delete":
-        return events.push(compile_source_inventory_git_event_v1(
-            "delete", normalized, ""))
+        return Some(events.push(compile_source_inventory_git_event_v1(
+            "delete", normalized, "")))
     val absolute = root + "/" + normalized
     if not file_exists(absolute):
-        return events.push(compile_source_inventory_git_event_v1(
-            "delete", normalized, ""))
+        return Some(events.push(compile_source_inventory_git_event_v1(
+            "delete", normalized, "")))
     # Reducing straight to an event here (digests + byte_count only) rather
     # than collecting a change record that keeps `content` alive is the
     # point: the outer array below no longer has to retain every listed
@@ -111,12 +113,14 @@ fn compiler_inventory_event_push_v1(
     # on a ~1.6 GB checkout (measured 21 GB RSS / 342 CPU-s before this
     # change — see
     # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
-    events.push(compile_source_inventory_git_event_v1(
-        operation, normalized, file_read(absolute)))
+    val event = compiler_inventory_file_event_v1(operation, normalized, absolute)
+    if event == nil:
+        return nil
+    Some(events.push(event!))
 
 fn compiler_inventory_parse_name_status_v1(
     root: text, output: text, events: [CompileSourceEventV1]
-) -> [CompileSourceEventV1]:
+) -> [CompileSourceEventV1]?:
     var result = events
     for line in output.split("\n"):
         if line.trim() == "":
@@ -127,8 +131,11 @@ fn compiler_inventory_parse_name_status_v1(
         val status = line[:separator]
         val path = line[separator + 1:]
         val operation = if status.starts_with("D"): "delete" else: "modify"
-        result = compiler_inventory_event_push_v1(result, root, operation, path)
-    result
+        val next = compiler_inventory_event_push_v1(result, root, operation, path)
+        if next == nil:
+            return nil
+        result = next!
+    Some(result)
 
 fn compiler_inventory_git_events_v1(
     root: text, previous_head: text, source_roots: [text], cold_init: bool
@@ -142,8 +149,11 @@ fn compiler_inventory_git_events_v1(
             return nil
         for path in listed!.split("\n"):
             if path.trim() != "":
-                events = compiler_inventory_event_push_v1(
+                val next = compiler_inventory_event_push_v1(
                     events, root, "create", path)
+                if next == nil:
+                    return nil
+                events = next!
         return Some(events)
     val head = compiler_inventory_git_head_v1(root)
     if head == "" or previous_head == "":
@@ -154,7 +164,10 @@ fn compiler_inventory_git_events_v1(
                 "--no-renames", previous_head, head, "--"] + source_roots)
         if committed == nil:
             return nil
-        events = compiler_inventory_parse_name_status_v1(root, committed!, events)
+        val next = compiler_inventory_parse_name_status_v1(root, committed!, events)
+        if next == nil:
+            return nil
+        events = next!
     val working = compiler_inventory_git_lines_v1(
         root, ["-c", "core.quotePath=false", "diff", "--name-status",
             "--no-renames", "HEAD", "--"] + source_roots)
@@ -162,10 +175,16 @@ fn compiler_inventory_git_events_v1(
         root, ["ls-files", "--others", "--exclude-standard", "--"] + source_roots)
     if working == nil or untracked == nil:
         return nil
-    events = compiler_inventory_parse_name_status_v1(root, working!, events)
+    val changed = compiler_inventory_parse_name_status_v1(root, working!, events)
+    if changed == nil:
+        return nil
+    events = changed!
     for path in untracked!.split("\n"):
         if path.trim() != "":
-            events = compiler_inventory_event_push_v1(events, root, "create", path)
+            val next = compiler_inventory_event_push_v1(events, root, "create", path)
+            if next == nil:
+                return nil
+            events = next!
     Some(events)
 
 fn compiler_inventory_decode_v1(value: text) -> text:
