@@ -36,11 +36,17 @@ now returns an error immediately when `spl_dlopen_checked` returns a nonzero
 status. It retains the direct-return fallback only for status zero with an
 unobserved output handle, the documented interpreter writeback-loss case.
 
-`ffi_dispatch_platform_spec.spl` was red (3/3 examples failed: missing Darwin
-mapping helper and missing bare soname raised); after the repair it passed 4/4
-in interpreter mode on Linux. This proves the mapping and nil failure path on
-Linux. A macOS run of the existing CUDA and Vulkan specs is still required to
-prove the originally observed host behavior.
+The focused `ffi_dispatch_platform_spec.spl` was run on Linux with the shared
+`/home/yoon/dev/simple/bin/simple`, which identified itself as a **Rust-built
+bootstrap seed**, in interpreter mode with `SIMPLE_LIB=src`. Its pre-edit RED
+had two helper-existence failures (`gpu_lib_candidates_for_os` did not yet
+exist) and one observed missing-bare-soname `spl_dlopen` raise. The helper
+failures are test-first evidence, not a reproduction of Darwin selection on a
+macOS host. After the source repair the spec passed 4/4 on that same seed.
+This proves the candidate mapping and nil failure path only under the Linux
+seed interpreter. The admitted pure-Simple runtime and the originally affected
+macOS host remain unverified; run the focused spec plus the existing CUDA and
+Vulkan specs on macOS before closing this bug.
 
 The public `gpu_lib_candidates`, `try_load_gpu_lib`, `DynLib.load`, and
 `DynLib.load_checked` signatures are unchanged. SimpleOS keeps the static
