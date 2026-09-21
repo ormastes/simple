@@ -407,11 +407,12 @@ public static class MaterializerApi {
     }
     // Retain handles without write/delete sharing through the protected action.
     // Starting at the volume/share root prevents ancestor rename/reparse swaps.
-    static void Parents(string path, bool create, List<SafeFileHandle> held) {
+    static SafeFileHandle Parents(string path, bool create, List<SafeFileHandle> held) {
         string full = Path.GetFullPath(path), root = Path.GetPathRoot(full);
         string parent = Path.GetDirectoryName(full);
         if (String.IsNullOrEmpty(parent)) parent = root;
         string current = root;
+        SafeFileHandle directParent = null;
         var parts = parent.Substring(root.Length).Split(new char[] {'\\'}, StringSplitOptions.RemoveEmptyEntries);
         // Phase 1 is read-only: hold every existing prefix before any creation.
         int n;
@@ -424,12 +425,13 @@ public static class MaterializerApi {
             if (h.IsInvalid) {
                 int error = Marshal.GetLastWin32Error(); h.Dispose();
                 if (n >= 0 && error == 2) {
-                    if (!create) return;
+                    if (!create) return directParent;
                     break;
                 }
                 throw new IOException("api.open-parent:" + candidate + ":win32=" + error);
             }
             held.Add(h);
+            directParent = h;
             var t = Tag(h);
             if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + candidate);
             if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + candidate);
@@ -441,11 +443,13 @@ public static class MaterializerApi {
         for (; n < parts.Length; n++) {
             current = Path.Combine(current, parts[n]);
             var h = CreateDirectoryHeld(current); held.Add(h);
+            directParent = h;
             var t = Tag(h);
             if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + current);
             if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + current);
             Identity(h);
         }
+        return directParent;
     }
     public static void ProbeTarget(string path) {
         var held = new List<SafeFileHandle>();
@@ -688,7 +692,9 @@ public static class MaterializerApi {
         var held = new List<SafeFileHandle>();
         FileStream policyStream = null;
         try {
-            Parents(destination, !checkOnly, held);
+            SafeFileHandle destinationParent = Parents(destination, !checkOnly, held);
+            if (destinationParent == null || destinationParent.IsInvalid)
+                throw new IOException("receipt.destination-parent");
             using (var existing = CreateFileW(destination, 0, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
                 if (!existing.IsInvalid) throw new IOException("receipt.destination-exists");
                 int e = Marshal.GetLastWin32Error();
@@ -807,10 +813,16 @@ public static class MaterializerApi {
                 // Win32 I/O keeps publication on this one handle.
                 try {
                     WriteAndFlush(h, receiptBytes);
-                    byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+                    byte[] name = Encoding.Unicode.GetBytes(Path.GetFileName(destination));
                     int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
                     byte[] rename = new byte[lengthOffset + 4 + name.Length + 2];
-                    // ReplaceIfExists=FALSE, RootDirectory=NULL; native full path.
+                    // ReplaceIfExists=FALSE. Bind the relative destination to
+                    // the already-held parent: a full-path rename asks Windows
+                    // to reopen that directory and conflicts with our own
+                    // no-write/no-delete-sharing authority handle.
+                    int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+                    byte[] rootHandle = BitConverter.GetBytes(destinationParent.DangerousGetHandle().ToInt64());
+                    Buffer.BlockCopy(rootHandle, 0, rename, rootOffset, IntPtr.Size);
                     Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, rename, lengthOffset, 4);
                     Buffer.BlockCopy(name, 0, rename, lengthOffset + 4, name.Length);
                     int renameError = 0;
@@ -900,7 +912,12 @@ start_native_batch() {
     export MATERIALIZER_TREE="$(to_win_path "$raw_links_list")" MATERIALIZER_APPROVE_CONVERSION="$approve_conversion"
     export MATERIALIZER_HEAD="$head_sha" MATERIALIZER_ROOT_POSIX_B64="$(printf '%s' "$repo_root" | base64 -w0)"
     export MATERIALIZER_PRODUCER_SHA256="$producer_sha256" MATERIALIZER_POLICY_SHA256="$policy_sha256"
-    coproc MATERIALIZER_BATCH { powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(to_win_path "$work_dir/api.ps1")"; }
+    # Add-Type needs a writable compiler temp directory. Native PowerShell can
+    # otherwise fall back to C:\Windows when the launcher has no usable
+    # TEMP/TMP, failing before the materializer API starts.
+    native_work_dir=$(to_win_path "$work_dir") || return 1
+    [ -n "$native_work_dir" ] || return 1
+    coproc MATERIALIZER_BATCH { TEMP="$native_work_dir" TMP="$native_work_dir" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(to_win_path "$work_dir/api.ps1")"; }
     batch_pid=$MATERIALIZER_BATCH_PID
     exec 8>&${MATERIALIZER_BATCH[1]} 9<&${MATERIALIZER_BATCH[0]}
     IFS= read -r -t 60 ready <&9 || return 1
