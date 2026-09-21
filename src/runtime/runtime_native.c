@@ -10973,7 +10973,10 @@ static wchar_t* rt_widen_long_path_rc(const char* path) {
         if (need == 0) return wide;
         full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
         if (wcslen(full) < 248) { free(full); return wide; }
         out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
@@ -13892,7 +13895,10 @@ static wchar_t* spl_widen_long_path(const char* path) {
         if (need == 0) return wide;
         full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
         if (wcslen(full) < 248) { free(full); return wide; }
         out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
