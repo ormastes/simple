@@ -168,6 +168,14 @@ pub(package) fn module_surface_import_resolution_trace_v1(
     registry: ModuleSurfacesByName, facade: ModuleSurface,
     import_id: text
 ) -> NativeResolutionTraceV1:
+    module_surface_import_resolution_trace_with_generation_v1(
+        registry, facade, import_id,
+        module_surface_stable_resolution_generation_v1(registry))
+
+fn module_surface_import_resolution_trace_with_generation_v1(
+    registry: ModuleSurfacesByName, facade: ModuleSurface,
+    import_id: text, stable_generation: text
+) -> NativeResolutionTraceV1:
     """Capture the actual frozen HIR import selection plus ordered probes.
 
     Probe order mirrors the absolute resolver's precedence. Relative imports
@@ -228,8 +236,7 @@ pub(package) fn module_surface_import_resolution_trace_v1(
         consumer_module_id: facade.preferred_registry_name,
         import_id: import_id, probes: probes, selected: selected,
         selected_count: if selected == "": 0 else: 1,
-        dir_generation: "module-surfaces-" +
-            module_surface_stable_resolution_generation_v1(registry),
+        dir_generation: "module-surfaces-" + stable_generation,
         resolver_version: NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1)
 
 pub(package) fn module_surface_preferred_registry_name(
@@ -388,6 +395,11 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         return Err(generation_result.unwrap_err())
     val generation = generation_result.unwrap()
     registry.generation = generation
+    # The resolution generation depends only on ordered names and canonical
+    # paths. Freeze does not change either. Compute its insertion-sort/hash
+    # projection once, rather than once for every import in every surface.
+    val stable_resolution_generation =
+        module_surface_stable_resolution_generation_v1(registry)
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         var surface = registry.surfaces[surface_index]
@@ -430,8 +442,9 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         var import_index = 0
         while import_index < surface.imports.len():
             val import_decl = surface.imports[import_index]
-            val resolution_trace = module_surface_import_resolution_trace_v1(
-                registry, surface, import_decl.module)
+            val resolution_trace = module_surface_import_resolution_trace_with_generation_v1(
+                registry, surface, import_decl.module,
+                stable_resolution_generation)
             val target_name = resolution_trace.selected
             var target_index = -1
             if target_name != "":
