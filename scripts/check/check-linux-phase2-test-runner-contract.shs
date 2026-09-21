@@ -1,0 +1,62 @@
+#!/bin/sh
+# Linux-safe contract check for the native-Linux Phase 2 test runner.
+
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runner="$root/scripts/bootstrap/run-linux-phase2-tests.shs"
+checks=0
+failed=0
+
+check() {
+    checks=$((checks + 1))
+    if ! "$@"; then
+        failed=$((failed + 1))
+        echo "FAIL: $*" >&2
+    fi
+}
+
+check test -f "$runner"
+check sh -n "$runner"
+
+tasks=$(sh "$runner" --list-tasks) || {
+    echo "ERROR — nothing was checked (task inventory failed)"
+    exit 2
+}
+for task in base_phase_matrix interpreter_module_load native_module_build \
+    native_module_execute interpreter_regression loader_regression; do
+    checks=$((checks + 1))
+    if ! printf '%s\n' "$tasks" | grep -qx "$task"; then
+        failed=$((failed + 1))
+        echo "FAIL: missing task $task" >&2
+    fi
+done
+
+checks=$((checks + 1))
+if printf '%s\n' "$tasks" | grep -Eq 'placeholder|todo|mock'; then
+    failed=$((failed + 1))
+    echo "FAIL: task inventory contains a vacuous marker" >&2
+fi
+
+for required in \
+    'bootstrap-phase-verification[.]shs' \
+    'rm -rf "\$verification_root/outputs/compiler-tools"' \
+    'use phase2_loader_dep[.]{phase2_answer}' \
+    'native-build' \
+    'run "\$fixture/main[.]spl"' \
+    'SIMPLE_NO_STUB_FALLBACK=1' \
+    'simple_test_runner' \
+    'test/01_unit/compiler/interpreter/block_scoped_use_resolves_spec[.]spl' \
+    'test/01_unit/compiler/interpreter/module_loader_lazy_spec[.]spl'; do
+    checks=$((checks + 1))
+    if ! grep -q "$required" "$runner"; then
+        failed=$((failed + 1))
+        echo "FAIL: runner is missing contract: $required" >&2
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL — $checks check(s) run, $failed failed"
+    exit 1
+fi
+echo "PASS — $checks check(s) run, 0 failed"
