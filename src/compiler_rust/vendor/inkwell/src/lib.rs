@@ -23,16 +23,16 @@ pub mod attributes;
 pub mod basic_block;
 pub mod builder;
 #[deny(missing_docs)]
-#[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
 pub mod comdat;
 #[deny(missing_docs)]
 pub mod context;
 pub mod data_layout;
-#[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
 pub mod debug_info;
+pub mod error;
 pub mod execution_engine;
 pub mod intrinsics;
 pub mod memory_buffer;
+pub mod memory_manager;
 #[deny(missing_docs)]
 pub mod module;
 pub mod object_file;
@@ -42,8 +42,6 @@ pub mod types;
 pub mod values;
 
 // Boilerplate to select a desired llvm_sys version at compile & link time.
-#[cfg(feature = "llvm10-0")]
-pub extern crate llvm_sys_100 as llvm_sys;
 #[cfg(feature = "llvm11-0")]
 pub extern crate llvm_sys_110 as llvm_sys;
 #[cfg(feature = "llvm12-0")]
@@ -58,20 +56,18 @@ pub extern crate llvm_sys_150 as llvm_sys;
 pub extern crate llvm_sys_160 as llvm_sys;
 #[cfg(feature = "llvm17-0")]
 pub extern crate llvm_sys_170 as llvm_sys;
-#[cfg(feature = "llvm18-0")]
-pub extern crate llvm_sys_180 as llvm_sys;
-#[cfg(feature = "llvm4-0")]
-pub extern crate llvm_sys_40 as llvm_sys;
-#[cfg(feature = "llvm5-0")]
-pub extern crate llvm_sys_50 as llvm_sys;
-#[cfg(feature = "llvm6-0")]
-pub extern crate llvm_sys_60 as llvm_sys;
-#[cfg(feature = "llvm7-0")]
-pub extern crate llvm_sys_70 as llvm_sys;
-#[cfg(feature = "llvm8-0")]
-pub extern crate llvm_sys_80 as llvm_sys;
-#[cfg(feature = "llvm9-0")]
-pub extern crate llvm_sys_90 as llvm_sys;
+#[cfg(feature = "llvm18-1")]
+pub extern crate llvm_sys_181 as llvm_sys;
+#[cfg(feature = "llvm19-1")]
+pub extern crate llvm_sys_191 as llvm_sys;
+#[cfg(feature = "llvm20-1")]
+pub extern crate llvm_sys_201 as llvm_sys;
+#[cfg(feature = "llvm21-1")]
+pub extern crate llvm_sys_211 as llvm_sys;
+#[cfg(feature = "llvm22-1")]
+pub extern crate llvm_sys_221 as llvm_sys;
+#[cfg(feature = "llvm23-1")]
+pub extern crate llvm_sys_231 as llvm_sys;
 
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 use llvm_sys::{
@@ -79,9 +75,9 @@ use llvm_sys::{
     LLVMThreadLocalMode, LLVMVisibility,
 };
 
-#[llvm_versions(7..)]
 use llvm_sys::LLVMInlineAsmDialect;
 
+pub use error::Error;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
@@ -116,13 +112,6 @@ macro_rules! assert_unique_used_features {
 }
 
 assert_unique_used_features! {
-    "llvm4-0",
-    "llvm5-0",
-    "llvm6-0",
-    "llvm7-0",
-    "llvm8-0",
-    "llvm9-0",
-    "llvm10-0",
     "llvm11-0",
     "llvm12-0",
     "llvm13-0",
@@ -130,24 +119,43 @@ assert_unique_used_features! {
     "llvm15-0",
     "llvm16-0",
     "llvm17-0",
-    "llvm18-0"
+    "llvm18-1",
+    "llvm19-1",
+    "llvm20-1",
+    "llvm21-1",
+    "llvm22-1",
+    "llvm23-1"
 }
+
+#[cfg(all(
+    any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0"
+    ),
+    not(feature = "typed-pointers")
+))]
+compile_error!("Opaque pointers are not supported prior to LLVM version 15.0.");
+
+#[cfg(all(any(feature = "llvm17-0", feature = "llvm18-1"), feature = "typed-pointers"))]
+compile_error!("Typed pointers are not supported starting from LLVM version 17.0.");
 
 /// Defines the address space in which a global will be inserted.
 ///
-/// The default address space is zero. An address space can always be created from a `u16`:
+/// The default address space is number zero. An address space can always be created from a [`u16`]:
 /// ```no_run
 /// inkwell::AddressSpace::from(1u16);
 /// ```
 ///
-/// An Address space is a 24-bit number. To convert from a u32, use the `TryFrom` instance
+/// An address space is a 24-bit number. To convert from a [`u32`], use the [`TryFrom`] implementation:
 ///
 /// ```no_run
 /// inkwell::AddressSpace::try_from(42u32).expect("fits in 24-bit unsigned int");
 /// ```
 ///
 /// # Remarks
-/// See also: https://llvm.org/doxygen/NVPTXBaseInfo_8h_source.html
+/// See also: <https://llvm-swift.github.io/LLVMSwift/Structs/AddressSpace.html>
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Default)]
 pub struct AddressSpace(u32);
 
@@ -162,11 +170,7 @@ impl TryFrom<u32> for AddressSpace {
 
     fn try_from(val: u32) -> Result<Self, Self::Error> {
         // address space is a 24-bit integer
-        if val < 1 << 24 {
-            Ok(AddressSpace(val))
-        } else {
-            Err(())
-        }
+        if val < 1 << 24 { Ok(AddressSpace(val)) } else { Err(()) }
     }
 }
 
@@ -354,16 +358,10 @@ pub enum AtomicRMWBinOp {
     UMin,
 
     /// Adds to the float-typed value in memory and returns the prior value.
-    // Although this was added in LLVM 9, it wasn't exposed to the C API
-    // until 10.0.
-    #[llvm_versions(10..)]
     #[llvm_variant(LLVMAtomicRMWBinOpFAdd)]
     FAdd,
 
     /// Subtract a float-typed value off the value in memory and returns the prior value.
-    // Although this was added in LLVM 9, it wasn't exposed to the C API
-    // until 10.0.
-    #[llvm_versions(10..)]
     #[llvm_variant(LLVMAtomicRMWBinOpFSub)]
     FSub,
 
@@ -376,12 +374,45 @@ pub enum AtomicRMWBinOp {
     #[llvm_versions(15..)]
     #[llvm_variant(LLVMAtomicRMWBinOpFMin)]
     FMin,
+
+    #[llvm_versions(19.1..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpUIncWrap)]
+    UIncWrap,
+
+    #[llvm_versions(19.1..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpUDecWrap)]
+    UDecWrap,
+
+    #[llvm_versions(20..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpUSubCond)]
+    USubCond,
+
+    #[llvm_versions(20..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpUSubSat)]
+    USubSat,
+
+    #[llvm_versions(21..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpFMaximum)]
+    FMaximum,
+
+    #[llvm_versions(21..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpFMinimum)]
+    FMinimum,
+
+    #[llvm_versions(23..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpFMaximumNum)]
+    FMaximumNum,
+
+    #[llvm_versions(23..)]
+    #[llvm_variant(LLVMAtomicRMWBinOpFMinimumNum)]
+    FMinimumNum,
 }
 
-/// Defines the optimization level used to compile a `Module`.
+/// Defines the optimization level used to compile a [`Module`](crate::module::Module).
 ///
 /// # Remarks
-/// See also: https://llvm.org/doxygen/CodeGen_8h_source.html
+///
+/// See the C++ API documentation: [`llvm::CodeGenOpt`](https://llvm.org/doxygen/namespacellvm_1_1CodeGenOpt.html).
 #[repr(u32)]
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -479,7 +510,6 @@ impl Default for DLLStorageClass {
     }
 }
 
-#[llvm_versions(7..)]
 #[llvm_enum(LLVMInlineAsmDialect)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

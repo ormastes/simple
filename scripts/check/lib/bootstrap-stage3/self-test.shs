@@ -309,7 +309,20 @@ bootstrap_stage3_provenance_self_test() {
     bootstrap_stage3_test_fake_bin="$bootstrap_stage3_test_root/fake-bin"
     bootstrap_stage3_test_fake_prefix="$bootstrap_stage3_test_root/fake-llvm"
     mkdir -p "$bootstrap_stage3_test_fake_bin" \
+        "$bootstrap_stage3_test_fake_prefix/bin" \
         "$bootstrap_stage3_test_fake_prefix/lib"
+    bootstrap_stage3_test_llvm_windows=0
+    bootstrap_stage3_test_llvm_version=99.88.77-simple-path-fixture
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            bootstrap_stage3_test_llvm_windows=1
+            bootstrap_stage3_test_llvm_version=23.1.1
+            printf 'fixture LLVM-C import library bytes\n' \
+                >"$bootstrap_stage3_test_fake_prefix/lib/LLVM-C.lib"
+            printf 'fixture LLVM-C runtime bytes\n' \
+                >"$bootstrap_stage3_test_fake_prefix/bin/LLVM-C.dll"
+            ;;
+    esac
     bootstrap_stage3_test_llvm_archive_a=\
 "$bootstrap_stage3_test_fake_prefix/lib/libLLVMFixtureA.a"
     bootstrap_stage3_test_llvm_archive_b=\
@@ -333,7 +346,7 @@ bootstrap_stage3_provenance_self_test() {
         >"$bootstrap_stage3_test_llvm_system_libs"
     printf '%s\n' '#!/bin/sh' \
         'case "$*" in' \
-        '  --version) echo 99.88.77-simple-path-fixture ;;' \
+        "  --version) echo '$bootstrap_stage3_test_llvm_version' ;;" \
         "  --prefix) printf '%s\\n' '$bootstrap_stage3_test_fake_prefix' ;;" \
         "  --libdir) printf '%s\\n' '$bootstrap_stage3_test_fake_prefix/lib' ;;" \
         "  '--link-static --libfiles') IFS= read -r line <'$bootstrap_stage3_test_llvm_libfiles'; printf '%s\\n' \"\$line\" ;;" \
@@ -350,29 +363,45 @@ bootstrap_stage3_provenance_self_test() {
     printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
         grep -q '^llvm-build-status=enabled$' || return 1
     printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-major=99$" || return 1
+        grep -q "^llvm-version=$bootstrap_stage3_test_llvm_version$" ||
+        return 1
     printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
         grep -q "^llvm-prefix=$bootstrap_stage3_test_fake_prefix$" ||
         return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q '^llvm-static-lib-count=2$' || return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-static-lib-0001-path=$bootstrap_stage3_test_llvm_archive_a$" ||
-        return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-static-lib-0002-path=$bootstrap_stage3_test_llvm_archive_b$" ||
-        return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q '^llvm-system-lib-count=1$' || return 1
-    printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
-        grep -q "^llvm-system-lib-0001-path=$bootstrap_stage3_test_llvm_system$" ||
-        return 1
-    printf '%s\n' "-L$bootstrap_stage3_test_fake_prefix/unbound" \
-        >"$bootstrap_stage3_test_llvm_system_libs"
-    if bootstrap_stage3_resolve_llvm_build_authority \
-        "$bootstrap_stage3_test_producer_path" '--features llvm' \
-        >/dev/null 2>&1; then
-        return 1
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 1 ]; then
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-major=23$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-link-kind=dynamic-c-api$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-c-import-lib-path=$bootstrap_stage3_test_fake_prefix/lib/LLVM-C.lib$" ||
+            return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-c-runtime-dll-path=$bootstrap_stage3_test_fake_prefix/bin/LLVM-C.dll$" ||
+            return 1
+    else
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-major=99$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-static-lib-count=2$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-static-lib-0001-path=$bootstrap_stage3_test_llvm_archive_a$" ||
+            return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-static-lib-0002-path=$bootstrap_stage3_test_llvm_archive_b$" ||
+            return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q '^llvm-system-lib-count=1$' || return 1
+        printf '%s\n' "$bootstrap_stage3_test_llvm_authority" |
+            grep -q "^llvm-system-lib-0001-path=$bootstrap_stage3_test_llvm_system$" ||
+            return 1
+        printf '%s\n' "-L$bootstrap_stage3_test_fake_prefix/unbound" \
+            >"$bootstrap_stage3_test_llvm_system_libs"
+        if bootstrap_stage3_resolve_llvm_build_authority \
+            "$bootstrap_stage3_test_producer_path" '--features llvm' \
+            >/dev/null 2>&1; then
+            return 1
+        fi
     fi
     printf '%s\n' '-lfixture-system' \
         >"$bootstrap_stage3_test_llvm_system_libs"
@@ -381,8 +410,15 @@ bootstrap_stage3_provenance_self_test() {
             "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
             "$bootstrap_stage3_test_producer_path"
     ) || return 1
-    printf 'fixture archive B mutated bytes\n' \
-        >"$bootstrap_stage3_test_llvm_archive_b"
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 1 ]; then
+        bootstrap_stage3_test_llvm_mutated=\
+"$bootstrap_stage3_test_fake_prefix/lib/LLVM-C.lib"
+    else
+        bootstrap_stage3_test_llvm_mutated=\
+"$bootstrap_stage3_test_llvm_archive_b"
+    fi
+    printf 'fixture mutated bytes\n' \
+        >"$bootstrap_stage3_test_llvm_mutated"
     bootstrap_stage3_test_seed_static_bytes_changed=$(
         bootstrap_stage3_seed_inputs_fingerprint \
             "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
@@ -390,8 +426,13 @@ bootstrap_stage3_provenance_self_test() {
     ) || return 1
     [ "$bootstrap_stage3_test_seed_static_before" != \
         "$bootstrap_stage3_test_seed_static_bytes_changed" ] || return 1
-    printf 'fixture archive B bytes\n' \
-        >"$bootstrap_stage3_test_llvm_archive_b"
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 1 ]; then
+        printf 'fixture LLVM-C import library bytes\n' \
+            >"$bootstrap_stage3_test_llvm_mutated"
+    else
+        printf 'fixture archive B bytes\n' \
+            >"$bootstrap_stage3_test_llvm_mutated"
+    fi
     bootstrap_stage3_test_seed_static_restored=$(
         bootstrap_stage3_seed_inputs_fingerprint \
             "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
@@ -399,19 +440,21 @@ bootstrap_stage3_provenance_self_test() {
     ) || return 1
     [ "$bootstrap_stage3_test_seed_static_before" = \
         "$bootstrap_stage3_test_seed_static_restored" ] || return 1
-    printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_b" \
-        "$bootstrap_stage3_test_llvm_archive_a" \
-        >"$bootstrap_stage3_test_llvm_libfiles"
-    bootstrap_stage3_test_seed_static_order_changed=$(
-        bootstrap_stage3_seed_inputs_fingerprint \
-            "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
-            "$bootstrap_stage3_test_producer_path"
-    ) || return 1
-    [ "$bootstrap_stage3_test_seed_static_before" != \
-        "$bootstrap_stage3_test_seed_static_order_changed" ] || return 1
-    printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_a" \
-        "$bootstrap_stage3_test_llvm_archive_b" \
-        >"$bootstrap_stage3_test_llvm_libfiles"
+    if [ "$bootstrap_stage3_test_llvm_windows" -eq 0 ]; then
+        printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_b" \
+            "$bootstrap_stage3_test_llvm_archive_a" \
+            >"$bootstrap_stage3_test_llvm_libfiles"
+        bootstrap_stage3_test_seed_static_order_changed=$(
+            bootstrap_stage3_seed_inputs_fingerprint \
+                "$bootstrap_stage3_test_root/repo" cranelift '--features llvm' \
+                "$bootstrap_stage3_test_producer_path"
+        ) || return 1
+        [ "$bootstrap_stage3_test_seed_static_before" != \
+            "$bootstrap_stage3_test_seed_static_order_changed" ] || return 1
+        printf '%s %s\n' "$bootstrap_stage3_test_llvm_archive_a" \
+            "$bootstrap_stage3_test_llvm_archive_b" \
+            >"$bootstrap_stage3_test_llvm_libfiles"
+    fi
     bootstrap_stage3_test_path_transcript=\
 "$bootstrap_stage3_test_root/path-command.transcript"
     bootstrap_stage3_write_command_transcript \
