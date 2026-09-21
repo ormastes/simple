@@ -22,5 +22,36 @@ perl "$root/scripts/check/lib/portable-session-exec.pl" sh -eu -c '
     test "$(grep -c "^host-env:" "$work/command")" = 5
     bootstrap_stage3_verify_command_transcript "$work/command" "$root" \
         TEST_FIXED=changed -- /bin/true && exit 1
+
+    # Regression: explicit command env must not replace the guard-owned pair
+    # after the inherited helper has validated it. /usr/bin/true simulates a
+    # fake helper which accepts every SID and would allow the payload to run.
+    for attack in both sid helper; do
+        case "$attack" in
+            both) set -- SIMPLE_BOOTSTRAP_SESSION_ID=1 SIMPLE_BOOTSTRAP_SESSION_EXEC=/usr/bin/true ;;
+            sid) set -- SIMPLE_BOOTSTRAP_SESSION_ID=1 ;;
+            helper) set -- SIMPLE_BOOTSTRAP_SESSION_EXEC=/usr/bin/true ;;
+        esac
+        if bootstrap_stage3_run_transcribed "$work/$attack.command" "$root" \
+            "$work/$attack.log" "$work/home" "$work/tmp" /usr/bin:/bin \
+            "$@" -- /usr/bin/touch "$work/$attack.payload"; then
+            echo "FAIL: explicit session override accepted" >&2
+            exit 1
+        fi
+        test ! -e "$work/$attack.payload"
+        test ! -e "$work/$attack.command"
+
+        # A handcrafted transcript containing the formerly accepted fields
+        # must also be refused when verification is called independently.
+        sed "/^explicit-env:/d; /^executable:/,$ d" "$work/command" >"$work/forged"
+        for assignment in "$@"; do
+            printf "explicit-env:%s:%s\n" "${#assignment}" "$assignment" >>"$work/forged"
+        done
+        printf "executable:9:/bin/true\n" >>"$work/forged"
+        if bootstrap_stage3_verify_command_transcript "$work/forged" "$root" "$@" -- /bin/true; then
+            echo "FAIL: forged session override transcript verified" >&2
+            exit 1
+        fi
+    done
     echo "PASS: hermetic launch preserves verified session contract and fixed transcript admission"
 ' sh "$root" "$work"

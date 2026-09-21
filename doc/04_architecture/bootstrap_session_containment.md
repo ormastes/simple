@@ -34,7 +34,10 @@ The SID is allocated after the command transcript is frozen, so its concrete
 value belongs to the guard receipt. A shell immediately inside the guard
 validates and forwards exactly this dynamic pair across `env -i`. The five
 fixed Unix host variables and the explicit command variables remain subject to
-the existing exact transcript checks. Earlier transcripts without this policy
+the existing exact transcript checks. Both session variable names are reserved:
+the writer, independent verifier, and final explicit-env exporter reject any
+attempt to set them. A caller cannot replace a validated helper with a command
+that unconditionally succeeds. Earlier transcripts without this policy
 record fail current verification and must be regenerated.
 
 ## Audited graph
@@ -100,7 +103,12 @@ of a TERM-resistant descendant. Twenty helper launches took 0.059 seconds.
 The existing bounded collector contract suite passed under the session
 contract, including exec-failure receipt fidelity and cleanup. The new
 transcript integration test passed with an unrelated inherited variable
-removed by `env -i`. Transcript refusal diagnostics passed.
+removed by `env -i`. It also rejects the exact SID=1/helper=/usr/bin/true attack,
+each single-variable override, and handwritten transcripts carrying overrides.
+Running that adversarial test against the original `822d2158865` command owner
+fails because the explicit session override is accepted, demonstrating the
+regression test distinguishes the vulnerable implementation. Transcript
+refusal diagnostics passed.
 
 The existing transcript argv parser test fails `malformed unrelated argv
 prefix was accepted` on both this change and the untouched base. That separate
