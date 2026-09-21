@@ -230,7 +230,10 @@ process_tree_metrics() {
 process_tree_metrics_ps() {
   metrics_root=$1
   metrics_exclude=$2
-  ps -axo pid=,ppid=,pgid=,rss=,time=,comm= 2>/dev/null | awk \
+  snapshot_ps=${BOOTSTRAP_WATCH_PS_COMMAND:-ps}
+  BOOTSTRAP_WATCH_METRICS_ROOT=$metrics_root \
+    BOOTSTRAP_WATCH_METRICS_EXCLUDE=$metrics_exclude \
+    "$snapshot_ps" -axo pid=,ppid=,pgid=,rss=,lstart=,time=,comm= 2>/dev/null | awk \
       -v root="$metrics_root" -v exclude="$metrics_exclude" \
       -v state="$cpu_state_file" -v now="$(date +%s)" '
     function cpu_seconds(value,   day_parts, clock, n, a, days) {
@@ -248,18 +251,28 @@ process_tree_metrics_ps() {
     }
     {
       pid = $1
-      if (pid !~ /^[0-9]+$/ || NF < 5) next
+      if (pid !~ /^[0-9]+$/ || NF < 11) next
       pids[++n] = pid
       parent[pid] = $2
       pgrp[pid] = $3
       rss[pid] = $4 + 0
-      ticks[pid] = cpu_seconds($5)
-      name = $6
+      # lstart is five fixed fields on Darwin/BSD. It is the process birth
+      # identity: a recycled PID must never inherit the prior process CPU base.
+      birth[pid] = $5 "_" $6 "_" $7 "_" $8 "_" $9
+      ticks[pid] = cpu_seconds($10)
+      name = $11
       sub(/^.*\//, "", name)
       gsub(/[[:space:]]+/, "_", name)
       comm[pid] = (name == "" ? "unknown" : name)
     }
     END {
+      # An empty/partial ps snapshot is unavailable evidence, not a zero-sized
+      # process tree. Do not touch the state file: the next healthy sample must
+      # establish a fresh baseline rather than delta against a failed scan.
+      if (!(root in parent)) {
+        printf "unknown unknown unknown none unknown none unknown unknown 1 unknown\n"
+        exit
+      }
       included[root] = 1
       excluded[exclude] = 1
       changed = 1
@@ -276,7 +289,7 @@ process_tree_metrics_ps() {
       while ((getline line < state) > 0) {
         split(line, s, " ")
         if (s[1] == "when") { prev_when = s[2]; continue }
-        prev_ticks[s[1]] = s[2]
+        prev_birth[s[1]] = s[2]; prev_ticks[s[1]] = s[3]
       }
       close(state)
       printf "when %s\n", now > state
@@ -294,8 +307,8 @@ process_tree_metrics_ps() {
         nproc++; total_rss += rss[pid]
         if (pid == root) root_rss = rss[pid]
         if (rss[pid] > top_rss) { top_rss = rss[pid]; top_pid = pid; top_comm = comm[pid] }
-        printf "%s %.3f\n", pid, ticks[pid] > state
-        if (pid in prev_ticks) {
+        printf "%s %s %.3f\n", pid, birth[pid], ticks[pid] > state
+        if (pid in prev_ticks && prev_birth[pid] == birth[pid]) {
           d = ticks[pid] - prev_ticks[pid]
           if (d > 0) cpu_delta += d
         } else {
