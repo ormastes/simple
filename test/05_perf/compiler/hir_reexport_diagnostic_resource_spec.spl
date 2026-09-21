@@ -1,0 +1,46 @@
+"""Memory and timing guard for disabled HIR re-export miss diagnostics."""
+use std.spec.{describe, it, expect, step}
+use compiler.hir.reexport_diagnostic_policy.{hir_reexport_chase_unresolved_receipt}
+
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn profile_receipts(count: i64, enabled: bool) -> [i64]:
+    assert(rt_transient_array_scope_begin())
+    val before = rt_heap_registry_count()
+    val started = rt_time_now_nanos()
+    var rendered_bytes = 0
+    var i = 0
+    while i < count:
+        val receipt = hir_reexport_chase_unresolved_receipt(
+            if enabled: "1" else: "",
+            "lib.nogc_async_mut.io.platform_event", "Result", "Result",
+            "src/lib/nogc_async_mut/io/platform_event.spl")
+        rendered_bytes = rendered_bytes + receipt.len()
+        i = i + 1
+    val elapsed = rt_time_now_nanos() - started
+    val objects = rt_heap_registry_count() - before
+    assert(rt_transient_array_scope_end())
+    [elapsed, objects, rendered_bytes]
+
+describe "HIR re-export diagnostic resource profile":
+    it "keeps disabled miss receipts bounded without a timing regression":
+        step("Warm disabled and explicitly enabled diagnostic paths")
+        profile_receipts(8, false)
+        profile_receipts(8, true)
+        step("Measure the Stage 3 default path and an enabled negative control")
+        val small = profile_receipts(10000, false)
+        val large = profile_receipts(20000, false)
+        val enabled = profile_receipts(2000, true)
+        print "[hir-reexport-diagnostic] small={small} large={large} enabled={enabled} units=ns,objects,bytes"
+        step("Require no rendered default output and bounded live allocations")
+        expect(small[2]).to_equal(0)
+        expect(large[2]).to_equal(0)
+        expect(enabled[2]).to_be_greater_than(500000)
+        expect(small[1] <= 8 and large[1] <= 8).to_equal(true)
+        expect(enabled[1]).to_be_greater_than(1000)
+        step("Prevent disabled-path performance and scaling regressions")
+        expect(large[0] <= small[0] * 3 + 20000000).to_equal(true)
+        expect(large[0]).to_be_less_than(1000000000)

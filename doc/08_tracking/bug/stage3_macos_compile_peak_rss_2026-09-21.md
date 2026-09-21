@@ -65,3 +65,41 @@ compiler output. It was stopped at 48.30 s; `/usr/bin/time -l` reported
 4,580,589,568 bytes maximum RSS and 835,533,027,401 instructions. No artifact
 was produced. The three-cycle cap is exhausted, so canonical Stage 3 was not
 started. The memory bug and TODO remain open as release blockers.
+
+## Stage 3 retained-diagnostic correction, 2026-09-21
+
+Stable evidence from the later jobs=8 run is
+`build/evidence/macos-bootstrap-20260921/stage3-native-build.log`, SHA-256
+`11ab3d606b1d0ed508cf2c28b11c8d2e368c4b3983835eda9c7a6427d92c5a1c`.
+The run reached HIR module 618 of 847 before SIGBUS and peaked at
+15,971,434,496 bytes RSS. Of 92,363 log lines / 29,266,762 bytes, 70,917 lines
+and 27,018,948 bytes (92.3%) are the same
+`[hir-reexport-chase-unresolved]` receipt. Its owner rendered a long
+interpolated message unconditionally for every routine failed facade chase,
+even though the later canonical unresolved-name/type diagnostic remains.
+
+The detailed attribution is now rendered only when
+`SIMPLE_BOOTSTRAP_DIAG=1`, matching the other re-export trace receipts. The
+policy is isolated in `compiler.hir.reexport_diagnostic_policy` so the default
+and enabled behavior can be exercised without a full bootstrap. A unit spec
+checks both states. A reciprocal resource spec checks zero rendered bytes and
+bounded live objects for 10,000/20,000 disabled misses, retains an explicitly
+enabled allocation control, and guards elapsed-time scaling.
+
+Verification on the admitted Stage 2 producer:
+
+- The policy module compiled to SMF in 4.41 s with 180,027,392 bytes maximum
+  RSS.
+- The unit spec and all 26 dependencies parsed; lowering reached the existing
+  `std.spec` dependency defects (`process_run`, `read_file_text`, and
+  `time_now_unix_micros` unresolved), so execution is pending a full CLI that
+  can load this source revision.
+- The prior full CLI test runner fails earlier while parsing the existing
+  `src/lib/nogc_sync_mut/io/process_ops.spl`; it cannot execute the specs.
+- The direct-env runtime guard passes.
+
+The 28 MiB retained output establishes the dominant logged allocation path,
+but does not by itself account byte-for-byte for the 15.97 GB RSS peak. A
+fresh Stage 3 run is still required to measure the reduction and to decide
+whether the terminal SIGBUS has an additional HIR cache-lifetime owner. The
+bug remains open and the sub-1 GB requirement remains unmet.

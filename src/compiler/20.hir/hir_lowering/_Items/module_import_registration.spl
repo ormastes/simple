@@ -36,6 +36,7 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.reexport_diagnostic_policy.{hir_reexport_chase_unresolved_receipt}
 
 impl HirLowering:
     me materialize_imported_field_dependency(
@@ -669,16 +670,17 @@ impl HirLowering:
                 # the actual break. That is why this class stayed invisible:
                 # every diagnostic pointed at a victim, never at the facade.
                 #
-                # Same stance and wording as the materialization walk's
-                # `[hir-callable-dep-origin-unresolved]`/`[hir-payload-origin-
-                # unresolved]` receipts, which already announce an unresolvable
-                # owner ahead of the later hard error. This is a RECEIPT, not a
-                # fix: it does not resolve the name, it names the facade and
-                # item so the later fatal is attributable. Kept unconditional
-                # (not gated behind SIMPLE_BOOTSTRAP_DIAG) for exactly the
-                # reason PR #320 landed -- a diagnostic nobody turns on is a
-                # diagnostic that does not exist.
-                eprint("[hir-reexport-chase-unresolved] facade={imported_mod.module_name} item={imported_name} local={local_name} importer={self.module_filename}: the facade neither declares this name nor routes it through a resolvable re-export; nothing was registered and a later `unresolved type`/`unresolved name: {imported_name}` will be reported against an importing module instead")
+                # The later hard unresolved-name/type error remains canonical.
+                # Keep this detailed attribution available under the existing
+                # bootstrap diagnostic flag. Rendering it unconditionally made
+                # 70,917 transient messages (27 MiB of retained stderr) before
+                # module 619 in a macOS Stage 3 run.
+                val receipt = hir_reexport_chase_unresolved_receipt(
+                    hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "",
+                    imported_mod.module_name, imported_name, local_name,
+                    self.module_filename)
+                if receipt != "":
+                    eprint(receipt)
 
     me report_reexport_chase_stats():
         """Level-gated (SIMPLE_HIR_REEXPORT_STATS=1, default off) readout for the
