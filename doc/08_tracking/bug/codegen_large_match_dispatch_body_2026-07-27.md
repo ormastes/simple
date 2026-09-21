@@ -8,8 +8,8 @@ nested conditional tree containing every arm body. The Phase 2 full CLI build
 timed this file out at 600 seconds; the earlier focused profile retained more
 than 3 GiB while converging the same leaf.
 
-`formula.spl` now routes names into eight alphabetic helpers of at most 39
-arms. All 229 names and the unknown-function behavior are preserved. The
+`formula.spl` now routes names into letter-bounded helpers of at most 25 arms.
+All 229 names and the unknown-function behavior are preserved. The
 focused functional regression is
 `test/01_unit/app/office/sheets/formula_dispatch_partition_spec.spl` and the
 cold compiler/RSS gate is
@@ -19,9 +19,21 @@ Measured with the admitted macOS Phase 2 compiler
 `35acf59774028cb8849812abf5762330dfd16f232dacb9bb3b278f176e8b0669`:
 
 - 30 compiled, 0 cached, 0 failed;
-- 115.6 seconds compile, 18.2 seconds link, 134 seconds wall;
-- 923,844,608 bytes maximum RSS; and
+- 12.0 seconds compile, 4.9 seconds link, 17 seconds wall;
+- 916,406,272 bytes maximum RSS; and
 - `SIMPLE_NO_STUB_FALLBACK=1` with isolated frontend, HIR, and native caches.
+
+The source-bound native behavior witness compiled 31 modules with zero cache
+hits and exited 0 after checking one representative from each of the eight
+reviewed alphabetic ranges plus the unknown-name path. Its binding hashes are:
+
+- compiler `35acf59774028cb8849812abf5762330dfd16f232dacb9bb3b278f176e8b0669`;
+- Formula source `26aabce68fad4416304075b17fb0b0b400fe9617b9fc6c0274d59ae5bd604a73`;
+- fixture `082b55ec5f972969ea800390b46b66d42cefb416d4ba8455a6c7fc94efef1ff8`;
+- native artifact `486429bf71a376c4669aa9954bfef3d6ef54f61926681bd8a390f74cfcff5bff`.
+
+Both executable gates write receipts that also bind the exact command and
+fresh cache paths.
 
 The retained pre-fix Phase 2 evidence is
 `build/evidence/phase2-test-20260921/run-2/work/logs/compiler_cli_build.log`
