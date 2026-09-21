@@ -1,5 +1,5 @@
 #!/bin/sh
-# check-bootstrap-preflight.shs — pre-bootstrap readiness detector (ADVISORY)
+# check-bootstrap-preflight.shs — pre-bootstrap readiness evidence producer
 #
 # Verifies, WITHOUT building anything, that a full bootstrap run has a fighting
 # chance. Five independent invariants (detector_standard.md rule 6):
@@ -17,7 +17,9 @@
 #
 # Verdict (last stdout line): PASS/FAIL/ERROR, exit 0/1/2. n>0 or ERROR.
 # SKIPs are counted and printed separately, never folded into checked.
-# FP-RATE: not yet measured — ADVISORY; treat FAIL lists as an UPPER BOUND.
+# FP-RATE: not yet measured; standalone FAIL lists remain an upper bound. A
+# receipt is authoritative only when every check ran and the bound state stayed
+# byte-identical for the entire scan.
 # --selftest is fatal and runs before every scan (must-PASS and must-FAIL fixtures).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -39,16 +41,85 @@ fi
 export CARGO_TARGET_DIR
 NO_CARGO=0
 SELFTEST_ONLY=0
+RECEIPT_PATH=
+VERIFY_RECEIPT=
+PREFLIGHT_CONFIG=unspecified
 for a in "$@"; do
   case "$a" in
     --no-cargo) NO_CARGO=1 ;;
     --selftest) SELFTEST_ONLY=1 ;;
-    *) echo "usage: $0 [--no-cargo] [--selftest]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
+    --receipt=*) RECEIPT_PATH=${a#*=} ;;
+    --verify-receipt=*) VERIFY_RECEIPT=${a#*=} ;;
+    --config=*) PREFLIGHT_CONFIG=${a#*=} ;;
+    *) echo "usage: $0 [--no-cargo] [--selftest] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
   esac
 done
 
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+manifest_value() {
+  _key=$1 _manifest=$2
+  [ "$(grep -c "^${_key}=" "$_manifest" || true)" -eq 1 ] || return 1
+  sed -n "s/^${_key}=//p" "$_manifest"
+}
+
+capture_bindings() {
+  _out=$1
+  _facade="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  BOOTSTRAP_STAGE3_FACADE_PATH=$_facade
+  BOOTSTRAP_STAGE3_VERSION_ROOT=$ROOT
+  export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+  . "$_facade" || return 1
+  bootstrap_stage3_source_snapshot "$_out/source" "$ROOT" || return 1
+  bootstrap_stage3_git_state "$ROOT" "$_out/git" || return 1
+  git -C "$ROOT" rev-parse --verify HEAD >"$_out/head" || return 1
+  printf '%s' "$PREFLIGHT_CONFIG" >"$_out/config" || return 1
+}
+
+verify_receipt() {
+  _receipt=$1
+  [ -f "$_receipt" ] && [ ! -L "$_receipt" ] || return 1
+  for _key in schema status git_head source_snapshot_sha256 git_state_sha256 \
+    config_hex config_sha256 seed_sha256 checker_sha256 cargo_mode; do
+    manifest_value "$_key" "$_receipt" >/dev/null || return 1
+  done
+  [ "$(manifest_value schema "$_receipt")" = simple-bootstrap-preflight-v1 ] || return 1
+  [ "$(manifest_value status "$_receipt")" = pass ] || return 1
+  [ "$(manifest_value cargo_mode "$_receipt")" = checked ] || return 1
+  _bindings="$TMP/verify-bindings"
+  mkdir "$_bindings" || return 1
+  capture_bindings "$_bindings" || return 1
+  _config_hex=$(manifest_value config_hex "$_receipt") || return 1
+  case "$_config_hex" in *[!0-9a-f]* ) return 1 ;; esac
+  perl -e 'print pack("H*", $ARGV[0])' "$_config_hex" >"$_bindings/config" || return 1
+  [ "$(manifest_value git_head "$_receipt")" = "$(cat "$_bindings/head")" ] || return 1
+  [ "$(manifest_value source_snapshot_sha256 "$_receipt")" = "$(hash_file "$_bindings/source")" ] || return 1
+  [ "$(manifest_value git_state_sha256 "$_receipt")" = "$(hash_file "$_bindings/git")" ] || return 1
+  [ "$(manifest_value config_sha256 "$_receipt")" = "$(hash_file "$_bindings/config")" ] || return 1
+  [ "$(manifest_value seed_sha256 "$_receipt")" = "$(hash_file "$ROOT/bin/simple")" ] || return 1
+  [ "$(manifest_value checker_sha256 "$_receipt")" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || return 1
+}
+
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$TMP"' EXIT
+
+if [ -n "$VERIFY_RECEIPT" ]; then
+  [ -z "$RECEIPT_PATH" ] && [ "$SELFTEST_ONLY" -eq 0 ] || {
+    echo "ERROR — verify mode is exclusive"; exit 2;
+  }
+  if verify_receipt "$VERIFY_RECEIPT"; then
+    echo "PASS — authoritative preflight receipt verified: $VERIFY_RECEIPT"
+    exit 0
+  fi
+  echo "FAIL — authoritative preflight receipt rejected: $VERIFY_RECEIPT"
+  exit 1
+fi
 
 # ---- helper classifiers (pure functions so selftest can fixture them) ----
 
@@ -134,6 +205,15 @@ if [ "$SELFTEST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+if [ -n "$RECEIPT_PATH" ]; then
+  mkdir "$TMP/start-bindings" || exit 2
+  capture_bindings "$TMP/start-bindings" || {
+    echo "ERROR — could not bind preflight source and git state before checks"; exit 2;
+  }
+  START_SEED_SHA=$(hash_file "$ROOT/bin/simple") || exit 2
+  START_CHECKER_SHA=$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs") || exit 2
+fi
+
 CHECKED=0; SKIPPED=0; FAILS=""
 
 # ---- 1. seed binary present + banner ----
@@ -212,6 +292,42 @@ fi
 if [ -n "$FAILS" ]; then
   echo "FAIL — $CHECKED check(s) run, failing:$FAILS ($SKIPPED skipped)"
   exit 1
+fi
+if [ -n "$RECEIPT_PATH" ]; then
+  case "$RECEIPT_PATH" in /*) ;; *) RECEIPT_PATH="$ROOT/$RECEIPT_PATH" ;; esac
+  [ ! -e "$RECEIPT_PATH" ] && [ ! -L "$RECEIPT_PATH" ] || {
+    echo "ERROR — refusing preflight receipt collision: $RECEIPT_PATH"; exit 2;
+  }
+  mkdir -p "$(dirname "$RECEIPT_PATH")" || exit 2
+  _bindings="$TMP/write-bindings"
+  mkdir "$_bindings" || exit 2
+  capture_bindings "$_bindings" || {
+    echo "ERROR — could not bind preflight source and git state"; exit 2;
+  }
+  cmp -s "$TMP/start-bindings/source" "$_bindings/source" &&
+    cmp -s "$TMP/start-bindings/git" "$_bindings/git" &&
+    cmp -s "$TMP/start-bindings/head" "$_bindings/head" &&
+    cmp -s "$TMP/start-bindings/config" "$_bindings/config" &&
+    [ "$START_SEED_SHA" = "$(hash_file "$ROOT/bin/simple")" ] &&
+    [ "$START_CHECKER_SHA" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || {
+    echo "ERROR — source, Git state, configuration, seed, or checker changed during preflight"; exit 2;
+  }
+  _receipt_tmp="${RECEIPT_PATH}.tmp.$$"
+  {
+    echo schema=simple-bootstrap-preflight-v1
+    echo status=pass
+    echo git_head="$(cat "$_bindings/head")"
+    echo source_snapshot_sha256="$(hash_file "$_bindings/source")"
+    echo git_state_sha256="$(hash_file "$_bindings/git")"
+    echo config_hex="$(perl -e 'print unpack("H*", <STDIN>)' <"$_bindings/config")"
+    echo config_sha256="$(hash_file "$_bindings/config")"
+    echo seed_sha256="$(hash_file "$ROOT/bin/simple")"
+    echo checker_sha256="$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")"
+    if [ "$NO_CARGO" -eq 1 ]; then echo cargo_mode=skipped; else echo cargo_mode=checked; fi
+  } >"$_receipt_tmp" || exit 2
+  chmod 400 "$_receipt_tmp" || exit 2
+  mv "$_receipt_tmp" "$RECEIPT_PATH" || exit 2
+  echo "receipt: $RECEIPT_PATH"
 fi
 echo "PASS — $CHECKED check(s) run, 0 failed ($SKIPPED skipped)"
 exit 0

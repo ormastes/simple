@@ -50,6 +50,14 @@ bootstrap_stage3_resume_output_path "$source_output" "$root" \
   "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
   bootstrap_stage3_error "OUTPUT_DIR is not a canonical allowlisted directory: $source_output"
 output=$BOOTSTRAP_STAGE3_RESUME_OUTPUT
+bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+  --verify-receipt="$bootstrap_preflight_receipt" || {
+  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
+  exit 64
+}
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
 [ -n "$planner_admission" ] || {
   echo "bootstrap-policy-error: planner-admission-v2-required" >&2; exit 64;
@@ -226,6 +234,9 @@ bootstrap_stage3_resume_write_status_receipt() {
     echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
     echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
     echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo preflight_receipt_path="${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:?authoritative preflight receipt is required}"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file \
+      "${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT}")"
     echo log_sha256="$(bootstrap_stage3_hash_file \
       "$bootstrap_stage3_resume_receipt_log")"
     echo transcript_sha256="$(bootstrap_stage3_hash_file \
@@ -331,6 +342,9 @@ bootstrap_stage3_resume_write_status_receipt() {
     echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
     echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
     echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo preflight_receipt_path="${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:?authoritative preflight receipt is required}"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file \
+      "${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT}")"
     echo log_sha256="$(bootstrap_stage3_hash_file \
       "$bootstrap_stage3_resume_receipt_log")"
     echo transcript_sha256="$(bootstrap_stage3_hash_file \
