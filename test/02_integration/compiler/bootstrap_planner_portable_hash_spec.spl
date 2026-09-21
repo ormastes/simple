@@ -1,0 +1,41 @@
+"""
+Planner admission hashing on macOS: execute the production shell helpers with
+an isolated shasum-only PATH, reject a provider that emits a digest and fails,
+and retain the standard empty-input digest. Fixture evidence covers hashing;
+it does not claim a complete compiler bootstrap.
+"""
+# codex-system-test
+# @req: REQ-PLANNER-PORTABLE-HASH-001
+
+use app.io.mod.{process_run_timeout}
+use std.spec.{describe, it, expect, step}
+
+describe "Planner admission portable hashing":
+    it "should hash files and snapshot records when sha256sum is unavailable":
+        step("Run the production helper with only the native shasum provider available")
+        val (stdout, stderr, code) = process_run_timeout(
+            "/bin/sh",
+            ["test/00_unit/scripts/bootstrap_planner_portable_hash_spec.shs"],
+            20000
+        )
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("PASS: planner portable file/text/stream/snapshot hashing and provider failure")
+
+    it "should reject a provider that prints a valid digest and exits with failure":
+        step("Inject a failing provider and invoke the production text hash helper")
+        val command = ". scripts/check/lib/bootstrap-planner-admission-bound.shs; " +
+            "sha256sum() ( printf '%s  -\\n' ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad; return 1; ); " +
+            "bootstrap_planner_v2_hash_text abc"
+        val (stdout, stderr, code) = process_run_timeout("/bin/sh", ["-c", command], 10000)
+        expect(code).to_equal(1)
+        expect(stdout).to_equal("")
+        expect(stderr).to_equal("")
+
+    it "should preserve the canonical digest of empty input":
+        step("Hash empty input through the production text hash helper")
+        val command = ". scripts/check/lib/bootstrap-planner-admission-bound.shs; bootstrap_planner_v2_hash_text ''"
+        val (stdout, stderr, code) = process_run_timeout("/bin/sh", ["-c", command], 10000)
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n")
