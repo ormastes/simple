@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d)
+work=$(CDPATH= cd "$work" && pwd -P)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
+    "$root/scripts/bootstrap/bootstrap-session-exec.c" -o "$work/session-exec"
+perl "$root/scripts/check/lib/portable-session-exec.pl" sh -eu -c '
+    root=$1 work=$2
+    SIMPLE_BOOTSTRAP_SESSION_ID=$$
+    SIMPLE_BOOTSTRAP_SESSION_EXEC=$work/session-exec
+    export SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+    . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+    . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+    mkdir "$work/home" "$work/tmp"
+    bootstrap_stage3_run_transcribed "$work/command" "$root" "$work/log" \
+        "$work/home" "$work/tmp" /usr/bin:/bin \
+        TEST_FIXED=present -- /bin/sh -eu -c '\''"$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check; test "$TEST_FIXED" = present; test -z "${UNPLANNED_ENV+x}"; printf "contract-survived\n"'\''
+    grep -qx contract-survived "$work/log"
+    grep -qx runtime-env-contract:bootstrap-session-v1 "$work/command"
+    test "$(grep -c "^host-env:" "$work/command")" = 5
+    bootstrap_stage3_verify_command_transcript "$work/command" "$root" \
+        TEST_FIXED=changed -- /bin/true && exit 1
+    echo "PASS: hermetic launch preserves verified session contract and fixed transcript admission"
+' sh "$root" "$work"

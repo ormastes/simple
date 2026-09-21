@@ -13,6 +13,7 @@ bootstrap_stage3_write_command_transcript() {
     bootstrap_stage3_transcript_tmp="${bootstrap_stage3_transcript}.tmp.$$"
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
+        echo "runtime-env-contract:bootstrap-session-v1"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
         # Emitted one call at a time rather than through `for ... in` over
@@ -245,6 +246,7 @@ bootstrap_stage3_verify_command_transcript() (
     fi
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
+        echo "runtime-env-contract:bootstrap-session-v1"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
         cat "$bootstrap_stage3_host" || exit 1
@@ -348,6 +350,9 @@ ${ProgramData:-${PROGRAMDATA:-}}
                 exit $?
                 ;;
         esac
+        # The guard allocates SID after this transcript is frozen. Preserve
+        # exactly its validated dynamic pair across env -i; the guard receipt
+        # owns their concrete values. Fixed host/explicit env remains exact.
         # Every Stage 2 retry, Stage 3 build, and admitted resume enters here.
         # Wrap env so the compiler environment and transcript remain exact.
         bootstrap_stage3_rss_runner="$bootstrap_stage3_run_cwd/scripts/resource/process-tree-rss-watchdog.pl"
@@ -355,7 +360,15 @@ ${ProgramData:-${PROGRAMDATA:-}}
             --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
             --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
             --receipt="$bootstrap_stage3_run_log.rss.env" -- \
-        env -i "HOME=$bootstrap_stage3_run_home" \
+        /bin/sh -c '
+            if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+                case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) exit 125 ;; esac
+                "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check || exit 125
+                exec env -i "SIMPLE_BOOTSTRAP_SESSION_ID=$SIMPLE_BOOTSTRAP_SESSION_ID" \
+                    "SIMPLE_BOOTSTRAP_SESSION_EXEC=$SIMPLE_BOOTSTRAP_SESSION_EXEC" "$@"
+            fi
+            exec env -i "$@"
+        ' sh "HOME=$bootstrap_stage3_run_home" \
             "PATH=$bootstrap_stage3_run_path" \
             "TMPDIR=$bootstrap_stage3_run_tmpdir" \
             "LC_ALL=C" "LANG=C" /bin/sh -c '
