@@ -1,0 +1,60 @@
+#!/bin/sh
+# Filesystem fixtures exercise the production registration owner, never a copy.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+guard=$repo/scripts/check/check-tracking-doc-registration.shs
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+bug=$tmp/doc/08_tracking/bug
+todo=$tmp/doc/08_tracking/todo
+mkdir -p "$bug/nested" "$todo"
+cat > "$bug/bug_db.sdn" <<'EOF'
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    registered, P2, open, "fixture, with comma", src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true
+EOF
+cat > "$todo/todo_db.sdn" <<'EOF'
+todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|
+    7, TODO, test, P2, "source-only task", src/fixture.spl, 5, , "", open, true
+EOF
+printf '# Registered fixture\nStatus: OPEN\n' > "$bug/registered.md"
+passed=0
+expect() {
+    label=$1; want=$2; token=$3
+    rc=0; sh "$guard" --root "$tmp" > "$tmp/out" 2>&1 || rc=$?
+    [ "$rc" -eq "$want" ] && grep -F "$token" "$tmp/out" >/dev/null || {
+        echo "FAIL $label expected=$want actual=$rc token=$token"; cat "$tmp/out"; exit 1;
+    }
+    passed=$((passed+1))
+}
+expect source-only-todo-valid 0 'PASS rows=2'
+printf '# Plain open\nStatus: open\n' > "$bug/nested/missing.md"
+expect recursive-plain-open 1 'unregistered-bug-document'
+printf '# Blocked\nStatus: BLOCKED pending host\n' > "$bug/nested/missing.md"
+expect blocked-is-unresolved 1 'unregistered-bug-document'
+printf '# Not a lifecycle record\nStatus: opened input handle\n' > "$bug/nested/missing.md"
+expect token-boundary 0 'PASS rows=2'
+printf '# Tutorial\n```text\nStatus: OPEN\n```\n' > "$bug/nested/missing.md"
+expect fenced-example-ignored 0 'PASS rows=2'
+printf '# Pending task\nStatus: in-progress\n' > "$todo/pending.md"
+expect todo-orphan 1 'unregistered-todo-document'
+printf '    8, TODO, test, P2, "curated task", doc/08_tracking/todo/pending.md, 1, , "", blocked, true\n' >> "$todo/todo_db.sdn"
+expect curated-todo-registered 0 'PASS rows=3'
+printf '# Marker-only task\n# TODO: execute retained fixture\n' > "$todo/marker.md"
+expect marker-needs-triage 1 'todo-marker-without-row'
+printf '# Historical note without lifecycle or marker\n' > "$todo/marker.md"
+printf '    missing_doc, P2, open, fixture, src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+expect reverse-document-link 1 'bug-row-without-exact-document'
+printf '# Missing doc\nStatus: OPEN\n' > "$bug/missing_doc.md"
+expect reverse-link-repaired 0 'PASS rows=4'
+printf '    alias_2026_09_21, P2, open, alias, src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+printf '# Date spelling\nStatus: OPEN\n' > "$bug/alias_2026-09-21.md"
+expect date-spelling-does-not-register 1 'candidate-id=alias_2026_09_21'
+mv "$bug/alias_2026-09-21.md" "$bug/alias_2026_09_21.md"
+expect exact-date-identity 0 'PASS rows=5'
+printf '    9, TODO, test, P2, broken, unquoted, comma, src/fixture.spl, 1, , "", open, true\n' >> "$todo/todo_db.sdn"
+expect malformed-width 1 'malformed-row'
+printf '\nbugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    registered, P2, open, duplicate, src/fixture.spl, 1, NONE, 2026-09-21, 2026-09-21, true\n' >> "$bug/bug_db.sdn"
+expect cross-table-duplicate 1 'duplicate-bug-id'
+mv "$todo/todo_db.sdn" "$todo/missing.sdn"
+expect missing-db-is-error 2 'ERROR missing-db'
+echo "PASS tracking registration: $passed fixtures"
