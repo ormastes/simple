@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+checker="$root/scripts/check/check-bootstrap-preflight.shs"
+entry="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+resume4="$root/scripts/bootstrap/resume-stage4-from-admitted.sh"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-preflight-evidence.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+sh -n "$checker"
+sh -n "$entry"
+sh -n "$resume"
+sh -n "$resume4"
+sh "$checker" --selftest >/dev/null
+
+# A console PASS or a receipt that skipped the cargo authority check is never
+# admissible evidence, even when every other field looks structurally valid.
+cat >"$tmp/skipped.env" <<'EOF'
+schema=simple-bootstrap-preflight-v1
+status=pass
+git_head=0000000000000000000000000000000000000000
+source_snapshot_sha256=0000000000000000000000000000000000000000000000000000000000000000
+git_state_sha256=0000000000000000000000000000000000000000000000000000000000000000
+config_hex=78
+config_sha256=0000000000000000000000000000000000000000000000000000000000000000
+seed_sha256=0000000000000000000000000000000000000000000000000000000000000000
+checker_sha256=0000000000000000000000000000000000000000000000000000000000000000
+cargo_mode=skipped
+EOF
+if sh "$checker" --verify-receipt="$tmp/skipped.env" >/dev/null 2>&1; then
+  echo "bootstrap preflight evidence: admitted skipped cargo receipt" >&2
+  exit 1
+fi
+
+lock_line=$(grep -n 'bootstrap_lock_handle=${PORTABLE_LOCK_HANDLE}' "$entry" | cut -d: -f1)
+produce_line=$(grep -n 'bootstrap-preflight.shs.*\\' "$entry" | tail -n 1 | cut -d: -f1)
+stage_line=$(grep -n '^bootstrap_progress_pid=' "$entry" | head -n 1 | cut -d: -f1)
+[ "$lock_line" -lt "$produce_line" ]
+[ "$produce_line" -lt "$stage_line" ]
+
+verify_line=$(grep -n -- '--verify-receipt="$bootstrap_preflight_receipt"' "$resume" | cut -d: -f1)
+build_line=$(grep -n 'native-build --target' "$resume" | head -n 1 | cut -d: -f1)
+[ "$verify_line" -lt "$build_line" ]
+
+[ "$(grep -c 'preflight_receipt_path=' "$resume")" -ge 1 ]
+[ "$(grep -c 'preflight_receipt_sha256=' "$resume")" -ge 1 ]
+[ "$(grep -c 'preflight_receipt_sha256=' "$resume4")" -eq 1 ]
+[ "$(grep -c -- '--verify-receipt="$preflight_receipt"' "$resume4")" -eq 1 ]
+
+echo "bootstrap_preflight_evidence_contract=true"
