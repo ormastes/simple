@@ -23,3 +23,11 @@ missing providers, and a provider that emits a valid digest but exits nonzero.
 Validation: the focused regression passed on macOS. The existing producer and
 verifier gate also passed all 13 fixtures under `PATH=/usr/bin:/bin`, exercising
 the complete admission flow with native macOS tools and fixture compilers.
+
+Executable SSpec: `test/02_integration/compiler/bootstrap_planner_portable_hash_spec.spl`.
+It executes the isolated shell regression through the process facade and adds
+direct production-helper scenarios for a failed provider and empty input.
+SSpec execution and SPipe docgen are pending a qualified full CLI. The binary
+at `bin/release/aarch64-apple-darwin/simple` was identified as a Rust bootstrap
+seed; its attempted invocation is excluded from verification evidence. The
+direct shell commands used by the added scenarios were checked independently.
