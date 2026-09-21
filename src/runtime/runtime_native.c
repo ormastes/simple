@@ -9972,17 +9972,51 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     return rc;
 }
 
+#if defined(_WIN32)
+/* rt_widen_long_path_rc is defined later in this file (twin of runtime.c's
+ * copy, same name, see that definition's comment); forward-declare it here so
+ * the fsync worker above that point can use it too. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path);
+#endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* Same fix as runtime.c's rt_fsync_path twin: fopen()+fflush() is both
+     * MAX_PATH-capped (ANSI/narrow-CRT) and not actually durable (fflush()
+     * only empties the CRT's userspace buffer). Use CreateFileW (widened,
+     * extended-length-prefixed) + FlushFileBuffers, falling back to
+     * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
+     * required for FlushFileBuffers to succeed. FILE_FLAG_BACKUP_SEMANTICS is
+     * required too: callers durability-sync DIRECTORIES through this same
+     * worker (native_noop_admission.spl syncs "{root}/generations" after a
+     * rename, the POSIX fsync-the-parent-dir idiom), and CreateFile refuses
+     * to open a directory handle at all without it (ERROR_ACCESS_DENIED);
+     * harmless on a regular file. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (wide_path) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        free(wide_path);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = 0;
+    return ok ? 1 : 0;
+#else
     FILE* file = fopen(path, "rb");
     if (!file) return 0;
-#ifdef _WIN32
-    int ok = fflush(file) == 0;
-#else
     int ok = fsync(fileno(file)) == 0;
-#endif
     fclose(file);
     return ok ? 1 : 0;
+#endif
 }
 SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
@@ -10215,16 +10249,91 @@ int64_t rt_log_is_enabled(int64_t level, const uint8_t* scope_ptr, uint64_t scop
     return level <= current_level ? 1 : 0;
 }
 
+/* ---- file_ops.rs: rt_mmap ------------------------------------------------- */
+/* ACTUAL-access mapping (the SOSIX `sosix_file_map` op). Same bounds contract
+ * as the Rust owner: size > 0, offset >= 0, offset + size must not overflow
+ * and must lie inside an existing file, read-only vs read-write selected by
+ * `readonly`; 0 on any failure. POSIX maps with mmap(2); Windows with
+ * CreateFileMapping + MapViewOfFile (released by UnmapViewOfFile in
+ * rt_munmap). The CACHING op (`sosix_file_map_prefetch`) is composed in
+ * Simple from this + rt_madvise + rt_munmap on POSIX and is a no-op on
+ * Windows, so no second runtime symbol exists for it. The core-C lane has no
+ * runtime sandbox (no C file op consults one), so there is no capability gate
+ * to mirror; the Rust owner keeps its READ_FILE/WRITE_FILE gate.
+ *
+ * Strong (not SPL_CORE_C_WEAK) on purpose: every lane that links the core-C
+ * archive resolves this symbol statically from it. */
+int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+    if (size <= 0 || offset < 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
+#if defined(_WIN32)
+    DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0 ||
+        (uint64_t)file_size.QuadPart < end) {
+        CloseHandle(file);
+        return 0;
+    }
+    HANDLE mapping = CreateFileMappingA(file, NULL, readonly ? PAGE_READONLY : PAGE_READWRITE,
+                                        0, 0, NULL);
+    if (!mapping) {
+        CloseHandle(file);
+        return 0;
+    }
+    void* address = MapViewOfFile(mapping, readonly ? FILE_MAP_READ : FILE_MAP_WRITE,
+                                  (DWORD)((uint64_t)offset >> 32),
+                                  (DWORD)((uint64_t)offset & 0xFFFFFFFFu), (SIZE_T)size);
+    /* The view keeps the file and section alive; the handles can go now. */
+    CloseHandle(mapping);
+    CloseHandle(file);
+    if (!address) return 0;
+    if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
+        UnmapViewOfFile(address);
+        return 0;
+    }
+    return (int64_t)(intptr_t)address;
+#else
+    int fd = open(path, (readonly ? O_RDONLY : O_RDWR) | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
+        close(fd);
+        return 0;
+    }
+    int protection = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
+    void* address = mmap(NULL, (size_t)size, protection, MAP_SHARED, fd, (off_t)offset);
+    close(fd);
+    if (address == MAP_FAILED) return 0;
+    if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
+        munmap(address, (size_t)size);
+        return 0;
+    }
+    return (int64_t)(intptr_t)address;
+#endif
+}
+
 /* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
 
 bool rt_munmap(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
 #if defined(_WIN32)
-    /* Pairs with rt_mmap_raw above, which reserves with VirtualAlloc rather
-     * than a file mapping; MEM_RELEASE frees the whole reservation and
-     * requires a zero size. */
+    /* Pairs with rt_mmap above (a MapViewOfFile view), never with rt_mmap_raw:
+     * VirtualAlloc reservations from rt_mmap_raw are released by rt_munmap_raw
+     * (runtime_legacy_core.c), and no Simple call site unmaps one through here.
+     * UnmapViewOfFile takes the base address only. */
     (void)size;
-    return VirtualFree((void*)(intptr_t)addr, 0, MEM_RELEASE) != 0;
+    return UnmapViewOfFile((void*)(intptr_t)addr) != 0;
 #else
     return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
 #endif
@@ -10232,10 +10341,7 @@ bool rt_munmap(int64_t addr, int64_t size) {
 bool rt_msync(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
 #if defined(_WIN32)
-    /* rt_mmap_raw refuses fd != -1 on Windows, so every mapping reachable here
-     * is private anonymous memory with no file behind it to flush. Validate the
-     * arguments as the POSIX branch does and report success. */
-    return true;
+    return FlushViewOfFile((void*)(intptr_t)addr, (SIZE_T)size) != 0;
 #else
     return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
 #endif
@@ -13666,6 +13772,26 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
     char new_path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(old_ptr, old_len, old_path, sizeof(old_path))) return false;
     if (!rt_text_arg_to_path(new_ptr, new_len, new_path, sizeof(new_path))) return false;
+#if defined(_WIN32)
+    /* CRT rename() is an ANSI/narrow-CRT entry point capped at MAX_PATH --
+     * same bug class as rt_file_fsync above. native_noop_admission.spl
+     * renames a staged generation file whose path was already shown to
+     * exceed MAX_PATH (the incident that motivated this whole fix pass), so
+     * this call was silently failing right after the just-fixed fsync
+     * succeeded, reproducing the identical "generation-publication-failed"
+     * symptom for an unrelated reason. Prefer the wide, extended-length-
+     * prefixed MoveFileExW with no replace flag -- matching rename()'s
+     * Windows semantics of failing when the destination already exists --
+     * falling back to plain rename() only when a path cannot be widened. */
+    wchar_t* wide_old = rt_widen_long_path_rc(old_path);
+    wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
+    if (wide_old && wide_new) {
+        BOOL ok = MoveFileExW(wide_old, wide_new, 0);
+        free(wide_old); free(wide_new);
+        return ok != 0;
+    }
+    free(wide_old); free(wide_new);
+#endif
     return rename(old_path, new_path) == 0;
 }
 
@@ -13702,7 +13828,17 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
     if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes);
+    /* CreateDirectoryA is an ANSI entry point capped at MAX_PATH; `parent`
+     * (the bootstrap cache root) is routinely already close to that limit, so
+     * appending "<prefix>-<32hex>" can push `path` over it. Reuse
+     * rt_widen_long_path_rc (defined earlier in this file, already used by
+     * rt_file_read_regular_no_follow_bounded) rather than the later-defined
+     * spl_widen_long_path, so no forward declaration is needed. Twin of the
+     * same fix in runtime.c's rt_secure_temp_dir. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    BOOL created = wide_path ? CreateDirectoryW(wide_path, &attributes)
+                             : CreateDirectoryA(path, &attributes);
+    free(wide_path);
     LocalFree(descriptor); FreeLibrary(advapi);
     if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else

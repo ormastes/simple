@@ -12,7 +12,7 @@ use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_capabilities, _dr
     _driver_pwrite_text_handle, _driver_pread_text_handle, _driver_close_handle,
     _driver_fsync, _driver_fdatasync, _file_stat_is_directory,
     _driver_unlink_path_text, _driver_rename_path_text, _driver_ftruncate_handle,
-    _driver_mmap_shared_writable_handle, _driver_link_path_text}
+    _driver_mmap_shared_writable_handle, _driver_link_path_text, _driver_mount}
 val MOUNT_ID_MAX: u32 = 0xFFFFFFFFu32
 val HANDLE_ID_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
 val MOUNT_TABLE_MAX_MOUNTS: i64 = 4096
@@ -206,7 +206,15 @@ impl MountTable:
 
         if self.next_id == MOUNT_ID_MAX:
             return Err(FsError.TooLarge)
-        val supported = _driver_capabilities(driver)
+        val mount_result = _driver_mount(driver, opts)
+        if mount_result.is_err():
+            return Err(mount_result.unwrap_err())
+        # Struct parameters are value types: `_driver_mount` returns the
+        # mutated instance (mounted flag flipped) rather than mutating
+        # `driver` in place. Use the returned instance, not the original
+        # `driver` argument, for both capability probing and the stored entry.
+        val mounted_driver = mount_result.unwrap()
+        val supported = _driver_capabilities(mounted_driver)
         val required = FsCapabilitySet(bits: opts.require_caps)
         if (supported.bits & required.bits) != required.bits:
             return Err(FsError.Unsupported)
@@ -219,7 +227,7 @@ impl MountTable:
         val entry = MountEntry(
             id: id,
             mount_point: path,
-            driver: driver,
+            driver: mounted_driver,
             opts: opts,
             active_caps: active.bits,
             capability_version: FS_CAPABILITY_V1,

@@ -7,6 +7,55 @@
 # Phase 2 implementation
 
 
+# Character-space helpers.
+#
+# On the current engine single-index text access (`s[i]`) is CHARACTER-indexed
+# while `s[i:j]` slices and `s.len()` are BYTE-indexed (see
+# doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md). Walking a
+# string with a cursor that mixes the two spaces corrupts or crashes on any
+# multi-byte content, so the conversion loops below operate on a character
+# array instead of raw text indexing.
+
+fn _to_chars(s: text) -> [text]:
+    var chars: [text] = []
+    var i = 0
+    val n = s.char_count()
+    while i < n:
+        chars.push(s[i])
+        i = i + 1
+    chars
+
+fn _chars_join(chars: [text], from: i64, to: i64) -> text:
+    chars[from:to].join("")
+
+fn _find_char_in(chars: [text], ch: text, start: i64) -> i64:
+    """Find first occurrence of character after start position."""
+    var i = start
+    while i < chars.len():
+        if chars[i] == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _match_at(chars: [text], pattern: [text], start: i64) -> bool:
+    if start + pattern.len() > chars.len():
+        return false
+    var j = 0
+    while j < pattern.len():
+        if chars[start + j] != pattern[j]:
+            return false
+        j = j + 1
+    true
+
+fn _find_subsequence(chars: [text], pattern: [text], start: i64) -> i64:
+    """First index at which pattern occurs at or after start, else -1."""
+    var i = start
+    while i + pattern.len() <= chars.len():
+        if _match_at(chars, pattern, i):
+            return i
+        i = i + 1
+    -1
+
 fn storage_to_markdown(storage: text) -> text:
     """Convert Confluence storage XHTML to Markdown (lossy).
 
@@ -15,19 +64,20 @@ fn storage_to_markdown(storage: text) -> text:
       <original-xml>
       ~~~
     """
+    val chars = _to_chars(storage)
     var result = ""
     var i = 0
-    val len = storage.len()
+    val len = chars.len()
 
     while i < len:
-        if storage[i] == "<":
+        if chars[i] == "<":
             # Find end of tag
-            val tag_end = _find_char(storage, ">", i)
+            val tag_end = _find_char_in(chars, ">", i)
             if tag_end < 0:
-                result = result + storage[i:]
+                result = result + _chars_join(chars, i, len)
                 i = len
             else:
-                val tag_content = storage[i + 1:tag_end]
+                val tag_content = _chars_join(chars, i + 1, tag_end)
                 val tag_name = _extract_tag_name(tag_content)
                 val is_closing = tag_content.starts_with("/")
                 val clean_name = if is_closing: tag_name[1:] else: tag_name
@@ -101,19 +151,19 @@ fn storage_to_markdown(storage: text) -> text:
                         if clean_name.starts_with("ac:") or clean_name.contains(":"):
                             # Preserve as fenced block
                             if not is_closing:
-                                val macro_end = _find_closing_tag(storage, clean_name, i)
+                                val macro_end = _find_closing_tag(chars, clean_name, i)
                                 if macro_end > i:
-                                    val macro_content = storage[i:macro_end]
+                                    val macro_content = _chars_join(chars, i, macro_end)
                                     result = result + "\n~~~confluence-raw\n{macro_content}\n~~~\n\n"
                                     i = macro_end
                                 else:
-                                    result = result + storage[i:tag_end + 1]
+                                    result = result + _chars_join(chars, i, tag_end + 1)
                         # Other unknown tags: skip silently
 
                 i = tag_end + 1
         else:
             # Regular text content
-            result = result + storage[i]
+            result = result + chars[i]
             i = i + 1
 
     result.trim()
@@ -209,71 +259,67 @@ fn _inline_md(text_content: text) -> text:
 
 fn _replace_pairs(s: text, marker: text, open_tag: text, close_tag: text) -> text:
     """Replace paired markers with open/close tags."""
+    val chars = _to_chars(s)
+    val marker_chars = _to_chars(marker)
     var result = ""
     var in_pair = false
     var i = 0
-    val mlen = marker.len()
 
-    while i < s.len():
-        if i + mlen <= s.len() and s[i:i + mlen] == marker:
+    while i < chars.len():
+        if _match_at(chars, marker_chars, i):
             if in_pair:
                 result = result + close_tag
             else:
                 result = result + open_tag
             in_pair = not in_pair
-            i = i + mlen
+            i = i + marker_chars.len()
         else:
-            result = result + s[i]
+            result = result + chars[i]
             i = i + 1
 
     result
 
 
-fn _find_char(s: text, ch: text, start: i64) -> i64:
-    """Find first occurrence of character after start position."""
-    var i = start
-    while i < s.len():
-        if s[i] == ch:
-            return i
-        i = i + 1
-    -1
-
-
 fn _extract_tag_name(tag_content: text) -> text:
     """Extract tag name from tag content (e.g., 'a href="..."' -> 'a').
 
-    Bug fix 2026-07-20: a leading '/' (closing-tag marker, e.g. '/strong')
+    Bug fix 2026-07-20: a leading '/' (closing-tag marker, e.g., '/strong')
     must NOT end the scan — callers strip it themselves via is_closing
     (tag_name[1:]). Only a '/' after the first character (self-closing,
     e.g. 'br/') should end the scan. Previously any leading '/' terminated
     the loop immediately, so every closing tag resolved to clean_name=""
     and silently fell through to the unknown-tag branch — meaning
     </strong>/</em>/</code> never emitted their markdown close markers.
+
+    Character-space walk (2026 multi-byte fix): the cursor and the join both
+    operate on the character array, so multi-byte tag content cannot desync
+    the end offset.
     """
-    val trimmed = tag_content.trim()
+    val chars = _to_chars(tag_content.trim())
     var end = 0
-    while end < trimmed.len() and trimmed[end] != " " and trimmed[end] != ">" and (trimmed[end] != "/" or end == 0):
+    while end < chars.len() and chars[end] != " " and chars[end] != ">" and (chars[end] != "/" or end == 0):
         end = end + 1
-    trimmed[0:end]
+    _chars_join(chars, 0, end)
 
 
 fn _extract_attr(tag_content: text, attr_name: text) -> text:
     """Extract attribute value from tag content."""
-    val pattern = "{attr_name}=\""
-    val idx = tag_content.find(pattern)
+    val chars = _to_chars(tag_content)
+    val pattern = _to_chars("{attr_name}=\"")
+    val idx = _find_subsequence(chars, pattern, 0)
     if idx < 0:
         return ""
-    val start = idx + pattern.len()
-    val end = _find_char(tag_content, "\"", start)
+    val value_start = idx + pattern.len()
+    val end = _find_char_in(chars, "\"", value_start)
     if end < 0:
         return ""
-    tag_content[start:end]
+    _chars_join(chars, value_start, end)
 
 
-fn _find_closing_tag(s: text, tag_name: text, start: i64) -> i64:
+fn _find_closing_tag(chars: [text], tag_name: text, start: i64) -> i64:
     """Find the position after the closing tag for a given element."""
-    val close = "</{tag_name}>"
-    val idx = s.find(close)
+    val close = _to_chars("</{tag_name}>")
+    val idx = _find_subsequence(chars, close, start)
     if idx < 0:
         return -1
     idx + close.len()

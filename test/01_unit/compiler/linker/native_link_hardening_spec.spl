@@ -6,15 +6,52 @@ use compiler.backend.linker.linker_wrapper.{
     unresolved_symbol_flags_for_cc,
     native_direct_platform_flags,
     native_effective_link_os,
-    native_linker_abi_for_target
+    native_linker_abi_for_target,
+    native_msvc_extra_args
 }
 use compiler.backend.build_native_types.{BuildLinkConfig, BuildOutputFormat, native_link_config_from_build}
 use compiler.backend.backend.llvm_native_link.{NativeLinkOptions}
+use compiler.backend.linker.msvc.{MsvcConfig, msvc_strip_unix_rpath_args}
 use testing.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Native linker hardening":
+    it "removes Unix rpath flags at the MSVC linker boundary":
+        step("Pass external-provider rpath flags to the MSVC boundary")
+        val flags = native_msvc_extra_args([
+            "/DEBUG", "-rpath", "$ORIGIN", "/OPT:NOREF",
+            "-Wl,-rpath,C:/provider", "/INCREMENTAL:NO"
+        ])
+        step("Require only MSVC-compatible flags to remain")
+        expect(flags).to_equal(["/DEBUG", "/OPT:NOREF", "/INCREMENTAL:NO"])
+
+    it "MsvcConfig.build_args() drops rpath pairs reaching the real link.exe argv":
+        step("Build an MsvcConfig carrying an unfiltered $ORIGIN rpath pair, as a caller that forgot to pre-filter would")
+        var config = MsvcConfig.default()
+        config.extra_args = [
+            "/DEBUG", "-rpath", "$ORIGIN", "/OPT:NOREF",
+            "-Wl,-rpath,C:/provider", "/INCREMENTAL:NO"
+        ]
+        step("Assemble the final link.exe/lld-link argv")
+        val args = config.build_args("out.exe", ["a.obj", "b.obj"])
+        step("Neither the bare -rpath flag nor $ORIGIN may reach the real argv (LNK1181: 'cannot open input file $ORIGIN.obj')")
+        expect(args.contains("-rpath")).to_equal(false)
+        expect(args.contains("$ORIGIN")).to_equal(false)
+        expect(args.contains("-Wl,-rpath,C:/provider")).to_equal(false)
+        step("The MSVC-compatible flags still make it through")
+        expect(args.contains("/DEBUG")).to_equal(true)
+        expect(args.contains("/OPT:NOREF")).to_equal(true)
+        expect(args.contains("/INCREMENTAL:NO")).to_equal(true)
+
+    it "msvc_strip_unix_rpath_args matches native_msvc_extra_args' filtering shape":
+        step("Same dangerous input, the msvc.spl-local filter used by build_args() and link_from_config()")
+        val flags = msvc_strip_unix_rpath_args([
+            "/DEBUG", "-rpath", "$ORIGIN", "/OPT:NOREF",
+            "-Wl,-rpath,C:/provider", "/INCREMENTAL:NO"
+        ])
+        expect(flags).to_equal(["/DEBUG", "/OPT:NOREF", "/INCREMENTAL:NO"])
+
     it "preserves an explicit runtime provider across the build-link boundary":
         val build = BuildLinkConfig(
             output_format: BuildOutputFormat.Native,

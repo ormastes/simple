@@ -319,6 +319,10 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     char path[4096];
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = 0;  /* NUL-terminate */
+    /* Bounds contract shared with the Rust owner and runtime_native.c: the
+     * region must lie inside the file, else a later access SIGBUSes. */
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
 
     int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
@@ -326,6 +330,11 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
 
     int fd = open(path, open_flags);
     if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
+        close(fd);
+        return 0;
+    }
 
     void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
     close(fd);

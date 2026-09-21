@@ -135,6 +135,8 @@ mkdir -p "$home" "$tmp" "$cache" "$outputs" "$logs" || die "cannot isolate verif
 server_outputs="$outputs"
 mcp_build_ready=0
 lsp_build_ready=0
+stage4_tooling_receipt=""
+stage4_tooling_receipt_sha=""
 
 # Copy only an already-admitted compiler. The before/copy/after hashes make a
 # concurrent publish or accidental mutation a terminal admission failure.
@@ -211,20 +213,68 @@ run_task() {
   task=$1
   shift
   expected_executable=""
-  case "${1:-}" in
-    --verification-expect-executable=*)
-      expected_executable=${1#*=}
-      shift
-      ;;
-  esac
+  task_command_owner_receipt=""
+  task_stage4_tooling_receipt=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --verification-expect-executable=*)
+        expected_executable=${1#*=}
+        shift
+        ;;
+      --verification-command-owner-receipt=*)
+        task_command_owner_receipt=${1#*=}
+        shift
+        ;;
+      --verification-stage4-tooling-receipt=*)
+        task_stage4_tooling_receipt=${1#*=}
+        shift
+        ;;
+      *) break ;;
+    esac
+  done
   log="$logs/$task.log"
   started=$(date +%s)
   status=0
-  if [ -n "$expected_executable" ] && ! rm -f "$expected_executable"; then
+  command_owner_before=not-applicable
+  command_owner_after=not-applicable
+  stage4_tooling_before=not-applicable
+  stage4_tooling_after=not-applicable
+  stage4_snapshot_before=not-applicable
+  stage4_snapshot_after=not-applicable
+  if [ -n "$task_command_owner_receipt" ]; then
+    if ! validate_command_owner_receipt "$task_command_owner_receipt"; then
+      printf 'bootstrap-phase-verification: command-owner receipt is not current before invocation: %s\n' \
+        "$task_command_owner_receipt" >"$log"
+      status=90
+      command_owner_before=mismatch
+    else
+      command_owner_before=PASS
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ -n "$task_stage4_tooling_receipt" ]; then
+    if ! validate_stage4_tooling_receipt "$task_stage4_tooling_receipt"; then
+      printf 'bootstrap-phase-verification: Stage4 tooling receipt is not current before invocation: %s\n' \
+        "$task_stage4_tooling_receipt" >"$log"
+      status=90
+      stage4_tooling_before=mismatch
+    else
+      stage4_tooling_before=PASS
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ "$phase" = stage4 ] && [ "${1:-}" = "$compiler_snapshot" ]; then
+    if validate_stage4_compiler_snapshot; then
+      stage4_snapshot_before=PASS
+    else
+      printf 'bootstrap-phase-verification: Stage4 compiler snapshot changed before producer invocation\n' >"$log"
+      status=90
+      stage4_snapshot_before=mismatch
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ -n "$expected_executable" ] && ! rm -f "$expected_executable"; then
     printf 'bootstrap-phase-verification: cannot remove prior expected artifact: %s\n' \
       "$expected_executable" >"$log"
     status=88
-  else
+  elif [ "$status" -eq 0 ]; then
     (
       cd "$source_root" || exit 125
       if [ "$phase" = stage1 ]; then
@@ -249,6 +299,35 @@ run_task() {
     ) >"$log" 2>&1 || status=$?
     if [ "$phase" = stage1 ] && [ "$status" -eq 0 ]; then
       bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-after.env" >>"$log" 2>&1 || status=89
+    fi
+  fi
+  if [ -n "$task_command_owner_receipt" ] && [ "$command_owner_before" = PASS ]; then
+    if validate_command_owner_receipt "$task_command_owner_receipt"; then
+      command_owner_after=PASS
+    else
+      printf 'bootstrap-phase-verification: command-owner receipt changed during invocation: %s\n' \
+        "$task_command_owner_receipt" >>"$log"
+      status=90
+      command_owner_after=mismatch
+    fi
+  fi
+  if [ -n "$task_stage4_tooling_receipt" ] && [ "$stage4_tooling_before" = PASS ]; then
+    if validate_stage4_tooling_receipt "$task_stage4_tooling_receipt"; then
+      stage4_tooling_after=PASS
+    else
+      printf 'bootstrap-phase-verification: Stage4 tooling receipt changed during invocation: %s\n' \
+        "$task_stage4_tooling_receipt" >>"$log"
+      status=90
+      stage4_tooling_after=mismatch
+    fi
+  fi
+  if [ "$stage4_snapshot_before" = PASS ]; then
+    if validate_stage4_compiler_snapshot; then
+      stage4_snapshot_after=PASS
+    else
+      printf 'bootstrap-phase-verification: Stage4 compiler snapshot changed during producer invocation\n' >>"$log"
+      status=90
+      stage4_snapshot_after=mismatch
     fi
   fi
   # Tool help is an executable ABI sanity probe, not merely an exit-code
@@ -299,14 +378,175 @@ run_task() {
     *) result=FAIL ;;
   esac
   if [ -n "$expected_executable" ]; then
-    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s\n' \
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s\n' \
       "$task" "$result" "$status" "$((ended - started))" "$log" \
-      "$expected_executable" "$artifact_status" "$artifact_sha256" >>"$summary"
+      "$expected_executable" "$artifact_status" "$artifact_sha256" \
+      "$stage4_snapshot_before" "$stage4_snapshot_after" >>"$summary"
   else
-    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s\n' \
-      "$task" "$result" "$status" "$((ended - started))" "$log" >>"$summary"
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|command_owner_before=%s|command_owner_after=%s|stage4_tooling_before=%s|stage4_tooling_after=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$log" \
+      "$command_owner_before" "$command_owner_after" "$stage4_tooling_before" "$stage4_tooling_after" \
+      "$stage4_snapshot_before" "$stage4_snapshot_after" >>"$summary"
   fi
   [ "$status" -eq 0 ]
+}
+
+# The full CLI and test runner are distinct native products.  A receipt binds
+# every source check/test invocation to the exact pair constructed by this
+# verification run.  It is created once with noclobber and then made read-only;
+# validating both hashes before and after a command rejects a concurrent swap.
+write_command_owner_receipt() {
+  receipt=$1
+  cli=$2
+  cli_sha=$3
+  runner=$4
+  runner_sha=$5
+  mcp=$6
+  mcp_sha=$7
+  if [ -e "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ "$(manifest_value schema "$receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
+    [ "$(manifest_value status "$receipt")" = frozen ] || return 1
+    [ "$(manifest_value phase "$receipt")" = "$phase" ] || return 1
+    [ "$(manifest_value compiler_cli_path "$receipt")" = "$cli" ] || return 1
+    [ "$(manifest_value compiler_cli_sha256 "$receipt")" = "$cli_sha" ] || return 1
+    [ "$(manifest_value test_runner_path "$receipt")" = "$runner" ] || return 1
+    [ "$(manifest_value test_runner_sha256 "$receipt")" = "$runner_sha" ] || return 1
+    [ "$(manifest_value mcp_server_path "$receipt")" = "$mcp" ] || return 1
+    [ "$(manifest_value mcp_server_sha256 "$receipt")" = "$mcp_sha" ] || return 1
+    return 0
+  fi
+  (
+    umask 077
+    set -C
+    {
+      echo 'schema=simple-bootstrap-command-owners-v3'
+      echo 'status=frozen'
+      echo "phase=$phase"
+      echo "compiler_cli_path=$cli"
+      echo "compiler_cli_sha256=$cli_sha"
+      echo "test_runner_path=$runner"
+      echo "test_runner_sha256=$runner_sha"
+      echo "mcp_server_path=$mcp"
+      echo "mcp_server_sha256=$mcp_sha"
+    } >"$receipt"
+  ) || return 1
+  chmod 400 "$receipt" || return 1
+  [ ! -L "$receipt" ] && [ "$(hash_file "$receipt")" ]
+}
+
+validate_command_owner_receipt() {
+  vcor_receipt=$1
+  [ -n "${command_owner_receipt_sha:-}" ] || return 1
+  [ -f "$vcor_receipt" ] && [ ! -L "$vcor_receipt" ] || return 1
+  [ "$(hash_file "$vcor_receipt")" = "$command_owner_receipt_sha" ] || return 1
+  [ "$(manifest_value schema "$vcor_receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
+  [ "$(manifest_value status "$vcor_receipt")" = frozen ] || return 1
+  [ "$(manifest_value phase "$vcor_receipt")" = "$phase" ] || return 1
+  vcor_cli=$(manifest_value compiler_cli_path "$vcor_receipt")
+  vcor_cli_sha=$(manifest_value compiler_cli_sha256 "$vcor_receipt")
+  vcor_runner=$(manifest_value test_runner_path "$vcor_receipt")
+  vcor_runner_sha=$(manifest_value test_runner_sha256 "$vcor_receipt")
+  vcor_mcp=$(manifest_value mcp_server_path "$vcor_receipt")
+  vcor_mcp_sha=$(manifest_value mcp_server_sha256 "$vcor_receipt")
+  [ "$vcor_cli" = "$compiler_cli" ] && [ "$vcor_cli_sha" = "$compiler_cli_sha" ] || return 1
+  [ "$vcor_runner" = "$test_runner" ] && [ "$vcor_runner_sha" = "$test_runner_sha" ] || return 1
+  [ "$vcor_mcp" = "$mcp_server" ] && [ "$vcor_mcp_sha" = "$mcp_server_sha" ] || return 1
+  [ -f "$vcor_cli" ] && [ ! -L "$vcor_cli" ] && [ -x "$vcor_cli" ] || return 1
+  [ -f "$vcor_runner" ] && [ ! -L "$vcor_runner" ] && [ -x "$vcor_runner" ] || return 1
+  [ -f "$vcor_mcp" ] && [ ! -L "$vcor_mcp" ] && [ -x "$vcor_mcp" ] || return 1
+  [ "$(hash_file "$vcor_cli")" = "$vcor_cli_sha" ] || return 1
+  [ "$(hash_file "$vcor_runner")" = "$vcor_runner_sha" ] || return 1
+  [ "$(hash_file "$vcor_mcp")" = "$vcor_mcp_sha" ] || return 1
+}
+
+# Stage 4 must prove that every producer invocation and final tooling receipt
+# still refer to the immutable compiler snapshot taken at this verification
+# boundary. A cached expected hash alone would not detect a concurrent rewrite.
+validate_stage4_compiler_snapshot() {
+  [ "$phase" = stage4 ] || return 1
+  [ -f "$compiler_snapshot" ] && [ ! -L "$compiler_snapshot" ] && [ -x "$compiler_snapshot" ] || return 1
+  [ "$(hash_file "$compiler_snapshot")" = "$snapshot_sha" ] || return 1
+  [ "$snapshot_sha" = "$expected_sha" ] || return 1
+}
+
+# Stage 4 is the first phase that can support a release claim.  Its tool
+# evidence therefore binds the Phase-4 CLI/runner pair, runtime authority, and
+# both service binaries in one immutable receipt.  A matching Stage-3 receipt
+# or tool path cannot satisfy this phase-specific record.
+write_stage4_tooling_receipt() {
+  receipt=$1
+  mcp=$2
+  mcp_sha=$3
+  lsp=$4
+  lsp_sha=$5
+  if [ -e "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ "$(manifest_value schema "$receipt")" = simple-bootstrap-stage4-tooling-owners-v1 ] || return 1
+    [ "$(manifest_value status "$receipt")" = frozen ] || return 1
+    [ "$(manifest_value phase "$receipt")" = stage4 ] || return 1
+    [ "$(manifest_value compiler_snapshot_path "$receipt")" = "$compiler_snapshot" ] || return 1
+    [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
+    [ "$(manifest_value command_owner_receipt_path "$receipt")" = "$command_owner_receipt" ] || return 1
+    [ "$(manifest_value command_owner_receipt_sha256 "$receipt")" = "$command_owner_receipt_sha" ] || return 1
+    [ "$(manifest_value hosted_runtime_path "$receipt")" = "$runtime_path" ] || return 1
+    [ "$(manifest_value hosted_runtime_sha256 "$receipt")" = "$hosted_runtime_sha" ] || return 1
+    [ "$(manifest_value mcp_server_path "$receipt")" = "$mcp" ] || return 1
+    [ "$(manifest_value mcp_server_sha256 "$receipt")" = "$mcp_sha" ] || return 1
+    [ "$(manifest_value lsp_server_path "$receipt")" = "$lsp" ] || return 1
+    [ "$(manifest_value lsp_server_sha256 "$receipt")" = "$lsp_sha" ] || return 1
+    return 0
+  fi
+  (
+    umask 077
+    set -C
+    {
+      echo 'schema=simple-bootstrap-stage4-tooling-owners-v1'
+      echo 'status=frozen'
+      echo 'phase=stage4'
+      echo "compiler_snapshot_path=$compiler_snapshot"
+      echo "compiler_snapshot_sha256=$snapshot_sha"
+      echo "command_owner_receipt_path=$command_owner_receipt"
+      echo "command_owner_receipt_sha256=$command_owner_receipt_sha"
+      echo "hosted_runtime_path=$runtime_path"
+      echo "hosted_runtime_sha256=$hosted_runtime_sha"
+      echo "mcp_server_path=$mcp"
+      echo "mcp_server_sha256=$mcp_sha"
+      echo "lsp_server_path=$lsp"
+      echo "lsp_server_sha256=$lsp_sha"
+    } >"$receipt"
+  ) || return 1
+  chmod 400 "$receipt" || return 1
+  [ ! -L "$receipt" ] && [ "$(hash_file "$receipt")" ]
+}
+
+validate_stage4_tooling_receipt() {
+  vstr_receipt=$1
+  [ "$phase" = stage4 ] || return 1
+  [ -n "${stage4_tooling_receipt_sha:-}" ] || return 1
+  [ -f "$vstr_receipt" ] && [ ! -L "$vstr_receipt" ] || return 1
+  [ "$(hash_file "$vstr_receipt")" = "$stage4_tooling_receipt_sha" ] || return 1
+  [ "$(manifest_value schema "$vstr_receipt")" = simple-bootstrap-stage4-tooling-owners-v1 ] || return 1
+  [ "$(manifest_value status "$vstr_receipt")" = frozen ] || return 1
+  [ "$(manifest_value phase "$vstr_receipt")" = stage4 ] || return 1
+  validate_stage4_compiler_snapshot || return 1
+  [ "$(manifest_value compiler_snapshot_path "$vstr_receipt")" = "$compiler_snapshot" ] || return 1
+  [ "$(manifest_value compiler_snapshot_sha256 "$vstr_receipt")" = "$snapshot_sha" ] || return 1
+  [ "$(manifest_value command_owner_receipt_path "$vstr_receipt")" = "$command_owner_receipt" ] || return 1
+  [ "$(manifest_value command_owner_receipt_sha256 "$vstr_receipt")" = "$command_owner_receipt_sha" ] || return 1
+  validate_command_owner_receipt "$command_owner_receipt" || return 1
+  [ "$(manifest_value hosted_runtime_path "$vstr_receipt")" = "$runtime_path" ] || return 1
+  validate_hosted_runtime_authority "$runtime_path" || return 1
+  # Revalidation refreshes hosted_runtime_sha from the current frozen authority.
+  # Compare the tooling receipt only afterward so replacing the authority and
+  # its admission record cannot retain a stale, previously matching hash.
+  [ "$(manifest_value hosted_runtime_sha256 "$vstr_receipt")" = "$hosted_runtime_sha" ] || return 1
+  for vstr_server_key in mcp_server lsp_server; do
+    vstr_server=$(manifest_value "${vstr_server_key}_path" "$vstr_receipt")
+    vstr_server_sha=$(manifest_value "${vstr_server_key}_sha256" "$vstr_receipt")
+    [ -f "$vstr_server" ] && [ ! -L "$vstr_server" ] && [ -x "$vstr_server" ] || return 1
+    [ "$(hash_file "$vstr_server")" = "$vstr_server_sha" ] || return 1
+  done
 }
 
 matrix_failed=0
@@ -339,6 +579,7 @@ record_unsupported_task() {
 # timeout cannot discard the remaining inventory or suppress terminal receipts.
 run_compiler_unit_tests() {
   test_runner=$1
+  command_owner_receipt=$2
   task=compiler_unit_tests
   log="$logs/$task.log"
   inventory="$logs/${task}.inventory.tsv"
@@ -348,17 +589,30 @@ run_compiler_unit_tests() {
   printf 'spec\tresult\tstatus\n' >"$inventory"
   started=$(date +%s)
   failed=0
+  spec_count=0
   while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    spec_count=$((spec_count + 1))
     relative=${spec#"$source_root/"}
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
-    (
-      cd "$source_root" || exit 125
-      HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
-        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-          "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable
-    ) >>"$log" 2>&1 || status=$?
+    if ! validate_command_owner_receipt "$command_owner_receipt"; then
+      printf 'command-owner receipt mismatch before %s\n' "$relative" >>"$log"
+      status=90
+    else
+      (
+        cd "$source_root" || exit 125
+        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+          SIMPLE_BINARY="$compiler_cli" \
+          "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+            "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable
+      ) >>"$log" 2>&1 || status=$?
+      if ! validate_command_owner_receipt "$command_owner_receipt"; then
+        printf 'command-owner receipt changed during %s\n' "$relative" >>"$log"
+        status=90
+      fi
+    fi
     result=FAIL
     case "$status" in
       0) result=PASS ;;
@@ -369,11 +623,126 @@ run_compiler_unit_tests() {
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
+  if [ "$spec_count" -eq 0 ]; then
+    printf 'compiler unit inventory is empty; no passing result can be admitted\n' >>"$log"
+    failed=1
+  fi
   ended=$(date +%s)
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s\n' \
-    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" >>"$summary"
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" "$spec_count" \
+    "$command_owner_receipt" >>"$summary"
+  [ "$failed" -eq 0 ]
+}
+
+# Phase 3 full verification must cover the repository inventory, not only the
+# compiler subtree.  Each spec is terminalized independently so a crash or
+# timeout cannot hide later rows, and --assert-ran rejects zero-example greens.
+run_repository_full_tests() {
+  test_runner=$1
+  full_owner_receipt=$2
+  full_mcp_server=$3
+  task=repository_full_tests
+  log="$logs/$task.log"
+  inventory="$logs/${task}.inventory.tsv"
+  manifest="$tmp/${task}.manifest"
+  unsorted_manifest="$tmp/${task}.unsorted"
+  if ! find "$source_root/test" -type f \
+      \( -name '*_spec.spl' -o -name '*_test.spl' \) -print >"$unsorted_manifest"; then
+    printf 'task=%s|result=FAIL|status=discovery-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+      "$task" "$log" "$inventory" >>"$summary"
+    return 1
+  fi
+  if ! LC_ALL=C sort "$unsorted_manifest" >"$manifest"; then
+    printf 'task=%s|result=FAIL|status=sort-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+      "$task" "$log" "$inventory" >>"$summary"
+    return 1
+  fi
+  : >"$log"
+  row_dir="$logs/${task}.rows"
+  mkdir -p "$row_dir"
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\n' >"$inventory"
+  started=$(date +%s)
+  failed=0
+  spec_count=0
+  passed_count=0
+  timeout_count=0
+  crash_count=0
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    spec_count=$((spec_count + 1))
+    relative=${spec#"$source_root/"}
+    row_output="$row_dir/$spec_count.json.log"
+    printf 'BEGIN %s\n' "$relative" >>"$log"
+    status=0
+    executed=0
+    row_passed=0
+    row_failed=0
+    row_skipped=0
+    if ! validate_command_owner_receipt "$full_owner_receipt"; then
+      printf 'command-owner receipt mismatch before %s\n' "$relative" >>"$log"
+      status=90
+    else
+      (
+        cd "$source_root" || exit 125
+        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+          SIMPLE_BINARY="$compiler_cli" \
+          SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
+          "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+            "$spec_timeout_seconds" 15 "$test_runner" "$relative" \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon --sequential --json
+      ) >"$row_output" 2>&1 || status=$?
+      cat "$row_output" >>"$log"
+      if ! validate_command_owner_receipt "$full_owner_receipt"; then
+        printf 'command-owner receipt changed during %s\n' "$relative" >>"$log"
+        status=90
+      fi
+    fi
+    if [ "$status" -eq 0 ]; then
+      row_json=$(grep -E '^\{"success":' "$row_output" | tail -n 1 || :)
+      row_success=$(printf '%s\n' "$row_json" | sed -n 's/^{"success":true,.*/true/p')
+      row_spec_success=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"success":true.*/true/p')
+      row_passed=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_passed":\([0-9][0-9]*\).*/\1/p')
+      row_failed=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_failed":\([0-9][0-9]*\).*/\1/p')
+      row_skipped=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_skipped":\([0-9][0-9]*\).*/\1/p')
+      case "$row_success" in true) ;; *) status=93 ;; esac
+      case "$row_spec_success" in true) ;; *) status=93 ;; esac
+      numeric_rows=1
+      case "$row_passed" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
+      case "$row_failed" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
+      case "$row_skipped" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
+      if [ "$numeric_rows" -eq 1 ]; then
+        [ "$row_failed" -eq 0 ] || status=93
+        executed=$((row_passed + row_failed))
+        [ "$executed" -gt 0 ] || [ "$status" -ne 0 ] || status=92
+      fi
+    fi
+    result=FAIL
+    case "$status" in
+      0) result=PASS; passed_count=$((passed_count + 1)) ;;
+      124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
+      134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
+      "$row_skipped" "$row_output" >>"$inventory"
+    printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
+    [ "$status" -eq 0 ] || failed=1
+  done <"$manifest"
+  if [ "$spec_count" -eq 0 ]; then
+    printf 'repository test inventory is empty; no passing result can be admitted\n' >>"$log"
+    failed=1
+  fi
+  ended=$(date +%s)
+  result=PASS
+  [ "$failed" -eq 0 ] || result=FAIL
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" \
+    "$spec_count" "$passed_count" "$timeout_count" "$crash_count" \
+    "$full_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
 }
 
@@ -405,6 +774,8 @@ else
   hosted_runtime_sha=""
   compiler_cli=""
   test_runner=""
+  command_owner_receipt=""
+  command_owner_receipt_sha=""
   compiler_cli_ready=0
   test_runner_ready=0
   if ! validate_hosted_runtime_authority "$runtime_path"; then
@@ -413,8 +784,8 @@ else
   else
     echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
     hosted_runtime_ready=1
-    tool_cache="$cache_root/compiler-tools/$snapshot_sha/$runtime_cache_identity"
-    tool_outputs="$outputs/compiler-tools/$snapshot_sha/$runtime_cache_identity"
+    tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
+    tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
     mkdir -p "$tool_cache/full-cli" "$tool_cache/test-runner"
@@ -437,12 +808,101 @@ else
   fi
 
   if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ]; then
-    echo "compiler_cli_sha256=$(hash_file "$compiler_cli")" >>"$summary"
-    run_matrix_task compiler_check "$compiler_cli" check src/compiler
-    run_matrix_task mcp_check "$compiler_cli" check src/app/mcp
-    run_matrix_task lsp_check "$compiler_cli" check src/app/simple_lsp_mcp
+    compiler_cli_sha=$(hash_file "$compiler_cli")
+  else
+    compiler_cli_sha=""
+  fi
+  if [ "$test_runner_ready" -eq 1 ] && [ -x "$test_runner" ]; then
+    test_runner_sha=$(hash_file "$test_runner")
+  else
+    test_runner_sha=""
+  fi
+
+  # Build the receipt-owned service binaries before any full inventory row can
+  # reach an MCP spec. The command-owner receipt below binds this MCP path and
+  # hash, so no phase can substitute an ambient bin/simple_mcp_server wrapper.
+  mcp_server=""
+  mcp_server_sha=""
+  if [ "$hosted_runtime_ready" -eq 1 ]; then
+    tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"
+    server_outputs="$outputs/tool-builds/$phase/$snapshot_sha/$runtime_cache_identity"
+    mcp_server="$server_outputs/simple_mcp_server"
+    mkdir -p "$server_outputs"
+    rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
+    run_matrix_task mcp_build --verification-expect-executable="$mcp_server" \
+      "$compiler_snapshot" native-build \
+      --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+      --output "$mcp_server"
+    mcp_build_ready=$matrix_task_passed
+    run_matrix_task lsp_build --verification-expect-executable="$server_outputs/simple_lsp_mcp_server" \
+      "$compiler_snapshot" native-build \
+      --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+      --output "$server_outputs/simple_lsp_mcp_server"
+    lsp_build_ready=$matrix_task_passed
+    if [ "$mcp_build_ready" -eq 1 ] && [ -x "$mcp_server" ]; then
+      mcp_server_sha=$(hash_file "$mcp_server")
+    fi
+  else
+    record_unsupported_task mcp_build host-gpu-hosted-runtime-authority-unavailable
+    record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
+  fi
+
+  if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ] && [ -n "$mcp_server_sha" ]; then
+    command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
+      sha256sum | awk '{print $1}')
+    command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
+    write_command_owner_receipt "$command_owner_receipt" "$compiler_cli" "$compiler_cli_sha" \
+      "$test_runner" "$test_runner_sha" "$mcp_server" "$mcp_server_sha" || die "cannot freeze command-owner receipt"
+    command_owner_receipt_sha=$(hash_file "$command_owner_receipt")
+    echo "compiler_cli_sha256=$compiler_cli_sha" >>"$summary"
+    echo "test_runner_sha256=$test_runner_sha" >>"$summary"
+    echo "command_owner_receipt=$command_owner_receipt" >>"$summary"
+    echo "command_owner_receipt_sha256=$command_owner_receipt_sha" >>"$summary"
+  fi
+
+  if [ "$phase" = stage4 ]; then
+    if [ "${compiler_cli_ready:-0}" -eq 1 ] && [ "${test_runner_ready:-0}" -eq 1 ] && \
+       [ "${mcp_build_ready:-0}" -eq 1 ] && [ "${lsp_build_ready:-0}" -eq 1 ] && \
+       [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
+       [ -x "$server_outputs/simple_mcp_server" ] && [ -x "$server_outputs/simple_lsp_mcp_server" ] && \
+       [ -n "$command_owner_receipt" ]; then
+      validate_stage4_compiler_snapshot || die "Stage4 compiler snapshot changed before tooling receipt"
+      stage4_mcp_sha=$(hash_file "$server_outputs/simple_mcp_server")
+      stage4_lsp_sha=$(hash_file "$server_outputs/simple_lsp_mcp_server")
+      # Derive one compact filename identity from every mutable artifact bound
+      # by the frozen receipt. This avoids NAME_MAX overflow without aliasing a
+      # rebuilt MCP/LSP/runtime lineage onto an incompatible existing receipt.
+      stage4_tooling_lineage_sha=$(printf '%s\n' "$snapshot_sha" "$command_owner_receipt_sha" \
+        "$runtime_path" "$hosted_runtime_sha" "$stage4_mcp_sha" "$stage4_lsp_sha" |
+        sha256sum | awk '{print $1}')
+      stage4_tooling_receipt="$server_outputs/stage4-tooling-owners.$stage4_tooling_lineage_sha.env"
+      write_stage4_tooling_receipt "$stage4_tooling_receipt" \
+        "$server_outputs/simple_mcp_server" "$stage4_mcp_sha" \
+        "$server_outputs/simple_lsp_mcp_server" "$stage4_lsp_sha" ||
+        die "cannot freeze Stage4 tooling receipt"
+      stage4_tooling_receipt_sha=$(hash_file "$stage4_tooling_receipt")
+      echo "stage4_tooling_receipt=$stage4_tooling_receipt" >>"$summary"
+      echo "stage4_tooling_receipt_sha256=$stage4_tooling_receipt_sha" >>"$summary"
+    else
+      record_unsupported_task stage4_tooling_owners stage4-cli-runner-mcp-lsp-artifact-not-built
+    fi
+  fi
+
+  if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ] && \
+     [ -n "$command_owner_receipt" ]; then
+    run_matrix_task compiler_check --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/compiler
+    run_matrix_task mcp_check --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/app/mcp
+    run_matrix_task lsp_check --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/app/simple_lsp_mcp
     if [ "$strategy" = full ]; then
-      run_matrix_task library_check "$compiler_cli" check src/lib
+      run_matrix_task library_check --verification-command-owner-receipt="$command_owner_receipt" \
+        env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/lib
     fi
   else
     record_unsupported_task compiler_check full-cli-artifact-not-built
@@ -453,17 +913,32 @@ else
     fi
   fi
 
-  if [ "$test_runner_ready" -eq 1 ] && [ -x "$test_runner" ]; then
-    echo "test_runner_sha256=$(hash_file "$test_runner")" >>"$summary"
-    run_matrix_task compiler_bootstrap_tests "$test_runner" \
+  if [ "$compiler_cli_ready" -eq 1 ] && [ "$test_runner_ready" -eq 1 ] && \
+     [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
+     [ -n "$command_owner_receipt" ]; then
+    run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$test_runner" \
       test/01_unit/compiler/bootstrap --mode=interpreter --unstable
-    if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner"; then
+    run_matrix_task compiler_bootstrap_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/bootstrap --mode=compile --unstable
+    if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then
+      matrix_failed=1
+    fi
+    if { [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; } && [ "$strategy" = full ] && \
+       ! run_repository_full_tests "$test_runner" "$command_owner_receipt" "$mcp_server"; then
       matrix_failed=1
     fi
   else
-    record_unsupported_task compiler_bootstrap_tests test-runner-artifact-not-built
+    test_owner_reason=test-runner-artifact-not-built
+    [ "$test_runner_ready" -ne 1 ] || test_owner_reason=full-cli-artifact-not-built
+    record_unsupported_task compiler_bootstrap_tests "$test_owner_reason"
+    record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
     if [ "$strategy" = full ]; then
-      record_unsupported_task compiler_unit_tests test-runner-artifact-not-built
+      record_unsupported_task compiler_unit_tests "$test_owner_reason"
+      if [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; then
+        record_unsupported_task repository_full_tests "$test_owner_reason"
+      fi
     fi
   fi
 fi
@@ -481,34 +956,50 @@ if [ "$phase" = stage1 ]; then
     --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
     --output "$outputs/simple_lsp_mcp_server"
   lsp_build_ready=$matrix_task_passed
-elif [ "$hosted_runtime_ready" -eq 1 ]; then
-  tool_build_cache="$cache/tool_builds/$snapshot_sha/$runtime_cache_identity"
-  server_outputs="$outputs/tool-builds/$snapshot_sha/$runtime_cache_identity"
-  mkdir -p "$server_outputs"
-  rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
-  run_matrix_task mcp_build --verification-expect-executable="$server_outputs/simple_mcp_server" \
-    "$compiler_snapshot" native-build \
-    --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
-    --source src/compiler --source src/app --source src/lib --entry-closure \
-    --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
-    --output "$server_outputs/simple_mcp_server"
-  mcp_build_ready=$matrix_task_passed
-  run_matrix_task lsp_build --verification-expect-executable="$server_outputs/simple_lsp_mcp_server" \
-    "$compiler_snapshot" native-build \
-    --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
-    --source src/compiler --source src/app --source src/lib --entry-closure \
-    --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
-    --output "$server_outputs/simple_lsp_mcp_server"
-  lsp_build_ready=$matrix_task_passed
 else
-  record_unsupported_task mcp_build host-gpu-hosted-runtime-authority-unavailable
-  record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
+  # Non-Stage1 service builds are scheduled before the source/test matrix so
+  # an MCP spec never observes an ambient wrapper.
+  :
 fi
-if [ "$phase" != stage1 ] && [ "${test_runner_ready:-0}" -eq 1 ] && [ -x "$test_runner" ]; then
-  run_matrix_task mcp_behavior env SIMPLE_LIB=src "$test_runner" \
-    test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable
+
+if [ "$phase" != stage1 ] && [ "${compiler_cli_ready:-0}" -eq 1 ] && \
+   [ "${test_runner_ready:-0}" -eq 1 ] && [ -x "$compiler_cli" ] && \
+   [ -x "$test_runner" ] && [ -n "${command_owner_receipt:-}" ]; then
+  if [ "$phase" = stage4 ]; then
+    if [ -n "$stage4_tooling_receipt" ]; then
+      run_matrix_task mcp_behavior --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-stage4-tooling-receipt="$stage4_tooling_receipt" \
+        env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+        SIMPLE_MCP_TEST_BINARY="$server_outputs/simple_mcp_server" "$test_runner" \
+        test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon --sequential
+      run_matrix_task mcp_behavior_compile --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-stage4-tooling-receipt="$stage4_tooling_receipt" \
+        env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+        SIMPLE_MCP_TEST_BINARY="$server_outputs/simple_mcp_server" "$test_runner" \
+        test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon --sequential
+    else
+      record_unsupported_task mcp_behavior stage4-tooling-owners-not-built
+      record_unsupported_task mcp_behavior_compile stage4-tooling-owners-not-built
+    fi
+  else
+    run_matrix_task mcp_behavior --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+      SIMPLE_MCP_TEST_BINARY="$mcp_server" "$test_runner" \
+      test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon --sequential
+    run_matrix_task mcp_behavior_compile --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+      SIMPLE_MCP_TEST_BINARY="$mcp_server" "$test_runner" \
+      test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon --sequential
+  fi
 else
-  record_unsupported_task mcp_behavior test-runner-artifact-not-built
+  behavior_owner_reason=test-runner-artifact-not-built
+  [ "${test_runner_ready:-0}" -ne 1 ] || behavior_owner_reason=full-cli-artifact-not-built
+  record_unsupported_task mcp_behavior "$behavior_owner_reason"
+  record_unsupported_task mcp_behavior_compile "$behavior_owner_reason"
 fi
 
 for tool in simple_mcp_server simple_lsp_mcp_server; do
@@ -522,7 +1013,16 @@ for tool in simple_mcp_server simple_lsp_mcp_server; do
     simple_lsp_mcp_server) tool_ready=${lsp_build_ready:-0} ;;
   esac
   if [ "$tool_ready" -eq 1 ] && [ -x "$tool_path" ]; then
-    run_matrix_task "${tool}_help" "$tool_path" --help
+    if [ "$phase" = stage4 ]; then
+      if [ -n "$stage4_tooling_receipt" ]; then
+        run_matrix_task "${tool}_help" \
+          --verification-stage4-tooling-receipt="$stage4_tooling_receipt" "$tool_path" --help
+      else
+        record_unsupported_task "${tool}_help" stage4-tooling-owners-not-built
+      fi
+    else
+      run_matrix_task "${tool}_help" "$tool_path" --help
+    fi
   else
     printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
       "$tool" >>"$summary"

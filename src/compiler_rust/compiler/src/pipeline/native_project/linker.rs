@@ -22,6 +22,18 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+fn is_windows_gnu_target(target: simple_common::target::Target) -> bool {
+    target.os == simple_common::target::TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu
+}
+
+fn generated_c_source_compiler(target: simple_common::target::Target) -> String {
+    if target.os == simple_common::target::TargetOS::Windows {
+        target_c_compiler(target)
+    } else {
+        target_cxx_compiler(target)
+    }
+}
+
 /// Translate a `SIMPLE_LINKER` value into the pair the C driver needs.
 ///
 /// Returns `(fuse_ld_name, probe_binary)`:
@@ -859,17 +871,20 @@ impl NativeProjectBuilder {
         Ok(qualified_candidate)
     }
 
-    /// Compile the C++ main stub to an object file.
+    /// Compile the C main stub to an object file.
     pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
-        let main_cpp = temp_dir.join("_main_stub.cpp");
+        let main_c = temp_dir.join("_main_stub.c");
         let target = effective_target();
-        let cxx = target_cxx_compiler(target);
+        let cc = generated_c_source_compiler(target);
         let is_msvc = uses_msvc_flags(target.linker_flavor());
 
-        let has_entry = self.entry_file.is_some();
         let stub_code = if is_msvc {
             r#"
+#include <wchar.h>
+
+#ifdef __cplusplus
 extern "C" {
+#endif
     int spl_main(void);
     void rt_set_args_wide(int argc, const wchar_t** argv);
     void __simple_runtime_init(void);
@@ -886,17 +901,19 @@ extern "C" {
     // PE-loader-zeroed BSS default (null) -- see
     // doc/08_tracking/bug/windows_msvc_module_init_alternatename_link_order_2026-08-31.md.
     void __simple_call_module_inits(void);
-}
 #pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_shutdown=___simple_runtime_shutdown_stub")
-extern "C" int _spl_main_stub(void) { return 0; }
-extern "C" void ___simple_runtime_init_stub(void) {}
-extern "C" void ___simple_runtime_shutdown_stub(void) {}
+int _spl_main_stub(void) { return 0; }
+void ___simple_runtime_init_stub(void) {}
+void ___simple_runtime_shutdown_stub(void) {}
+#ifdef __cplusplus
+}
+#endif
 int wmain(int argc, wchar_t** argv) {
     __simple_runtime_init();
     __simple_call_module_inits();
-    rt_set_args_wide(argc, const_cast<const wchar_t**>(argv));
+    rt_set_args_wide(argc, (const wchar_t**)argv);
     int r = spl_main();
     __simple_runtime_shutdown();
     return r;
@@ -905,21 +922,29 @@ int wmain(int argc, wchar_t** argv) {
         } else {
             r#"
 #if defined(__APPLE__)
+#ifdef __cplusplus
 extern "C" {
+#endif
     int __attribute__((weak)) spl_main(void) { return 0; }
     void rt_set_args(int, char**);
     void __attribute__((weak)) __simple_runtime_init(void) {}
     void __attribute__((weak)) __simple_runtime_shutdown(void) {}
     void __attribute__((weak)) __simple_call_module_inits(void) {}
+#ifdef __cplusplus
 }
+#endif
 #else
+#ifdef __cplusplus
 extern "C" {
+#endif
     int __attribute__((weak)) spl_main(void);
     void rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
     void __attribute__((weak)) __simple_call_module_inits(void);
+#ifdef __cplusplus
 }
+#endif
 #endif
 int main(int argc, char** argv) {
     if (__simple_runtime_init) __simple_runtime_init();
@@ -932,14 +957,14 @@ int main(int argc, char** argv) {
 "#
         };
 
-        std::fs::write(&main_cpp, stub_code).map_err(|e| format!("write main stub: {e}"))?;
+        std::fs::write(&main_c, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
         let clang_cl_args: Vec<String> = vec![
             "/c".to_string(),
             format!("/Fo{}", main_o.display()),
             "/Gy".to_string(),
-            main_cpp.display().to_string(),
+            main_c.display().to_string(),
         ];
         let other_args: Vec<String> = vec![
             "-c".to_string(),
@@ -951,13 +976,17 @@ int main(int argc, char** argv) {
             "-fno-stack-protector".to_string(),
             "-o".to_string(),
             main_o.display().to_string(),
-            main_cpp.display().to_string(),
+            main_c.display().to_string(),
         ];
         let argv: &[String] = if is_msvc { &clang_cl_args } else { &other_args };
-        let output = std::process::Command::new(&cxx)
-            .args(argv)
+        let mut cmd = std::process::Command::new(&cc);
+        cmd.args(argv);
+        if is_windows_gnu_target(target) {
+            cmd.arg("--target=x86_64-w64-windows-gnu");
+        }
+        let output = cmd
             .output()
-            .map_err(|e| format!("compile main stub: failed to spawn `{} {}`: {e}", cxx, argv.join(" ")))?;
+            .map_err(|e| format!("compile main stub: failed to spawn `{} {}`: {e}", cc, argv.join(" ")))?;
         if !output.status.success() {
             // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
             // capturing only stderr here previously produced a message ending
@@ -968,7 +997,7 @@ int main(int argc, char** argv) {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
                 "Failed to compile main stub ({} {}): exit={:?} stdout=[{}] stderr=[{}]",
-                cxx,
+                cc,
                 argv.join(" "),
                 output.status.code(),
                 stdout.trim(),
@@ -1026,9 +1055,8 @@ int main(int argc, char** argv) {
         init_names.dedup();
 
         let cross_target = effective_target();
-        let cxx = target_cxx_compiler(cross_target);
+        let cc = generated_c_source_compiler(cross_target);
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
-        let is_clang_cl = is_msvc && cxx.contains("clang-cl");
         let use_llvm_backend = self.config.backend == "llvm";
         let init_target_triple = if cross_target.is_host() {
             None
@@ -1037,50 +1065,48 @@ int main(int argc, char** argv) {
         };
 
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
+        code.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n");
         if is_msvc {
-            code.push_str("extern \"C\" {\n");
             for name in &init_names {
                 code.push_str(&format!("    void {}(void);\n", name));
             }
-            code.push_str("}\n");
             for name in &init_names {
                 let stub = format!("_{}_stub", name);
                 code.push_str(&format!(
                     "#pragma comment(linker, \"/ALTERNATENAME:{}={}\")\n\
-                     extern \"C\" void {}(void) {{}}\n",
+                     void {}(void) {{}}\n",
                     name, stub, stub
                 ));
             }
-            code.push_str("extern \"C\" void __simple_call_module_inits(void) {\n");
+            code.push_str("void __simple_call_module_inits(void) {\n");
             for name in &init_names {
                 code.push_str(&format!("    {}();\n", name));
             }
             code.push_str("}\n");
         } else {
-            code.push_str("extern \"C\" {\n");
             for name in &init_names {
                 code.push_str(&format!("    void __attribute__((weak)) {}(void);\n", name));
             }
-            code.push_str("}\n");
-            code.push_str("extern \"C\" void __simple_call_module_inits(void) {\n");
+            code.push_str("void __simple_call_module_inits(void) {\n");
             for name in &init_names {
                 code.push_str(&format!("    if ({}) {}();\n", name, name));
             }
             code.push_str("}\n");
         }
+        code.push_str("#ifdef __cplusplus\n}\n#endif\n");
 
-        let init_cpp = temp_dir.join("_init_all.cpp");
-        std::fs::write(&init_cpp, &code).map_err(|e| format!("write init_all: {e}"))?;
+        let init_c = temp_dir.join("_init_all.c");
+        std::fs::write(&init_c, &code).map_err(|e| format!("write init_all: {e}"))?;
 
         let init_o = temp_dir.join("_init_all.o");
-        // `is_msvc`, not `is_clang_cl`: cl.exe shares clang-cl's driver CLI, and
+        // `is_msvc`: clang-cl shares the MSVC driver CLI, and
         // taking the GNU branch made it read `-o` as its deprecated `/o`, so the
         // object was written to the CWD as `_init_all.obj` instead of to
         // `temp_dir`. The link then failed with `LNK1181: cannot open input file
         // ..._init_all.o`. The sibling main-stub compile above already gates on
         // `is_msvc`, which is why only this object went missing.
         let status = if is_msvc {
-            let mut cmd = std::process::Command::new(&cxx);
+            let mut cmd = std::process::Command::new(&cc);
             cmd.arg("/c")
                 .arg("/O2")
                 .arg("/Gy")
@@ -1110,11 +1136,11 @@ int main(int argc, char** argv) {
             ) {
                 cmd.arg("-mcmodel=medany");
             }
-            cmd.arg(&init_cpp)
+            cmd.arg(&init_c)
                 .status()
                 .map_err(|e| format!("compile init_all: {e}"))?
         } else {
-            let mut cmd = std::process::Command::new(&cxx);
+            let mut cmd = std::process::Command::new(&cc);
             cmd.arg("-c")
                 .arg("-Os")
                 .arg("-ffunction-sections")
@@ -1124,6 +1150,9 @@ int main(int argc, char** argv) {
                 .arg("-fno-stack-protector");
             if let Some(triple) = init_target_triple {
                 cmd.arg(format!("--target={}", triple));
+            }
+            if is_windows_gnu_target(cross_target) {
+                cmd.arg("--target=x86_64-w64-windows-gnu");
             }
             match cross_target.arch {
                 simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
@@ -1145,14 +1174,14 @@ int main(int argc, char** argv) {
             ) {
                 cmd.arg("-mcmodel=medany");
             }
-            cmd.arg(&init_cpp)
+            cmd.arg(&init_c)
                 .arg("-o")
                 .arg(&init_o)
                 .status()
                 .map_err(|e| format!("compile init_all: {e}"))?
         };
         if !status.success() {
-            return Err(format!("compile init_all.cpp failed ({})", cxx));
+            return Err(format!("compile init_all.c failed ({})", cc));
         }
         Ok((Some(init_o), init_names))
     }
@@ -1418,7 +1447,9 @@ int main(int argc, char** argv) {
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);
 
-        let cc = if has_native_all || host_gpu_lane {
+        let cc = if cross_target.os == simple_common::target::TargetOS::Windows {
+            target_c_compiler(cross_target)
+        } else if has_native_all || host_gpu_lane {
             target_cxx_compiler(cross_target)
         } else {
             target_c_compiler(cross_target)
@@ -1426,6 +1457,9 @@ int main(int argc, char** argv) {
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
+        if is_windows_gnu_target(cross_target) {
+            cmd.arg("--target=x86_64-w64-windows-gnu");
+        }
         // Honour SIMPLE_LINKER. `-fuse-ld=<name>` is used rather than invoking
         // the linker binary directly because this is the HOSTED link: the C
         // driver contributes crt1/crti/crtn, the libc and libgcc search paths,

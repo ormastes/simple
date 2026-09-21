@@ -36,6 +36,34 @@ On PowerShell, run `scripts/setup-spipe-local.ps1 -Project <id>`. The bootstrap
 initializes the revision already recorded by the project. Current legacy hosts
 with `.spipe/spipe` are supported without moving or overwriting their state.
 
+## Host links and root hook
+
+The reusable SPipe process surfaces are linked into this repository with:
+
+```sh
+sh .spipe/spipe/scripts/setup-spipe-links.sh --dry-run
+sh .spipe/spipe/scripts/setup-spipe-links.sh
+```
+
+The Unix setup script follows the configured `host_process_doc` root, matching
+the PowerShell setup pattern. In a Simple workspace, it also invokes the host
+hook setup to install the root-manifest pre-commit hook when `FILE.md`,
+`scripts/setup/setup-hooks.shs`, and `scripts/hooks/pre-commit-root-guard` are
+present. A missing prerequisite is reported as a skip rather than changed.
+The PowerShell link script currently creates the same documentation links but
+does not install that Unix hook; run the host hook setup separately there.
+
+SPipe manuals are Markdown-only under `doc/06_spec/`, mirroring executable
+specs after the leading `test/` segment. For example,
+`test/03_system/app/spipe/feature/example_spec.spl` maps to
+`doc/06_spec/03_system/app/spipe/feature/example_spec.md`. `doc/05_spec` is
+not a documentation location in this repository.
+
+The root `scratchpad/` directory is a declared mutable developer-probe area,
+not a quarantine location. Keep probes there while they remain local; do not
+move it or treat it as quarantine. Mutable quarantine artifacts belong under
+`.scv/quarantine/`.
+
 ## Ownership and updates
 
 - Common: generally reusable procedures and public knowledge.

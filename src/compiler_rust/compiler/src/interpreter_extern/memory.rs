@@ -1541,6 +1541,64 @@ pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
     }))
 }
 
+/// Hosted `unsafe_addr_of(ref: any) -> u64` — baremetal SimpleOS code (e.g.
+/// `src/os/kernel/fd_io.spl::_vfs_ipc_request`) declares this extern with no
+/// interpreter binding, so any hosted spec that reaches it died with
+/// `unknown extern function: unsafe_addr_of`. See
+/// doc/08_tracking/bug/interpreter_extern_registry_gap_blocks_os_specs_2026-08-04.md.
+///
+/// A hosted interpreter cannot take the true machine address of a boxed
+/// `Value` the way freestanding codegen can, so this returns the real data
+/// pointer only for the variants that have contiguous backing storage
+/// (`ByteArray`/`FrozenByteArray`/`Str`), mirroring `rt_array_data_ptr`
+/// immediately above, and `0` for every other variant. Callers that then feed
+/// the result straight into a real syscall (as `_vfs_ipc_request` does) never
+/// dereference it hosted, because the paired `rt_x86_syscall` stub below
+/// fails closed before any kernel would read the pointer — see that
+/// function's doc comment. Non-contiguous variants intentionally return 0
+/// rather than a fabricated address: 0 is a safe, recognizable "no real
+/// pointer" sentinel that callers already treat as invalid.
+pub fn unsafe_addr_of(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("unsafe_addr_of requires 1 argument (ref)"));
+    }
+    let addr: u64 = match &args[0] {
+        Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as u64,
+        Value::Str(s) => {
+            let bytes = s.as_str().as_bytes();
+            if bytes.is_empty() {
+                0
+            } else {
+                bytes.as_ptr() as u64
+            }
+        }
+        _ => 0,
+    };
+    Ok(Value::UInt { value: addr, width: 64 })
+}
+
+/// Hosted `rt_x86_syscall(id, arg0, arg1, arg2, arg3, arg4) -> i64` —
+/// baremetal SimpleOS userland (`src/os/userlib/syscall_raw.spl::syscall`)
+/// declares this `@cfg(x86_64)` extern to emit a real `syscall` instruction
+/// on freestanding builds; it had no interpreter binding at all, so any
+/// hosted spec that reached it (e.g. `posix_dup2` -> `posix_close` ->
+/// `_vfs_ipc_request`) died with `unknown extern function: rt_x86_syscall`.
+/// See doc/08_tracking/bug/interpreter_extern_registry_gap_blocks_os_specs_2026-08-04.md.
+///
+/// There is no real SimpleOS kernel to trap into from a hosted process, and
+/// issuing the literal `syscall` instruction here would invoke the HOST
+/// OS's syscall table with attacker-controlled register contents — not a
+/// safe stub. The honest hosted double is ENOSYS (-38): every caller in
+/// `src/os/**` already treats a negative return as "this operation is
+/// unavailable" and degrades gracefully (`_vfs_ipc_request` returns a
+/// transport-failure reply; `fd_dup2`'s local table update does not depend
+/// on the syscall succeeding), so specs that only assert local-state
+/// effects pass unchanged.
+pub fn rt_x86_syscall(_args: &[Value]) -> Result<Value, CompileError> {
+    const ENOSYS: i64 = 38;
+    Ok(Value::Int(-ENOSYS))
+}
+
 /// All-i64 bulk copy: `memcpy(addr + offset, src, len)`.
 ///
 /// Callable from Simple as:

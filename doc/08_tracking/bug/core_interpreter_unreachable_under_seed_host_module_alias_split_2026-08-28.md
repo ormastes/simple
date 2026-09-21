@@ -60,3 +60,28 @@ Canonicalize module identity before global-state allocation (one instance per FI
 not per alias path), or rewrite `compiler.core.*` <-> `compiler.frontend.core.*` to a
 single canonical id in the seed's module loader.
 
+## 2026-09-19 re-verification — `flat_if_chain_interpreter_spec.spl` (suite-2026-09-18 lane)
+
+Spec run (seed `bin/simple.exe`, `--mode=interpreter`): 7 examples, 7 failures, all
+executable examples report `expected 0 to equal ...`. Probe evidence confirms both
+defects above still hold at HEAD:
+
+- `core_interpret("5 + 7", "f.spl")` returns `0` (and `val_get_int` of it `0`) under
+  `<seed> run` — not `-1`, no E1002 diagnostic emitted; the pipeline silently yields
+  `0` for every program, including the file's own documented example
+  (`fn square(x): x * x; square(7)` → `0`). Import via the
+  `compiler.frontend.core.interpreter.mod` alias family reproduces the failure
+  identically in `run` and `test` modes.
+- The spec's 7th (structural) example additionally pins accessor/section names that
+  are absent from the current tree but are NOT phantom: `flat_if_chain_first_arm_get`,
+  `flat_if_arm_then_expr_get`, `flat_if_chain_else_expr_get`,
+  `resolve_prescan_expr`, `esc_collect_expr_locals` (14 hits in
+  `interpreter/resolve.spl` alone) all existed under `src/compiler/10.frontend/core/`
+  at `fcbec1c3b62^` and were wiped by `fcbec1c3b62` "fix(merge): restore src/compiler
+  and src/lib to origin for phase 1 bootstrap" (2026-08-30). The spec (last touched
+  `15c9e602c93`, divergent lineage, same date) was never re-pinned after that
+  restore. At HEAD, `resolve.spl` resolves `STMT_IF` by tag in `resolve_expr` with
+  no prescan/escape functions. That example therefore fails independent of the seed
+  host (stale spec vs intentionally restored tree); re-pinning the spec or
+  re-landing the arena refactor is an owner decision and was left unpatched here.
+

@@ -62,6 +62,19 @@ int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
 #  define SIMPLE_RUNTIME_TARGET_AVX2
 #endif
 
+/* Same MSVC exception as SIMPLE_RUNTIME_TARGET_AVX2 above, for the AVX-512
+ * lane-explicit kernels further down this file. MSVC's cl.exe does not
+ * recognise `__attribute__` at all (not a GNU-compat parser), so an unguarded
+ * use is a hard syntax error under real MSVC (C2143/C2091/C2059), not merely
+ * a no-op like it would be on an unsupported GCC/clang target. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define SIMPLE_RUNTIME_TARGET_AVX512 __attribute__((target("avx512f")))
+#  define SIMPLE_RUNTIME_TARGET_AVX512BWDQ __attribute__((target("avx512f,avx512bw,avx512dq")))
+#else
+#  define SIMPLE_RUNTIME_TARGET_AVX512
+#  define SIMPLE_RUNTIME_TARGET_AVX512BWDQ
+#endif
+
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 static bool rt_msvc_x86_os_avx_enabled(void) {
     int regs[4];
@@ -2321,7 +2334,27 @@ static int db_bitmap_span(SplArray* array, int64_t limit, int64_t* out_n) {
  * ------------------------------------------------------------------------- */
 #define DB_BITMAP_AND_BODY                                       for (int64_t i = 0; i < n; i++) {                                uint32_t a = engine2d_unbox_pixel(l[i]);                     uint32_t b = engine2d_unbox_pixel(r[i]);                     o[i] = engine2d_box_pixel(a & b);                        }
 
-#if defined(__x86_64__) || defined(_M_X64)
+/* SIMD_CAN_AVX2, not a bare `defined(__x86_64__) || defined(_M_X64)` check:
+ * this block (and its five siblings below — two more AVX-512 kernel
+ * definitions plus their three dispatch call sites) uses __m512i/__m256i
+ * types and _mm512_*, _mm256_* intrinsics from <immintrin.h>, and that header
+ * is only #included above under SIMD_CAN_AVX2 (line ~52), which deliberately
+ * excludes clang-cl (__clang__ AND _MSC_VER both defined — see
+ * SIMD_CAN_AVX2's definition in runtime_simd_dispatch.h for why: the
+ * attribute-based per-function isolation these AVX-512/AVX2 kernels rely on
+ * does not work under -fms-compatibility). Simple's in-process embedded LLVM
+ * (used by Stage 2's native-build sanity step, targeting
+ * x86_64-pc-windows-msvc) presents the same way. Gating the intrinsic-using
+ * bodies on plain x86_64 while gating the header on SIMD_CAN_AVX2 is an
+ * asymmetry: the bodies would still be compiled with __m512i/_mm512_*
+ * undeclared. Matches the established pattern in runtime_simd_case.c and
+ * runtime_simd_utf8.c, whose AVX2 kernels are already gated on
+ * SIMD_CAN_AVX2 for the identical reason. Cost: under clang-cl (and the
+ * embedded-LLVM MSVC-target path), these AVX-512 kernels compile out and the
+ * scalar loop runs instead — correct, slower, same trade-off already made
+ * and documented for AVX2 in runtime_simd_dispatch.h. Real cl.exe and the
+ * GNU-driver clang/gcc are unaffected; they still get AVX-512. */
+#if SIMD_CAN_AVX2
 /* CPUID leaf 7 sub-leaf 0: EBX bit 16 = AVX512F, bit 30 = AVX512BW. The file
    has no existing avx512 feature predicate — only the OS-state probe — so this
    supplies the CPUID half that must accompany it. */
@@ -2373,7 +2406,7 @@ static bool db_bitmap_cpu_has_avx512f(void) {
  *     o = ((((l & r) >> 3) & 0xFFFFFFFF) << 3)
  * is bit-identical to the scalar body for every input.
  */
-__attribute__((target("avx512f")))
+SIMPLE_RUNTIME_TARGET_AVX512
 static void db_bitmap_and_avx512(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
     int64_t i = 0;
     const __m512i mask32 = _mm512_set1_epi64((long long)0xFFFFFFFFLL);
@@ -2393,7 +2426,7 @@ static void db_bitmap_and_avx512(const int64_t* l, const int64_t* r, int64_t* o,
     }
 }
 
-__attribute__((target("avx2")))
+SIMPLE_RUNTIME_TARGET_AVX2
 static void db_bitmap_and_avx2(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
     int64_t i = 0;
     const __m256i mask32 = _mm256_set1_epi64x((long long)0xFFFFFFFFLL);
@@ -2419,7 +2452,7 @@ static void db_bitmap_and_scalar(const int64_t* l, const int64_t* r, int64_t* o,
 }
 
 static void db_bitmap_and_dispatch(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     /* rt_x86_avx512_os_state_usable() checks XCR0 opmask/ZMM state, not just
        CPUID: a CPU that reports AVX-512 while the OS has not enabled the wide
        register state would fault on the first zmm touch. */
@@ -2578,8 +2611,8 @@ int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
  * non-opaque destination, which is exactly the kind of edge a parity test over
  * opaque ramps would miss.
  */
-#if defined(__x86_64__) || defined(_M_X64)
-__attribute__((target("avx512f,avx512bw,avx512dq")))
+#if SIMD_CAN_AVX2
+SIMPLE_RUNTIME_TARGET_AVX512BWDQ
 static void blend_mask_span_avx512_lanes(int64_t* dst, const uint8_t* mask,
                                          int64_t n, uint32_t color) {
     const __m512i c255   = _mm512_set1_epi64(255);
@@ -2658,7 +2691,7 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
        assuming. */
     const int mask_packed = rt_array_is_byte_packed(mask);
     const uint8_t* mask_bytes = (const uint8_t*)(uintptr_t)rt_array_data_ptr(mask);
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     /* Explicit-lane path needs the packed mask; the boxed representation falls
        through to the scalar loop below, which is the interpreter's shape and
        already has the Rust twin's AVX-512 behind it. */
@@ -2715,8 +2748,8 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
  * `cov <= 0` keeps the destination slot verbatim, matching the scalar path's
  * early `continue` rather than blending with a == 0.
  */
-#if defined(__x86_64__) || defined(_M_X64)
-__attribute__((target("avx512f,avx512bw,avx512dq")))
+#if SIMD_CAN_AVX2
+SIMPLE_RUNTIME_TARGET_AVX512BWDQ
 static void blend_cov_span_avx512_lanes(int64_t* dst, const int64_t* colcov,
                                         int64_t n, int64_t cov_y, int64_t alpha,
                                         uint32_t color) {
@@ -2799,7 +2832,7 @@ SplArray* rt_engine2d_blend_cov_span_u32(SplArray* dst, int64_t offset,
 
     int64_t cov_y = cov_y_and_alpha / 1024;
     int64_t alpha = cov_y_and_alpha % 1024;
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     if (blend_mask_cpu_has_avx512bw() && rt_x86_avx512_os_state_usable()) {
         for (int64_t i = 0; i < count; i++) o[i] = dst_data[offset + i];
         blend_cov_span_avx512_lanes(o, cov_data, count, cov_y, alpha,

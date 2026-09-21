@@ -26,6 +26,10 @@ use app.io.cli_commands.{cli_test_daemon}
 use app.io.cli_lint_commands.{run_lint_command}
 use app.io._CliCommands.handler_commands.{cli_watch_daemon}
 use app.cli.cli_helpers.{print_cli_help, handle_init, check_self_contained}
+use app.cli.command_registry.{
+    cli_registry_has_command_v1,
+    cli_registry_direct_script_target_v1,
+}
 use app.build.cli_entry.{handle_build}
 use app.cli.check.{run_check}
 use app.cli.check_capsule.{handle_check_capsule}
@@ -373,6 +377,9 @@ fn main() -> i64:
     if not activate_required_child_coverage_apk():
         return 1
 
+    val registered_command = cli_registry_has_command_v1(first)
+    val direct_script_target = cli_registry_direct_script_target_v1(first)
+
     if str_eq(first, "-h") or str_eq(first, "--help"):
         cli_print_help_with_progress(log_opts.progress)
         return 0
@@ -388,6 +395,24 @@ fn main() -> i64:
             print_error("-c requires a code argument")
             return 1
         return cli_run_code(filtered_args[1], flags.gc_log, flags.gc_off)
+    elif direct_script_target != "":
+        # Safe script-tail routes are executed from the canonical registry.
+        # This includes provider, so extension/provider argv never depends on
+        # a separately maintained root literal path.
+        return cli_run_file(direct_script_target,
+            _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
+    elif not registered_command:
+        # A new legacy branch is not executable until it has a structured
+        # registry record. Existing file execution remains an explicit lane.
+        if cli_file_exists(first):
+            var program_args = [first]
+            var file_arg = 1
+            while file_arg < filtered_args.len():
+                program_args.push(filtered_args[file_arg])
+                file_arg = file_arg + 1
+            return cli_run_file(first, program_args, flags.gc_log, flags.gc_off)
+        print_error_with_help("file not found: {first}")
+        return CLI_USAGE_ERROR_EXIT_CODE
     elif str_eq(first, "compile"):
         return cli_compile(filtered_args)
     elif str_eq(first, "targets"):

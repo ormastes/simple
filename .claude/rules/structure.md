@@ -31,6 +31,7 @@ doc/                # Documentation — each phase organized by feature domain
   # Domains: language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra
   # Topics: semantic grouping within domain (e.g., type_system/, parser/, networking/)
   # Rule: ≤10 files per directory; max depth 4 (doc/phase/domain/topic)
+  # Config: config/check/doc_layout.sdn (root/file_limit/max_depth/exempt_phase)
 bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 .claude/            # Agents, skills, templates, rules
 ```
@@ -42,6 +43,13 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
   See `doc/07_guide/workspace/file_manifest.md`.
 - **Detailed:** `doc/04_architecture/compiler/misc/file_class_structure.md` (2,649 files, 623K lines)
 - **Glossary:** `doc/glossary.md`
+- **Fan-out + depth guard:** `scripts/check/check-directory-fanout.shs` enforces the
+  ≤10-files and max-depth-4 rules above, baseline-relative (new/grown violations
+  fail; pre-existing ones are grandfathered in `scripts/check/directory_fanout_baseline.txt`
+  and `scripts/check/doc_depth_baseline.txt`). Reads `config/check/doc_layout.sdn`
+  (override with `--config`/`--root`); `--depth`/`--fanout` run one check only;
+  `--plan` prints a proposed (never-applied) file→subdirectory split for an
+  over-limit directory; `--selftest` is fatal and runs before every scan.
 
 ## Auto-Generated Docs
 | What | Where | When |

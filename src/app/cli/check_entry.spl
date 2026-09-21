@@ -5,7 +5,7 @@
 
 use app.cli.entry_args.{get_cli_args}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
-use app.io.env_ops.{env_get}
+use app.io.env_ops.{env_get, env_set}
 use app.io.process_ops.{process_run_timeout}
 use std.cli.log_modes.{parse_log_options}
 use app.cli.check_options.{check_option_error, check_worker_args, check_presentation_args}
@@ -39,13 +39,35 @@ val CHECK_CHUNK_TIMEOUT_PER_FILE_MS = 60000
 # in-process with the slow self-hosted frontend instead of delegating
 # (300s timeout per file). The real release path always has simple_seed
 # as a sibling, so delegation works there.
+# The test runner re-exports SIMPLE_BINARY to children in Windows verbatim
+# (`\\?\C:\...`) form, which file_exists rejects on some Windows builds.
+# Trying both the raw value and its 4-char-stripped form needs no prefix
+# literal (escaping a backslash prefix portably is lexer-version-sensitive).
+fn resolve_existing_path(candidate: text) -> text:
+    if file_exists(candidate):
+        return candidate
+    if candidate.len() > 4:
+        val stripped = candidate.substring(4, candidate.len())
+        if file_exists(stripped):
+            return stripped
+    ""
+
 fn resolve_worker_binary() -> text:
     val configured = env_get("SIMPLE_BINARY")
-    if configured != nil and configured != "" and file_exists(configured):
-        return configured
+    if configured != nil and configured != "":
+        val worker = resolve_existing_path(configured)
+        if worker != "":
+            return worker
     val configured_bin = env_get("SIMPLE_BIN")
-    if configured_bin != nil and configured_bin != "" and file_exists(configured_bin):
-        return configured_bin
+    if configured_bin != nil and configured_bin != "":
+        val worker_bin = resolve_existing_path(configured_bin)
+        if worker_bin != "":
+            return worker_bin
+    val configured_bin = env_get("SIMPLE_BIN")
+    if configured_bin != nil and configured_bin != "":
+        val worker_bin = strip_verbatim_prefix(configured_bin)
+        if file_exists(worker_bin):
+            return worker_bin
     val (os_out, _os_err, os_code) = process_run_timeout("uname", ["-s"], 10000)
     val (arch_out, _arch_err, arch_code) = process_run_timeout("uname", ["-m"], 10000)
     if os_code != 0 or arch_code != 0:
@@ -181,6 +203,12 @@ fn worker_entry_load_failed(stderr: text) -> bool:
     stderr.contains("compile failed") and stderr.contains(CHECK_WORKER_ENTRY)
 
 fn run_worker(worker_bin: text, worker_args: [text], timeout_ms: i64) -> (text, text, i32):
+    # The invoking test runner may hand children a Windows verbatim-path
+    # SIMPLE_BINARY; the worker's own file probes reject that form. Re-export
+    # the resolved clean path so the whole worker tree inherits it.
+    val raw_bin = env_get("SIMPLE_BINARY")
+    if raw_bin != nil and raw_bin != "" and raw_bin != worker_bin:
+        val _set = env_set("SIMPLE_BINARY", worker_bin)
     val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, timeout_ms)
     if code != 0 and worker_bin != CHECK_WORKER_FALLBACK and worker_entry_load_failed(stderr):
         eprint "check: worker {worker_bin} cannot load {CHECK_WORKER_ENTRY}; retrying on {CHECK_WORKER_FALLBACK} (that deployed binary is stale and needs a redeploy)"

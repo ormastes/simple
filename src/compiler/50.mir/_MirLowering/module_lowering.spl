@@ -436,33 +436,32 @@ impl MirLowering:
         self.composite_layout_owner_counts[key] = 1
 
     me record_external_layout_reference(symbol: SymbolId):
-        val symbol_info = self.symbols.get_symbol_raw(symbol.id)
-        if not symbol_info.?:
+        # Do not carry `HirSymbol?` across this boundary, and never call
+        # `.unwrap()` on it. In a Stage-2 compiler this site's
+        # `symbol_info.unwrap()` was bound to
+        # `lib.nogc_async_mut.async.poll.Poll.unwrap` (disassembly of the
+        # 2026-09-20 aarch64 Linux Stage 2: `bl Poll.unwrap` at
+        # `record_external_layout_reference+192`). `Poll.unwrap` matches
+        # neither Poll tag and returns 0, so `info` was a NULL pointer, not the
+        # nil sentinel 3 -- the old `if info == nil: return` guard compared
+        # 0 against 3, passed, and the `info.defining_module` load faulted at
+        # address 0x48 for every program with a struct-typed local. Open
+        # producer bug: doc/08_tracking/bug/unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md.
+        # The scalar readers keep the struct-valued Dict access inside
+        # SymbolTable (same workaround as enum symbol resolution in
+        # _MirLoweringExpr/switch_operators_calls.spl); "" means absent.
+        val info_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+        if info_name == "":
             return
-        val info = symbol_info.unwrap()
-        # `Option<SymbolInfo>`'s nil case does not survive the staged native
-        # ABI: `symbol_info.?` reads PRESENT for an absent symbol, so `unwrap()`
-        # hands back a nil `info` and the very next field read faults. Measured
-        # 2026-09-14 on the Stage-2 candidate (`aarch64-apple-darwin`, sha
-        # 80911c47f07cdb64...): EXC_BAD_ACCESS code=1 address=0x48 at
-        # `record_external_layout_reference + 204` (`ldr x0, [x26, #0x48]`) for
-        # EVERY program declaring a class with a method -- a nine-line
-        # `class Box: n: i64 / me get()` is enough, and hello-world builds fine.
-        # `mir_struct_symbol_name` below already applies exactly this guard and
-        # documents the same hazard (canonical-minted ids that
-        # `get_symbol_raw` knows nothing about); this call site simply never
-        # did. See doc/08_tracking/bug/stage2_native_method_scoped_dict_field_write_segfaults_2026-09-14.md
-        if info == nil:
-            return
-        var owner = mir_layout_canonical_module_name(info.defining_module ?? "")
-        var key = "{owner}::{info.name}"
+        var owner = mir_layout_canonical_module_name(self.symbols.symbol_defining_module_scalar_raw(symbol.id))
+        var key = "{owner}::{info_name}"
         var owner_count = 0
         # Imported type symbols can retain the consumer filename in older HIR
         # transports. Resolve that lossy spelling only against layouts actually
         # prescanned in this lowering session, and retain ambiguity explicitly.
         if owner == "" or owner == self.current_module_id or
            not self.composite_layout_digests.has(key):
-            val suffix = "::{info.name}"
+            val suffix = "::{info_name}"
             for candidate in self.composite_layout_digests.keys():
                 if candidate.ends_with(suffix) and
                    not candidate.starts_with(self.current_module_id + "::"):
@@ -475,11 +474,11 @@ impl MirLowering:
         if owner == "" or owner == self.current_module_id or owner_count == 0:
             return
         for trace in self.external_layout_traces:
-            if trace.owner_module_id == owner and trace.type_id == info.name:
+            if trace.owner_module_id == owner and trace.type_id == info_name:
                 return
         self.external_layout_traces.push(MirExternalLayoutTraceV1(
             consumer_module_id: self.current_module_id,
-            owner_module_id: owner, type_id: info.name,
+            owner_module_id: owner, type_id: info_name,
             layout_digest: self.composite_layout_digests[key],
             owner_count: owner_count))
 

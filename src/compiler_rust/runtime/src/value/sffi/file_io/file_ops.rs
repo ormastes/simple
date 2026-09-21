@@ -764,6 +764,104 @@ pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
     }
 }
 
+/// Widen a UTF-8 path to a NUL-terminated UTF-16 buffer and, once it is long
+/// enough to hit the MAX_PATH ceiling, fully qualify it and add the
+/// extended-length ("\\?\") prefix so a WIDE Win32 call is not itself capped
+/// at MAX_PATH -- a wide call is not exempt on its own, only the prefix lifts
+/// the ceiling (to ~32,767 characters). Twin of the C runtime's
+/// `rt_widen_long_path_rc` (src/runtime/runtime.c, runtime_native.c) and
+/// `spl_secure_widen_long_path` (src/runtime/runtime_secure_staging.c):
+/// `rt_file_fsync`/`rt_file_rename` are implemented HERE, in Rust, not in
+/// those C twins, which is why fixing only the C side left this bug live --
+/// see the "generation-publication-failed" incident this fixes. Returns
+/// `None` when the path is short enough that no widening is needed, or when
+/// widening fails for any reason; callers fall back to the original path.
+#[cfg(windows)]
+fn win_widen_long_path(path: &str) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetFullPathNameW;
+
+    let mut wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().collect();
+    if wide.len() < 248 {
+        return None;
+    }
+    for unit in wide.iter_mut() {
+        if *unit == b'/' as u16 {
+            *unit = b'\\' as u16;
+        }
+    }
+    // Already extended-length or a UNC path: hand it back unchanged (just
+    // NUL-terminated) rather than double-prefixing it.
+    if wide.len() >= 2 && wide[0] == b'\\' as u16 && wide[1] == b'\\' as u16 {
+        wide.push(0);
+        return Some(wide);
+    }
+    wide.push(0);
+    unsafe {
+        let needed = GetFullPathNameW(PCWSTR(wide.as_ptr()), None, None);
+        if needed == 0 {
+            return None;
+        }
+        let mut full = vec![0u16; needed as usize];
+        let written = GetFullPathNameW(PCWSTR(wide.as_ptr()), Some(&mut full), None);
+        if written == 0 || written as usize >= full.len() {
+            return None;
+        }
+        full.truncate(written as usize);
+        let mut out: Vec<u16> = vec![b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        out.extend_from_slice(&full);
+        out.push(0);
+        Some(out)
+    }
+}
+
+/// CreateFileW + FlushFileBuffers over a widened path, for a durability sync
+/// on Windows. `FILE_FLAG_BACKUP_SEMANTICS` is required even for the common
+/// regular-file case here: `native_noop_admission.spl` also fsyncs the
+/// PARENT DIRECTORY after a rename (the POSIX fsync-the-parent-dir idiom via
+/// this same `rt_file_fsync` extern), and `CreateFile` refuses to open a
+/// directory handle at all without that flag (`ERROR_ACCESS_DENIED`); the
+/// flag is harmless on a regular file.
+#[cfg(windows)]
+unsafe fn win_fsync_path(path_str: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
+        OPEN_EXISTING,
+    };
+
+    let widened = win_widen_long_path(path_str);
+    let narrow_fallback;
+    let wide_ptr: PCWSTR = match &widened {
+        Some(w) => PCWSTR(w.as_ptr()),
+        None => {
+            let mut w: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(path_str)).collect();
+            w.push(0);
+            narrow_fallback = w;
+            PCWSTR(narrow_fallback.as_ptr())
+        }
+    };
+    let flags = FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0 | FILE_FLAG_BACKUP_SEMANTICS.0);
+    let handle = match CreateFileW(
+        wide_ptr,
+        FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+        FILE_SHARE_MODE(0x1 | 0x2 | 0x4), /* FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE */
+        None,
+        OPEN_EXISTING,
+        flags,
+        None,
+    ) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let ok = FlushFileBuffers(handle).is_ok();
+    let _ = CloseHandle(handle);
+    ok
+}
+
 /// Synchronize file contents and metadata with durable storage.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bool {
@@ -777,6 +875,20 @@ pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bo
         Err(_) => return false,
     };
 
+    #[cfg(windows)]
+    {
+        // `OpenOptions::open` below encodes the path to UTF-16 and calls
+        // CreateFileW directly with no widening -- Rust's std does not
+        // auto-prefix long paths (rust-lang/rust#38909) -- so a bootstrap
+        // generation path that exceeds MAX_PATH (260 chars) failed
+        // identically here even after the C-side rt_file_fsync twins were
+        // fixed, because THIS is the definition that actually links: the
+        // runtime crate provides a strong `rt_file_fsync`, and
+        // runtime_native.c's copy is `SPL_CORE_C_WEAK` specifically so the
+        // Rust one wins when both are linked.
+        return win_fsync_path(path_str);
+    }
+    #[cfg(not(windows))]
     match OpenOptions::new().read(true).open(Path::new(path_str)) {
         Ok(file) => file.sync_all().is_ok(),
         Err(_) => false,
@@ -1382,7 +1494,82 @@ pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i
     }
 }
 
-#[cfg(not(unix))]
+/// Windows twin of the unix `rt_mmap`: same bounds and capability contract,
+/// CreateFileMappingW + MapViewOfFile instead of mmap(2). The view keeps the
+/// file and section alive, so both handles are closed before returning.
+/// Released by `rt_munmap` (UnmapViewOfFile). The CACHING op is a no-op on
+/// Windows at the SOSIX facade and never reaches this symbol.
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i64 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, PAGE_READONLY, PAGE_READWRITE,
+        UnmapViewOfFile,
+    };
+
+    let Some(path) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || offset < 0 {
+        return 0;
+    }
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID)
+        || (readonly == 0 && !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID))
+    {
+        return 0;
+    }
+    let Ok(size) = usize::try_from(size) else {
+        return 0;
+    };
+    let Some(end) = (offset as u64).checked_add(size as u64) else {
+        return 0;
+    };
+    let file = if readonly != 0 {
+        File::open(path)
+    } else {
+        OpenOptions::new().read(true).write(true).open(path)
+    };
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.metadata().map_or(true, |metadata| metadata.len() < end) {
+        return 0;
+    }
+    let (protect, access) = if readonly != 0 {
+        (PAGE_READONLY, FILE_MAP_READ)
+    } else {
+        (PAGE_READWRITE, FILE_MAP_WRITE)
+    };
+    let address = unsafe {
+        let mapping = CreateFileMappingW(file.as_raw_handle() as HANDLE, std::ptr::null(), protect, 0, 0, std::ptr::null());
+        if mapping.is_null() {
+            return 0;
+        }
+        let view = MapViewOfFile(
+            mapping,
+            access,
+            ((offset as u64) >> 32) as u32,
+            ((offset as u64) & 0xFFFF_FFFF) as u32,
+            size,
+        );
+        CloseHandle(mapping);
+        view.Value
+    };
+    if address.is_null() {
+        0
+    } else if (address as usize) > i64::MAX as usize {
+        unsafe {
+            UnmapViewOfFile(windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: address })
+        };
+        0
+    } else {
+        address as usize as i64
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) -> i64 {
     0
@@ -1397,7 +1584,18 @@ pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::munmap(addr as usize as *mut libc::c_void, size) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
+    use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+    addr > 0
+        && size > 0
+        && unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: addr as usize as *mut std::ffi::c_void }) != 0
+        }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_munmap(_addr: i64, _size: i64) -> bool {
     false
@@ -1420,7 +1618,15 @@ pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::madvise(addr as usize as *mut libc::c_void, size, advice) == 0 }
 }
 
-#[cfg(not(unix))]
+/// Windows has no madvise; mirror the C twin: validate the arguments and the
+/// advice code, report success for a known code (advice is a hint everywhere).
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
+    addr > 0 && size > 0 && (0..=4).contains(&advice)
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_madvise(_addr: i64, _size: i64, _advice: i64) -> bool {
     false
@@ -1435,7 +1641,17 @@ pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::msync(addr as usize as *mut libc::c_void, size, libc::MS_SYNC) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
+    use windows_sys::Win32::System::Memory::FlushViewOfFile;
+    let Ok(size) = usize::try_from(size) else {
+        return false;
+    };
+    addr > 0 && size > 0 && unsafe { FlushViewOfFile(addr as usize as *const std::ffi::c_void, size) != 0 }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_msync(_addr: i64, _size: i64) -> bool {
     false
@@ -1465,6 +1681,47 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
         Err(_) => return false,
     };
 
+    #[cfg(windows)]
+    {
+        // std::fs::rename encodes to UTF-16 and calls MoveFileExW with no
+        // widening, same MAX_PATH-capped defect as rt_file_fsync above (and
+        // the same reason fixing only the C-side rt_file_rename twin did not
+        // clear the bootstrap blocker: this Rust definition is the one that
+        // links). Prefer the widened, extended-length-prefixed call with no
+        // replace flag -- matching std::fs::rename's Windows behavior of
+        // failing when the destination already exists -- falling back to the
+        // original (possibly un-widened) path only when a path cannot be
+        // widened.
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+
+        let from_wide = win_widen_long_path(from_str);
+        let to_wide = win_widen_long_path(to_str);
+        let from_narrow;
+        let to_narrow;
+        let from_ptr: PCWSTR = match &from_wide {
+            Some(w) => PCWSTR(w.as_ptr()),
+            None => {
+                let mut w: Vec<u16> =
+                    std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(from_str)).collect();
+                w.push(0);
+                from_narrow = w;
+                PCWSTR(from_narrow.as_ptr())
+            }
+        };
+        let to_ptr: PCWSTR = match &to_wide {
+            Some(w) => PCWSTR(w.as_ptr()),
+            None => {
+                let mut w: Vec<u16> =
+                    std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(to_str)).collect();
+                w.push(0);
+                to_narrow = w;
+                PCWSTR(to_narrow.as_ptr())
+            }
+        };
+        return MoveFileExW(from_ptr, to_ptr, MOVE_FILE_FLAGS(0)).is_ok();
+    }
+    #[cfg(not(windows))]
     std::fs::rename(from_str, to_str).is_ok()
 }
 

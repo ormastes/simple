@@ -50,6 +50,7 @@ try {
   });
   assert.equal(drySetup.status, 0);
   assert.ok(drySetup.stdout.includes("would_link docs/process/skill_command"));
+  assert.ok(drySetup.stdout.includes("skip_root_manifest_hook missing_workspace_marker FILE.md"));
   const setup = spawnSync("sh", [setupPath], {
     cwd: host, encoding: "utf8", env: { ...process.env, SPIPE_HOST_ROOT: host }
   });
@@ -111,6 +112,44 @@ try {
   assert.ok(run(["fine-tune-next", "a1"], 1).stdout.includes("STATUS: WARN llm-finetune-next"));
   assert.ok(run(["fine-tune-report", "a1"]).stdout.includes("a1"));
   run(["fine-tune-verify", join(host, ".spipe/llm-finetune-process/attempts/a1.sdn")], 1);
+
+  const hookHost = mkdtempSync(join(tmpdir(), "spipe-root-manifest-hook-"));
+  try {
+    const hookSetupSource = readFileSync(setupPath, "utf8");
+    assert.ok(hookSetupSource.includes('hook_setup="$HOST_ROOT/scripts/setup/setup-hooks.shs"'));
+    assert.ok(hookSetupSource.includes('sh "$hook_setup"'));
+    const gitInit = spawnSync("git", ["init", "-q", hookHost], { encoding: "utf8" });
+    assert.equal(gitInit.status, 0, gitInit.stderr);
+    mkdirSync(join(hookHost, "scripts/setup"), { recursive: true });
+    mkdirSync(join(hookHost, "scripts/hooks"), { recursive: true });
+    writeFileSync(join(hookHost, "FILE.md"), "# Project File Manifest\n");
+    writeFileSync(join(hookHost, "scripts/hooks/pre-commit-root-guard"), "#!/bin/sh\n");
+    writeFileSync(join(hookHost, "scripts/setup/setup-hooks.shs"),
+      "#!/bin/sh\nprintf 'installed-by-existing-setup-hooks\\n' > .git/hooks/pre-commit\n");
+
+    const dryHookSetup = spawnSync("sh", [setupPath, "--dry-run"], {
+      cwd: hookHost, encoding: "utf8", env: { ...process.env, SPIPE_HOST_ROOT: hookHost }
+    });
+    assert.equal(dryHookSetup.status, 0, dryHookSetup.stderr);
+    assert.ok(dryHookSetup.stdout.includes("would_install_root_manifest_hook .git/hooks/pre-commit"));
+
+    const hookSetup = spawnSync("sh", [setupPath], {
+      cwd: hookHost, encoding: "utf8", env: { ...process.env, SPIPE_HOST_ROOT: hookHost }
+    });
+    assert.equal(hookSetup.status, 0, hookSetup.stderr);
+    assert.ok(hookSetup.stdout.includes("installed_root_manifest_hook .git/hooks/pre-commit"));
+    assert.equal(readFileSync(join(hookHost, ".git/hooks/pre-commit"), "utf8"), "installed-by-existing-setup-hooks\n");
+
+    rmSync(join(hookHost, "scripts/hooks/pre-commit-root-guard"));
+    const missingGuard = spawnSync("sh", [setupPath], {
+      cwd: hookHost, encoding: "utf8", env: { ...process.env, SPIPE_HOST_ROOT: hookHost }
+    });
+    assert.equal(missingGuard.status, 0, missingGuard.stderr);
+    assert.ok(missingGuard.stdout.includes("skip_root_manifest_hook missing_root_guard scripts/hooks/pre-commit-root-guard"));
+  } finally {
+    rmSync(hookHost, { recursive: true, force: true });
+  }
+
   console.log("STATUS: PASS spipe-legacy-host-fine-tune-workflows");
 } finally {
   rmSync(host, { recursive: true, force: true });

@@ -6,7 +6,7 @@
 # resolver consulted `/usr/bin/which` and nothing else, so it inherited
 # whatever PATH the child happened to get, and its failure said nothing about
 # what had been attempted.
-use std.io_runtime.{env_set}
+use std.io_runtime.{env_set, file_write, file_delete, file_exists, cwd}
 use compiler.backend.linker._LinkerWrapper.native_linking.{
     darwin_link_tool_env_name, darwin_link_tool_xcrun_name,
     darwin_link_tool_unresolved_error, darwin_resolve_link_tool,
@@ -41,16 +41,24 @@ describe "darwin link tool resolution":
         # The load-bearing case. In the stage-2 native binary neither `which`
         # nor `xcrun` answers, so the ONLY step that can succeed is the one
         # that runs no subprocess: read the pinned absolute path and stat it.
-        # /bin/sh stands in for the real clang -- any existing executable
-        # proves the branch, and nothing here needs Xcode to be installed.
-        assert_true(env_set("SIMPLE_DARWIN_LD", "/bin/sh"))
-        expect(darwin_resolve_link_tool("ld")).to_equal("/bin/sh")
+        # Pin to a file this spec just created, so the branch is proven on any
+        # host (the original /bin/sh stand-in only exists on POSIX).
+        val probe_path = cwd() + "/.darwin-ld-probe"
+        assert_true(file_write(probe_path, "link-tool probe"))
+        assert_true(env_set("SIMPLE_DARWIN_LD", probe_path))
+        expect(darwin_resolve_link_tool("ld")).to_equal(probe_path)
+        assert_true(file_delete(probe_path))
 
     it "does not accept a pinned path that does not exist":
         assert_true(env_set("SIMPLE_DARWIN_LD", "/simple/no/such/linker"))
         val trail = darwin_link_tool_trail("ld")
         expect(trail).to_contain("SIMPLE_DARWIN_LD=/simple/no/such/linker(absent)")
-        expect(trail).to_contain("xcrun --find ld")
+        # The xcrun step is only attempted where the documented absolute
+        # interpreter exists; elsewhere the trail records it as absent.
+        if file_exists("/usr/bin/xcrun"):
+            expect(trail).to_contain("xcrun --find ld")
+        else:
+            expect(trail).to_contain("/usr/bin/xcrun(absent)")
         expect(trail).to_contain("which ld")
 
     it "names the pinned env var as unset when the lane forwarded nothing":

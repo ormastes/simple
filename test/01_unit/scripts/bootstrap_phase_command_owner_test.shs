@@ -7,7 +7,8 @@ trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
-  "$tmp/source/test/01_unit/compiler" "$tmp/work" "$tmp/stage2-admitted"
+  "$tmp/source/test/01_unit/compiler" "$tmp/source/test/02_integration/app" \
+  "$tmp/work" "$tmp/stage2-admitted" "$tmp/bin"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
   "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
 : >"$tmp/runtime/deps/libspl_hosted_runtime-fixture.rlib"
@@ -22,10 +23,86 @@ chmod 400 "$tmp/runtime/hosted-runtime.env" "$tmp/runtime/deps/libspl_hosted_run
 chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
 : >"$tmp/invocations"
 : >"$tmp/executions"
+: >"$tmp/source/test/01_unit/compiler/fixture_spec.spl"
+: >"$tmp/source/test/01_unit/compiler/fixture_test.spl"
+: >"$tmp/source/test/02_integration/app/mcp_stdio_integration_spec.spl"
+
+# Git-for-Windows reports NTFS paths as 755/644 even after chmod.  The
+# production verifier receives POSIX modes on supported bootstrap hosts; this
+# fixture supplies those admitted modes so it can exercise command ownership
+# rather than fail in the pre-existing hosted-runtime permission gate.
+cat >"$tmp/bin/stat" <<'EOF'
+#!/bin/sh
+last=
+for arg in "$@"; do last=$arg; done
+if [ -d "$last" ]; then echo 500; else echo 400; fi
+EOF
+chmod +x "$tmp/bin/stat"
 
 cat >"$tmp/tool" <<'EOF'
 #!/bin/sh
-printf '%s\t%s\n' "$(basename "$0")" "$*" >>"$PHASE_EXECUTIONS"
+printf '%s\t%s\t%s\n' "$(basename "$0")" "${SIMPLE_BINARY:-}" "$*" >>"$PHASE_EXECUTIONS"
+[ -z "${SIMPLE_MCP_TEST_BINARY:-}" ] ||
+  printf 'mcp_test_binary\t%s\t%s\n' "$SIMPLE_MCP_TEST_BINARY" "$*" >>"$PHASE_EXECUTIONS"
+if [ "${PHASE_TAMPER_COMMAND_OWNER:-0}" = 1 ] && \
+   [ "$(basename "$0")" = simple_test_runner ] && \
+   [ "${1:-}" = test/01_unit/compiler/bootstrap ]; then
+  printf '\n# tampered by fixture\n' >>"$SIMPLE_BINARY"
+fi
+if [ "${PHASE_REPLACE_COMMAND_RECEIPT:-0}" = 1 ] && \
+   [ "$(basename "$0")" = simple_test_runner ] && \
+   [ "${1:-}" = test/01_unit/compiler/bootstrap ]; then
+  receipt=$(find "$(dirname "$SIMPLE_BINARY")" -name 'command-owners.*.env' -type f | head -n 1)
+  chmod u+w "$receipt"
+  printf '\n# replaced by fixture\n' >>"$receipt"
+fi
+if [ "${PHASE_TAMPER_STAGE4_TOOLING:-0}" = 1 ] && \
+   [ "$(basename "$0")" = simple_mcp_server ] && [ "${1:-}" = --help ]; then
+  stage4_lsp=$(find "$(dirname "$0")" -name simple_lsp_mcp_server -type f | head -n 1)
+  printf '\n# tampered Stage4 LSP server\n' >>"$stage4_lsp"
+fi
+if [ "${PHASE_REPLACE_STAGE4_RUNTIME:-0}" = 1 ] && \
+   [ "$(basename "$0")" = simple_mcp_server ] && [ "${1:-}" = --help ]; then
+  chmod u+w "$PHASE_RUNTIME" "$PHASE_RUNTIME/deps"
+  chmod u+w "$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib" \
+    "$PHASE_RUNTIME/hosted-runtime.env" "$PHASE_ADMISSION"
+  printf '\nreplaced runtime\n' >>"$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib"
+  replacement_sha=$(sha256sum "$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib" | awk '{print $1}')
+  sed "s/^sha256=.*/sha256=$replacement_sha/" "$PHASE_RUNTIME/hosted-runtime.env" \
+    >"$PHASE_RUNTIME/hosted-runtime.replaced"
+  mv "$PHASE_RUNTIME/hosted-runtime.replaced" "$PHASE_RUNTIME/hosted-runtime.env"
+  sed "s/^hosted_runtime_sha256=.*/hosted_runtime_sha256=$replacement_sha/" "$PHASE_ADMISSION" \
+    >"$PHASE_ADMISSION.replaced"
+  mv "$PHASE_ADMISSION.replaced" "$PHASE_ADMISSION"
+  chmod 400 "$PHASE_RUNTIME/deps/libspl_hosted_runtime-fixture.rlib" \
+    "$PHASE_RUNTIME/hosted-runtime.env"
+  chmod 500 "$PHASE_RUNTIME/deps" "$PHASE_RUNTIME"
+fi
+if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
+  [ -n "${SIMPLE_MCP_TEST_BINARY:-}" ] && [ -x "$SIMPLE_MCP_TEST_BINARY" ] || exit 23
+fi
+case " $* " in
+  *' --json '*)
+    if [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_FALSE_SPEC_SUCCESS:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":false,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_NONZERO_FAILED_COUNT:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      # The test runner contract is terminal JSON, even when an outer wrapper
+      # erroneously normalizes its exit status to zero.  Phase 3 must use the
+      # reported failure instead of treating this as a passed inventory row.
+      echo '{"success":false,"spec":{"success":false,"total_passed":0,"total_failed":1,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_SKIPPED_FULL_INVENTORY:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    else
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    fi
+    ;;
+esac
 exit 0
 EOF
 chmod +x "$tmp/tool"
@@ -44,6 +121,12 @@ if [ "${1:-}" = native-build ]; then
   mkdir -p "$(dirname "$output")"
   cp "$PHASE_TOOL" "$output"
   chmod +x "$output"
+  if [ "${PHASE_TAMPER_STAGE4_SNAPSHOT:-0}" = 1 ]; then
+    printf '\n# tampered Stage4 compiler snapshot\n' >>"$0"
+  fi
+  if [ "${PHASE_FAIL_CLI_BUILD:-0}" = 1 ] && [ "$(basename "$output")" = simple_cli ]; then
+    exit 9
+  fi
   [ "${PHASE_FAIL_NATIVE_BUILD:-0}" != 1 ] || exit 9
 fi
 exit 0
@@ -61,12 +144,17 @@ hosted_runtime_relative_path=deps/libspl_hosted_runtime-fixture.rlib
 hosted_runtime_sha256=$runtime_sha
 EOF
 
-PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+status=0
+PATH="$tmp/bin:$PATH" PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
 PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
   sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
-    --phase=stage2 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
     --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
-    --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30
+    --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30 || status=$?
+if [ "$status" -ne 0 ]; then
+  cat "$tmp/work/summary.env" >&2 || :
+  fail "valid command-owner fixture was rejected (status=$status)"
+fi
 
 grep -Fq -- '--timeout 600 --runtime-bundle host-gpu --runtime-path' "$tmp/invocations" ||
   fail "compiled command owners did not use the qualified hosted runtime"
@@ -74,15 +162,92 @@ grep -Fq -- '--entry src/app/cli/_CliMain/main_and_help.spl' "$tmp/invocations" 
   fail "full CLI was not built"
 grep -Fq -- '--entry src/app/test_runner_new/main.spl' "$tmp/invocations" ||
   fail "test runner was not built"
-grep -Eq -- '^simple_cli[[:space:]]+check src/compiler$' "$tmp/executions" ||
+grep -Eq -- "^simple_cli[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+check src/compiler$" "$tmp/executions" ||
   fail "check was not routed through the full CLI"
-grep -Eq -- '^simple_test_runner[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable$' \
-  "$tmp/executions" || fail "test was not routed directly through the test runner"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable$" \
+  "$tmp/executions" || fail "interpreter test was not bound to the full CLI"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable$" \
+  "$tmp/executions" || fail "compile test was not bound to the full CLI"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential$" \
+  "$tmp/executions" || fail "compile integration test was not bound to the full CLI"
 if grep -Eq -- '^compiler.snapshot[[:space:]]+check' "$tmp/executions" ||
    grep -Eq -- '^compiler.snapshot[[:space:]]+test' "$tmp/executions"; then
   fail "bootstrap compiler capsule was invoked as a full CLI"
 fi
 grep -Fq 'overall=PASS' "$tmp/work/summary.env" || fail "fixture matrix did not pass"
+receipt=$(find "$tmp/work/outputs/compiler-tools" -name 'command-owners.*.env' -type f | head -n 1)
+[ -n "$receipt" ] || fail "command-owner receipt was not written"
+case "$(uname -s)" in
+  MINGW*|MSYS*) : ;; # NTFS mode bits are not authoritative; hash tamper checks below are.
+  *) [ "$(stat -c '%a' "$receipt" 2>/dev/null || stat -f '%Lp' "$receipt")" = 400 ] ||
+       fail "command-owner receipt is not immutable" ;;
+esac
+grep -Fq 'schema=simple-bootstrap-command-owners-v3' "$receipt" ||
+  fail "command-owner receipt lacks schema"
+grep -Fq 'phase=stage4' "$receipt" ||
+  fail "command-owner receipt is not Stage4-specific"
+stage4_receipt=$(find "$tmp/work/outputs/tool-builds/stage4" -name 'stage4-tooling-owners.*.env' -type f | head -n 1)
+[ -n "$stage4_receipt" ] || fail "Stage4 tooling receipt was not written"
+grep -Fq 'schema=simple-bootstrap-stage4-tooling-owners-v1' "$stage4_receipt" ||
+  fail "Stage4 tooling receipt lacks schema"
+grep -Fq 'hosted_runtime_sha256=' "$stage4_receipt" ||
+  fail "Stage4 tooling receipt lacks runtime binding"
+grep -Fq 'mcp_server_sha256=' "$stage4_receipt" ||
+  fail "Stage4 tooling receipt lacks MCP binding"
+grep -Fq 'lsp_server_sha256=' "$stage4_receipt" ||
+  fail "Stage4 tooling receipt lacks LSP binding"
+grep -Fq 'mcp_server_sha256=' "$receipt" ||
+  fail "command-owner receipt lacks MCP server binding"
+grep -Fq 'command_owner_before=PASS|command_owner_after=PASS' "$tmp/work/summary.env" ||
+  fail "successful command owners were not hash-checked before and after"
+grep -Fq 'task=mcp_behavior|result=PASS|status=0' "$tmp/work/summary.env" ||
+  fail "MCP interpreter behavior did not execute"
+grep -F 'task=mcp_behavior|' "$tmp/work/summary.env" |
+  grep -Fq 'command_owner_before=PASS|command_owner_after=PASS' ||
+  fail "MCP interpreter behavior was not command-owner checked"
+grep -F 'task=mcp_behavior_compile|' "$tmp/work/summary.env" |
+  grep -Fq 'command_owner_before=PASS|command_owner_after=PASS' ||
+  fail "MCP compile behavior was not command-owner checked"
+grep -Fq 'task=repository_full_tests|result=PASS|status=0' "$tmp/work/summary.env" ||
+  fail "Phase 4 repository inventory did not pass"
+grep -Fq 'spec_count=3|passed_count=3|timeout_count=0|crash_count=0' \
+  "$tmp/work/summary.env" || fail "Phase 4 repository inventory counts are not exact"
+grep -Fq 'task=mcp_behavior|result=PASS|status=0' "$tmp/work/summary.env" ||
+  fail "Stage4 MCP behavior did not pass"
+grep -F 'task=mcp_behavior|' "$tmp/work/summary.env" | \
+  grep -Fq 'stage4_tooling_before=PASS|stage4_tooling_after=PASS' ||
+  fail "Stage4 MCP behavior was not bound to the Stage4 tooling receipt"
+grep -F 'mcp_test_binary' "$tmp/executions" | \
+  grep -Fq "$tmp/work/outputs/tool-builds/stage4" ||
+  fail "Stage4 MCP behavior did not receive its receipt-bound server path"
+grep -F 'task=simple_mcp_server_help|' "$tmp/work/summary.env" | \
+  grep -Fq 'stage4_tooling_before=PASS|stage4_tooling_after=PASS' ||
+  fail "Stage4 MCP server help was not receipt-bound"
+grep -F 'task=simple_lsp_mcp_server_help|' "$tmp/work/summary.env" | \
+  grep -Fq 'stage4_tooling_before=PASS|stage4_tooling_after=PASS' ||
+  fail "Stage4 LSP server help was not receipt-bound"
+
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/fixture_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+  "$tmp/executions" || fail "full inventory row did not use the exact CLI and non-vacuous options"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/fixture_test.spl .* --json$" \
+  "$tmp/executions" || fail "*_test.spl inventory row was not executed"
+grep -F 'mcp_test_binary' "$tmp/executions" | \
+  grep -F "$tmp/work/outputs/tool-builds/stage4" | \
+  grep -Fq 'test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json' ||
+  fail "full inventory MCP row did not receive the receipt-bound server path"
+
+# A retry of the same admitted lineage reuses the frozen receipt and distinct
+# shared build caches. It must not fail merely because evidence already exists.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_INVOCATIONS="$tmp/invocations" \
+PHASE_EXECUTIONS="$tmp/executions" PHASE_TOOL="$tmp/tool" \
+BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30 || status=$?
+[ "$status" -eq 0 ] || fail "same-lineage command-owner retry was rejected"
 
 # The currently deployed Stage-2 admission schema does not bind a hosted rlib.
 # It must produce one explicit unsupported row per capability, never one false
@@ -93,9 +258,9 @@ mv "$tmp/stage2-admitted/admission.v1" "$tmp/stage2-admitted/admission.env"
 : >"$tmp/invocations"
 : >"$tmp/executions"
 status=0
-PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PATH="$tmp/bin:$PATH" PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
 PHASE_TOOL="$tmp/tool" sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
-  --phase=stage2 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+  --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
   --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
   --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30 || status=$?
 [ "$status" -ne 0 ] || fail "unbound v1 hosted runtime was admitted"
@@ -115,14 +280,157 @@ sed 's/simple-bootstrap-stage2-admission-v1/simple-bootstrap-stage2-admission-v2
 mv "$tmp/stage2-admitted/admission.v2" "$tmp/stage2-admitted/admission.env"
 : >"$tmp/executions"
 status=0
-PHASE_FAIL_NATIVE_BUILD=1 PHASE_INVOCATIONS="$tmp/invocations" \
+PATH="$tmp/bin:$PATH" PHASE_FAIL_NATIVE_BUILD=1 PHASE_INVOCATIONS="$tmp/invocations" \
 PHASE_EXECUTIONS="$tmp/executions" PHASE_TOOL="$tmp/tool" \
   sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
-    --phase=stage2 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
     --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
     --runtime-path="$tmp/runtime" --work-root="$tmp/work" --timeout-seconds=30 || status=$?
 [ "$status" -ne 0 ] || fail "failed compiled-tool build was admitted"
 [ ! -s "$tmp/executions" ] ||
   fail "executable residue from a failed compiled-tool build was executed"
+
+# A runner without its exact full CLI owner is not independently runnable.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_FAIL_CLI_BUILD=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/cli-failed-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "runner without a full CLI owner was admitted"
+if grep -Eq '^simple_test_runner[[:space:]]' "$tmp/executions"; then
+  fail "runner executed tests after its full CLI owner failed to build"
+fi
+grep -Fq 'task=compiler_bootstrap_compile_tests|result=UNSUPPORTED|status=full-cli-artifact-not-built' \
+  "$tmp/cli-failed-work/summary.env" || fail "compile row did not terminalize after CLI build failure"
+grep -Fq 'task=mcp_behavior_compile|result=UNSUPPORTED|status=full-cli-artifact-not-built' \
+  "$tmp/cli-failed-work/summary.env" || fail "MCP compile row did not terminalize after CLI build failure"
+grep -Fq 'task=repository_full_tests|result=UNSUPPORTED|status=full-cli-artifact-not-built' \
+  "$tmp/cli-failed-work/summary.env" || fail "full inventory did not terminalize after CLI build failure"
+
+# A skipped-only file returns zero from the runner but executes no examples.
+# Phase 3 must classify that row nonpassing instead of inflating passed_count.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_SKIPPED_FULL_INVENTORY=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/skipped-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "skipped-only repository row was admitted"
+grep -Fq 'fixture_test.spl' "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "skipped-only fixture is absent from inventory"
+awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 92 && \
+  $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } END { exit !found }' \
+  "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "skipped-only fixture did not fail with zero executed examples"
+
+# Test each terminal JSON guard independently. Wrappers can flatten process
+# status to zero, so outer success, spec success, and failure count must each
+# be sufficient to reject a row.
+for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS PHASE_NONZERO_FAILED_COUNT; do
+  : >"$tmp/executions"
+  status=0
+  failed_work="$tmp/failed-json-$failed_mode"
+  env "$failed_mode=1" PATH="$tmp/bin:$PATH" \
+    PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+    PHASE_TOOL="$tmp/tool" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+      --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+      --runtime-path="$tmp/runtime" --work-root="$failed_work" --timeout-seconds=30 || status=$?
+  [ "$status" -ne 0 ] || fail "zero-exit failed JSON mode $failed_mode was admitted"
+  awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 93 && \
+    $4 == 1 { found=1 } END { exit !found }' \
+    "$failed_work/logs/repository_full_tests.inventory.tsv" ||
+    fail "zero-exit failed JSON mode $failed_mode did not terminalize as a failure"
+done
+
+# A test runner can be executable and return zero while changing the full CLI.
+# The verifier must reject it after the invocation instead of admitting a
+# vacuous command-owner result.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_TAMPER_COMMAND_OWNER=1 PHASE_INVOCATIONS="$tmp/invocations" \
+PHASE_EXECUTIONS="$tmp/executions" PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/tampered-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "mutated command owner was admitted"
+grep -Fq 'task=compiler_bootstrap_tests|result=FAIL|status=90' \
+  "$tmp/tampered-work/summary.env" || fail "post-invocation command-owner mutation was not rejected"
+
+# Replacing the receipt while keeping matching tool paths/hashes must also be
+# rejected against the receipt SHA captured by this invocation.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_REPLACE_COMMAND_RECEIPT=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/receipt-tampered-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "replaced command-owner receipt was admitted"
+grep -Fq 'task=compiler_bootstrap_tests|result=FAIL|status=90' \
+  "$tmp/receipt-tampered-work/summary.env" || fail "receipt replacement was not rejected"
+
+# A Stage4 server can return success while replacing another member of the
+# tooling receipt. The help gate must reject that post-invocation mutation.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_TAMPER_STAGE4_TOOLING=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/stage4-tampered-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "mutated Stage4 tooling owner was admitted"
+grep -Fq 'task=simple_mcp_server_help|result=FAIL|status=90' \
+  "$tmp/stage4-tampered-work/summary.env" ||
+  fail "Stage4 server mutation was not rejected after help"
+
+# Replacing the runtime and both of its authority records during a successful
+# tool invocation must not overwrite the cached hash and satisfy a stale
+# Stage4 tooling receipt.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_REPLACE_STAGE4_RUNTIME=1 \
+PHASE_RUNTIME="$tmp/runtime" PHASE_ADMISSION="$tmp/stage2-admitted/admission.env" \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/stage4-runtime-replaced-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "replaced Stage4 runtime authority was admitted"
+grep -Fq 'task=simple_mcp_server_help|result=FAIL|status=90' \
+  "$tmp/stage4-runtime-replaced-work/summary.env" ||
+  fail "Stage4 runtime replacement was not rejected after help"
+
+# A compiler snapshot can be rewritten while emitting a successful native
+# artifact. Stage4 must reject that producer invocation before it can mint any
+# tooling receipt or use its output.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_TAMPER_STAGE4_SNAPSHOT=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/stage4-snapshot-tampered-work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "rewritten Stage4 compiler snapshot was admitted"
+grep -Fq 'task=compiler_cli_build|result=FAIL|status=90' \
+  "$tmp/stage4-snapshot-tampered-work/summary.env" ||
+  fail "Stage4 compiler snapshot mutation was not rejected after build"
 
 echo 'bootstrap_phase_command_owner_test: PASS'

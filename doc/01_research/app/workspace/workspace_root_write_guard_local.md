@@ -70,6 +70,15 @@ Do not make the whole repository immutable. Use a policy-driven allowlist:
   possible, but shell/build writes need filesystem permissions or post-write
   audit.
 
+## Canonical Quarantine
+
+Use `.scv/quarantine/`, not a root `quarantine/` directory. SCV already owns
+this recoverable, never-delete state and its GC moves rejected objects there.
+Keep the lanes explicit: `scv/` for recovered SCV pack fixtures, `jit/` for
+JIT metadata sidecars, and `root/` for legacy root artifacts moved by the
+workspace guard. Root-level ignore rules do not exempt an entry from `FILE.md`:
+the guard must enumerate and reject ignored root entries as well.
+
 ## Conclusion
 
 The achievable path is a two-stage guard: first a deterministic audit/fix script

@@ -11,6 +11,7 @@
 # docstring then failed to parse in the self-hosted `check` driver path
 # (parser.spl -> lex_next -> CoreLexer.next_token).
 use compiler.frontend.core.lexer.{lex_init, lex_next, lex_token_text}
+use compiler.core.parser.{parser_init, par_kind_get, par_text_get, parser_advance}
 
 use std.spec.step
 
@@ -24,8 +25,14 @@ describe "CoreLexer triple-quoted strings":
         val body = if start >= 0 and end > start: source.substring(start, end) else: ""
         expect(source).to_contain("slice_parts: [text]")
         expect(source).to_contain("var core_token_text_intern: {i64: text} = {}")
-        expect(body).to_contain("core_token_text_intern.get(key)")
-        expect(body).to_contain("core_token_text_matches(self.source_chars, s, e, cached)")
+        # contains_key + index read, never `.get()` — see the native Dict
+        # pitfall note in the same function (doc/07_guide/language/dict_native_pitfalls.md).
+        expect(body).to_contain("core_token_text_intern.contains_key(key)")
+        expect(body).to_contain("val cached = core_token_text_intern[key]")
+        # PERF (2026-08-28, same file, `chars_match` docstring): the compare
+        # helper was renamed from `core_token_text_matches` to `chars_match`
+        # and rewritten to a byte compare with identical outcome.
+        expect(body).to_contain("self.chars_match(s, e, cached)")
         expect(body).to_contain("core_token_text_intern[key] = interned")
         expect(body).to_contain("self.slice_parts.clear()")
         expect(body).to_contain("self.slice_parts.push(self.source_chars[i])")
@@ -40,14 +47,17 @@ describe "CoreLexer triple-quoted strings":
         val start = source.find("pub fn rt_string_chars(value: i64) -> i64:") ?? -1
         val end = source.find("pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:") ?? -1
         val body = if start >= 0 and end > start: source.substring(start, end) else: ""
-        expect(body).to_contain("val ascii_cache = calloc(256, 8)")
+        # Wrapped by the file's own `_sffi_core_string_*` SFFI convention.
+        expect(body).to_contain("val ascii_cache = _sffi_core_string_calloc(256, 8)")
         expect(body).to_contain("if width == 1 and ascii_cache > 0:")
         expect(body).to_contain("val cache_offset = b0 * 8")
-        expect(body).to_contain("char_value = spl_load_i64(ascii_cache, cache_offset)")
+        expect(body).to_contain("char_value = _sffi_core_string_spl_load_i64(ascii_cache, cache_offset)")
         expect(body).to_contain("if string_ptr(char_value) > 0:")
-        expect(body).to_contain("spl_store_i64(ascii_cache, cache_offset, char_value)")
+        expect(body).to_contain("_sffi_core_string_spl_store_i64(ascii_cache, cache_offset, char_value)")
         expect(body).to_contain("char_value = rt_string_new(data + byte_index, width)")
-        expect(body).to_contain("if ascii_cache > 0:\n        free(ascii_cache)")
+        # The libc `free` call is wrapped by the file's own SFFI convention
+        # (`_sffi_core_string_malloc`/`_sffi_core_string_calloc`/`_sffi_core_string_free`, ...).
+        expect(body).to_contain("if ascii_cache > 0:\n        _sffi_core_string_free(ascii_cache)")
 
     it "keeps exact parser token text without offset reconstruction":
         # @req REQ-SSPEC-COMPILER
@@ -119,4 +129,6 @@ describe "CoreLexer triple-quoted strings":
         lex_init("\"\"\"" + payload + "\"\"\"")
         expect(lex_next()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(lex_token_text()).to_equal(payload)
-        expect(lex_next()).to_equal(0)
+        # oracle: 190 — `Eof` (lexer_types.spl:163), not 0; there is no
+        # zero-valued token kind in this lexer.
+        expect(lex_next()).to_equal(190)

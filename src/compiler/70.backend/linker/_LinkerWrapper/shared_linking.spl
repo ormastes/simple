@@ -38,7 +38,7 @@ use compiler.backend.linker.crt_discovery.*
 
 # Import helpers (SMF linking, self-contained, binary utils)
 use compiler.backend.linker.linker_wrapper_helpers.{SelfContainedConfig}
-use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths}
+use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths, msvc_strip_unix_rpath_args}
 use compiler.backend.linker.linker_wrapper_helpers.{SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION}
 use compiler.backend.linker.linker_wrapper_helpers.{link_to_smf, link_to_self_contained}
 use compiler.backend.linker.linker_wrapper_helpers.{detect_self_contained, find_runtime_binary, find_runtime_lib_dir}
@@ -50,17 +50,17 @@ use compiler.backend.linker.linker_wrapper_helpers.{write_bytes_to_file, write_e
 # ============================================================================
 
 fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    """Link using MinGW gcc driver.
+    """Link using the bootstrap-owned Windows GNU Clang driver.
 
     Invoked as a direct argv process, NOT through shell(): shell() hardcodes
     "/bin/sh -c", which can never spawn on native Windows (CreateProcess has
     no /bin/sh), so every link died with exit -1 and no output. Direct argv
     also removes shell-quoting hazards in object paths."""
-    val cc = if config.target_triple.ends_with("-pc-windows-gnu"):
-        "x86_64-w64-mingw32-gcc"
-    else:
-        "gcc"
+    val cc = env_get("CC")
+    if cc == "" or (not cc.ends_with("/clang") and not cc.ends_with("/clang.exe") and not cc.ends_with("\\clang") and not cc.ends_with("\\clang.exe")):
+        return Err("Windows GNU linking requires bootstrap-owned clang through CC")
     var args: [text] = []
+    args = args.push("--target=x86_64-w64-windows-gnu")
     for flag in native_retained_symbol_cc_args(config.retained_symbols, "windows-mingw"):
         args = args.push(flag)
     for obj in object_files:
@@ -113,7 +113,7 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     val cmd_text = cc + " " + args.join(" ")
     if config.verbose:
-        print "[linker-wrapper] MinGW command: {cmd_text}"
+        print "[linker-wrapper] Windows GNU Clang command: {cmd_text}"
 
     val (link_out, link_err, link_code) = process_run(cc, args)
     if link_code == 0:
@@ -125,7 +125,7 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
         var err_msg = "{link_err}{link_out}"
         if err_msg.trim() == "":
             err_msg = "(no linker output; exit code {link_code})"
-        Err("MinGW linking failed: {err_msg}\ncommand: {cmd_text}")
+        Err("Windows GNU Clang linking failed: {err_msg}\ncommand: {cmd_text}")
 
 # ============================================================================
 # Shared Library Linking
@@ -299,8 +299,9 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
             if not msvc_config.libs.contains(wlib):
                 msvc_config.libs.push(wlib)
 
-    # Extra flags
-    for flag in config.extra_flags:
+    # Extra flags. Filtered at the source too, not only in build_args()
+    # below -- see msvc_strip_unix_rpath_args's docstring (msvc.spl).
+    for flag in msvc_strip_unix_rpath_args(config.extra_flags):
         msvc_config.extra_args.push(flag)
 
     # Size optimization: remove unreferenced data + fold identical COMDATs
@@ -319,18 +320,21 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
             Err("Windows MSVC DLL linking failed: {e.message}")
 
 fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
-    """Link a DLL using MinGW gcc."""
-    val sb = StringBuilder(parts: [])
-    sb.push("gcc -shared -DSPL_SHARED_LIBRARY")
+    """Link a DLL using the bootstrap-owned Windows GNU Clang C driver."""
+    val cc = env_get("CC")
+    if cc == "" or (not cc.ends_with("/clang") and not cc.ends_with("/clang.exe") and not cc.ends_with("\\clang") and not cc.ends_with("\\clang.exe")):
+        return Err("Windows GNU shared linking requires bootstrap-owned clang through CC")
+    var args: [text] = []
+    args = args.push("--target=x86_64-w64-windows-gnu")
+    args = args.push("-shared")
+    args = args.push("-DSPL_SHARED_LIBRARY")
 
     for obj in object_files:
-        sb.push(" ")
-        sb.push(obj)
+        args = args.push(obj)
 
     # Library paths
     for lp in config.library_paths:
-        sb.push(" -L")
-        sb.push(lp)
+        args = args.push("-L{lp}")
 
     # Runtime library
     var runtime_dir = config.runtime_path
@@ -342,43 +346,43 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
             runtime_dir, config.runtime_bundle)
         for arg in native_runtime_archive_link_args(
                 runtime_dir, config.runtime_bundle, runtime_archives, true, true, false):
-            sb.push(" ")
-            sb.push(arg)
+            args = args.push(arg)
             support_inputs.push(arg)
 
     # Windows system libraries
     val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll"]
     for lib in mingw_libs:
-        sb.push(" -l{lib}")
+        args = args.push("-l{lib}")
     for flag in native_all_gnu_support_args(support_inputs, "windows-mingw", ""):
-        sb.push(" ")
-        sb.push(flag)
+        args = args.push(flag)
 
     # User libraries
     for lib in config.libraries:
-        sb.push(" -l{lib}")
+        args = args.push("-l{lib}")
 
     # Dead code elimination and strip (size reduction)
-    sb.push(" -Wl,--gc-sections -Wl,-s")
+    args = args.push("-Wl,--gc-sections")
+    args = args.push("-Wl,-s")
 
     # Extra flags
     for flag in config.extra_flags:
-        sb.push(" ")
-        sb.push(flag)
+        args = args.push(flag)
 
-    sb.push(" -o ")
-    sb.push(output)
-    val cmd = sb.to_text()
+    args = args.push("-o")
+    args = args.push(output)
+    val cmd_text = cc + " " + args.join(" ")
 
     if config.verbose:
-        print "[linker-wrapper] MinGW DLL command: {cmd}"
+        print "[linker-wrapper] Windows GNU Clang DLL command: {cmd_text}"
 
-    val link = shell(cmd)
-    if link.exit_code == 0:
+    val (link_out, link_err, link_code) = process_run(cc, args)
+    if link_code == 0:
         Ok(output)
     else:
-        val err_msg = if link.stderr != "": link.stderr else: "Unknown linking error"
-        Err("MinGW DLL linking failed: {err_msg}")
+        var err_msg = "{link_err}{link_out}"
+        if err_msg.trim() == "":
+            err_msg = "(no linker output; exit code {link_code})"
+        Err("Windows GNU Clang shared linking failed: {err_msg}\ncommand: {cmd_text}")
 
 # ============================================================================
 # Exports

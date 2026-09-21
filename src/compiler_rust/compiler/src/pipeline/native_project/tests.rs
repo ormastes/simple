@@ -351,15 +351,15 @@ fn simpleos_entry_closure_compatibility_owners_are_explicit() {
     assert!(accessors.contains("platform_target_catalog.{simpleos_platform_targets}"));
     assert!(part1.contains("intentionally compatibility-public"));
     assert_eq!(
-        explicit_names(&facade, "simpleos_multiplatform_build_part1."),
+        explicit_names(&facade, "build_target_contracts."),
         explicit_names(&part1, "build_target_contracts.")
     );
     assert_eq!(
-        explicit_names(&facade, "simpleos_multiplatform_build_part2."),
+        explicit_names(&facade, "platform_target_catalog."),
         explicit_names(&part2, "platform_target_catalog.")
     );
     assert_eq!(
-        explicit_names(&facade, "simpleos_multiplatform_build_part3."),
+        explicit_names(&facade, "platform_target_accessors."),
         explicit_names(&part3, "platform_target_accessors.")
     );
 }
@@ -1685,8 +1685,8 @@ fn test_security_registry_init_source_filters_and_escapes() {
         "capability == \"engine2d-composited-glass-material-v1\" or ready\n"
     ));
 
-    let escaped = cxx_raw_string_literal("before )SECURITY_SDN\" after");
-    assert!(!escaped.contains(")SECURITY_SDN\""));
+    let escaped = c_string_literal("before \\ and \"quote\"\n after");
+    assert_eq!(escaped, "before \\\\ and \\\"quote\\\"\\n\"\n\" after");
 }
 
 #[test]
@@ -4315,7 +4315,7 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
     for entry in [focused_entry, full_entry, os_entry] {
         for (bundle, expected) in [
             ("hosted", "removed Rust-hosted runtime bundles"),
-            ("simple-core", "requires the core-c-bootstrap runtime lane"),
+            ("simple-core", "requires the core-c-bootstrap or dynamic-runtime runtime lane"),
         ] {
             let mut rejected = NativeBuildConfig {
                 runtime_path: Some(runtime_path.clone()),
@@ -5031,7 +5031,7 @@ fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
         src_root.join("lib/nogc_sync_mut/platform.spl"),
         src_root.join("lib/nogc_async_mut/path.spl"),
         src_root.join("lib/nogc_async_mut/platform.spl"),
-        src_root.join("std/platform.spl"),
+        src_root.join("lib/platform.spl"),
         src_root.join("lib/nogc_sync_mut/fs.spl"),
         src_root.join("lib/nogc_async_mut/fs.spl"),
     ];
