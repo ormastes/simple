@@ -1,0 +1,126 @@
+# Pointer-free executable-mapping identity and release-result vocabulary.
+#
+# This common leaf owns only immutable coordinates and accounting facts. It
+# deliberately carries no address, native handle, callback, or release
+# authority. The physical mapper identified by `mapper_instance_id` remains
+# the sole owner of native mapping lifecycle operations.
+
+val EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1: i64 = 1
+val EXECUTABLE_MAPPING_RECEIPT_MAX_INSTANCE_BYTES: i64 = 1024
+val EXECUTABLE_MAPPING_RECEIPT_MAX_OWNER_BYTES: i64 = 1024
+val EXECUTABLE_MAPPING_RECEIPT_MAX_KEY_BYTES: i64 = 4096
+
+enum ExecutableMappingProducerKindV1:
+    SegmentMapper
+    SharedExecMapper
+
+enum ExecutableMappingReleaseOutcomeV1:
+    Released
+    AlreadyReleased
+    NotFound
+    OwnerMismatch
+    GenerationMismatch
+    FinalUnpinRequired
+    NativeReleaseFailed
+
+"""Copyable coordinates for one exact executable mapping generation.
+
+`mapping_key` is opaque outside the mapper named by `mapper_instance_id`.
+Possessing or copying a receipt does not grant native release authority.
+"""
+struct ExecutableMappingReceiptV1:
+    schema: i64
+    producer_kind: ExecutableMappingProducerKindV1
+    mapper_instance_id: text
+    owner_id: text
+    mapping_key: text
+    mapping_generation: i64
+    mapped_bytes: i64
+    segment_count: i64
+
+"""Observed result of one mapper-owned release attempt."""
+struct ExecutableMappingReleaseResultV1:
+    receipt: ExecutableMappingReceiptV1
+    outcome: ExecutableMappingReleaseOutcomeV1
+    released_bytes: i64
+    released_segments: i64
+    attempt_id: i64
+
+fn executable_mapping_receipt_v1(
+        producer_kind: ExecutableMappingProducerKindV1,
+        mapper_instance_id: text,
+        owner_id: text,
+        mapping_key: text,
+        mapping_generation: i64,
+        mapped_bytes: i64,
+        segment_count: i64) -> ExecutableMappingReceiptV1:
+    ExecutableMappingReceiptV1(
+        schema: EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1,
+        producer_kind: producer_kind,
+        mapper_instance_id: mapper_instance_id,
+        owner_id: owner_id,
+        mapping_key: mapping_key,
+        mapping_generation: mapping_generation,
+        mapped_bytes: mapped_bytes,
+        segment_count: segment_count)
+
+fn executable_mapping_receipt_v1_well_formed(
+        value: ExecutableMappingReceiptV1) -> bool:
+    value.schema == EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1 and
+        value.mapper_instance_id.len() > 0 and
+        value.mapper_instance_id.len() <=
+            EXECUTABLE_MAPPING_RECEIPT_MAX_INSTANCE_BYTES and
+        value.owner_id.len() > 0 and
+        value.owner_id.len() <= EXECUTABLE_MAPPING_RECEIPT_MAX_OWNER_BYTES and
+        value.mapping_key.len() > 0 and
+        value.mapping_key.len() <= EXECUTABLE_MAPPING_RECEIPT_MAX_KEY_BYTES and
+        value.mapping_generation > 0 and
+        value.mapped_bytes > 0 and
+        value.segment_count > 0
+
+"""Exact identity includes producer, mapper instance, owner, generation, and
+accounting extents so a forged or stale coordinate cannot match."""
+fn executable_mapping_receipt_v1_same_identity(
+        left: ExecutableMappingReceiptV1,
+        right: ExecutableMappingReceiptV1) -> bool:
+    executable_mapping_receipt_v1_well_formed(left) and
+        executable_mapping_receipt_v1_well_formed(right) and
+        left.schema == right.schema and
+        left.producer_kind == right.producer_kind and
+        left.mapper_instance_id == right.mapper_instance_id and
+        left.owner_id == right.owner_id and
+        left.mapping_key == right.mapping_key and
+        left.mapping_generation == right.mapping_generation and
+        left.mapped_bytes == right.mapped_bytes and
+        left.segment_count == right.segment_count
+
+fn executable_mapping_release_result_v1(
+        receipt: ExecutableMappingReceiptV1,
+        outcome: ExecutableMappingReleaseOutcomeV1,
+        released_bytes: i64,
+        released_segments: i64,
+        attempt_id: i64) -> ExecutableMappingReleaseResultV1:
+    ExecutableMappingReleaseResultV1(
+        receipt: receipt,
+        outcome: outcome,
+        released_bytes: released_bytes,
+        released_segments: released_segments,
+        attempt_id: attempt_id)
+
+fn executable_mapping_release_result_v1_well_formed(
+        value: ExecutableMappingReleaseResultV1) -> bool:
+    if not executable_mapping_receipt_v1_well_formed(value.receipt) or
+            value.attempt_id <= 0:
+        return false
+    if value.outcome == ExecutableMappingReleaseOutcomeV1.Released:
+        return value.released_bytes == value.receipt.mapped_bytes and
+            value.released_segments == value.receipt.segment_count
+    value.released_bytes == 0 and value.released_segments == 0
+
+fn executable_mapping_release_result_v1_matches(
+        value: ExecutableMappingReleaseResultV1,
+        receipt: ExecutableMappingReceiptV1,
+        attempt_id: i64) -> bool:
+    executable_mapping_release_result_v1_well_formed(value) and
+        attempt_id > 0 and value.attempt_id == attempt_id and
+        executable_mapping_receipt_v1_same_identity(value.receipt, receipt)
