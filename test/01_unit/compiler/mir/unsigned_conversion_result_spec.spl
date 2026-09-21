@@ -1,0 +1,42 @@
+# @req REQ-COMPILER-MIR-U64-CONVERSION
+# Preserve the unsigned result of primitive conversion through MIR lowering.
+use std.spec.*
+use compiler.core.lexer_types.{LexSpan}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirTypeKind}
+
+fn conversion_receiver() -> HirExpr:
+    val span = LexSpan(start: 0, end_pos: 0, line: 1, col: 1)
+    HirExpr(kind: HirExprKind.IntLit(-1, nil), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+
+describe "MIR primitive unsigned conversion result":
+    it "retains U64 for a conversion whose high bit is set":
+        var lowering = MirLowering.new(SymbolTable.new())
+        var builder = lowering.builder
+        builder.begin_simple_function("unsigned_conversion", "unit")
+        lowering.builder = builder
+        val result = lowering.lower_method_call(conversion_receiver(), "to_u64", [], MethodResolution.Unresolved, "", -1)
+        val result_type = lowering.local_mir_type_of(result)
+        expect(result_type != nil).to_equal(true)
+        val unsigned_result = match result_type.kind:
+            case MirTypeKind.U64: true
+            case _: false
+        expect(unsigned_result).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "keeps the established i64 slot after narrowing to u8":
+        var lowering = MirLowering.new(SymbolTable.new())
+        var builder = lowering.builder
+        builder.begin_simple_function("narrow_conversion", "unit")
+        lowering.builder = builder
+        val result = lowering.lower_method_call(conversion_receiver(), "to_u8", [], MethodResolution.Unresolved, "", -1)
+        val result_type = lowering.local_mir_type_of(result)
+        expect(result_type != nil).to_equal(true)
+        val signed_slot = match result_type.kind:
+            case MirTypeKind.I64: true
+            case _: false
+        expect(signed_slot).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
