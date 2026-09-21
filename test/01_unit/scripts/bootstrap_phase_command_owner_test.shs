@@ -83,7 +83,19 @@ if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
 fi
 case " $* " in
   *' --json '*)
-    if [ "${PHASE_SKIPPED_FULL_INVENTORY:-0}" = 1 ] && \
+    if [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_FALSE_SPEC_SUCCESS:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":false,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_NONZERO_FAILED_COUNT:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      # The test runner contract is terminal JSON, even when an outer wrapper
+      # erroneously normalizes its exit status to zero.  Phase 3 must use the
+      # reported failure instead of treating this as a passed inventory row.
+      echo '{"success":false,"spec":{"success":false,"total_passed":0,"total_failed":1,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_SKIPPED_FULL_INVENTORY:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
       echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     else
@@ -317,6 +329,27 @@ awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 92 && \
   $4 == 0 && $5 == 0 && $6 == 0 && $7 == 1 { found=1 } END { exit !found }' \
   "$tmp/skipped-work/logs/repository_full_tests.inventory.tsv" ||
   fail "skipped-only fixture did not fail with zero executed examples"
+
+# Test each terminal JSON guard independently. Wrappers can flatten process
+# status to zero, so outer success, spec success, and failure count must each
+# be sufficient to reject a row.
+for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS PHASE_NONZERO_FAILED_COUNT; do
+  : >"$tmp/executions"
+  status=0
+  failed_work="$tmp/failed-json-$failed_mode"
+  env "$failed_mode=1" PATH="$tmp/bin:$PATH" \
+    PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+    PHASE_TOOL="$tmp/tool" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+      --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+      --runtime-path="$tmp/runtime" --work-root="$failed_work" --timeout-seconds=30 || status=$?
+  [ "$status" -ne 0 ] || fail "zero-exit failed JSON mode $failed_mode was admitted"
+  awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 93 && \
+    $4 == 1 { found=1 } END { exit !found }' \
+    "$failed_work/logs/repository_full_tests.inventory.tsv" ||
+    fail "zero-exit failed JSON mode $failed_mode did not terminalize as a failure"
+done
 
 # A test runner can be executable and return zero while changing the full CLI.
 # The verifier must reject it after the invocation instead of admitting a
