@@ -32,6 +32,23 @@ No self-hosted behavioral PASS or closure of the historical lint blocker is
 claimed. Re-run the focused specs using a source-matched Phase 2 full CLI/test
 runner once that gate clears, then update this record from actual results.
 
+The executable qualification owner is now
+`scripts/check/check-macos-test-runner-process-policy.shs`. It fails closed
+unless given an executable full CLI and its expected SHA-256, requires a real
+`test` command, proves the historical `ulimit -u 64` fork failure on a macOS
+UID with more than 64 live processes, and then exercises default inheritance,
+an explicit process cap, and `--safe-mode --no-limits`. Each positive row must
+emit a non-vacuous green summary and remain below the default 1 GiB RSS ceiling.
+On 2026-09-21 the baseline reproduced on this host with 345 UID processes:
+the nested fork exited 128 with `Resource temporarily unavailable`, while the
+same nested fork without the cap exited 0. The retained admitted Phase 2
+compiler has no `test` command, so the positive qualification remains pending
+and this record is not closed.
+
+SoSIX compatibility is unchanged. This policy controls hosted test child
+limits through the existing resource-scope facade; it adds no runtime ABI,
+syscall, process, environment, loader, or SoSIX provider surface.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
