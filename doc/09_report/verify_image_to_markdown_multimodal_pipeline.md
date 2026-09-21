@@ -9,7 +9,7 @@ Date: 2026-09-08
 - PASS — Numbered-artifact guards passed for working and staged paths: 674
   working paths classified, zero violations; zero staged violations.
 - PASS — Staged direct-env/runtime guard passed.
-- PASS — Two synthetic project fixtures have independent expected-content and
+- PASS — Three synthetic project fixtures have independent expected-content and
   SHA-256 records under `test/fixture/image_to_markdown/`.
 - PASS — Astra's final scoped source/design review accepted receipt redaction,
   pre-dispatch request counting, validation-failure classification, retained
@@ -86,5 +86,11 @@ Date: 2026-09-08
   `transport_ms` upper bound, while `inference_ms` remains zero. Exact transport
   and trusted provider-side inference timing remain an NFR-009 gap; the receipt
   no longer presents the aggregate as inference-only measurement.
+- WARN — The image profile now has a 384 MiB default
+  `max_working_set_bytes` admission budget (2 GiB ceiling). Admission rejects
+  before pixel decode or Base64/provider serialization when the conservative
+  source/view/serialization/RGBA estimate exceeds that budget. Static guards
+  pass; executable proof and an external model-process cgroup/service ceiling
+  remain pending with the admitted-runtime blocker.
 
-STATUS: FAIL (2 failures, 11 warnings)
+STATUS: FAIL (2 failures, 12 warnings)
