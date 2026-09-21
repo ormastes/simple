@@ -21,6 +21,11 @@ For every program in `deterministic/`, the runner executes it **K times** (defau
 run-to-run divergence within a mode is a nondeterminism defect and fails the gate
 (non-zero exit); the runner prints the two differing outputs as evidence.
 
+Every execution must exit successfully before its stdout can qualify. Missing
+executables, compiler failures, and crashes fail the gate even when they emit
+identical empty stdout. Successful programs with empty stdout remain valid.
+`SIMPLE_BIN` defaults to the checkout's `bin/simple` wrapper on every host.
+
 This is a *per-mode run-to-run* property. It is intentionally narrow — see Scope below.
 
 ## Layout
