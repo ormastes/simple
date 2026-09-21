@@ -1,6 +1,6 @@
 # macOS bootstrap lane: a cluster of eight platform defects, none of them visible from Linux
 
-Status: OPEN (fixes landed for all eight; lane not yet green through Stage 2)
+Status: FIXED (original eight fixes landed; macOS Stage 2 admitted 2026-09-21)
 Area: bootstrap / runtime / tooling / macOS
 Severity: blocker — no macOS bootstrap could start, and none could finish
 
@@ -106,3 +106,43 @@ by "the lane got further":
    single class.
 4. Police the `src/lib` vs `src/app` module twins the way test-tree divergence
    is policed, or de-duplicate them.
+
+## 2026-09-21 macOS requalification
+
+The original eight-defect cluster now satisfies its previously missing Stage 2
+acceptance. The active Astra bootstrap lane admitted the memory-patched
+`aarch64-apple-darwin` Stage 2 with eight jobs. Its source checkout was based on
+`5bb25555556`; the admission binds the working source through its fingerprints.
+This closes the original cluster's Stage 2 gap, not Stage 3 or full test-runner
+qualification.
+
+| Evidence | SHA-256 |
+|---|---|
+| Stage 2 compiler | `96c10a67ae86d1bcfb7e90086f8ec0a4d1a9364da417c01a6dd5d82285e62f24` |
+| Stage 2 sanity receipt (`status=pass`) | `e1305c8936186bd3416592f2bf8abc7af818ffa3ac84ec203f98ca8263f6d6b8` |
+| Stage 2 provenance | `8b07a472da49b0100119be324b12d1d6754539ce7978635bcacfb4e3d3165454` |
+| Stage 3 planner admission (`status=pass`) | `716a03a8a8fc5c9d2d6ef1088e81223dbcb86de77f91126ed4a9900062f5be65` |
+
+Artifacts are retained under
+`/Users/ormastes/simple-tmp/astra-stage3-hir/.simple/storage/build/bootstrap/`:
+`stage2/aarch64-apple-darwin/simple`,
+`stage3/aarch64-apple-darwin/stage2-sanity.env`, and
+`stage3-planner-admission.receipt`.
+
+Independent checks at `origin/main` `eb98be6f2b1` with the focused changes in
+this lane:
+
+- `sh scripts/check/check-bootstrap-preflight.shs --selftest`: PASS, 9 fixtures.
+- `sh scripts/bootstrap/run-process-group-timeout-test.shs`: PASS; the timed-out
+  descendant is terminated and reaped using the macOS Perl session fallback.
+- `sh .claude/hooks/bash_net_blocker.shs --selftest`: PASS; 10 denied, 7 allowed,
+  empty input denied.
+- `sh test/01_unit/scripts/phase2_runtime_capsule_contract_test.shs`: PASS after
+  replacing its GNU `stat -c` assertion and making permission scan errors fail
+  closed. The injected scan-error case failed before the production repair.
+
+The process module twins have also been consolidated: `src/app/io/process_ops.spl`
+now re-exports the canonical library owner. This requalification found two
+additional defects with separate acceptance records in
+`macos_bootstrap_capsule_scan_and_stdbuf_2026-09-21.md`: the capsule scan-error
+repair is verified; the optional-`stdbuf` source fix awaits native execution.

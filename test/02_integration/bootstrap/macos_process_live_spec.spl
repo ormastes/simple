@@ -1,0 +1,28 @@
+# Stock macOS has neither setsid nor stdbuf. Exercise the canonical owner
+# through a system-only PATH rather than relying on Homebrew-installed tools.
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout_live}
+
+describe "macOS bootstrap live process runner":
+    it "preserves quoted arguments, captured streams and exit status without stdbuf":
+        val original_path = env_get("PATH")
+        val changed = env_set("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        val payload = "single' double\" dollar$ backtick` slash\\"
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "printf '%s' \"$1\"; printf '%s' diagnostic >&2; exit 7", "sh", payload], 10000)
+        val restored = env_set("PATH", original_path)
+        expect(changed).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(out).to_equal(payload)
+        expect(err).to_equal("diagnostic")
+        expect(code).to_equal(7)
+
+    it "enforces the timeout with stock macOS process tools":
+        val original_path = env_get("PATH")
+        val changed = env_set("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", "sleep 3"], 200)
+        val restored = env_set("PATH", original_path)
+        expect(changed).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(code).to_equal(-1)
+        expect(err).to_contain("[TIMEOUT:")
