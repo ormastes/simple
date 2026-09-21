@@ -749,7 +749,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;
             Ok(cs
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .map(|v| v.into_int_value())
                 .unwrap_or_else(|| i64_type.const_int(0, false)))
         };
@@ -1062,7 +1062,7 @@ impl LlvmBackend {
             if alias.get_type().get_return_type().is_some() {
                 let ret = call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CompileError::semantic(format!("alias `{alias_name}` missing return value")))?;
                 builder
                     .build_return(Some(&ret))
@@ -1550,7 +1550,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call malloc", &e))?;
         let ptr = call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("call malloc", "no return value"))?
             .into_pointer_value();
         let val = i32t.const_int(42, false);

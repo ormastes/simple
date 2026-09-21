@@ -1,19 +1,105 @@
 use std::fmt::{self, Display};
 
-use either::Either;
+use llvm_sys::LLVMTypeKind;
+use llvm_sys::core::LLVMGetCalledFunctionType;
 use llvm_sys::core::{
-    LLVMGetInstructionCallConv, LLVMGetTypeKind, LLVMIsTailCall, LLVMSetInstrParamAlignment,
+    LLVMGetCalledValue, LLVMGetInstructionCallConv, LLVMGetTypeKind, LLVMIsTailCall, LLVMSetInstrParamAlignment,
     LLVMSetInstructionCallConv, LLVMSetTailCall, LLVMTypeOf,
 };
 #[llvm_versions(18..)]
 use llvm_sys::core::{LLVMGetTailCallKind, LLVMSetTailCallKind};
 use llvm_sys::prelude::LLVMValueRef;
-use llvm_sys::LLVMTypeKind;
 
 use crate::attributes::{Attribute, AttributeLoc};
+use crate::types::FunctionType;
+#[llvm_versions(18..)]
+use crate::values::operand_bundle::OperandBundleIter;
 use crate::values::{AsValueRef, BasicValueEnum, FunctionValue, InstructionValue, Value};
 
 use super::{AnyValue, InstructionOpcode};
+
+/// Either [BasicValueEnum] or [InstructionValue].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueKind<'ctx> {
+    /// Represents a [BasicValueEnum].
+    Basic(BasicValueEnum<'ctx>),
+    /// Represents an [InstructionValue].
+    Instruction(InstructionValue<'ctx>),
+}
+
+impl<'ctx> ValueKind<'ctx> {
+    /// Determines if the [ValueKind] is a [BasicValueEnum].
+    #[inline]
+    #[must_use]
+    pub fn is_basic(self) -> bool {
+        matches!(self, Self::Basic(_))
+    }
+
+    /// Determines if the [ValueKind] is an [InstructionValue].
+    #[inline]
+    #[must_use]
+    pub fn is_instruction(self) -> bool {
+        matches!(self, Self::Instruction(_))
+    }
+
+    /// If the [ValueKind] is a [BasicValueEnum], map it into [Option::Some].
+    #[inline]
+    #[must_use]
+    pub fn basic(self) -> Option<BasicValueEnum<'ctx>> {
+        match self {
+            Self::Basic(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// If the [ValueKind] is an [InstructionValue], map it into [Option::Some].
+    #[inline]
+    #[must_use]
+    pub fn instruction(self) -> Option<InstructionValue<'ctx>> {
+        match self {
+            Self::Instruction(inst) => Some(inst),
+            _ => None,
+        }
+    }
+
+    /// Expect [BasicValueEnum], panic with the message if it is not.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn expect_basic(self, msg: &str) -> BasicValueEnum<'ctx> {
+        match self {
+            Self::Basic(value) => value,
+            _ => panic!("{msg}"),
+        }
+    }
+
+    /// Expect [InstructionValue], panic with the message if it is not.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn expect_instruction(self, msg: &str) -> InstructionValue<'ctx> {
+        match self {
+            Self::Instruction(inst) => inst,
+            _ => panic!("{msg}"),
+        }
+    }
+
+    /// Unwrap [BasicValueEnum]. Will panic if it is not.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn unwrap_basic(self) -> BasicValueEnum<'ctx> {
+        self.expect_basic("Called unwrap_basic() on ValueKind::Instruction.")
+    }
+
+    /// Unwrap [InstructionValue]. Will panic if it is not.
+    #[inline]
+    #[must_use]
+    #[track_caller]
+    pub fn unwrap_instruction(self) -> InstructionValue<'ctx> {
+        self.expect_instruction("Called unwrap_instruction() on ValueKind::Basic.")
+    }
+}
 
 /// A value resulting from a function call. It may have function attributes applied to it.
 ///
@@ -28,7 +114,7 @@ impl<'ctx> CallSiteValue<'ctx> {
     ///
     /// The ref must be valid and of type call site.
     pub unsafe fn new(value: LLVMValueRef) -> Self {
-        CallSiteValue(Value::new(value))
+        unsafe { CallSiteValue(Value::new(value)) }
     }
 
     /// Sets whether or not this call is a tail call.
@@ -155,13 +241,13 @@ impl<'ctx> CallSiteValue<'ctx> {
     ///
     /// let call_site_value = builder.build_call(fn_value, &[], "my_fn").unwrap();
     ///
-    /// assert!(call_site_value.try_as_basic_value().is_right());
+    /// assert!(call_site_value.try_as_basic_value().is_instruction());
     /// ```
-    pub fn try_as_basic_value(self) -> Either<BasicValueEnum<'ctx>, InstructionValue<'ctx>> {
+    pub fn try_as_basic_value(self) -> ValueKind<'ctx> {
         unsafe {
             match LLVMGetTypeKind(LLVMTypeOf(self.as_value_ref())) {
-                LLVMTypeKind::LLVMVoidTypeKind => Either::Right(InstructionValue::new(self.as_value_ref())),
-                _ => Either::Left(BasicValueEnum::new(self.as_value_ref())),
+                LLVMTypeKind::LLVMVoidTypeKind => ValueKind::Instruction(InstructionValue::new(self.as_value_ref())),
+                _ => ValueKind::Basic(BasicValueEnum::new(self.as_value_ref())),
             }
         }
     }
@@ -181,7 +267,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -199,9 +286,12 @@ impl<'ctx> CallSiteValue<'ctx> {
 
     /// Gets the `FunctionValue` this `CallSiteValue` is based on.
     ///
+    /// Returns [`None`] if the call this value bases on is indirect or the retrieved function
+    /// value doesn't have the same type as the underlying call instruction.
+    ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```
     /// use inkwell::context::Context;
     ///
     /// let context = Context::create();
@@ -211,19 +301,65 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
     ///
     /// let call_site_value = builder.build_call(fn_value, &[], "my_fn").unwrap();
     ///
-    /// assert_eq!(call_site_value.get_called_fn_value(), fn_value);
+    /// assert_eq!(call_site_value.get_called_fn_value(), Some(fn_value));
     /// ```
-    pub fn get_called_fn_value(self) -> FunctionValue<'ctx> {
-        use llvm_sys::core::LLVMGetCalledValue;
+    pub fn get_called_fn_value(self) -> Option<FunctionValue<'ctx>> {
+        // SAFETY: the passed LLVMValueRef is of type CallSite
+        let called_value = unsafe { LLVMGetCalledValue(self.as_value_ref()) };
 
-        unsafe { FunctionValue::new(LLVMGetCalledValue(self.as_value_ref())).expect("This should never be null?") }
+        let fn_value = unsafe { FunctionValue::new(called_value) };
+
+        // Check that the retrieved function value has the same type as the callee.
+        // This matches the behavior of the C++ API `CallBase::getCalledFunction`.
+        // This is only possible on LLVM >=8, where the `LLVMGetCalledFunctionType` API exists.
+        self.get_called_fn_value_check_type_consistency(fn_value)
+    }
+
+    #[inline]
+    fn get_called_fn_value_check_type_consistency(
+        &self,
+        fn_value: Option<FunctionValue<'ctx>>,
+    ) -> Option<FunctionValue<'ctx>> {
+        fn_value.filter(|fn_value| fn_value.get_type() == self.get_called_fn_type())
+    }
+
+    /// Gets the type of the function called by the instruction this `CallSiteValue` is based on.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use inkwell::context::Context;
+    ///
+    /// let context = Context::create();
+    /// let builder = context.create_builder();
+    /// let module = context.create_module("my_mod");
+    /// let i32_type = context.i32_type();
+    /// let fn_type = i32_type.fn_type(&[], false);
+    /// let fn_value = module.add_function("my_fn", fn_type, None);
+    ///
+    /// let entry_bb = context.append_basic_block(fn_value, "entry");
+    /// builder.position_at_end(entry_bb);
+    ///
+    /// // Recursive call.
+    /// let call_site_value = builder.build_call(fn_value, &[], "my_fn").unwrap();
+    ///
+    /// assert_eq!(call_site_value.get_called_fn_type(), fn_type);
+    /// ```
+    pub fn get_called_fn_type(self) -> FunctionType<'ctx> {
+        // SAFETY: the passed LLVMValueRef is of type CallSite
+        let fn_type_ref = unsafe { LLVMGetCalledFunctionType(self.as_value_ref()) };
+
+        // FIXME?: this assumes that fn_type_ref is not null.
+        // SAFETY: fn_type_ref is a function type reference.
+        unsafe { FunctionType::new(fn_type_ref) }
     }
 
     /// Counts the number of `Attribute`s on this `CallSiteValue` at an index.
@@ -241,7 +377,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -274,7 +411,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -332,7 +470,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -372,7 +511,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -419,7 +559,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -453,7 +594,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -494,7 +636,8 @@ impl<'ctx> CallSiteValue<'ctx> {
     /// let fn_type = void_type.fn_type(&[], false);
     /// let fn_value = module.add_function("my_fn", fn_type, None);
     /// let string_attribute = context.create_string_attribute("my_key", "my_val");
-    /// let enum_attribute = context.create_enum_attribute(1, 1);
+    /// // Enum attribute cannot have non-zero value
+    /// let enum_attribute = context.create_enum_attribute(1, 0);
     /// let entry_bb = context.append_basic_block(fn_value, "entry");
     ///
     /// builder.position_at_end(entry_bb);
@@ -591,6 +734,47 @@ impl<'ctx> CallSiteValue<'ctx> {
         assert_eq!(alignment.count_ones(), 1, "Alignment must be a power of two.");
 
         unsafe { LLVMSetInstrParamAlignment(self.as_value_ref(), loc.get_index(), alignment) }
+    }
+
+    /// Iterate over operand bundles.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use inkwell::context::Context;
+    /// use inkwell::values::OperandBundle;
+    ///
+    /// let context = Context::create();
+    /// let module = context.create_module("op_bundles");
+    /// let builder = context.create_builder();
+    ///
+    /// let void_type = context.void_type();
+    /// let i32_type = context.i32_type();
+    /// let fn_type = void_type.fn_type(&[], false);
+    /// let fn_value = module.add_function("func", fn_type, None);
+    ///
+    /// let basic_block = context.append_basic_block(fn_value, "entry");
+    /// builder.position_at_end(basic_block);
+    ///
+    /// // Recursive call
+    /// let callinst = builder.build_direct_call_with_operand_bundles(
+    ///   fn_value,
+    ///   &[],
+    ///   &[OperandBundle::create("tag0", &[i32_type.const_zero().into()]), OperandBundle::create("tag1", &[])],
+    ///   "call"
+    /// ).unwrap();
+    ///
+    /// builder.build_return(None).unwrap();
+    /// # module.verify().unwrap();
+    ///
+    /// let mut op_bundles_iter = callinst.get_operand_bundles();
+    /// assert_eq!(op_bundles_iter.len(), 2);
+    /// let tags: Vec<String> = op_bundles_iter.map(|ob| ob.get_tag().unwrap().into()).collect();
+    /// assert_eq!(tags, vec!["tag0", "tag1"]);
+    /// ```
+    #[llvm_versions(18..)]
+    pub fn get_operand_bundles(&self) -> OperandBundleIter<'_, 'ctx> {
+        OperandBundleIter::new(self)
     }
 }
 

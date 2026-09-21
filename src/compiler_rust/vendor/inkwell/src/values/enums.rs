@@ -6,7 +6,7 @@ use crate::types::{AnyTypeEnum, BasicTypeEnum};
 use crate::values::traits::AsValueRef;
 use crate::values::{
     ArrayValue, FloatValue, FunctionValue, InstructionValue, IntValue, MetadataValue, PhiValue, PointerValue,
-    StructValue, VectorValue,
+    ScalableVectorValue, StructValue, VectorValue,
 };
 
 use std::convert::TryFrom;
@@ -68,9 +68,9 @@ macro_rules! enum_value_set {
 }
 
 enum_value_set! {AggregateValueEnum: ArrayValue, StructValue}
-enum_value_set! {AnyValueEnum: ArrayValue, IntValue, FloatValue, PhiValue, FunctionValue, PointerValue, StructValue, VectorValue, InstructionValue, MetadataValue}
-enum_value_set! {BasicValueEnum: ArrayValue, IntValue, FloatValue, PointerValue, StructValue, VectorValue}
-enum_value_set! {BasicMetadataValueEnum: ArrayValue, IntValue, FloatValue, PointerValue, StructValue, VectorValue, MetadataValue}
+enum_value_set! {AnyValueEnum: ArrayValue, IntValue, FloatValue, PhiValue, FunctionValue, PointerValue, StructValue, VectorValue, ScalableVectorValue, InstructionValue, MetadataValue}
+enum_value_set! {BasicValueEnum: ArrayValue, IntValue, FloatValue, PointerValue, StructValue, VectorValue, ScalableVectorValue}
+enum_value_set! {BasicMetadataValueEnum: ArrayValue, IntValue, FloatValue, PointerValue, StructValue, VectorValue, ScalableVectorValue, MetadataValue}
 
 impl<'ctx> AnyValueEnum<'ctx> {
     /// Get a value from an [LLVMValueRef].
@@ -79,30 +79,68 @@ impl<'ctx> AnyValueEnum<'ctx> {
     ///
     /// The ref must be valid and of supported enum type options ([LLVMTypeKind]).
     pub unsafe fn new(value: LLVMValueRef) -> Self {
-        match LLVMGetTypeKind(LLVMTypeOf(value)) {
-            LLVMTypeKind::LLVMFloatTypeKind
-            | LLVMTypeKind::LLVMFP128TypeKind
-            | LLVMTypeKind::LLVMDoubleTypeKind
-            | LLVMTypeKind::LLVMHalfTypeKind
-            | LLVMTypeKind::LLVMX86_FP80TypeKind
-            | LLVMTypeKind::LLVMPPC_FP128TypeKind => AnyValueEnum::FloatValue(FloatValue::new(value)),
-            LLVMTypeKind::LLVMIntegerTypeKind => AnyValueEnum::IntValue(IntValue::new(value)),
-            LLVMTypeKind::LLVMStructTypeKind => AnyValueEnum::StructValue(StructValue::new(value)),
-            LLVMTypeKind::LLVMPointerTypeKind => match LLVMGetValueKind(value) {
-                LLVMValueKind::LLVMFunctionValueKind => AnyValueEnum::FunctionValue(FunctionValue::new(value).unwrap()),
-                _ => AnyValueEnum::PointerValue(PointerValue::new(value)),
-            },
-            LLVMTypeKind::LLVMArrayTypeKind => AnyValueEnum::ArrayValue(ArrayValue::new(value)),
-            LLVMTypeKind::LLVMVectorTypeKind => AnyValueEnum::VectorValue(VectorValue::new(value)),
-            LLVMTypeKind::LLVMFunctionTypeKind => AnyValueEnum::FunctionValue(FunctionValue::new(value).unwrap()),
-            LLVMTypeKind::LLVMVoidTypeKind => {
-                if LLVMIsAInstruction(value).is_null() {
-                    panic!("Void value isn't an instruction.");
-                }
-                AnyValueEnum::InstructionValue(InstructionValue::new(value))
-            },
-            LLVMTypeKind::LLVMMetadataTypeKind => panic!("Metadata values are not supported as AnyValue's."),
-            _ => panic!("The given type is not supported."),
+        unsafe {
+            match LLVMGetTypeKind(LLVMTypeOf(value)) {
+                LLVMTypeKind::LLVMFloatTypeKind
+                | LLVMTypeKind::LLVMFP128TypeKind
+                | LLVMTypeKind::LLVMDoubleTypeKind
+                | LLVMTypeKind::LLVMHalfTypeKind
+                | LLVMTypeKind::LLVMX86_FP80TypeKind
+                | LLVMTypeKind::LLVMPPC_FP128TypeKind => AnyValueEnum::FloatValue(FloatValue::new(value)),
+                #[cfg(any(
+                    feature = "llvm11-0",
+                    feature = "llvm12-0",
+                    feature = "llvm13-0",
+                    feature = "llvm14-0",
+                    feature = "llvm15-0",
+                    feature = "llvm16-0",
+                    feature = "llvm17-0",
+                    feature = "llvm18-1",
+                    feature = "llvm19-1",
+                    feature = "llvm20-1",
+                    feature = "llvm21-1",
+                    feature = "llvm22-1",
+                    feature = "llvm23-1",
+                ))]
+                LLVMTypeKind::LLVMBFloatTypeKind => AnyValueEnum::FloatValue(FloatValue::new(value)),
+                LLVMTypeKind::LLVMIntegerTypeKind => AnyValueEnum::IntValue(IntValue::new(value)),
+                LLVMTypeKind::LLVMStructTypeKind => AnyValueEnum::StructValue(StructValue::new(value)),
+                LLVMTypeKind::LLVMPointerTypeKind => match LLVMGetValueKind(value) {
+                    LLVMValueKind::LLVMFunctionValueKind => {
+                        AnyValueEnum::FunctionValue(FunctionValue::new(value).unwrap())
+                    },
+                    _ => AnyValueEnum::PointerValue(PointerValue::new(value)),
+                },
+                LLVMTypeKind::LLVMArrayTypeKind => AnyValueEnum::ArrayValue(ArrayValue::new(value)),
+                LLVMTypeKind::LLVMVectorTypeKind => AnyValueEnum::VectorValue(VectorValue::new(value)),
+                #[cfg(any(
+                    feature = "llvm11-0",
+                    feature = "llvm12-0",
+                    feature = "llvm13-0",
+                    feature = "llvm14-0",
+                    feature = "llvm15-0",
+                    feature = "llvm16-0",
+                    feature = "llvm17-0",
+                    feature = "llvm18-1",
+                    feature = "llvm19-1",
+                    feature = "llvm20-1",
+                    feature = "llvm21-1",
+                    feature = "llvm22-1",
+                    feature = "llvm23-1",
+                ))]
+                LLVMTypeKind::LLVMScalableVectorTypeKind => {
+                    AnyValueEnum::ScalableVectorValue(ScalableVectorValue::new(value))
+                },
+                LLVMTypeKind::LLVMFunctionTypeKind => AnyValueEnum::FunctionValue(FunctionValue::new(value).unwrap()),
+                LLVMTypeKind::LLVMVoidTypeKind => {
+                    if LLVMIsAInstruction(value).is_null() {
+                        panic!("Void value isn't an instruction.");
+                    }
+                    AnyValueEnum::InstructionValue(InstructionValue::new(value))
+                },
+                LLVMTypeKind::LLVMMetadataTypeKind => panic!("Metadata values are not supported as AnyValue's."),
+                _ => panic!("The given type is not supported."),
+            }
         }
     }
 
@@ -142,79 +180,101 @@ impl<'ctx> AnyValueEnum<'ctx> {
         matches!(self, AnyValueEnum::VectorValue(_))
     }
 
+    pub fn is_scalable_vector_value(self) -> bool {
+        matches!(self, AnyValueEnum::ScalableVectorValue(_))
+    }
+
     pub fn is_instruction_value(self) -> bool {
         matches!(self, AnyValueEnum::InstructionValue(_))
     }
 
+    #[track_caller]
     pub fn into_array_value(self) -> ArrayValue<'ctx> {
         if let AnyValueEnum::ArrayValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the ArrayValue variant", self)
+            panic!("Found {self:?} but expected the ArrayValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_int_value(self) -> IntValue<'ctx> {
         if let AnyValueEnum::IntValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the IntValue variant", self)
+            panic!("Found {self:?} but expected the IntValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_float_value(self) -> FloatValue<'ctx> {
         if let AnyValueEnum::FloatValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the FloatValue variant", self)
+            panic!("Found {self:?} but expected the FloatValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_phi_value(self) -> PhiValue<'ctx> {
         if let AnyValueEnum::PhiValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the PhiValue variant", self)
+            panic!("Found {self:?} but expected the PhiValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_function_value(self) -> FunctionValue<'ctx> {
         if let AnyValueEnum::FunctionValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the FunctionValue variant", self)
+            panic!("Found {self:?} but expected the FunctionValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_pointer_value(self) -> PointerValue<'ctx> {
         if let AnyValueEnum::PointerValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the PointerValue variant", self)
+            panic!("Found {self:?} but expected the PointerValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_struct_value(self) -> StructValue<'ctx> {
         if let AnyValueEnum::StructValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the StructValue variant", self)
+            panic!("Found {self:?} but expected the StructValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_vector_value(self) -> VectorValue<'ctx> {
         if let AnyValueEnum::VectorValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the VectorValue variant", self)
+            panic!("Found {self:?} but expected the VectorValue variant")
         }
     }
 
+    #[track_caller]
+    pub fn into_scalable_vector_value(self) -> ScalableVectorValue<'ctx> {
+        if let AnyValueEnum::ScalableVectorValue(v) = self {
+            v
+        } else {
+            panic!("Found {self:?} but expected the ScalableVectorValue variant")
+        }
+    }
+
+    #[track_caller]
     pub fn into_instruction_value(self) -> InstructionValue<'ctx> {
         if let AnyValueEnum::InstructionValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the InstructionValue variant", self)
+            panic!("Found {self:?} but expected the InstructionValue variant")
         }
     }
 }
@@ -226,19 +286,55 @@ impl<'ctx> BasicValueEnum<'ctx> {
     ///
     /// The ref must be valid and of supported enum type options ([LLVMTypeKind]).
     pub unsafe fn new(value: LLVMValueRef) -> Self {
-        match LLVMGetTypeKind(LLVMTypeOf(value)) {
-            LLVMTypeKind::LLVMFloatTypeKind
-            | LLVMTypeKind::LLVMFP128TypeKind
-            | LLVMTypeKind::LLVMDoubleTypeKind
-            | LLVMTypeKind::LLVMHalfTypeKind
-            | LLVMTypeKind::LLVMX86_FP80TypeKind
-            | LLVMTypeKind::LLVMPPC_FP128TypeKind => BasicValueEnum::FloatValue(FloatValue::new(value)),
-            LLVMTypeKind::LLVMIntegerTypeKind => BasicValueEnum::IntValue(IntValue::new(value)),
-            LLVMTypeKind::LLVMStructTypeKind => BasicValueEnum::StructValue(StructValue::new(value)),
-            LLVMTypeKind::LLVMPointerTypeKind => BasicValueEnum::PointerValue(PointerValue::new(value)),
-            LLVMTypeKind::LLVMArrayTypeKind => BasicValueEnum::ArrayValue(ArrayValue::new(value)),
-            LLVMTypeKind::LLVMVectorTypeKind => BasicValueEnum::VectorValue(VectorValue::new(value)),
-            _ => unreachable!("The given type is not a basic type."),
+        unsafe {
+            match LLVMGetTypeKind(LLVMTypeOf(value)) {
+                LLVMTypeKind::LLVMFloatTypeKind
+                | LLVMTypeKind::LLVMFP128TypeKind
+                | LLVMTypeKind::LLVMDoubleTypeKind
+                | LLVMTypeKind::LLVMHalfTypeKind
+                | LLVMTypeKind::LLVMX86_FP80TypeKind
+                | LLVMTypeKind::LLVMPPC_FP128TypeKind => BasicValueEnum::FloatValue(FloatValue::new(value)),
+                #[cfg(any(
+                    feature = "llvm11-0",
+                    feature = "llvm12-0",
+                    feature = "llvm13-0",
+                    feature = "llvm14-0",
+                    feature = "llvm15-0",
+                    feature = "llvm16-0",
+                    feature = "llvm17-0",
+                    feature = "llvm18-1",
+                    feature = "llvm19-1",
+                    feature = "llvm20-1",
+                    feature = "llvm21-1",
+                    feature = "llvm22-1",
+                    feature = "llvm23-1",
+                ))]
+                LLVMTypeKind::LLVMBFloatTypeKind => BasicValueEnum::FloatValue(FloatValue::new(value)),
+                LLVMTypeKind::LLVMIntegerTypeKind => BasicValueEnum::IntValue(IntValue::new(value)),
+                LLVMTypeKind::LLVMStructTypeKind => BasicValueEnum::StructValue(StructValue::new(value)),
+                LLVMTypeKind::LLVMPointerTypeKind => BasicValueEnum::PointerValue(PointerValue::new(value)),
+                LLVMTypeKind::LLVMArrayTypeKind => BasicValueEnum::ArrayValue(ArrayValue::new(value)),
+                LLVMTypeKind::LLVMVectorTypeKind => BasicValueEnum::VectorValue(VectorValue::new(value)),
+                #[cfg(any(
+                    feature = "llvm11-0",
+                    feature = "llvm12-0",
+                    feature = "llvm13-0",
+                    feature = "llvm14-0",
+                    feature = "llvm15-0",
+                    feature = "llvm16-0",
+                    feature = "llvm17-0",
+                    feature = "llvm18-1",
+                    feature = "llvm19-1",
+                    feature = "llvm20-1",
+                    feature = "llvm21-1",
+                    feature = "llvm22-1",
+                    feature = "llvm23-1",
+                ))]
+                LLVMTypeKind::LLVMScalableVectorTypeKind => {
+                    BasicValueEnum::ScalableVectorValue(ScalableVectorValue::new(value))
+                },
+                _ => unreachable!("The given type is not a basic type."),
+            }
         }
     }
 
@@ -251,6 +347,7 @@ impl<'ctx> BasicValueEnum<'ctx> {
             BasicValueEnum::PointerValue(v) => v.get_name(),
             BasicValueEnum::StructValue(v) => v.get_name(),
             BasicValueEnum::VectorValue(v) => v.get_name(),
+            BasicValueEnum::ScalableVectorValue(v) => v.get_name(),
         }
     }
 
@@ -263,6 +360,7 @@ impl<'ctx> BasicValueEnum<'ctx> {
             BasicValueEnum::PointerValue(v) => v.set_name(name),
             BasicValueEnum::StructValue(v) => v.set_name(name),
             BasicValueEnum::VectorValue(v) => v.set_name(name),
+            BasicValueEnum::ScalableVectorValue(v) => v.set_name(name),
         }
     }
 
@@ -294,51 +392,70 @@ impl<'ctx> BasicValueEnum<'ctx> {
         matches!(self, BasicValueEnum::VectorValue(_))
     }
 
+    pub fn is_scalable_vector_value(self) -> bool {
+        matches!(self, BasicValueEnum::ScalableVectorValue(_))
+    }
+
+    #[track_caller]
     pub fn into_array_value(self) -> ArrayValue<'ctx> {
         if let BasicValueEnum::ArrayValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the ArrayValue variant", self)
+            panic!("Found {self:?} but expected the ArrayValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_int_value(self) -> IntValue<'ctx> {
         if let BasicValueEnum::IntValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the IntValue variant", self)
+            panic!("Found {self:?} but expected the IntValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_float_value(self) -> FloatValue<'ctx> {
         if let BasicValueEnum::FloatValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the FloatValue variant", self)
+            panic!("Found {self:?} but expected the FloatValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_pointer_value(self) -> PointerValue<'ctx> {
         if let BasicValueEnum::PointerValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected PointerValue variant", self)
+            panic!("Found {self:?} but expected PointerValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_struct_value(self) -> StructValue<'ctx> {
         if let BasicValueEnum::StructValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the StructValue variant", self)
+            panic!("Found {self:?} but expected the StructValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_vector_value(self) -> VectorValue<'ctx> {
         if let BasicValueEnum::VectorValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the VectorValue variant", self)
+            panic!("Found {self:?} but expected the VectorValue variant")
+        }
+    }
+
+    #[track_caller]
+    pub fn into_scalable_vector_value(self) -> ScalableVectorValue<'ctx> {
+        if let BasicValueEnum::ScalableVectorValue(v) = self {
+            v
+        } else {
+            panic!("Found {self:?} but expected the ScalableVectorValue variant")
         }
     }
 }
@@ -350,10 +467,12 @@ impl<'ctx> AggregateValueEnum<'ctx> {
     ///
     /// The ref must be valid and of supported aggregate type enum options ([LLVMTypeKind]).
     pub unsafe fn new(value: LLVMValueRef) -> Self {
-        match LLVMGetTypeKind(LLVMTypeOf(value)) {
-            LLVMTypeKind::LLVMArrayTypeKind => AggregateValueEnum::ArrayValue(ArrayValue::new(value)),
-            LLVMTypeKind::LLVMStructTypeKind => AggregateValueEnum::StructValue(StructValue::new(value)),
-            _ => unreachable!("The given type is not an aggregate type."),
+        unsafe {
+            match LLVMGetTypeKind(LLVMTypeOf(value)) {
+                LLVMTypeKind::LLVMArrayTypeKind => AggregateValueEnum::ArrayValue(ArrayValue::new(value)),
+                LLVMTypeKind::LLVMStructTypeKind => AggregateValueEnum::StructValue(StructValue::new(value)),
+                _ => unreachable!("The given type is not an aggregate type."),
+            }
         }
     }
 
@@ -365,39 +484,77 @@ impl<'ctx> AggregateValueEnum<'ctx> {
         matches!(self, AggregateValueEnum::StructValue(_))
     }
 
+    #[track_caller]
     pub fn into_array_value(self) -> ArrayValue<'ctx> {
         if let AggregateValueEnum::ArrayValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the ArrayValue variant", self)
+            panic!("Found {self:?} but expected the ArrayValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_struct_value(self) -> StructValue<'ctx> {
         if let AggregateValueEnum::StructValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the StructValue variant", self)
+            panic!("Found {self:?} but expected the StructValue variant")
         }
     }
 }
 
 impl<'ctx> BasicMetadataValueEnum<'ctx> {
     pub(crate) unsafe fn new(value: LLVMValueRef) -> Self {
-        match LLVMGetTypeKind(LLVMTypeOf(value)) {
-            LLVMTypeKind::LLVMFloatTypeKind
-            | LLVMTypeKind::LLVMFP128TypeKind
-            | LLVMTypeKind::LLVMDoubleTypeKind
-            | LLVMTypeKind::LLVMHalfTypeKind
-            | LLVMTypeKind::LLVMX86_FP80TypeKind
-            | LLVMTypeKind::LLVMPPC_FP128TypeKind => BasicMetadataValueEnum::FloatValue(FloatValue::new(value)),
-            LLVMTypeKind::LLVMIntegerTypeKind => BasicMetadataValueEnum::IntValue(IntValue::new(value)),
-            LLVMTypeKind::LLVMStructTypeKind => BasicMetadataValueEnum::StructValue(StructValue::new(value)),
-            LLVMTypeKind::LLVMPointerTypeKind => BasicMetadataValueEnum::PointerValue(PointerValue::new(value)),
-            LLVMTypeKind::LLVMArrayTypeKind => BasicMetadataValueEnum::ArrayValue(ArrayValue::new(value)),
-            LLVMTypeKind::LLVMVectorTypeKind => BasicMetadataValueEnum::VectorValue(VectorValue::new(value)),
-            LLVMTypeKind::LLVMMetadataTypeKind => BasicMetadataValueEnum::MetadataValue(MetadataValue::new(value)),
-            _ => unreachable!("Unsupported type"),
+        unsafe {
+            match LLVMGetTypeKind(LLVMTypeOf(value)) {
+                LLVMTypeKind::LLVMFloatTypeKind
+                | LLVMTypeKind::LLVMFP128TypeKind
+                | LLVMTypeKind::LLVMDoubleTypeKind
+                | LLVMTypeKind::LLVMHalfTypeKind
+                | LLVMTypeKind::LLVMX86_FP80TypeKind
+                | LLVMTypeKind::LLVMPPC_FP128TypeKind => BasicMetadataValueEnum::FloatValue(FloatValue::new(value)),
+                #[cfg(any(
+                    feature = "llvm11-0",
+                    feature = "llvm12-0",
+                    feature = "llvm13-0",
+                    feature = "llvm14-0",
+                    feature = "llvm15-0",
+                    feature = "llvm16-0",
+                    feature = "llvm17-0",
+                    feature = "llvm18-1",
+                    feature = "llvm19-1",
+                    feature = "llvm20-1",
+                    feature = "llvm21-1",
+                    feature = "llvm22-1",
+                    feature = "llvm23-1",
+                ))]
+                LLVMTypeKind::LLVMBFloatTypeKind => BasicMetadataValueEnum::FloatValue(FloatValue::new(value)),
+                LLVMTypeKind::LLVMIntegerTypeKind => BasicMetadataValueEnum::IntValue(IntValue::new(value)),
+                LLVMTypeKind::LLVMStructTypeKind => BasicMetadataValueEnum::StructValue(StructValue::new(value)),
+                LLVMTypeKind::LLVMPointerTypeKind => BasicMetadataValueEnum::PointerValue(PointerValue::new(value)),
+                LLVMTypeKind::LLVMArrayTypeKind => BasicMetadataValueEnum::ArrayValue(ArrayValue::new(value)),
+                LLVMTypeKind::LLVMVectorTypeKind => BasicMetadataValueEnum::VectorValue(VectorValue::new(value)),
+                #[cfg(any(
+                    feature = "llvm11-0",
+                    feature = "llvm12-0",
+                    feature = "llvm13-0",
+                    feature = "llvm14-0",
+                    feature = "llvm15-0",
+                    feature = "llvm16-0",
+                    feature = "llvm17-0",
+                    feature = "llvm18-1",
+                    feature = "llvm19-1",
+                    feature = "llvm20-1",
+                    feature = "llvm21-1",
+                    feature = "llvm22-1",
+                    feature = "llvm23-1",
+                ))]
+                LLVMTypeKind::LLVMScalableVectorTypeKind => {
+                    BasicMetadataValueEnum::ScalableVectorValue(ScalableVectorValue::new(value))
+                },
+                LLVMTypeKind::LLVMMetadataTypeKind => BasicMetadataValueEnum::MetadataValue(MetadataValue::new(value)),
+                _ => unreachable!("Unsupported type"),
+            }
         }
     }
 
@@ -425,63 +582,83 @@ impl<'ctx> BasicMetadataValueEnum<'ctx> {
         matches!(self, BasicMetadataValueEnum::VectorValue(_))
     }
 
+    pub fn is_scalable_vector_value(self) -> bool {
+        matches!(self, BasicMetadataValueEnum::ScalableVectorValue(_))
+    }
+
     pub fn is_metadata_value(self) -> bool {
         matches!(self, BasicMetadataValueEnum::MetadataValue(_))
     }
 
+    #[track_caller]
     pub fn into_array_value(self) -> ArrayValue<'ctx> {
         if let BasicMetadataValueEnum::ArrayValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the ArrayValue variant", self)
+            panic!("Found {self:?} but expected the ArrayValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_int_value(self) -> IntValue<'ctx> {
         if let BasicMetadataValueEnum::IntValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the IntValue variant", self)
+            panic!("Found {self:?} but expected the IntValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_float_value(self) -> FloatValue<'ctx> {
         if let BasicMetadataValueEnum::FloatValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected FloatValue variant", self)
+            panic!("Found {self:?} but expected FloatValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_pointer_value(self) -> PointerValue<'ctx> {
         if let BasicMetadataValueEnum::PointerValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the PointerValue variant", self)
+            panic!("Found {self:?} but expected the PointerValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_struct_value(self) -> StructValue<'ctx> {
         if let BasicMetadataValueEnum::StructValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the StructValue variant", self)
+            panic!("Found {self:?} but expected the StructValue variant")
         }
     }
 
+    #[track_caller]
     pub fn into_vector_value(self) -> VectorValue<'ctx> {
         if let BasicMetadataValueEnum::VectorValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected the VectorValue variant", self)
+            panic!("Found {self:?} but expected the VectorValue variant")
         }
     }
 
+    #[track_caller]
+    pub fn into_scalable_vector_value(self) -> ScalableVectorValue<'ctx> {
+        if let BasicMetadataValueEnum::ScalableVectorValue(v) = self {
+            v
+        } else {
+            panic!("Found {self:?} but expected the ScalableVectorValue variant")
+        }
+    }
+
+    #[track_caller]
     pub fn into_metadata_value(self) -> MetadataValue<'ctx> {
         if let BasicMetadataValueEnum::MetadataValue(v) = self {
             v
         } else {
-            panic!("Found {:?} but expected MetaData variant", self)
+            panic!("Found {self:?} but expected MetaData variant")
         }
     }
 }
@@ -510,6 +687,7 @@ impl<'ctx> TryFrom<AnyValueEnum<'ctx>> for BasicValueEnum<'ctx> {
             PointerValue(pv) => pv.into(),
             StructValue(sv) => sv.into(),
             VectorValue(vv) => vv.into(),
+            ScalableVectorValue(vv) => vv.into(),
             MetadataValue(_) | PhiValue(_) | FunctionValue(_) | InstructionValue(_) => return Err(()),
         })
     }
@@ -527,6 +705,7 @@ impl<'ctx> TryFrom<AnyValueEnum<'ctx>> for BasicMetadataValueEnum<'ctx> {
             PointerValue(pv) => pv.into(),
             StructValue(sv) => sv.into(),
             VectorValue(vv) => vv.into(),
+            ScalableVectorValue(vv) => vv.into(),
             MetadataValue(mv) => mv.into(),
             PhiValue(_) | FunctionValue(_) | InstructionValue(_) => return Err(()),
         })
@@ -545,6 +724,7 @@ impl<'ctx> TryFrom<BasicMetadataValueEnum<'ctx>> for BasicValueEnum<'ctx> {
             PointerValue(pv) => pv.into(),
             StructValue(sv) => sv.into(),
             VectorValue(vv) => vv.into(),
+            ScalableVectorValue(vv) => vv.into(),
             MetadataValue(_) => return Err(()),
         })
     }

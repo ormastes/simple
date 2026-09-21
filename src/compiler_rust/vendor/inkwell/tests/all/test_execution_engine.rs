@@ -1,7 +1,21 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use inkwell::context::Context;
 use inkwell::execution_engine::FunctionLookupError;
-use inkwell::targets::{InitializationConfig, Target};
+use inkwell::memory_manager::McjitMemoryManager;
+use inkwell::module::Linkage;
+use inkwell::targets::{CodeModel, InitializationConfig, Target};
 use inkwell::{AddressSpace, IntPredicate, OptimizationLevel};
+
+#[cfg(target_os = "windows")]
+use windows::Win32::System::{
+    Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        VirtualProtect,
+    },
+    SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+};
 
 type Thunk = unsafe extern "C" fn();
 
@@ -54,22 +68,12 @@ fn test_jit_execution_engine() {
     let module = context.create_module("main_module");
     let builder = context.create_builder();
     let i32_type = context.i32_type();
-    #[cfg(not(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )))]
+    #[cfg(feature = "typed-pointers")]
     let i8_ptr_ptr_type = context
         .i8_type()
         .ptr_type(AddressSpace::default())
         .ptr_type(AddressSpace::default());
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     let i8_ptr_ptr_type = context.ptr_type(AddressSpace::default());
     let one_i32 = i32_type.const_int(1, false);
     let three_i32 = i32_type.const_int(3, false);
@@ -118,11 +122,11 @@ fn test_jit_execution_engine() {
 
     let ret = unsafe { execution_engine.run_function_as_main(main, &["input", "bar"]) };
 
-    assert_eq!(ret, 1, "unexpected main return code: {}", ret);
+    assert_eq!(ret, 1, "unexpected main return code: {ret}");
 
     let ret = unsafe { execution_engine.run_function_as_main(main, &["input", "bar", "baz"]) };
 
-    assert_eq!(ret, 42, "unexpected main return code: {}", ret);
+    assert_eq!(ret, 42, "unexpected main return code: {ret}");
 }
 
 // #[test]
@@ -148,6 +152,122 @@ fn test_interpreter_execution_engine() {
     let module = context.create_module("main_module");
 
     assert!(module.create_interpreter_execution_engine().is_ok());
+}
+
+#[test]
+
+fn test_mcjit_execution_engine_with_memory_manager() {
+    let mmgr = MockMemoryManager::new();
+    let mmgr_for_test = mmgr.clone();
+
+    {
+        let context = Context::create();
+        let module = context.create_module("main_module");
+        let builder = context.create_builder();
+
+        // Define @llvm.experimental.stackmap
+        let fn_type = context
+            .void_type()
+            .fn_type(&[context.i64_type().into(), context.i32_type().into()], true);
+        let stackmap_func = module.add_function("llvm.experimental.stackmap", fn_type, Some(Linkage::External));
+
+        // Set up the function
+        //
+        // `@llvm.experimental.stackmap` a call is present, LLVM will emit a separate stackmap section,
+        // causing the `allocate_data_section` callback to be invoked an additional
+        // time to handle the stackmap data. Specifically:
+        // ```
+        // f64 test_fn() {
+        // entry:
+        //   call void @llvm.experimental.stackmap(i64 12345, i32 0)
+        //   ret f64 64.0
+        // }
+        // ```
+        let double = context.f64_type();
+        let sig = double.fn_type(&[], false);
+        let f = module.add_function("test_fn", sig, None);
+        let b = context.append_basic_block(f, "entry");
+        builder.position_at_end(b);
+
+        // Create a call to the stackmap intrinsic
+        // Stack maps are used by the garbage collector to find roots on the stack
+        // See: https://llvm.org/docs/StackMaps.html#intrinsics
+        builder
+            .build_call(
+                stackmap_func,
+                &[
+                    context.i64_type().const_int(12345, false).into(),
+                    context.i32_type().const_int(0, false).into(),
+                ],
+                "call_stackmap",
+            )
+            .unwrap();
+
+        // Insert a return statement
+        let ret = double.const_float(64.0);
+        builder.build_return(Some(&ret)).unwrap();
+
+        module.verify().unwrap();
+
+        let ee = module
+            .create_mcjit_execution_engine_with_memory_manager(
+                mmgr,
+                OptimizationLevel::None,
+                CodeModel::Default,
+                false,
+                false,
+            )
+            .unwrap();
+
+        unsafe {
+            let test_fn = ee.get_function::<unsafe extern "C" fn() -> f64>("test_fn").unwrap();
+            let return_value = test_fn.call();
+            assert_eq!(return_value, 64.0);
+        }
+    }
+    // ee dropped here. Destroy should be called
+
+    let data = mmgr_for_test.data.borrow();
+    assert_eq!(1, data.code_alloc_calls);
+    assert!(
+        data.data_alloc_calls >= 2,
+        "Expected at least 2 calls to allocate_data_section, but got {}. \
+         We've observed that LLVM 5 typically calls it 3 times, while LLVM 18 often calls it only 2.",
+        data.data_alloc_calls
+    );
+    assert_eq!(1, data.finalize_calls);
+    assert_eq!(1, data.destroy_calls);
+}
+
+#[test]
+fn test_create_mcjit_engine_when_already_owned() {
+    let context = Context::create();
+    let module = context.create_module("owned_module");
+
+    // First engine should succeed
+    let memory_manager = MockMemoryManager::new();
+    let engine_result = module.create_mcjit_execution_engine_with_memory_manager(
+        memory_manager,
+        OptimizationLevel::None,
+        CodeModel::Default,
+        false,
+        false,
+    );
+    assert!(engine_result.is_ok());
+
+    // Second engine should fail
+    let memory_manager2 = MockMemoryManager::new();
+    let second_result = module.create_mcjit_execution_engine_with_memory_manager(
+        memory_manager2,
+        OptimizationLevel::None,
+        CodeModel::Default,
+        false,
+        false,
+    );
+    assert!(
+        second_result.is_err(),
+        "Expected an error when creating a second ExecutionEngine on the same module"
+    );
 }
 
 #[test]
@@ -235,3 +355,204 @@ fn test_add_remove_module() {
 //         module.create_jit_execution_engine(OptimizationLevel::None).unwrap()
 //     };
 // }
+
+/// A mock memory manager that allocates memory in fixed-size pages for testing.
+#[derive(Debug, Clone)]
+struct MockMemoryManager {
+    data: Rc<RefCell<MockMemoryManagerData>>,
+}
+
+#[derive(Debug)]
+struct MockMemoryManagerData {
+    fixed_capacity_bytes: usize,
+    fixed_page_size: usize,
+
+    code_buff_ptr: std::ptr::NonNull<u8>,
+    code_offset: usize,
+
+    data_buff_ptr: std::ptr::NonNull<u8>,
+    data_offset: usize,
+
+    /// Count call to callbacks for testing
+    code_alloc_calls: usize,
+    data_alloc_calls: usize,
+    finalize_calls: usize,
+    destroy_calls: usize,
+}
+
+impl MockMemoryManager {
+    pub fn new() -> Self {
+        let capacity_bytes = 128 * 1024;
+        #[cfg(unix)]
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+
+        #[cfg(target_os = "windows")]
+        let page_size = {
+            let mut info = std::mem::MaybeUninit::<SYSTEM_INFO>::uninit();
+            unsafe {
+                GetSystemInfo(info.as_mut_ptr());
+            }
+            let info = unsafe { info.assume_init() };
+            info.dwPageSize as usize
+        };
+
+        #[cfg(unix)]
+        let code_buff_ptr = unsafe {
+            std::ptr::NonNull::new_unchecked(libc::mmap(
+                std::ptr::null_mut(),
+                capacity_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            ) as *mut u8)
+        };
+
+        #[cfg(target_os = "windows")]
+        let code_buff_ptr = unsafe {
+            std::ptr::NonNull::new_unchecked(
+                VirtualAlloc(None, capacity_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE).cast::<u8>(),
+            )
+        };
+
+        #[cfg(unix)]
+        let data_buff_ptr = unsafe {
+            std::ptr::NonNull::new_unchecked(libc::mmap(
+                std::ptr::null_mut(),
+                capacity_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            ) as *mut u8)
+        };
+
+        #[cfg(target_os = "windows")]
+        let data_buff_ptr = unsafe {
+            std::ptr::NonNull::new_unchecked(
+                VirtualAlloc(None, capacity_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE).cast::<u8>(),
+            )
+        };
+
+        Self {
+            data: Rc::new(RefCell::new(MockMemoryManagerData {
+                fixed_capacity_bytes: capacity_bytes,
+                fixed_page_size: page_size,
+
+                code_buff_ptr,
+                code_offset: 0,
+
+                data_buff_ptr,
+                data_offset: 0,
+
+                code_alloc_calls: 0,
+                data_alloc_calls: 0,
+                finalize_calls: 0,
+                destroy_calls: 0,
+            })),
+        }
+    }
+}
+
+impl McjitMemoryManager for MockMemoryManager {
+    fn allocate_code_section(
+        &mut self,
+        size: libc::size_t,
+        _alignment: libc::c_uint,
+        _section_id: libc::c_uint,
+        _section_name: &str,
+    ) -> *mut u8 {
+        let mut data = self.data.borrow_mut();
+        data.code_alloc_calls += 1;
+
+        let alloc_size = size.div_ceil(data.fixed_page_size) * data.fixed_page_size;
+        let ptr = unsafe { data.code_buff_ptr.as_ptr().add(data.code_offset) };
+        data.code_offset += alloc_size;
+
+        ptr
+    }
+
+    fn allocate_data_section(
+        &mut self,
+        size: libc::size_t,
+        _alignment: libc::c_uint,
+        _section_id: libc::c_uint,
+        _section_name: &str,
+        _is_read_only: bool,
+    ) -> *mut u8 {
+        let mut data = self.data.borrow_mut();
+
+        data.data_alloc_calls += 1;
+
+        let alloc_size = size.div_ceil(data.fixed_page_size) * data.fixed_page_size;
+        let ptr = unsafe { data.data_buff_ptr.as_ptr().add(data.data_offset) };
+        data.data_offset += alloc_size;
+
+        ptr
+    }
+
+    fn finalize_memory(&mut self) -> Result<(), String> {
+        let mut data = self.data.borrow_mut();
+
+        data.finalize_calls += 1;
+
+        #[cfg(unix)]
+        unsafe {
+            libc::mprotect(
+                data.code_buff_ptr.as_ptr() as *mut libc::c_void,
+                data.fixed_capacity_bytes,
+                libc::PROT_READ | libc::PROT_EXEC,
+            );
+            libc::mprotect(
+                data.data_buff_ptr.as_ptr() as *mut libc::c_void,
+                data.fixed_capacity_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+            );
+        }
+
+        #[cfg(windows)]
+        unsafe {
+            let mut old_protect = PAGE_READWRITE;
+            VirtualProtect(
+                data.code_buff_ptr.as_ptr() as *mut _,
+                data.fixed_capacity_bytes,
+                PAGE_EXECUTE_READ,
+                &mut old_protect,
+            )
+            .expect("VirtualProtect failed");
+            VirtualProtect(
+                data.data_buff_ptr.as_ptr() as *mut _,
+                data.fixed_capacity_bytes,
+                PAGE_READWRITE,
+                &mut old_protect,
+            )
+            .expect("VirtualProtect failed");
+        }
+
+        Ok(())
+    }
+
+    fn destroy(&mut self) {
+        let mut data = self.data.borrow_mut();
+
+        data.destroy_calls += 1;
+
+        #[cfg(unix)]
+        unsafe {
+            libc::munmap(
+                data.code_buff_ptr.as_ptr() as *mut libc::c_void,
+                data.fixed_capacity_bytes,
+            );
+            libc::munmap(
+                data.data_buff_ptr.as_ptr() as *mut libc::c_void,
+                data.fixed_capacity_bytes,
+            );
+        }
+
+        #[cfg(windows)]
+        unsafe {
+            VirtualFree(data.code_buff_ptr.as_ptr() as *mut _, 0, MEM_RELEASE).expect("Failed to free memory.");
+            VirtualFree(data.data_buff_ptr.as_ptr() as *mut _, 0, MEM_RELEASE).expect("Failed to free memory.");
+        }
+    }
+}

@@ -1,57 +1,66 @@
 //! A `Context` is an opaque owner and manager of core global data.
 
-#[llvm_versions(7..)]
 use crate::InlineAsmDialect;
 use libc::c_void;
-#[llvm_versions(..=6)]
-use llvm_sys::core::LLVMConstInlineAsm;
+#[cfg(all(any(feature = "llvm15-0", feature = "llvm16-0"), feature = "typed-pointers"))]
+use llvm_sys::core::LLVMContextSetOpaquePointers;
 #[llvm_versions(12..)]
 use llvm_sys::core::LLVMCreateTypeAttribute;
-#[llvm_versions(7..)]
-use llvm_sys::core::LLVMGetInlineAsm;
+
 #[llvm_versions(12..)]
 use llvm_sys::core::LLVMGetTypeByName2;
-#[llvm_versions(6..)]
-use llvm_sys::core::LLVMMetadataTypeInContext;
-#[llvm_versions(15..)]
+
+#[cfg(not(feature = "typed-pointers"))]
 use llvm_sys::core::LLVMPointerTypeInContext;
 use llvm_sys::core::{
-    LLVMAppendBasicBlockInContext, LLVMConstStringInContext, LLVMConstStructInContext, LLVMContextCreate,
+    LLVMAppendBasicBlockInContext, LLVMBFloatTypeInContext, LLVMConstStructInContext, LLVMContextCreate,
     LLVMContextDispose, LLVMContextSetDiagnosticHandler, LLVMCreateBuilderInContext, LLVMCreateEnumAttribute,
     LLVMCreateStringAttribute, LLVMDoubleTypeInContext, LLVMFP128TypeInContext, LLVMFloatTypeInContext,
-    LLVMGetGlobalContext, LLVMGetMDKindIDInContext, LLVMHalfTypeInContext, LLVMInsertBasicBlockInContext,
-    LLVMInt16TypeInContext, LLVMInt1TypeInContext, LLVMInt32TypeInContext, LLVMInt64TypeInContext,
-    LLVMInt8TypeInContext, LLVMIntTypeInContext, LLVMModuleCreateWithNameInContext, LLVMPPCFP128TypeInContext,
-    LLVMStructCreateNamed, LLVMStructTypeInContext, LLVMVoidTypeInContext, LLVMX86FP80TypeInContext,
+    LLVMGetInlineAsm, LLVMGetMDKindIDInContext, LLVMHalfTypeInContext, LLVMInsertBasicBlockInContext,
+    LLVMInt1TypeInContext, LLVMInt8TypeInContext, LLVMInt16TypeInContext, LLVMInt32TypeInContext,
+    LLVMInt64TypeInContext, LLVMIntTypeInContext, LLVMMDNodeInContext2, LLVMMDStringInContext2, LLVMMetadataAsValue,
+    LLVMMetadataTypeInContext, LLVMModuleCreateWithNameInContext, LLVMPPCFP128TypeInContext, LLVMStructCreateNamed,
+    LLVMStructTypeInContext, LLVMValueAsMetadata, LLVMVoidTypeInContext, LLVMX86FP80TypeInContext,
 };
-#[allow(deprecated)]
-use llvm_sys::core::{LLVMMDNodeInContext, LLVMMDStringInContext};
-use llvm_sys::ir_reader::LLVMParseIRInContext;
-use llvm_sys::prelude::{LLVMContextRef, LLVMDiagnosticInfoRef, LLVMTypeRef, LLVMValueRef};
-use llvm_sys::target::{LLVMIntPtrTypeForASInContext, LLVMIntPtrTypeInContext};
-use once_cell::sync::Lazy;
-use std::sync::{Mutex, MutexGuard};
 
+#[llvm_versions(..19)]
+use llvm_sys::core::LLVMConstStringInContext;
+
+#[llvm_versions(19..)]
+use llvm_sys::core::LLVMConstStringInContext2;
+
+#[llvm_versions(..22)]
+use llvm_sys::ir_reader::LLVMParseIRInContext;
+#[llvm_versions(22..)]
+use llvm_sys::ir_reader::LLVMParseIRInContext2;
+
+use llvm_sys::prelude::{LLVMContextRef, LLVMDiagnosticInfoRef, LLVMMetadataRef, LLVMTypeRef, LLVMValueRef};
+use llvm_sys::target::{LLVMIntPtrTypeForASInContext, LLVMIntPtrTypeInContext};
+use std::cell::LazyCell;
+use std::sync::{LazyLock, Mutex, MutexGuard};
+
+use crate::AddressSpace;
 use crate::attributes::Attribute;
 use crate::basic_block::BasicBlock;
 use crate::builder::Builder;
 use crate::memory_buffer::MemoryBuffer;
 use crate::module::Module;
-use crate::support::{to_c_str, LLVMString};
+use crate::support::{LLVMString, to_c_str};
 use crate::targets::TargetData;
 #[llvm_versions(12..)]
 use crate::types::AnyTypeEnum;
-#[llvm_versions(6..)]
 use crate::types::MetadataType;
-use crate::types::{AsTypeRef, BasicTypeEnum, FloatType, FunctionType, IntType, PointerType, StructType, VoidType};
+#[cfg(not(feature = "typed-pointers"))]
+use crate::types::PointerType;
+use crate::types::{AsTypeRef, BasicTypeEnum, FloatType, FunctionType, IntType, StructType, VoidType};
 use crate::values::{
     ArrayValue, AsValueRef, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, MetadataValue, PointerValue,
     StructValue,
 };
-use crate::AddressSpace;
 
 use std::marker::PhantomData;
 use std::mem::forget;
+use std::num::NonZeroU32;
 use std::ptr;
 use std::thread_local;
 
@@ -62,13 +71,20 @@ use std::thread_local;
 // This is still technically unsafe because another program in the same process
 // could also be accessing the global context via the C API. `get_global` has been
 // marked unsafe for this reason. Iff this isn't the case then this should be fully safe.
-static GLOBAL_CTX: Lazy<Mutex<Context>> = Lazy::new(|| unsafe { Mutex::new(Context::new(LLVMGetGlobalContext())) });
+static GLOBAL_CTX: LazyLock<Mutex<Context>> = LazyLock::new(|| Mutex::new(Context::create()));
 
 thread_local! {
-    pub(crate) static GLOBAL_CTX_LOCK: Lazy<MutexGuard<'static, Context>> = Lazy::new(|| {
+    #[deprecated(note = "use Context::create instead")]
+    pub(crate) static GLOBAL_CTX_LOCK: LazyCell<MutexGuard<'static, Context>> = LazyCell::new(|| {
         GLOBAL_CTX.lock().unwrap_or_else(|e| e.into_inner())
     });
 }
+
+// LLVM's arbitrary bit-width integer constraints.
+// "The integer type is a very simple type that simply specifies an arbitrary bit width...
+// Any bit width from 1 bit to 2^23-1 (about 8 million) can be specified."
+// Reference: https://llvm.org/docs/LangRef.html#integer-type
+const LLVM_MAX_INT_BITS: u32 = 1 << 23;
 
 /// This struct allows us to share method impls across Context and ContextRef types
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -77,6 +93,11 @@ pub(crate) struct ContextImpl(pub(crate) LLVMContextRef);
 impl ContextImpl {
     pub(crate) unsafe fn new(context: LLVMContextRef) -> Self {
         assert!(!context.is_null());
+
+        #[cfg(all(any(feature = "llvm15-0", feature = "llvm16-0"), feature = "typed-pointers"))]
+        unsafe {
+            LLVMContextSetOpaquePointers(context, 0)
+        };
 
         ContextImpl(context)
     }
@@ -95,7 +116,10 @@ impl ContextImpl {
         let mut module = ptr::null_mut();
         let mut err_str = ptr::null_mut();
 
+        #[cfg(not(any(feature = "llvm22-1", feature = "llvm23-1")))]
         let code = unsafe { LLVMParseIRInContext(self.0, memory_buffer.memory_buffer, &mut module, &mut err_str) };
+        #[cfg(any(feature = "llvm22-1", feature = "llvm23-1"))]
+        let code = unsafe { LLVMParseIRInContext2(self.0, memory_buffer.memory_buffer, &mut module, &mut err_str) };
 
         forget(memory_buffer);
 
@@ -115,33 +139,9 @@ impl ContextImpl {
         mut constraints: String,
         sideeffects: bool,
         alignstack: bool,
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))] dialect: Option<
-            InlineAsmDialect,
-        >,
-        #[cfg(not(any(
-            feature = "llvm4-0",
-            feature = "llvm5-0",
-            feature = "llvm6-0",
-            feature = "llvm7-0",
-            feature = "llvm8-0",
-            feature = "llvm9-0",
-            feature = "llvm10-0",
-            feature = "llvm11-0",
-            feature = "llvm12-0"
-        )))]
-        can_throw: bool,
+        dialect: Option<InlineAsmDialect>,
+        #[cfg(not(any(feature = "llvm11-0", feature = "llvm12-0")))] can_throw: bool,
     ) -> PointerValue<'ctx> {
-        #[cfg(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0"))]
-        let value = unsafe {
-            LLVMConstInlineAsm(
-                ty.as_type_ref(),
-                assembly.as_ptr() as *const ::libc::c_char,
-                constraints.as_ptr() as *const ::libc::c_char,
-                sideeffects as i32,
-                alignstack as i32,
-            )
-        };
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
         let value = unsafe {
             LLVMGetInlineAsm(
                 ty.as_type_ref(),
@@ -152,17 +152,7 @@ impl ContextImpl {
                 sideeffects as i32,
                 alignstack as i32,
                 dialect.unwrap_or(InlineAsmDialect::ATT).into(),
-                #[cfg(not(any(
-                    feature = "llvm4-0",
-                    feature = "llvm5-0",
-                    feature = "llvm6-0",
-                    feature = "llvm7-0",
-                    feature = "llvm8-0",
-                    feature = "llvm9-0",
-                    feature = "llvm10-0",
-                    feature = "llvm11-0",
-                    feature = "llvm12-0"
-                )))]
+                #[cfg(not(any(feature = "llvm11-0", feature = "llvm12-0")))]
                 {
                     can_throw as i32
                 },
@@ -198,14 +188,19 @@ impl ContextImpl {
 
     // TODO: Call LLVMInt128TypeInContext in applicable versions
     fn i128_type<'ctx>(&self) -> IntType<'ctx> {
-        self.custom_width_int_type(128)
+        self.custom_width_int_type(NonZeroU32::new(128).unwrap()).unwrap()
     }
 
-    fn custom_width_int_type<'ctx>(&self, bits: u32) -> IntType<'ctx> {
-        unsafe { IntType::new(LLVMIntTypeInContext(self.0, bits)) }
+    fn custom_width_int_type<'ctx>(&self, bits: NonZeroU32) -> Result<IntType<'ctx>, &'static str> {
+        let width = bits.get();
+
+        if width <= LLVM_MAX_INT_BITS {
+            unsafe { Ok(IntType::new(LLVMIntTypeInContext(self.0, width))) }
+        } else {
+            Err("LLVM only supports integers with bit widths between 1 and 8388608 (inclusive)")
+        }
     }
 
-    #[llvm_versions(6..)]
     fn metadata_type<'ctx>(&self) -> MetadataType<'ctx> {
         unsafe { MetadataType::new(LLVMMetadataTypeInContext(self.0)) }
     }
@@ -223,6 +218,25 @@ impl ContextImpl {
 
     fn f16_type<'ctx>(&self) -> FloatType<'ctx> {
         unsafe { FloatType::new(LLVMHalfTypeInContext(self.0)) }
+    }
+
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+        feature = "llvm23-1",
+    ))]
+    fn bf16_type<'ctx>(&self) -> FloatType<'ctx> {
+        unsafe { FloatType::new(LLVMBFloatTypeInContext(self.0)) }
     }
 
     fn f32_type<'ctx>(&self) -> FloatType<'ctx> {
@@ -245,7 +259,7 @@ impl ContextImpl {
         unsafe { FloatType::new(LLVMPPCFP128TypeInContext(self.0)) }
     }
 
-    #[llvm_versions(15..)]
+    #[cfg(not(feature = "typed-pointers"))]
     fn ptr_type<'ctx>(&self, address_space: AddressSpace) -> PointerType<'ctx> {
         unsafe { PointerType::new(LLVMPointerTypeInContext(self.0, address_space.0)) }
     }
@@ -329,23 +343,25 @@ impl ContextImpl {
         }
     }
 
-    #[allow(deprecated)]
     fn metadata_node<'ctx>(&self, values: &[BasicMetadataValueEnum<'ctx>]) -> MetadataValue<'ctx> {
-        let mut tuple_values: Vec<LLVMValueRef> = values.iter().map(|val| val.as_value_ref()).collect();
+        let mut tuple_values: Vec<LLVMMetadataRef> = values
+            .iter()
+            .map(|val| unsafe { LLVMValueAsMetadata(val.as_value_ref()) })
+            .collect();
+
         unsafe {
-            MetadataValue::new(LLVMMDNodeInContext(
-                self.0,
-                tuple_values.as_mut_ptr(),
-                tuple_values.len() as u32,
-            ))
+            let metadata = LLVMMDNodeInContext2(self.0, tuple_values.as_mut_ptr(), tuple_values.len());
+            MetadataValue::new(LLVMMetadataAsValue(self.0, metadata))
         }
     }
 
-    #[allow(deprecated)]
     fn metadata_string<'ctx>(&self, string: &str) -> MetadataValue<'ctx> {
         let c_string = to_c_str(string);
 
-        unsafe { MetadataValue::new(LLVMMDStringInContext(self.0, c_string.as_ptr(), string.len() as u32)) }
+        unsafe {
+            let metadata = LLVMMDStringInContext2(self.0, c_string.as_ptr(), c_string.count_bytes());
+            MetadataValue::new(LLVMMetadataAsValue(self.0, metadata))
+        }
     }
 
     fn get_kind_id(&self, key: &str) -> u32 {
@@ -373,12 +389,25 @@ impl ContextImpl {
         unsafe { Attribute::new(LLVMCreateTypeAttribute(self.0, kind_id, type_ref.as_type_ref())) }
     }
 
+    #[llvm_versions(..19)]
     fn const_string<'ctx>(&self, string: &[u8], null_terminated: bool) -> ArrayValue<'ctx> {
         unsafe {
             ArrayValue::new(LLVMConstStringInContext(
                 self.0,
                 string.as_ptr() as *const ::libc::c_char,
                 string.len() as u32,
+                !null_terminated as i32,
+            ))
+        }
+    }
+
+    #[llvm_versions(19..)]
+    fn const_string<'ctx>(&self, string: &[u8], null_terminated: bool) -> ArrayValue<'ctx> {
+        unsafe {
+            ArrayValue::new(LLVMConstStringInContext2(
+                self.0,
+                string.as_ptr() as *const ::libc::c_char,
+                string.len(),
                 !null_terminated as i32,
             ))
         }
@@ -433,8 +462,10 @@ impl Context {
     /// It's not intended to be used by most users, hence marked as unsafe.
     /// Use [`Context::create`] instead.
     pub unsafe fn new(context: LLVMContextRef) -> Self {
-        Context {
-            context: ContextImpl::new(context),
+        unsafe {
+            Context {
+                context: ContextImpl::new(context),
+            }
         }
     }
 
@@ -468,10 +499,12 @@ impl Context {
     ///     })
     /// };
     /// ```
+    #[deprecated(note = "use Context::create instead")]
     pub unsafe fn get_global<F, R>(func: F) -> R
     where
         F: FnOnce(&Context) -> R,
     {
+        #[allow(deprecated)]
         GLOBAL_CTX_LOCK.with(|lazy| func(lazy))
     }
 
@@ -486,7 +519,7 @@ impl Context {
     /// let builder = context.create_builder();
     /// ```
     #[inline]
-    pub fn create_builder(&self) -> Builder {
+    pub fn create_builder(&self) -> Builder<'_> {
         self.context.create_builder()
     }
 
@@ -501,7 +534,7 @@ impl Context {
     /// let module = context.create_module("my_module");
     /// ```
     #[inline]
-    pub fn create_module(&self, name: &str) -> Module {
+    pub fn create_module(&self, name: &str) -> Module<'_> {
         self.context.create_module(name)
     }
 
@@ -532,7 +565,7 @@ impl Context {
     // a double free in valgrind when the MemoryBuffer drops so we are `forget`ting MemoryBuffer here
     // for now until we can confirm this is the correct thing to do
     #[inline]
-    pub fn create_module_from_ir(&self, memory_buffer: MemoryBuffer) -> Result<Module, LLVMString> {
+    pub fn create_module_from_ir(&self, memory_buffer: MemoryBuffer) -> Result<Module<'_>, LLVMString> {
         self.context.create_module_from_ir(memory_buffer)
     }
 
@@ -559,15 +592,8 @@ impl Context {
     ///     "=r,{rax},{rdi}".to_string(),
     ///     true,
     ///     false,
-    ///     #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))] None,
+    ///     None,
     ///     #[cfg(not(any(
-    ///         feature = "llvm4-0",
-    ///         feature = "llvm5-0",
-    ///         feature = "llvm6-0",
-    ///         feature = "llvm7-0",
-    ///         feature = "llvm8-0",
-    ///         feature = "llvm9-0",
-    ///         feature = "llvm10-0",
     ///         feature = "llvm11-0",
     ///         feature = "llvm12-0"
     ///     )))]
@@ -576,13 +602,6 @@ impl Context {
     /// let params = &[context.i64_type().const_int(60, false).into(), context.i64_type().const_int(1, false).into()];
     ///
     /// #[cfg(any(
-    ///     feature = "llvm4-0",
-    ///     feature = "llvm5-0",
-    ///     feature = "llvm6-0",
-    ///     feature = "llvm7-0",
-    ///     feature = "llvm8-0",
-    ///     feature = "llvm9-0",
-    ///     feature = "llvm10-0",
     ///     feature = "llvm11-0",
     ///     feature = "llvm12-0",
     ///     feature = "llvm13-0",
@@ -594,7 +613,7 @@ impl Context {
     ///     builder.build_call(callable_value, params, "exit").unwrap();
     /// }
     ///
-    /// #[cfg(any(feature = "llvm15-0", feature = "llvm16-0", feature = "llvm17-0", feature = "llvm18-0"))]
+    /// #[cfg(any(feature = "llvm15-0", feature = "llvm16-0", feature = "llvm17-0", feature = "llvm18-1", feature = "llvm19-1", feature = "llvm20-1", feature = "llvm21-1", feature = "llvm22-1", feature = "llvm23-1"))]
     /// builder.build_indirect_call(asm_fn, asm, params, "exit").unwrap();
     ///
     /// builder.build_return(None).unwrap();
@@ -607,21 +626,8 @@ impl Context {
         constraints: String,
         sideeffects: bool,
         alignstack: bool,
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))] dialect: Option<
-            InlineAsmDialect,
-        >,
-        #[cfg(not(any(
-            feature = "llvm4-0",
-            feature = "llvm5-0",
-            feature = "llvm6-0",
-            feature = "llvm7-0",
-            feature = "llvm8-0",
-            feature = "llvm9-0",
-            feature = "llvm10-0",
-            feature = "llvm11-0",
-            feature = "llvm12-0"
-        )))]
-        can_throw: bool,
+        dialect: Option<InlineAsmDialect>,
+        #[cfg(not(any(feature = "llvm11-0", feature = "llvm12-0")))] can_throw: bool,
     ) -> PointerValue<'ctx> {
         self.context.create_inline_asm(
             ty,
@@ -629,19 +635,8 @@ impl Context {
             constraints,
             sideeffects,
             alignstack,
-            #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
             dialect,
-            #[cfg(not(any(
-                feature = "llvm4-0",
-                feature = "llvm5-0",
-                feature = "llvm6-0",
-                feature = "llvm7-0",
-                feature = "llvm8-0",
-                feature = "llvm9-0",
-                feature = "llvm10-0",
-                feature = "llvm11-0",
-                feature = "llvm12-0"
-            )))]
+            #[cfg(not(any(feature = "llvm11-0", feature = "llvm12-0")))]
             can_throw,
         )
     }
@@ -659,7 +654,7 @@ impl Context {
     /// assert_eq!(void_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn void_type(&self) -> VoidType {
+    pub fn void_type(&self) -> VoidType<'_> {
         self.context.void_type()
     }
 
@@ -677,7 +672,7 @@ impl Context {
     /// assert_eq!(bool_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn bool_type(&self) -> IntType {
+    pub fn bool_type(&self) -> IntType<'_> {
         self.context.bool_type()
     }
 
@@ -695,7 +690,7 @@ impl Context {
     /// assert_eq!(i8_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn i8_type(&self) -> IntType {
+    pub fn i8_type(&self) -> IntType<'_> {
         self.context.i8_type()
     }
 
@@ -713,7 +708,7 @@ impl Context {
     /// assert_eq!(i16_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn i16_type(&self) -> IntType {
+    pub fn i16_type(&self) -> IntType<'_> {
         self.context.i16_type()
     }
 
@@ -731,7 +726,7 @@ impl Context {
     /// assert_eq!(i32_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn i32_type(&self) -> IntType {
+    pub fn i32_type(&self) -> IntType<'_> {
         self.context.i32_type()
     }
 
@@ -749,7 +744,7 @@ impl Context {
     /// assert_eq!(i64_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn i64_type(&self) -> IntType {
+    pub fn i64_type(&self) -> IntType<'_> {
         self.context.i64_type()
     }
 
@@ -767,7 +762,7 @@ impl Context {
     /// assert_eq!(i128_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn i128_type(&self) -> IntType {
+    pub fn i128_type(&self) -> IntType<'_> {
         self.context.i128_type()
     }
 
@@ -776,16 +771,18 @@ impl Context {
     /// # Example
     ///
     /// ```no_run
+    /// use std::num::NonZeroU32;
     /// use inkwell::context::Context;
     ///
     /// let context = Context::create();
-    /// let i42_type = context.custom_width_int_type(42);
+    /// let width = NonZeroU32::new(42).unwrap();
+    /// let i42_type = context.custom_width_int_type(width).unwrap();
     ///
     /// assert_eq!(i42_type.get_bit_width(), 42);
     /// assert_eq!(i42_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn custom_width_int_type(&self, bits: u32) -> IntType {
+    pub fn custom_width_int_type(&self, bits: NonZeroU32) -> Result<IntType<'_>, &'static str> {
         self.context.custom_width_int_type(bits)
     }
 
@@ -803,8 +800,7 @@ impl Context {
     /// assert_eq!(md_type.get_context(), context);
     /// ```
     #[inline]
-    #[llvm_versions(6..)]
-    pub fn metadata_type(&self) -> MetadataType {
+    pub fn metadata_type(&self) -> MetadataType<'_> {
         self.context.metadata_type()
     }
 
@@ -826,7 +822,7 @@ impl Context {
     /// let int_type = context.ptr_sized_int_type(&target_data, None);
     /// ```
     #[inline]
-    pub fn ptr_sized_int_type(&self, target_data: &TargetData, address_space: Option<AddressSpace>) -> IntType {
+    pub fn ptr_sized_int_type(&self, target_data: &TargetData, address_space: Option<AddressSpace>) -> IntType<'_> {
         self.context.ptr_sized_int_type(target_data, address_space)
     }
 
@@ -844,8 +840,42 @@ impl Context {
     /// assert_eq!(f16_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn f16_type(&self) -> FloatType {
+    pub fn f16_type(&self) -> FloatType<'_> {
         self.context.f16_type()
+    }
+
+    /// Gets the `FloatType` representing bfloat16 with a 16 bit width. It will be assigned the current context.
+    /// This is only available with LLVM >= 11.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use inkwell::context::Context;
+    ///
+    /// let context = Context::create();
+    ///
+    /// let bf16_type = context.bf16_type();
+    ///
+    /// assert_eq!(bf16_type.get_context(), context);
+    /// ```
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+        feature = "llvm23-1",
+    ))]
+    #[inline]
+    pub fn bf16_type(&self) -> FloatType<'_> {
+        self.context.bf16_type()
     }
 
     /// Gets the `FloatType` representing a 32 bit width. It will be assigned the current context.
@@ -862,7 +892,7 @@ impl Context {
     /// assert_eq!(f32_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn f32_type(&self) -> FloatType {
+    pub fn f32_type(&self) -> FloatType<'_> {
         self.context.f32_type()
     }
 
@@ -880,7 +910,7 @@ impl Context {
     /// assert_eq!(f64_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn f64_type(&self) -> FloatType {
+    pub fn f64_type(&self) -> FloatType<'_> {
         self.context.f64_type()
     }
 
@@ -898,7 +928,7 @@ impl Context {
     /// assert_eq!(x86_f80_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn x86_f80_type(&self) -> FloatType {
+    pub fn x86_f80_type(&self) -> FloatType<'_> {
         self.context.x86_f80_type()
     }
 
@@ -917,7 +947,7 @@ impl Context {
     /// ```
     // IEEE 754-2008’s binary128 floats according to https://internals.rust-lang.org/t/pre-rfc-introduction-of-half-and-quadruple-precision-floats-f16-and-f128/7521
     #[inline]
-    pub fn f128_type(&self) -> FloatType {
+    pub fn f128_type(&self) -> FloatType<'_> {
         self.context.f128_type()
     }
 
@@ -938,7 +968,7 @@ impl Context {
     /// ```
     // Two 64 bits according to https://internals.rust-lang.org/t/pre-rfc-introduction-of-half-and-quadruple-precision-floats-f16-and-f128/7521
     #[inline]
-    pub fn ppc_f128_type(&self) -> FloatType {
+    pub fn ppc_f128_type(&self) -> FloatType<'_> {
         self.context.ppc_f128_type()
     }
 
@@ -956,9 +986,9 @@ impl Context {
     /// assert_eq!(ptr_type.get_address_space(), AddressSpace::default());
     /// assert_eq!(ptr_type.get_context(), context);
     /// ```
-    #[llvm_versions(15..)]
+    #[cfg(not(feature = "typed-pointers"))]
     #[inline]
-    pub fn ptr_type(&self, address_space: AddressSpace) -> PointerType {
+    pub fn ptr_type(&self, address_space: AddressSpace) -> PointerType<'_> {
         self.context.ptr_type(address_space)
     }
 
@@ -978,7 +1008,7 @@ impl Context {
     /// ```
     // REVIEW: AnyType but VoidType? FunctionType?
     #[inline]
-    pub fn struct_type(&self, field_types: &[BasicTypeEnum], packed: bool) -> StructType {
+    pub fn struct_type<'ctx>(&'ctx self, field_types: &[BasicTypeEnum], packed: bool) -> StructType<'ctx> {
         self.context.struct_type(field_types, packed)
     }
 
@@ -997,7 +1027,7 @@ impl Context {
     /// assert_eq!(struct_type.get_field_types(), &[]);
     /// ```
     #[inline]
-    pub fn opaque_struct_type(&self, name: &str) -> StructType {
+    pub fn opaque_struct_type<'ctx>(&'ctx self, name: &str) -> StructType<'ctx> {
         self.context.opaque_struct_type(name)
     }
 
@@ -1039,7 +1069,7 @@ impl Context {
     /// assert_eq!(const_struct.get_type().get_field_types(), &[i16_type.into(), f32_type.into()]);
     /// ```
     #[inline]
-    pub fn const_struct(&self, values: &[BasicValueEnum], packed: bool) -> StructValue {
+    pub fn const_struct<'ctx>(&'ctx self, values: &[BasicValueEnum], packed: bool) -> StructValue<'ctx> {
         self.context.const_struct(values, packed)
     }
 
@@ -1173,6 +1203,7 @@ impl Context {
     ///
     /// let context = Context::create();
     /// let md_string = context.metadata_string("Floats are awesome!");
+    /// let md_node = context.metadata_node(&[md_string.into()]);
     /// let f32_type = context.f32_type();
     /// let f32_one = f32_type.const_float(1.);
     /// let void_type = context.void_type();
@@ -1189,11 +1220,11 @@ impl Context {
     ///
     /// assert!(md_string.is_string());
     ///
-    /// ret_instr.set_metadata(md_string, 0);
+    /// ret_instr.set_metadata(md_node, 0);
     /// ```
     // REVIEW: Seems to be unassigned to anything
     #[inline]
-    pub fn metadata_string(&self, string: &str) -> MetadataValue {
+    pub fn metadata_string<'ctx>(&'ctx self, string: &str) -> MetadataValue<'ctx> {
         self.context.metadata_string(string)
     }
 
@@ -1305,7 +1336,7 @@ impl Context {
     /// ```
     // SubTypes: Should return ArrayValue<IntValue<i8>>
     #[inline]
-    pub fn const_string(&self, string: &[u8], null_terminated: bool) -> ArrayValue {
+    pub fn const_string<'ctx>(&'ctx self, string: &[u8], null_terminated: bool) -> ArrayValue<'ctx> {
         self.context.const_string(string, null_terminated)
     }
 
@@ -1351,9 +1382,11 @@ impl<'ctx> ContextRef<'ctx> {
     /// This function is exposed only for interoperability with other LLVM IR libraries.
     /// It's not intended to be used by most users, hence marked as unsafe.
     pub unsafe fn new(context: LLVMContextRef) -> Self {
-        ContextRef {
-            context: ContextImpl::new(context),
-            _marker: PhantomData,
+        unsafe {
+            ContextRef {
+                context: ContextImpl::new(context),
+                _marker: PhantomData,
+            }
         }
     }
 
@@ -1441,15 +1474,8 @@ impl<'ctx> ContextRef<'ctx> {
     ///     "=r,{rax},{rdi}".to_string(),
     ///     true,
     ///     false,
-    ///     #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))] None,
+    ///     None,
     ///     #[cfg(not(any(
-    ///         feature = "llvm4-0",
-    ///         feature = "llvm5-0",
-    ///         feature = "llvm6-0",
-    ///         feature = "llvm7-0",
-    ///         feature = "llvm8-0",
-    ///         feature = "llvm9-0",
-    ///         feature = "llvm10-0",
     ///         feature = "llvm11-0",
     ///         feature = "llvm12-0"
     ///     )))]
@@ -1458,13 +1484,6 @@ impl<'ctx> ContextRef<'ctx> {
     /// let params = &[context.i64_type().const_int(60, false).into(), context.i64_type().const_int(1, false).into()];
     ///
     /// #[cfg(any(
-    ///     feature = "llvm4-0",
-    ///     feature = "llvm5-0",
-    ///     feature = "llvm6-0",
-    ///     feature = "llvm7-0",
-    ///     feature = "llvm8-0",
-    ///     feature = "llvm9-0",
-    ///     feature = "llvm10-0",
     ///     feature = "llvm11-0",
     ///     feature = "llvm12-0",
     ///     feature = "llvm13-0",
@@ -1476,7 +1495,7 @@ impl<'ctx> ContextRef<'ctx> {
     ///     builder.build_call(callable_value, params, "exit").unwrap();
     /// }
     ///
-    /// #[cfg(any(feature = "llvm15-0", feature = "llvm16-0", feature = "llvm17-0", feature = "llvm18-0"))]
+    /// #[cfg(any(feature = "llvm15-0", feature = "llvm16-0", feature = "llvm17-0", feature = "llvm18-1", feature = "llvm19-1", feature = "llvm20-1", feature = "llvm21-1", feature = "llvm22-1", feature = "llvm23-1"))]
     /// builder.build_indirect_call(asm_fn, asm, params, "exit").unwrap();
     ///
     /// builder.build_return(None).unwrap();
@@ -1489,21 +1508,8 @@ impl<'ctx> ContextRef<'ctx> {
         constraints: String,
         sideeffects: bool,
         alignstack: bool,
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))] dialect: Option<
-            InlineAsmDialect,
-        >,
-        #[cfg(not(any(
-            feature = "llvm4-0",
-            feature = "llvm5-0",
-            feature = "llvm6-0",
-            feature = "llvm7-0",
-            feature = "llvm8-0",
-            feature = "llvm9-0",
-            feature = "llvm10-0",
-            feature = "llvm11-0",
-            feature = "llvm12-0"
-        )))]
-        can_throw: bool,
+        dialect: Option<InlineAsmDialect>,
+        #[cfg(not(any(feature = "llvm11-0", feature = "llvm12-0")))] can_throw: bool,
     ) -> PointerValue<'ctx> {
         self.context.create_inline_asm(
             ty,
@@ -1511,19 +1517,8 @@ impl<'ctx> ContextRef<'ctx> {
             constraints,
             sideeffects,
             alignstack,
-            #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
             dialect,
-            #[cfg(not(any(
-                feature = "llvm4-0",
-                feature = "llvm5-0",
-                feature = "llvm6-0",
-                feature = "llvm7-0",
-                feature = "llvm8-0",
-                feature = "llvm9-0",
-                feature = "llvm10-0",
-                feature = "llvm11-0",
-                feature = "llvm12-0"
-            )))]
+            #[cfg(not(any(feature = "llvm11-0", feature = "llvm12-0")))]
             can_throw,
         )
     }
@@ -1658,16 +1653,18 @@ impl<'ctx> ContextRef<'ctx> {
     /// # Example
     ///
     /// ```no_run
+    /// use std::num::NonZeroU32;
     /// use inkwell::context::Context;
     ///
     /// let context = Context::create();
-    /// let i42_type = context.custom_width_int_type(42);
+    /// let width = NonZeroU32::new(42).unwrap();
+    /// let i42_type = context.custom_width_int_type(width).unwrap();
     ///
     /// assert_eq!(i42_type.get_bit_width(), 42);
     /// assert_eq!(i42_type.get_context(), context);
     /// ```
     #[inline]
-    pub fn custom_width_int_type(&self, bits: u32) -> IntType<'ctx> {
+    pub fn custom_width_int_type(&self, bits: NonZeroU32) -> Result<IntType<'ctx>, &'static str> {
         self.context.custom_width_int_type(bits)
     }
 
@@ -1685,7 +1682,6 @@ impl<'ctx> ContextRef<'ctx> {
     /// assert_eq!(md_type.get_context(), context);
     /// ```
     #[inline]
-    #[llvm_versions(6..)]
     pub fn metadata_type(&self) -> MetadataType<'ctx> {
         self.context.metadata_type()
     }
@@ -1728,6 +1724,40 @@ impl<'ctx> ContextRef<'ctx> {
     #[inline]
     pub fn f16_type(&self) -> FloatType<'ctx> {
         self.context.f16_type()
+    }
+
+    /// Gets the `FloatType` representing bfloat16 with a 16 bit width. It will be assigned the current context.
+    /// This is only available with LLVM >= 11.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use inkwell::context::Context;
+    ///
+    /// let context = Context::create();
+    ///
+    /// let bf16_type = context.bf16_type();
+    ///
+    /// assert_eq!(bf16_type.get_context(), context);
+    /// ```
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+        feature = "llvm23-1",
+    ))]
+    #[inline]
+    pub fn bf16_type(&self) -> FloatType<'ctx> {
+        self.context.bf16_type()
     }
 
     /// Gets the `FloatType` representing a 32 bit width. It will be assigned the current context.
@@ -1838,7 +1868,7 @@ impl<'ctx> ContextRef<'ctx> {
     /// assert_eq!(ptr_type.get_address_space(), AddressSpace::default());
     /// assert_eq!(ptr_type.get_context(), context);
     /// ```
-    #[llvm_versions(15..)]
+    #[cfg(not(feature = "typed-pointers"))]
     #[inline]
     pub fn ptr_type(&self, address_space: AddressSpace) -> PointerType<'ctx> {
         self.context.ptr_type(address_space)
