@@ -1418,13 +1418,18 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val arg_escaped = arg.replace("'", "'\\''")
         command_parts.push("'{arg_escaped}'")
     val command_line = command_parts.join(" ")
-    # command_line is single-quoted per part; inside the double-quoted inner
-    # `sh -c` string the outer shell must not expand anything, so escape \ " $ `.
     # stdbuf is a GNU utility and is absent on stock macOS. Test for it in the
     # child shell, avoiding a recursive process call from this process runner.
     # Both branches exec so the recorded process-group leader remains valid.
     val buffered_command = "if command -v stdbuf >/dev/null 2>&1; then exec stdbuf -oL -eL {command_line}; else exec {command_line}; fi"
-    val inner_cmd = buffered_command.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+    # Quote paths for their own shell, then quote the entire child script for
+    # its parent shell. TMPDIR may contain spaces, apostrophes, or shell syntax;
+    # the child's $$ must expand only after the new process group is created.
+    val pgid_path = pgid_file.replace("'", "'\\''")
+    val child_script = "echo $$ > '{pgid_path}'; {buffered_command}"
+    val inner_cmd = child_script.replace("'", "'\\''")
+    val stdout_path = stdout_file.replace("'", "'\\''")
+    val stderr_path = stderr_file.replace("'", "'\\''")
     # `setsid` is util-linux and does NOT exist on macOS, where this line failed
     # with `/bin/sh: line 0: exec: setsid: not found` and exit 127 -- which
     # surfaced as an UNDIAGNOSABLE Stage-2 capability failure after a ~25 min
@@ -1441,7 +1446,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     # Note the perl form needs no `-w`: it execs in-place, so the exit status
     # propagates through the same process chain instead of via a wait layer.
     val sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- \"$@\"; fi; }; "
-    val redirected_cmd = "{sid_fn}sid sh -c \"echo \\$\\$ > '{pgid_file}'; {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
+    val redirected_cmd = "{sid_fn}sid sh -c '{inner_cmd}' > '{stdout_path}' 2> '{stderr_path}'"
 
     proc_slot_acquire()
     val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
