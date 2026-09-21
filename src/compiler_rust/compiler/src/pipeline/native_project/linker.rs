@@ -158,6 +158,23 @@ fn clang_cl_whole_archive_arg(path: &Path) -> String {
     format!("/WHOLEARCHIVE:{}", path.display())
 }
 
+/// The Windows LLVM 23 package exposes its C API through LLVM-C.dll.  The
+/// matching import library is selected from the same prefix as llvm-sys,
+/// rather than from the ambient MSVC LIB search path or llvm-config's static
+/// build-tree component list.
+#[cfg(all(target_os = "windows", feature = "llvm"))]
+fn llvm_c_import_library(prefix: &Path) -> Result<PathBuf, String> {
+    let import = prefix.join("lib/LLVM-C.lib");
+    let dll = prefix.join("bin/LLVM-C.dll");
+    if !import.is_file() || !dll.is_file() {
+        return Err(format!(
+            "LLVM 23 C API package at {} must contain lib/LLVM-C.lib and bin/LLVM-C.dll",
+            prefix.display()
+        ));
+    }
+    Ok(import)
+}
+
 /// Linker stdout+stderr, with source attribution appended for any undefined
 /// symbol that HIR lowering produced via the `lenient_types` fallback.
 ///
@@ -2010,6 +2027,12 @@ int main(int argc, char** argv) {
                 }
                 cmd.arg(format!("{}.lib", lib));
             }
+            #[cfg(all(target_os = "windows", feature = "llvm"))]
+            if has_native_all {
+                let prefix = std::env::var_os("LLVM_SYS_231_PREFIX")
+                    .ok_or_else(|| "LLVM_SYS_231_PREFIX is required to link the Windows LLVM native compiler".to_string())?;
+                cmd.arg(llvm_c_import_library(Path::new(&prefix))?);
+            }
         } else {
             #[cfg(target_os = "linux")]
             {
@@ -3077,6 +3100,19 @@ mod linker_tests {
             clang_cl_whole_archive_arg(Path::new("simple_native_all.lib")),
             "/WHOLEARCHIVE:simple_native_all.lib"
         );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "llvm"))]
+    #[test]
+    fn llvm_c_import_uses_selected_prefix_and_requires_runtime_dll() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("lib")).unwrap();
+        std::fs::create_dir(root.path().join("bin")).unwrap();
+        let import = root.path().join("lib/LLVM-C.lib");
+        std::fs::write(&import, b"import").unwrap();
+        assert!(llvm_c_import_library(root.path()).is_err());
+        std::fs::write(root.path().join("bin/LLVM-C.dll"), b"runtime").unwrap();
+        assert_eq!(llvm_c_import_library(root.path()).unwrap(), import);
     }
 
     #[cfg(target_os = "macos")]
