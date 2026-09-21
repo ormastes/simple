@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard=$root/scripts/check/check-f64-call-abi.shs
+tmp=${TMPDIR:-/tmp}/f64-call-abi-guard-contract.$$
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fake=$tmp/fake-simple
+cat >"$fake" <<'FAKE'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = "--version" ]; then
+    if [ "${FAKE_IDENTITY:-selfhost}" = seed ]; then
+        if [ "${SIMPLE_RUST_SEED_WARNING:-}" != 0 ] && [ "${SIMPLE_BOOTSTRAP:-}" != 1 ]; then
+            echo "WARNING: this Rust-built Simple binary is a bootstrap seed only" >&2
+        fi
+    fi
+    echo "simple-test-double"
+    exit 0
+fi
+
+if [ "${SIMPLE_EXECUTION_MODE:-}" = interpret ]; then
+    printf '21.5\n3.75\n43\n'
+elif [ "${SIMPLE_JIT_STRICT:-}" = 1 ]; then
+    printf '%s\n3.75\n43\n' "${FAKE_JIT_VALUE:-21.5}"
+else
+    # Model the real driver's non-strict fallback: a failed compiled lane can
+    # silently execute through the interpreter and return its correct value.
+    printf '21.5\n3.75\n43\n'
+fi
+FAKE
+chmod +x "$fake"
+
+failures=0
+run_case() {
+    label=$1
+    expected=$2
+    shift 2
+    set +e
+    "$@" >"$tmp/$label.log" 2>&1
+    actual=$?
+    set -e
+    if [ "$actual" -ne "$expected" ]; then
+        echo "FAIL $label: expected rc=$expected actual=$actual"
+        cat "$tmp/$label.log"
+        failures=$((failures + 1))
+    else
+        echo "PASS $label: rc=$actual"
+    fi
+}
+
+run_case correct 0 env SIMPLE_BIN="$fake" FAKE_JIT_VALUE=21.5 sh "$guard"
+run_case known_xfail 3 env SIMPLE_BIN="$fake" FAKE_JIT_VALUE=0.0 sh "$guard"
+run_case unexpected 1 env SIMPLE_BIN="$fake" FAKE_JIT_VALUE=17.0 sh "$guard"
+run_case seed_suppression 2 env SIMPLE_BIN="$fake" FAKE_IDENTITY=seed \
+    SIMPLE_BOOTSTRAP=1 SIMPLE_RUST_SEED_WARNING=0 sh "$guard"
+run_case inherited_interpret 3 env SIMPLE_BIN="$fake" FAKE_JIT_VALUE=0.0 \
+    SIMPLE_EXECUTION_MODE=interpret sh "$guard"
+
+if [ "$failures" -ne 0 ]; then
+    echo "f64_call_abi_guard_contract_test: FAIL ($failures cases)"
+    exit 1
+fi
+echo "f64_call_abi_guard_contract_test: PASS"
