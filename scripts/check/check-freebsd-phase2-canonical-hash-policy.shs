@@ -1,0 +1,36 @@
+#!/bin/sh
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/bin" "$work/source/scripts/bootstrap" "$work/output"
+cat >"$work/bin/uname" <<'EOF'
+#!/bin/sh
+echo FreeBSD
+EOF
+cat >"$work/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
+#!/bin/sh
+echo invoked >"$FAKE_VERIFIER_MARKER"
+exit 0
+EOF
+chmod +x "$work/bin/uname"
+marker="$work/verifier-invoked"
+for case_name in temporary_hash wrong_phase; do
+    rm -f "$marker"
+    case "$case_name" in
+        temporary_hash) set -- --phase=stage2 --hash-policy=temporary ; expected='canonical hash policy required' ;;
+        wrong_phase) set -- --phase=stage3 ; expected='Phase 2 runner requires --phase=stage2' ;;
+    esac
+    PATH="$work/bin:$PATH" FAKE_VERIFIER_MARKER="$marker" \
+        sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" \
+        --work-root="$work/output" --source-root="$work/source" \
+        "$@" >"$work/stdout" 2>"$work/stderr"
+    status=$?
+    if [ "$status" -eq 0 ] || [ -e "$marker" ] || \
+        ! grep -q "$expected" "$work/stderr"; then
+        echo "FAIL: FreeBSD Phase 2 runner accepted $case_name" >&2
+        exit 1
+    fi
+done
+echo 'PASS: FreeBSD Phase 2 runner requires Stage 2 and canonical compiler hash policy'
