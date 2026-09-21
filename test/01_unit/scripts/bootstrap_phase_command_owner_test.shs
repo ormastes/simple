@@ -82,6 +82,30 @@ if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
   [ -n "${SIMPLE_MCP_TEST_BINARY:-}" ] && [ -x "$SIMPLE_MCP_TEST_BINARY" ] || exit 23
 fi
 case " $* " in
+  *' test/01_unit/compiler/'*|*' test/02_integration/app/mcp_stdio_integration_spec.spl '*)
+    if [ "${PHASE_FALSE_UNIT_EMPTY:-0}" = 1 ] &&
+       [ "${1:-}" = test/01_unit/compiler/fixture_spec.spl ]; then
+      :
+    elif [ "${PHASE_FALSE_TEXT_THEN_PASS:-0}" = 1 ]; then
+      echo 'Results: 1 total, 0 passed, 1 failed'
+      echo 'Results: 1 total, 1 passed, 0 failed'
+    elif [ "${PHASE_FALSE_TEXT_SKIPPED:-0}" = 1 ]; then
+      echo 'Results: 1 total, 1 passed, 0 failed, 0 skipped'
+    elif [ "${PHASE_FALSE_TEXT_CACHED:-0}" = 1 ]; then
+      echo 'Results: 1 total, 1 passed, 0 failed, 1 cached'
+    elif [ "${PHASE_FALSE_TEXT_PENDING:-0}" = 1 ]; then
+      echo 'Results: 1 total, 1 passed, 0 failed, 0 pending'
+    elif [ "${PHASE_FALSE_TEXT_LEADING_ZERO:-0}" = 1 ]; then
+      echo 'Results: 01 total, 01 passed, 00 failed'
+    elif [ "${PHASE_FALSE_TEXT_SUCCESS:-0}" = 1 ] &&
+       [ "${1:-}" != test/01_unit/compiler/fixture_spec.spl ]; then
+      echo 'Results: 1 total, 0 passed, 1 failed'
+    else
+      echo 'Results: 1 total, 1 passed, 0 failed'
+    fi
+    ;;
+esac
+case " $* " in
   *' --json '*)
     if [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
@@ -98,6 +122,25 @@ case " $* " in
     elif [ "${PHASE_SKIPPED_FULL_INVENTORY:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
       echo '{"success":true,"spec":{"success":true,"total_passed":0,"total_failed":0,"total_skipped":1,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_JSON_DUPLICATE:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_JSON_CACHED:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"cached":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_JSON_LEADING_ZERO:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":01,"total_failed":00,"total_skipped":00,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_JSON_PENDING:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":1,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_JSON_TIMED_OUT:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_timed_out":1,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_JSON_SPEC_CACHED:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_cached":1,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     else
       echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     fi
@@ -432,5 +475,64 @@ PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
 grep -Fq 'task=compiler_cli_build|result=FAIL|status=90' \
   "$tmp/stage4-snapshot-tampered-work/summary.env" ||
   fail "Stage4 compiler snapshot mutation was not rejected after build"
+
+# A test runner may flatten assertion failures to exit 0. The verifier must
+# require one non-vacuous all-passed result line and reject failed-then-passing,
+# skipped, cached, and leading-zero result variants.
+for text_mode in PHASE_FALSE_TEXT_SUCCESS PHASE_FALSE_TEXT_THEN_PASS \
+  PHASE_FALSE_TEXT_SKIPPED PHASE_FALSE_TEXT_CACHED PHASE_FALSE_TEXT_PENDING \
+  PHASE_FALSE_TEXT_LEADING_ZERO; do
+  : >"$tmp/executions"
+  status=0
+  failed_work="$tmp/text-failed-$text_mode"
+  env "$text_mode=1" PATH="$tmp/bin:$PATH" \
+    PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+    PHASE_TOOL="$tmp/tool" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+      --strategy=normal --hash-policy=canonical --source-root="$tmp/source" \
+      --runtime-path="$tmp/runtime" --work-root="$failed_work" --timeout-seconds=30 || status=$?
+  [ "$status" -ne 0 ] || fail "zero-exit invalid textual result $text_mode was admitted"
+  grep -Fq 'task=compiler_bootstrap_tests|result=FAIL|status=94' \
+    "$failed_work/summary.env" ||
+    fail "invalid textual result $text_mode was not rejected"
+done
+
+for json_mode in PHASE_JSON_DUPLICATE PHASE_JSON_CACHED PHASE_JSON_SPEC_CACHED \
+  PHASE_JSON_PENDING PHASE_JSON_TIMED_OUT PHASE_JSON_LEADING_ZERO; do
+  : >"$tmp/executions"
+  status=0
+  json_work="$tmp/invalid-json-$json_mode"
+  env "$json_mode=1" PATH="$tmp/bin:$PATH" \
+    PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+    PHASE_TOOL="$tmp/tool" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+      --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+      --runtime-path="$tmp/runtime" --work-root="$json_work" --timeout-seconds=30 || status=$?
+  [ "$status" -ne 0 ] || fail "invalid JSON result $json_mode was admitted"
+  awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" { found=1 } END { exit !found }' \
+    "$json_work/logs/repository_full_tests.inventory.tsv" ||
+    fail "invalid JSON result $json_mode was not rejected"
+done
+
+# The compiler-unit inventory must pass explicit non-vacuous runner flags and
+# validate each row's result instead of trusting an exit-zero runner.
+: >"$tmp/executions"
+status=0
+unit_failed_work="$tmp/unit-empty-result"
+PHASE_FALSE_UNIT_EMPTY=1 PATH="$tmp/bin:$PATH" \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$unit_failed_work" --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "empty compiler-unit result was admitted"
+grep -Fq 'fixture_spec.spl' "$unit_failed_work/logs/compiler_unit_tests.inventory.tsv" ||
+  fail "empty compiler-unit fixture is absent from inventory"
+awk -F '\t' '$1 ~ /fixture_spec[.]spl$/ && $2 == "FAIL" && $3 == 94 { found=1 } END { exit !found }' \
+  "$unit_failed_work/logs/compiler_unit_tests.inventory.tsv" ||
+  fail "empty compiler-unit result was not rejected"
 
 echo 'bootstrap_phase_command_owner_test: PASS'
