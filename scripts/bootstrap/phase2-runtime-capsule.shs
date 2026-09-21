@@ -1,6 +1,9 @@
 #!/bin/sh
 # Publish or verify a SHA-addressed Phase2 compiler + hosted-runtime capsule.
 set -eu
+tool_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+windows_host=0
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) windows_host=1 ;; esac
 
 die() { echo "phase2-runtime-capsule: $*" >&2; exit 2; }
 hash_file() { sha256sum "$1" | awk '{print $1}'; }
@@ -12,6 +15,30 @@ require_unique_keys() {
   done
 }
 
+layout_files() {
+  layout=$1
+  case "$layout" in
+    posix) compiler_file=simple; native_file=libsimple_native_all.a
+      stamp_file=simple.inputs.sha256; backfill_file=libsimple_compiler_backfill.a ;;
+    windows-msvc) compiler_file=simple.exe; native_file=simple_native_all.lib
+      stamp_file=simple.exe.inputs.sha256; backfill_file=simple_compiler_backfill.lib ;;
+    *) return 1 ;;
+  esac
+}
+
+windows_permissions() {
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -File "$(cygpath -w "$tool_dir/phase2-capsule-permissions.ps1")" \
+    -Action "$1" -Path "$(cygpath -w "$2")"
+}
+
+capsule_identity() {
+  {
+    [ "$capsule_schema" = simple-phase2-runtime-capsule-v1 ] || printf '%s\n' "$layout"
+    printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha"
+  } | sha256sum | awk '{print $1}'
+}
+
 verify_capsule() {
   capsule=$1
   expected_basename=${2:-}
@@ -21,7 +48,14 @@ verify_capsule() {
   require_unique_keys "$receipt" schema status compiler_sha256 native_all_sha256 \
     hosted_authority_receipt_sha256 seed_authority_stamp_sha256 \
     capsule_identity_sha256 source_authority_path || return 1
-  [ "$(value schema "$receipt")" = simple-phase2-runtime-capsule-v1 ] || return 1
+  capsule_schema=$(value schema "$receipt")
+  case "$capsule_schema" in
+    simple-phase2-runtime-capsule-v1) layout_files posix ;;
+    simple-phase2-runtime-capsule-v2)
+      require_unique_keys "$receipt" artifact_layout || return 1
+      layout_files "$(value artifact_layout "$receipt")" || return 1 ;;
+    *) return 1 ;;
+  esac
   [ "$(value status "$receipt")" = frozen ] || return 1
   compiler_sha=$(value compiler_sha256 "$receipt")
   native_sha=$(value native_all_sha256 "$receipt")
@@ -30,13 +64,13 @@ verify_capsule() {
   [ ${#compiler_sha} -eq 64 ] && [ ${#native_sha} -eq 64 ] && [ ${#hosted_receipt_sha} -eq 64 ] || return 1
   [ "${expected_basename:-$(basename "$capsule")}" = "$compiler_sha" ] || return 1
   [ -n "$expected_basename" ] || [ "$(basename "$capsule")" = "$compiler_sha" ] || return 1
-  [ -x "$capsule/simple" ] && [ ! -L "$capsule/simple" ] || return 1
-  [ -f "$capsule/libsimple_native_all.a" ] && [ ! -L "$capsule/libsimple_native_all.a" ] || return 1
+  [ -x "$capsule/$compiler_file" ] && [ ! -L "$capsule/$compiler_file" ] || return 1
+  [ -f "$capsule/$native_file" ] && [ ! -L "$capsule/$native_file" ] || return 1
   [ -f "$capsule/hosted-runtime.env" ] && [ ! -L "$capsule/hosted-runtime.env" ] || return 1
-  [ "$(hash_file "$capsule/simple")" = "$compiler_sha" ] || return 1
-  [ "$(hash_file "$capsule/libsimple_native_all.a")" = "$native_sha" ] || return 1
+  [ "$(hash_file "$capsule/$compiler_file")" = "$compiler_sha" ] || return 1
+  [ "$(hash_file "$capsule/$native_file")" = "$native_sha" ] || return 1
   [ "$(hash_file "$capsule/hosted-runtime.env")" = "$hosted_receipt_sha" ] || return 1
-  stamp="$capsule/simple.inputs.sha256"
+  stamp="$capsule/$stamp_file"
   [ -f "$stamp" ] && [ ! -L "$stamp" ] || return 1
   require_unique_keys "$stamp" schema inputs_fingerprint seed_sha256 \
     native_all_sha256 backfill_status backfill_sha256 || return 1
@@ -47,9 +81,9 @@ verify_capsule() {
   backfill_sha=$(value backfill_sha256 "$stamp")
   case "$backfill_status" in
     present)
-      [ -f "$capsule/libsimple_compiler_backfill.a" ] && [ ! -L "$capsule/libsimple_compiler_backfill.a" ] || return 1
-      [ "$(hash_file "$capsule/libsimple_compiler_backfill.a")" = "$backfill_sha" ] || return 1 ;;
-    absent) [ "$backfill_sha" = absent ] && [ ! -e "$capsule/libsimple_compiler_backfill.a" ] || return 1 ;;
+      [ -f "$capsule/$backfill_file" ] && [ ! -L "$capsule/$backfill_file" ] || return 1
+      [ "$(hash_file "$capsule/$backfill_file")" = "$backfill_sha" ] || return 1 ;;
+    absent) [ "$backfill_sha" = absent ] && [ ! -e "$capsule/$backfill_file" ] || return 1 ;;
     *) return 1 ;;
   esac
   hosted_relative=$(value relative_path "$capsule/hosted-runtime.env")
@@ -58,10 +92,13 @@ verify_capsule() {
   [ "$(value schema "$capsule/hosted-runtime.env")" = simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
   [ "$(value status "$capsule/hosted-runtime.env")" = frozen ] || return 1
   case "$hosted_relative" in deps/libspl_hosted_runtime*.rlib) ;; *) return 1 ;; esac
+  case "${hosted_relative#deps/}" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  [ -d "$capsule/deps" ] && [ ! -L "$capsule/deps" ] || return 1
   [ -f "$capsule/$hosted_relative" ] && [ ! -L "$capsule/$hosted_relative" ] || return 1
   [ "$(hash_file "$capsule/$hosted_relative")" = "$hosted_sha" ] || return 1
   [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
-  aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha" | sha256sum | awk '{print $1}')
+  stamp_sha=$(hash_file "$stamp")
+  aggregate=$(capsule_identity)
   [ "$(value capsule_identity_sha256 "$receipt")" = "$aggregate" ] || return 1
   # `-perm /MODE` (any of these bits) is a GNU findutils extension. BSD find,
   # which is what /bin/sh gets on macOS, rejects it with
@@ -70,15 +107,12 @@ verify_capsule() {
   # capsule immutable no matter how writable it actually was. That is fail-OPEN
   # in an immutability check. POSIX `-perm -MODE` (all of these bits) is honoured
   # by both implementations; OR the three single-bit tests to recover "any".
-  # MSYS/Windows cannot clear the write bit on a directory (chmod 0500 lands
-  # as 0755, measured on Git Bash 2026-09-16), so on those hosts only files
-  # participate in the writability sweep; directory immutability is not
-  # representable there. Same limitation the tuple-copy checks document.
-  case "$(uname -s 2>/dev/null || echo unknown)" in
-    MSYS*|MINGW*|CYGWIN*) capsule_perm_type='-type f' ;;
-    *) capsule_perm_type= ;;
-  esac
-  [ -z "$(find "$capsule" $capsule_perm_type \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit)" ] || return 1
+  if [ "$windows_host" = 1 ]; then
+    windows_permissions verify "$capsule" || return 1
+  else
+    writable=$(find "$capsule" \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit) || return 1
+    [ -z "$writable" ] || return 1
+  fi
 }
 
 case ${1:-} in
@@ -91,33 +125,44 @@ case ${1:-} in
     compiler=$2; authority=$3; output_root=$4
     [ -x "$compiler" ] && [ ! -L "$compiler" ] || die 'invalid compiler'
     [ -d "$authority" ] && [ ! -L "$authority" ] || die 'invalid authority'
-    for file in libsimple_native_all.a hosted-runtime.env simple.inputs.sha256; do
+    if [ -e "$authority/simple_native_all.lib" ]; then
+      [ ! -e "$authority/libsimple_native_all.a" ] || die 'ambiguous authority layout'
+      layout_files windows-msvc
+    else
+      layout_files posix
+    fi
+    for file in "$native_file" hosted-runtime.env "$stamp_file"; do
       [ -f "$authority/$file" ] && [ ! -L "$authority/$file" ] || die "missing authority file: $file"
     done
-    native_sha=$(hash_file "$authority/libsimple_native_all.a")
-    [ "$(value native_all_sha256 "$authority/simple.inputs.sha256")" = "$native_sha" ] || die 'stale native_all authority stamp'
+    native_sha=$(hash_file "$authority/$native_file")
+    [ "$(value native_all_sha256 "$authority/$stamp_file")" = "$native_sha" ] || die 'stale native_all authority stamp'
     compiler_sha=$(hash_file "$compiler")
     destination="$output_root/$compiler_sha"
     mkdir -p "$output_root"
     lock="$output_root/.${compiler_sha}.publish-lock"
     mkdir "$lock" 2>/dev/null || die 'capsule publication already active'
     staging="$output_root/.${compiler_sha}.tmp.$$"
-    trap 'chmod -R u+w "$staging" 2>/dev/null || true; rm -rf "$staging" "$lock"' EXIT HUP INT TERM
+    trap 'if [ "$windows_host" = 1 ] && [ -d "$staging" ]; then windows_permissions thaw "$staging" 2>/dev/null || true; fi; chmod -R u+w "$staging" 2>/dev/null || true; rm -rf "$staging" "$lock"' EXIT HUP INT TERM
     [ ! -e "$destination" ] && [ ! -L "$destination" ] || die 'refusing to overwrite capsule'
     mkdir -p "$staging/deps"
-    cp "$compiler" "$staging/simple"
-    cp "$authority/libsimple_native_all.a" "$staging/"
-    cp "$authority/hosted-runtime.env" "$authority/simple.inputs.sha256" "$staging/"
-    [ ! -f "$authority/libsimple_compiler_backfill.a" ] || cp "$authority/libsimple_compiler_backfill.a" "$staging/"
+    cp "$compiler" "$staging/$compiler_file"
+    cp "$authority/$native_file" "$staging/"
+    cp "$authority/hosted-runtime.env" "$authority/$stamp_file" "$staging/"
+    [ ! -L "$authority/$backfill_file" ] || die 'symlink backfill authority'
+    [ ! -f "$authority/$backfill_file" ] || cp "$authority/$backfill_file" "$staging/"
     hosted_relative=$(value relative_path "$authority/hosted-runtime.env")
     case "$hosted_relative" in deps/libspl_hosted_runtime*.rlib) ;; *) die 'invalid hosted authority path' ;; esac
+    case "${hosted_relative#deps/}" in *[!A-Za-z0-9_.-]*) die 'invalid hosted authority leaf' ;; esac
+    [ ! -L "$authority/deps" ] && [ ! -L "$authority/$hosted_relative" ] || die 'symlink hosted authority'
     cp "$authority/$hosted_relative" "$staging/$hosted_relative"
     hosted_receipt_sha=$(hash_file "$authority/hosted-runtime.env")
-    stamp_sha=$(hash_file "$authority/simple.inputs.sha256")
-    backfill_sha=$(value backfill_sha256 "$authority/simple.inputs.sha256")
-    aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha" | sha256sum | awk '{print $1}')
+    stamp_sha=$(hash_file "$authority/$stamp_file")
+    backfill_sha=$(value backfill_sha256 "$authority/$stamp_file")
+    capsule_schema=simple-phase2-runtime-capsule-v2
+    aggregate=$(capsule_identity)
     {
-      echo schema=simple-phase2-runtime-capsule-v1
+      echo schema="$capsule_schema"
+      echo artifact_layout="$layout"
       echo status=frozen
       echo compiler_sha256="$compiler_sha"
       echo native_all_sha256="$native_sha"
@@ -127,8 +172,9 @@ case ${1:-} in
       echo source_authority_path="$(CDPATH= cd -- "$authority" && pwd -P)"
     } >"$staging/phase2-runtime-capsule.env"
     chmod 500 "$staging" "$staging/deps"
-    chmod 500 "$staging/simple"
-    find "$staging" -type f ! -name simple -exec chmod 400 {} +
+    chmod 500 "$staging/$compiler_file"
+    find "$staging" -type f ! -name "$compiler_file" -exec chmod 400 {} +
+    [ "$windows_host" = 0 ] || windows_permissions freeze "$staging"
     verify_capsule "$staging" "$compiler_sha" || die 'staged capsule verification failed'
     mv "$staging" "$destination"
     rmdir "$lock"

@@ -32,11 +32,18 @@ validate_hosted_runtime_authority() {
   expected=$(manifest_value sha256 "$receipt")
   if [ -f "$capsule_receipt" ] && [ ! -L "$capsule_receipt" ]; then
     "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$authority" >/dev/null || return 1
-    [ "$(manifest_value schema "$capsule_receipt")" = simple-phase2-runtime-capsule-v1 ] || return 1
+    case "$(manifest_value schema "$capsule_receipt")" in
+      simple-phase2-runtime-capsule-v1|simple-phase2-runtime-capsule-v2) ;;
+      *) return 1 ;;
+    esac
     [ "$(manifest_value status "$capsule_receipt")" = frozen ] || return 1
     [ "$(manifest_value compiler_sha256 "$capsule_receipt")" = "$expected_sha" ] || return 1
-    [ "$(hash_file "$authority/simple")" = "$expected_sha" ] || return 1
-    native_all="$authority/libsimple_native_all.a"
+    case "$(manifest_value artifact_layout "$capsule_receipt")" in
+      windows-msvc) capsule_compiler="$authority/simple.exe"; native_all="$authority/simple_native_all.lib" ;;
+      ''|posix) capsule_compiler="$authority/simple"; native_all="$authority/libsimple_native_all.a" ;;
+      *) return 1 ;;
+    esac
+    [ "$(hash_file "$capsule_compiler")" = "$expected_sha" ] || return 1
     [ -f "$native_all" ] && [ ! -L "$native_all" ] || return 1
     [ "$(hash_file "$native_all")" = "$(manifest_value native_all_sha256 "$capsule_receipt")" ] || return 1
     [ "$(hash_file "$authority/hosted-runtime.env")" = "$(manifest_value hosted_authority_receipt_sha256 "$capsule_receipt")" ] || return 1
@@ -63,10 +70,12 @@ validate_hosted_runtime_authority() {
   [ -f "$hosted" ] && [ ! -L "$hosted" ] || return 1
   [ "$(hash_file "$hosted")" = "$expected" ] || return 1
   [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  if [ ! -f "$capsule_receipt" ]; then
   [ "$(stat -c '%a' "$authority" 2>/dev/null || stat -f '%Lp' "$authority")" = 500 ] || return 1
   [ "$(stat -c '%a' "$authority/deps" 2>/dev/null || stat -f '%Lp' "$authority/deps")" = 500 ] || return 1
   [ "$(stat -c '%a' "$hosted" 2>/dev/null || stat -f '%Lp' "$hosted")" = 400 ] || return 1
   [ "$(stat -c '%a' "$receipt" 2>/dev/null || stat -f '%Lp' "$receipt")" = 400 ] || return 1
+  fi
   hosted_runtime_sha=$expected
   if [ -z "${runtime_cache_identity:-}" ]; then
     runtime_cache_identity=$hosted_runtime_sha
@@ -82,6 +91,7 @@ hash_policy=canonical
 work_root=""
 cache_root=""
 runtime_path=${SIMPLE_RUNTIME_PATH:-}
+runtime_path_explicit=0
 source_root=$(pwd -P)
 timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-1800}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
@@ -97,7 +107,7 @@ for arg in "$@"; do
     --hash-policy=*) hash_policy=${arg#*=} ;;
     --work-root=*) work_root=${arg#*=} ;;
     --cache-root=*) cache_root=${arg#*=} ;;
-    --runtime-path=*) runtime_path=${arg#*=} ;;
+    --runtime-path=*) runtime_path=${arg#*=}; runtime_path_explicit=1 ;;
     --source-root=*) source_root=${arg#*=} ;;
     --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
@@ -164,6 +174,15 @@ if [ "$phase" = stage1 ]; then
   bootstrap_phase1_register_tool "$compiler_snapshot" "$snapshot_sha" || die "cannot bind Phase1 compiler snapshot"
 fi
 
+if [ "$phase" = stage2 ]; then
+  bound_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
+    "$compiler" "$source_root" "$work_root") || die "Phase2 runtime binding is invalid"
+  if [ "$runtime_path_explicit" = 1 ]; then
+    [ -d "$runtime_path" ] && [ "$(cd "$runtime_path" && pwd -P)" = "$bound_runtime" ] ||
+      die "Phase2 runtime path differs from the admitted capsule"
+  fi
+  runtime_path=$bound_runtime
+fi
 if [ -z "$runtime_path" ]; then
   compiler_dir=$(dirname "$compiler")
   if [ -f "$compiler_dir/phase2-runtime-capsule.env" ]; then
