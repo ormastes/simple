@@ -624,6 +624,18 @@ fn eval_method_call(eid: i64) -> i64:
     # Built-in methods on types
     val kind = val_get_kind(receiver)
 
+    # Boxed enum values carry Type::Variant, while impl methods are registered
+    # under Type__method. Resolve the owner before built-in accessor dispatch
+    # so a user enum's is_some/unwrap method retains its declared behavior.
+    var receiver_method_decl: i64 = -1
+    if kind == VAL_STRUCT:
+        var receiver_type = val_get_struct_name(receiver)
+        if val_is_boxed_enum(receiver):
+            val variant_separator = receiver_type.index_of("::")
+            if variant_separator >= 0:
+                receiver_type = receiver_type.substring(0, variant_separator)
+        receiver_method_decl = func_table_lookup(receiver_type + "__" + method_name)
+
     # Option/Result accessor methods.
     #
     # These run BEFORE the per-kind dispatch below because an Option has no
@@ -645,7 +657,7 @@ fn eval_method_call(eid: i64) -> i64:
     # still wins on the struct-method path further down.
     if is_option_result_method(method_name):
         val is_plain_struct = kind == VAL_STRUCT and val_is_boxed_enum(receiver) == false
-        if is_plain_struct == false:
+        if is_plain_struct == false and receiver_method_decl < 0:
             return eval_option_result_method(receiver, method_name, arg_eids)
 
     # SPipe's expect() deliberately returns a stable integer handle while the
@@ -724,9 +736,7 @@ fn eval_method_call(eid: i64) -> i64:
 
     # Struct methods — look up Type__method in function table
     if kind == VAL_STRUCT:
-        val type_name = val_get_struct_name(receiver)
-        val full_name = type_name + "__" + method_name
-        val decl_id = func_table_lookup(full_name)
+        val decl_id = receiver_method_decl
         if decl_id >= 0:
             # Evaluate args, then call with receiver prepended
             var arg_values: [i64] = []
