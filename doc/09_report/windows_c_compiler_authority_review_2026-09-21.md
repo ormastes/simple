@@ -1,0 +1,32 @@
+# Windows C compiler authority review
+
+STATUS: WARN for complete admission. The shell/native portion has focused passing evidence and the lint authority P1 is repaired; self-hosted verification remains pending.
+
+## Current change
+
+Isolated branch fix/windows-msvc-toolchain-review-20260921 in D:/wk-msvc-review-astra was reconstructed from c0860cf's five semantic file changes onto origin/main e0dd873da1b7828389db4eb60e82972cc8245313. The subsequent user-selected policy adds LLVM23.1.1 Windows defaults, removal of Windows GNU/GCC selection, bootstrap-environment delegation, and the canonical deny lint rule. No shared-tree dirty files were staged.
+
+## Passing focused evidence
+
+All local artifacts below are under build/native_probe/msvc-review in the isolated worktree.
+
+- shell-before.log: the current executable contract failed on actual c0860cf parent source because it selected clang.exe, retained CXX, and lacked version authority. This is a real prior-source failure; the earlier author's oracle-construction failure was rejected.
+- shell-after.log: five executable selection cases pass, including the generic/target CC binding, inherited CXX clearing, missing authority, legacy major, wrong version, and failed version-query paths.
+- bootstrap-env.log: exact LLVM23.1.1 clang-cl generic/target CC; CXX and LLVM_SYS_180_PREFIX absent; LLVM_VERSIONS=23.
+- native-probe.log and paired-c-probe.json: identical C source compiled/linked/executed with LLVM23.1.1 clang and clang-cl, three samples each, with C++ explicitly rejected by preprocessing.
+- cmake-configure.log and cmake-build.log: CMake selected Clang23.1.1 MSVC-style C and produced the expected executable. cmake-forbidden-cl-exe.log rejects explicit cl.exe before compilation.
+- cargo-probe.log and cargo-build.log: the copied production MSVC Cargo target section compiled a tiny Rust executable with rustc -C linker=link.exe and produced the expected output. The final Cargo probe is distinct from an earlier PowerShell stderr-wrapper failure.
+
+The paired C probe uses the same source, C11 language, O2 optimization, and DLL CRT selection. Mean compile/link elapsed times were 670.195 ms for clang and 674.889 ms for clang-cl. Observed compiler peak working sets were 16982016 and 16314368 bytes respectively, sampled every 5 ms. Linker children are outside that memory sample. These are local side-effect bounds; no performance improvement or full compiler benchmark is claimed.
+
+## Repaired lint authority P1
+
+The lint provider's source-authority test now recognizes the official LLVM 23.1.x Windows MSVC distribution independently of its install root, including the PR1216 workspace cache. It requires a root-bound driver, an executed version query, an exact 23.1.x predicate, and fail-closed rejection. A bare `--version` token or untrusted compiler alias remains denied. PR1216 itself is unchanged by this lane.
+
+This follow-up is a fresh scoped continuation of the prior review and retains the three-cycle guard. An independent exact-head review is required before the draft PR can claim the P1 is clear.
+
+## Pending executable verification
+
+The original SSpec green used a Rust seed and was rejected. No admitted self-hosted runner is available. Both added SSpecs, generated-doc verification, and compiler/core/MCP gates remain pending. The manuals label these gaps explicitly.
+
+The bootstrap currently uses Cranelift. Rust llvm-sys180 feature pins and hardcoded prefixes elsewhere in bootstrap-from-scratch remain a separate LLVM backend migration issue; this change does not silently alter those Rust features or count LLVM18 execution as Windows compiler authority.

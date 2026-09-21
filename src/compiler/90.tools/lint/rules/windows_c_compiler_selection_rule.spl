@@ -1,0 +1,219 @@
+use compiler.tools.lint.lint_rule_api.{
+    LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding,
+    StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule
+}
+
+const WINDOWS_C_COMPILER_SELECTION_CODE = "W-WIN-CC-001"
+
+fn is_windows_toolchain_path(path: text) -> bool:
+    val lower = path.replace("\\", "/").lower()
+    if lower.starts_with("doc/") or lower.contains("/doc/") or
+       lower.contains("/vendor/") or lower.contains("compiler_rust/vendor"):
+        return false
+    lower.ends_with("/scripts/setup/llvm-toolchain-env.shs") or
+        lower == "scripts/setup/llvm-toolchain-env.shs" or
+        lower.ends_with("/src/compiler_rust/.cargo/config.toml") or
+        lower == "src/compiler_rust/.cargo/config.toml" or
+        lower.contains("/src/runtime/cmake/toolchains/windows-") or
+        lower.starts_with("src/runtime/cmake/toolchains/windows-") or
+        lower.contains("/scripts/setup/windows-") or
+        lower.starts_with("scripts/setup/windows-") or
+        lower.contains("/scripts/setup/windows_") or
+        lower.starts_with("scripts/setup/windows_") or
+        lower.contains("/.github/workflows/windows-") or
+        lower.starts_with(".github/workflows/windows-") or
+        lower.contains("/.github/workflows/windows_") or
+        lower.starts_with(".github/workflows/windows_")
+
+fn is_cargo_toolchain_config(path: text) -> bool:
+    val lower = path.replace("\\", "/").lower()
+    lower == "src/compiler_rust/.cargo/config.toml" or
+        lower.ends_with("/src/compiler_rust/.cargo/config.toml")
+
+fn is_windows_cargo_section(line: text) -> bool:
+    val lower = line.lower()
+    lower.starts_with("[target.") and lower.contains("windows")
+
+fn is_non_windows_cargo_section(line: text) -> bool:
+    val lower = line.lower()
+    lower.starts_with("[target.") and not lower.contains("windows")
+
+fn is_windows_gnu_cargo_section(line: text) -> bool:
+    val lower = line.lower()
+    lower.starts_with("[target.") and lower.contains("windows-gnu")
+
+fn is_windows_branch_start(line: text) -> bool:
+    val lower = line.lower()
+    lower.contains("windows") and
+        (lower.contains("c compilation") or lower.contains("msvc-abi"))
+
+fn is_windows_branch_end(line: text) -> bool:
+    line.contains("Local (non-root) LLVM")
+
+fn line_without_comment(line: text) -> text:
+    line.split("#")[0].trim()
+
+fn is_cxx_selection(line: text) -> bool:
+    val lower = line.lower()
+    lower.starts_with("cxx=") or lower.starts_with("cxx:") or
+        lower.starts_with("export cxx=") or lower.starts_with("set cxx=") or
+        lower.starts_with("set \"cxx=") or lower.starts_with("$env:cxx") or
+        lower.starts_with("cxx_") or lower.starts_with("set(cmake_cxx_compiler ") or
+        lower.starts_with("cmake_cxx_compiler=") or
+        lower.contains("-dcmake_cxx_compiler=") or
+        lower.contains("\"cxx=") or lower.contains("'cxx=")
+
+fn is_c_compiler_selection(line: text) -> bool:
+    val lower = line.lower()
+    if lower.contains("linker") or lower.contains("ld="):
+        return false
+    lower.starts_with("cc=") or lower.starts_with("cc:") or
+        lower.starts_with("export cc=") or lower.starts_with("set cc=") or
+        lower.starts_with("set \"cc=") or lower.starts_with("$env:cc") or
+        lower.starts_with("cc_") or lower.starts_with("c_compiler=") or
+        lower.starts_with("c_compiler:") or lower.starts_with("set(cmake_c_compiler ") or
+        lower.starts_with("cmake_c_compiler=") or
+        lower.contains("-dcmake_c_compiler=") or lower.starts_with("compiler:") or
+        lower.contains("\"cc=") or lower.contains("'cc=")
+
+fn has_forbidden_windows_c_driver(line: text) -> bool:
+    val lower = line.lower()
+    if lower.contains("clang++") or lower.contains("g++") or lower.contains("gcc") or
+       lower.contains("mingw") or lower.contains("link.exe"):
+        return true
+    if lower.contains("cl.exe") and not lower.contains("clang-cl.exe"):
+        return true
+    lower.ends_with("=cl") or
+        lower.contains("=cl\"") or lower.contains("=cl'") or
+        lower.contains("=cl ") or lower.ends_with("= cl") or
+        lower.contains("= cl\"") or lower.contains("= cl'") or
+        lower.contains("= cl ") or
+        lower.ends_with(": cl") or lower.contains(": cl\"") or
+        lower.contains(": cl'") or lower.contains(": cl ") or
+        lower.contains("set(cmake_c_compiler cl)") or
+        lower.contains("set(cmake_c_compiler cl ")
+
+fn has_official_llvm_231_distribution(content: text) -> bool:
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).replace("\\", "/").lower()
+        if lower.contains("clang+llvm-23.1.") and
+           lower.contains("x86_64-pc-windows-msvc"):
+            return true
+    false
+
+fn has_root_bound_driver_alias(content: text) -> bool:
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).replace("\\", "/").lower()
+        val names_driver = lower.contains("clang-cl.exe") or lower.contains("clang.exe")
+        val names_root = lower.contains("llvm_root") or lower.contains("llvm_win_root") or
+            lower.contains("_simple_win_bin")
+        if names_driver and names_root:
+            return true
+    false
+
+fn has_llvm_231_version_command(content: text) -> bool:
+    val has_root_alias = has_root_bound_driver_alias(content)
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).lower()
+        if lower.contains("--version") and
+           (lower.contains("clang") or lower.contains("_simple_win_cc") or
+            lower.contains("cmake_c_compiler") or
+            (has_root_alias and lower.contains("$tool"))):
+            return true
+    false
+
+fn has_exact_llvm_231_version_predicate(content: text) -> bool:
+    var has_family_pattern = false
+    var has_predicate = false
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).replace("\\", "").lower()
+        if lower.contains("23.1.") and
+           (lower.contains("[0-9]") or lower.contains("(?:s|$)")):
+            has_family_pattern = true
+        if lower.contains("-notmatch") or lower.contains(" matches ") or
+           lower.contains("matches \"") or lower.contains("sed -n") or
+           lower.contains("grep -e") or lower.starts_with("case "):
+            has_predicate = true
+    has_family_pattern and has_predicate
+
+fn has_fail_closed_version_check(content: text) -> bool:
+    var checks_status = false
+    var rejects_failure = false
+    for raw_line in content.split("\n"):
+        val lower = line_without_comment(raw_line).lower()
+        if lower.contains("lastexitcode") or lower.contains("result_variable") or
+           (lower.contains("--version") and lower.contains("if ") and lower.contains("!")):
+            checks_status = true
+        if lower.contains("throw ") or lower.contains("fatal_error") or
+           lower.contains("exit 1") or lower.contains("return 1"):
+            rejects_failure = true
+    checks_status and rejects_failure
+
+fn has_validated_llvm_231_authority(content: text) -> bool:
+    (has_official_llvm_231_distribution(content) and
+        has_root_bound_driver_alias(content) and
+        has_llvm_231_version_command(content) and
+        has_exact_llvm_231_version_predicate(content) and
+        has_fail_closed_version_check(content))
+
+fn has_validated_llvm_231_driver(line: text, has_llvm_231_authority: bool) -> bool:
+    if not has_llvm_231_authority:
+        return false
+    val lower = line.replace("\\", "/").lower()
+    val direct_root_driver = ((lower.contains("clang-cl") or lower.contains("clang.exe")) and
+        (lower.contains("llvm_root") or lower.contains("llvm_win_root") or
+         lower.contains("_simple_win_bin")))
+    (direct_root_driver or
+        lower.ends_with("=$_simple_win_cc") or lower.ends_with("=\"$_simple_win_cc\"") or
+        lower.ends_with("='$_simple_win_cc'"))
+
+fn windows_c_compiler_selection_finding(line_num: i64, message: text) -> StaticLintFinding:
+    StaticLintFinding(
+        WINDOWS_C_COMPILER_SELECTION_CODE, StaticLintLevel.Deny,
+        StaticLintCategory.Correctness, message,
+        "Select LLVM 23.1.x clang.exe or clang-cl.exe through the validated Windows LLVM root; keep link.exe only as a Rust/MSVC linker.",
+        line_num, 0)
+
+fn check_windows_c_compiler_selection_lint_rule(
+    params: LintParamsV1, unit: LintUnit
+) -> [StaticLintFinding]:
+    val _ = params
+    if not is_windows_toolchain_path(unit.path):
+        return []
+    var findings: [StaticLintFinding] = []
+    var in_windows_branch = not unit.path.ends_with("scripts/setup/llvm-toolchain-env.shs")
+    var in_windows_cargo_section = not is_cargo_toolchain_config(unit.path)
+    val has_llvm_231_authority = has_validated_llvm_231_authority(unit.content)
+    var line_num = 1
+    for raw_line in unit.content.split("\n"):
+        if is_windows_branch_start(raw_line):
+            in_windows_branch = true
+        if is_windows_branch_end(raw_line):
+            in_windows_branch = false
+        val line = line_without_comment(raw_line)
+        if is_cargo_toolchain_config(unit.path) and is_windows_cargo_section(line):
+            in_windows_cargo_section = true
+            if is_windows_gnu_cargo_section(line):
+                findings.push(windows_c_compiler_selection_finding(
+                    line_num, "Windows GNU/MinGW Cargo target is outside the admitted MSVC ABI toolchain"))
+        elif is_cargo_toolchain_config(unit.path) and is_non_windows_cargo_section(line):
+            in_windows_cargo_section = false
+        if in_windows_branch and in_windows_cargo_section and line != "":
+            if is_cxx_selection(line):
+                findings.push(windows_c_compiler_selection_finding(
+                    line_num, "Windows C-only toolchain must leave CXX/CMAKE_CXX_COMPILER unset"))
+            elif is_c_compiler_selection(line):
+                if has_forbidden_windows_c_driver(line):
+                    findings.push(windows_c_compiler_selection_finding(
+                        line_num, "Windows C compiler selection uses a forbidden driver"))
+                elif not has_validated_llvm_231_driver(line, has_llvm_231_authority):
+                    findings.push(windows_c_compiler_selection_finding(
+                        line_num, "Windows C compiler selection lacks LLVM 23.1.x root validation"))
+        line_num = line_num + 1
+    findings
+
+pub fn windows_c_compiler_selection_lint_rule() -> StaticLintRule:
+    static_lint_rule(
+        "windows_c_compiler_selection",
+        lint_rule_provider_iface("windows_c_compiler_selection"),
+        check_windows_c_compiler_selection_lint_rule)

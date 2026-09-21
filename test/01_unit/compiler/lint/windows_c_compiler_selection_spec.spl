@@ -1,0 +1,120 @@
+use std.spec.*
+use std.io_runtime.{read_file}
+use compiler.tools.lint.static_rules.{
+    LintParamsV1, LintUnit, StaticLintFinding, static_lint_rule_table
+}
+use compiler.tools.lint.rules.windows_c_compiler_selection_rule.{windows_c_compiler_selection_lint_rule}
+
+fn findings_for(path: text, content: text) -> [StaticLintFinding]:
+    windows_c_compiler_selection_lint_rule().check(LintParamsV1.defaults(), LintUnit(path, content))
+
+describe "windows_c_compiler_selection lint rule":
+    it "rejects a Windows C compiler selected as gcc":
+        val findings = findings_for("scripts/setup/windows-msvc-build.shs", "CC=gcc\n")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("W-WIN-CC-001")
+
+    it "rejects CXX and clang++ selections in Windows C-only settings":
+        val findings = findings_for(
+            "src/runtime/cmake/toolchains/windows-x86_64-clangcl.cmake",
+            "set(CMAKE_CXX_COMPILER clang++.exe)\n")
+        expect(findings.len()).to_equal(1)
+
+    it "rejects link.exe when selected as the C compiler":
+        val findings = findings_for("scripts/setup/windows-msvc-build.shs", "CC=link.exe\n")
+        expect(findings.len()).to_equal(1)
+
+    it "rejects common shell, PowerShell, batch and CI assignment spellings":
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", "export CC=gcc\n").len()).to_equal(1)
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", "$env:CC = \"gcc.exe\"\n").len()).to_equal(1)
+        expect(findings_for("scripts/setup/windows-msvc-build.cmd", "set \"CC=g++\"\n").len()).to_equal(1)
+        expect(findings_for(".github/workflows/windows-build.yml", "CC: C:/mingw/bin/gcc.exe\n").len()).to_equal(1)
+        expect(findings_for(".github/workflows/windows-build.yml", "echo \"CC=gcc\" >> \"$GITHUB_ENV\"\n").len()).to_equal(1)
+        expect(findings_for(".github/workflows/windows-build.yml", "CC_x86_64_pc_windows_msvc=cl.exe\n").len()).to_equal(1)
+
+    it "rejects the legacy cl driver and a Windows GNU Cargo target":
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", "CC=cl\n").len()).to_equal(1)
+        expect(findings_for(
+            "src/compiler_rust/.cargo/config.toml",
+            "[target.x86_64-pc-windows-gnu]\nlinker = \"x86_64-w64-mingw32-gcc\"\n").len()).to_equal(1)
+
+    it "accepts the local official root only with a fail-closed 23.1.x predicate":
+        val shell = "SIMPLE_LLVM_WIN_ROOT_23=/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
+            "_simple_win_cc=$SIMPLE_LLVM_WIN_ROOT_23/bin/clang-cl.exe\n" +
+            "if ! _simple_win_version=$(\"$_simple_win_cc\" --version); then exit 1; fi\n" +
+            "_simple_win_version=$(printf '%s' \"$_simple_win_version\" | sed -n 's/^clang version \\(23\\.1\\.[0-9][0-9]*\\).*$/\\1/p')\n" +
+            "if [ -z \"$_simple_win_version\" ]; then exit 1; fi\n" +
+            "SIMPLE_WINDOWS_C_COMPILER_VERSION=$_simple_win_version\nCC=$_simple_win_cc\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", shell).len()).to_equal(0)
+
+    it "accepts the PR1216 CI workspace root with exact predicate and attestation":
+        val powershell = "$env:LLVM_ROOT = 'D:/a/simple/simple/.toolchains/llvm-23.1.1'\n" +
+            "$archiveName = 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'\n" +
+            "$uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang%2Bllvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$versionLines = @(& $tool --version 2>&1)\n" +
+            "if ($LASTEXITCODE -ne 0) { throw 'version command failed' }\n" +
+            "$version = $versionLines -join \"`n\"\n" +
+            "if ($version -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)') { throw 'wrong version' }\n" +
+            "Write-Host \"LLVM_TOOL_ATTESTATION tool=clang-cl.exe version=$version\"\n" +
+            "\"CC=$env:LLVM_ROOT\\bin\\clang-cl.exe\" | Out-File $env:GITHUB_ENV\n"
+        expect(findings_for(".github/workflows/windows-build.yml", powershell).len()).to_equal(0)
+
+    it "accepts another official 23.1.x distribution outside the local install root":
+        val powershell = "$env:LLVM_ROOT = 'D:/runner/toolcache/llvm-23.1.2'\n" +
+            "$archiveName = 'clang+llvm-23.1.2-x86_64-pc-windows-msvc.tar.zst'\n" +
+            "$tool = Join-Path $env:LLVM_ROOT 'bin\\clang-cl.exe'\n" +
+            "$version = & $tool --version\n" +
+            "if ($LASTEXITCODE -ne 0 -or $version -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)') { throw 'invalid' }\n" +
+            "$env:SIMPLE_WINDOWS_C_COMPILER_VERSION = $version\n" +
+            "$env:CC = \"$env:LLVM_ROOT\\bin\\clang-cl.exe\"\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", powershell).len()).to_equal(0)
+
+    it "rejects unknown aliases and roots without a fail-closed version predicate":
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", "CC=$UNTRUSTED_CC\n").len()).to_equal(1)
+        val unknown_cc_alias = "LLVM_ROOT=C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
+            "version=$(clang-cl.exe --version)\n" +
+            "if [ -z \"$version\" ]; then exit 1; fi\nCC=$CC_UNTRUSTED\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", unknown_cc_alias).len()).to_equal(1)
+        val missing_probe = "LLVM_ROOT=C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
+            "CC=$LLVM_ROOT/bin/clang-cl.exe\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", missing_probe).len()).to_equal(1)
+        val token_only = "LLVM_ROOT=C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
+            "$LLVM_ROOT/bin/clang-cl.exe --version\nCC=$LLVM_ROOT/bin/clang-cl.exe\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", token_only).len()).to_equal(1)
+        val unbound_driver = "LLVM_ROOT=C:/cache/clang+llvm-23.1.1-x86_64-pc-windows-msvc\n" +
+            "$tool=$LLVM_ROOT/bin/clang-cl.exe\n" +
+            "$version=$tool --version\n" +
+            "if ($LASTEXITCODE -ne 0 -or $version -notmatch 'clang version 23\\.1\\.[0-9]+(?:\\s|$)') { throw 'invalid' }\n" +
+            "CC=C:/untrusted/clang-cl.exe\n"
+        expect(findings_for("scripts/setup/windows-msvc-build.ps1", unbound_driver).len()).to_equal(1)
+
+    it "does not treat Rust link.exe as a C compiler selection":
+        val findings = findings_for(
+            "src/compiler_rust/.cargo/config.toml",
+            "[target.x86_64-pc-windows-msvc]\nlinker = \"link.exe\"\n")
+        expect(findings.len()).to_equal(0)
+
+    it "ignores a non-Windows Cargo target section":
+        val findings = findings_for(
+            "src/compiler_rust/.cargo/config.toml",
+            "[target.x86_64-unknown-linux-gnu]\nCC=gcc\n")
+        expect(findings.len()).to_equal(0)
+
+    it "ignores comments, documentation and Linux compiler settings":
+        expect(findings_for("scripts/setup/windows-msvc-build.shs", "# CC=gcc\n").len()).to_equal(0)
+        expect(findings_for("doc/windows-toolchain.md", "CC=gcc\n").len()).to_equal(0)
+        expect(findings_for("scripts/setup/linux-build.shs", "CC=gcc\n").len()).to_equal(0)
+        expect(findings_for("D:/wk-msvc-review-astra/scripts/setup/linux-build.shs", "CC=gcc\n").len()).to_equal(0)
+
+    it "accepts the current validated Windows shell and CMake selections":
+        val shell = read_file("scripts/setup/llvm-toolchain-env.shs")
+        val cmake = read_file("src/runtime/cmake/toolchains/windows-x86_64-clangcl.cmake")
+        val cargo = read_file("src/compiler_rust/.cargo/config.toml")
+        expect(findings_for("scripts/setup/llvm-toolchain-env.shs", shell).len()).to_equal(0)
+        expect(findings_for("src/runtime/cmake/toolchains/windows-x86_64-clangcl.cmake", cmake).len()).to_equal(0)
+        expect(findings_for("src/compiler_rust/.cargo/config.toml", cargo).len()).to_equal(0)
+
+    it "registers the production rule in the canonical static table":
+        val ids = [rule.id() for rule in static_lint_rule_table()]
+        expect(ids).to_contain("windows_c_compiler_selection")

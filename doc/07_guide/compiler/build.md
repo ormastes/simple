@@ -141,7 +141,7 @@ The compiler supports multiple code generation backends:
 
 - **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
 - **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
-- **Windows:** LLVM rarely available; typically falls back to Cranelift. Supports both MSVC and MinGW toolchains.
+- **Windows MSVC C builds:** configure a validated LLVM 23.1.x driver from `C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc`; use `clang-cl.exe` for MSVC C (or the validated `clang.exe` C driver where required), and leave `CXX` unset. `cl.exe`, GCC, G++, MinGW, and `clang++` are not admitted C compiler selections. Cargo may use `link.exe` only as its MSVC Rust linker. Static lint rule `W-WIN-CC-001` checks Windows-specific compiler selection files.
 
 ### SimpleOS Multi-Platform Binaries
 
