@@ -44,6 +44,11 @@ printf '#!/bin/sh\necho authority\n' >"$fixture/nested/runner"
 chmod 700 "$fixture/nested/runner"
 dd if=/dev/zero of="$fixture/large.bin" bs=1048576 count=64 \
     >/dev/null 2>&1
+backslash_file="$fixture/back\\slash.bin"
+printf 'backslash path\n' >"$backslash_file"
+access_file="$fixture/access-0410"
+printf 'access parity\n' >"$access_file"
+chmod 0410 "$access_file"
 
 reference="$test_tmp/reference.snapshot"
 streamed="$test_tmp/streamed.snapshot"
@@ -69,6 +74,40 @@ fi
 
 cmp -s "$reference" "$streamed" ||
     fail "streaming changed canonical authority records"
+
+# A root containing an internal dot component must bind the same descendants
+# as its normalized spelling.
+bootstrap_stage3_directory_snapshot "$test_tmp/dot-root.streamed" \
+    "$test_tmp/./authority"
+cmp -s "$reference" "$test_tmp/dot-root.streamed" ||
+    fail "dot-component root changed canonical authority records"
+
+mkdir "$test_tmp/output-directory"
+if bootstrap_stage3_directory_snapshot "$test_tmp/output-directory" \
+        "$fixture" >/dev/null 2>&1; then
+    fail "directory output target was accepted"
+fi
+ln -s "$fixture" "$test_tmp/output-symlink"
+if bootstrap_stage3_directory_snapshot "$test_tmp/output-symlink" \
+        "$fixture" >/dev/null 2>&1; then
+    fail "symlink output target was accepted"
+fi
+chmod 640 "$streamed"
+bootstrap_stage3_directory_snapshot "$streamed" "$fixture"
+streamed_mode=$(stat -c '%a' "$streamed" 2>/dev/null ||
+    stat -f '%Lp' "$streamed")
+[ "$streamed_mode" = 640 ] || fail "existing output mode changed: $streamed_mode"
+(umask 077
+ bootstrap_stage3_directory_snapshot "$test_tmp/umask.snapshot" "$fixture"
+)
+umask_mode=$(stat -c '%a' "$test_tmp/umask.snapshot" 2>/dev/null ||
+    stat -f '%Lp' "$test_tmp/umask.snapshot")
+[ "$umask_mode" = 600 ] || fail "umask output mode changed: $umask_mode"
+
+# The bound snapshot path hashes a valid backslash filename through its opened
+# descriptor, preserving the serial authority record without relying on a
+# hash tool's escaped filename presentation.
+
 if [ "$(uname -s)" = Linux ]; then
     exec 8<"$fixture"
     bootstrap_stage3_directory_snapshot "$test_tmp/procfd.snapshot" \
@@ -82,6 +121,185 @@ bootstrap_stage3_directory_snapshot "$test_tmp/content.snapshot" "$fixture"
 [ "$before_sha" != "$(bootstrap_stage3_hash_file \
     "$test_tmp/content.snapshot")" ] || fail "content mutation not detected"
 
+# Newline-bearing names retain the historical serial authority path because a
+# newline-delimited worker manifest cannot encode them without changing the
+# canonical record stream.
+newline_fixture="$test_tmp/newline-authority"
+mkdir -p "$newline_fixture"
+newline_name=$(printf 'line\nbreak')
+printf 'newline path\n' >"$newline_fixture/$newline_name"
+reference_snapshot "$newline_fixture" "$test_tmp/newline.reference"
+bootstrap_stage3_directory_snapshot "$test_tmp/newline.streamed" \
+    "$newline_fixture"
+cmp -s "$test_tmp/newline.reference" "$test_tmp/newline.streamed" ||
+    fail "newline-bearing authority name changed canonical records"
+
+# A manifest larger than the 4096-file threshold must use the requested
+# bounded worker count and remain byte-identical to the serial oracle.
+parallel_fixture="$test_tmp/parallel-authority"
+mkdir -p "$parallel_fixture"
+parallel_index=1
+while [ "$parallel_index" -le 4096 ]; do
+    printf 'parallel input %s\n' "$parallel_index" \
+        >"$parallel_fixture/file-$parallel_index"
+    parallel_index=$((parallel_index + 1))
+done
+reference_snapshot "$parallel_fixture" "$test_tmp/parallel.reference"
+SIMPLE_NATIVE_BUILD_THREADS=2
+[ "$(bootstrap_stage3_hash_worker_count 4096)" -eq 2 ] ||
+    fail "4096-file fixture did not admit parallel workers"
+bootstrap_stage3_directory_snapshot "$test_tmp/parallel.streamed" \
+    "$parallel_fixture"
+cmp -s "$test_tmp/parallel.reference" "$test_tmp/parallel.streamed" ||
+    fail "parallel authority records differ from serial output"
+if [ "$(uname -s)" = Linux ] && [ -x /usr/bin/time ]; then
+    env SIMPLE_NATIVE_BUILD_THREADS=2 /usr/bin/time -f '%M' sh -c '
+        . "$1"
+        bootstrap_stage3_directory_snapshot "$2" "$3"
+    ' sh "$repo_root/scripts/check/lib/bootstrap-stage3/authority.shs" \
+        "$test_tmp/parallel.memory.streamed" "$parallel_fixture" \
+        >"$test_tmp/parallel.memory.stdout" \
+        2>"$test_tmp/parallel.memory.stderr" ||
+        fail "parallel memory profile snapshot failed"
+    parallel_snapshot_rss_kib=$(tail -n 1 "$test_tmp/parallel.memory.stderr")
+    case "$parallel_snapshot_rss_kib" in
+        ''|*[!0-9]*)
+            fail "parallel RSS probe did not emit KiB: $parallel_snapshot_rss_kib" ;;
+    esac
+    [ "$parallel_snapshot_rss_kib" -le 32768 ] ||
+        fail "parallel snapshot used ${parallel_snapshot_rss_kib} KiB"
+    cmp -s "$test_tmp/parallel.reference" \
+        "$test_tmp/parallel.memory.streamed" ||
+        fail "parallel memory profile changed canonical records"
+fi
+unset SIMPLE_NATIVE_BUILD_THREADS
+
+# A bound worker failure must reach the owner and leave its output untouched.
+# This is deliberately before the symlink rejection fixture so the failure
+# exercises hashing rather than the earlier tree admission gate.
+printf '%s\n' "$parallel_fixture/file-1" >"$test_tmp/failure.paths"
+printf '00\t0\t0\t0\t0\n' >"$test_tmp/failure.meta"
+printf 'previous-hashes\n' >"$test_tmp/failure.hashes"
+if bootstrap_stage3_hash_bound_path_list "$test_tmp/failure.paths" \
+        "$test_tmp/failure.meta" "$test_tmp/failure.hashes" 1 \
+        "$parallel_fixture" \
+        >/dev/null 2>&1; then
+    fail "bound hash worker failure was swallowed"
+fi
+grep -Fqx 'previous-hashes' "$test_tmp/failure.hashes" ||
+    fail "failed hash worker replaced the prior result"
+
+# Replacing a scanned regular leaf with a symlink to an outside target before
+# hashing must fail the bound worker. The old result remains untouched.
+race_file="$test_tmp/race-file"
+outside_file="$test_tmp/outside-file"
+printf 'inside\n' >"$race_file"
+printf 'outside\n' >"$outside_file"
+race_metadata=$(perl -e 'my @s=lstat($ARGV[0]);
+    print((-x $ARGV[0] ? 1 : 0), "\t", ($s[2] & 07777),
+        "\t", $s[0], "\t", $s[1])' "$race_file")
+printf '%s\n' "$race_file" >"$test_tmp/race.paths"
+printf '00\t%s\n' "$race_metadata" >"$test_tmp/race.meta"
+mv "$race_file" "$test_tmp/race-original"
+ln -s "$outside_file" "$race_file"
+printf 'previous-race-hash\n' >"$test_tmp/race.hashes"
+if bootstrap_stage3_hash_bound_path_list "$test_tmp/race.paths" \
+        "$test_tmp/race.meta" "$test_tmp/race.hashes" 1 \
+        "$test_tmp" \
+        >/dev/null 2>&1; then
+    fail "symlink substitution was accepted by bound hashing"
+fi
+grep -Fqx 'previous-race-hash' "$test_tmp/race.hashes" ||
+    fail "symlink substitution replaced the prior result"
+
+# A permission-only replacement is also a failed identity transition. The
+# executable bit is part of the authority record, so a stale :1: record must
+# never survive a deterministic chmod 700 -> 600 between phases.
+chmod_file="$test_tmp/chmod-file"
+printf 'chmod race\n' >"$chmod_file"
+chmod 700 "$chmod_file"
+chmod_metadata=$(perl -e 'my @s=lstat($ARGV[0]);
+    print((-x $ARGV[0] ? 1 : 0), "\t", ($s[2] & 07777), "\t",
+        $s[0], "\t", $s[1])' "$chmod_file")
+printf '%s\n' "$chmod_file" >"$test_tmp/chmod.paths"
+printf '00\t%s\n' "$chmod_metadata" >"$test_tmp/chmod.meta"
+chmod 600 "$chmod_file"
+printf 'previous-chmod-hash\n' >"$test_tmp/chmod.hashes"
+if bootstrap_stage3_hash_bound_path_list "$test_tmp/chmod.paths" \
+        "$test_tmp/chmod.meta" "$test_tmp/chmod.hashes" 1 \
+        "$test_tmp" \
+        >/dev/null 2>&1; then
+    fail "permission replacement was accepted by bound hashing"
+fi
+grep -Fqx 'previous-chmod-hash' "$test_tmp/chmod.hashes" ||
+    fail "permission replacement replaced the prior result"
+
+# Moving an ancestor and replacing it with a symlink must fail even when the
+# regular leaf's device and inode still match the scanner metadata. This is a
+# deterministic reproducer for the scan-to-hash ancestor substitution race.
+ancestor_root="$test_tmp/ancestor-root"
+ancestor_sub="$ancestor_root/sub"
+ancestor_moved="$test_tmp/ancestor-moved"
+mkdir -p "$ancestor_sub"
+ancestor_file="$ancestor_sub/file"
+printf 'ancestor inside\n' >"$ancestor_file"
+ancestor_metadata=$(perl -e 'my @s=lstat($ARGV[0]);
+    print((-x $ARGV[0] ? 1 : 0), "\t", ($s[2] & 07777),
+        "\t", $s[0], "\t", $s[1])' "$ancestor_file")
+printf '%s\n' "$ancestor_file" >"$test_tmp/ancestor.paths"
+printf '00\t%s\n' "$ancestor_metadata" >"$test_tmp/ancestor.meta"
+mv "$ancestor_sub" "$ancestor_moved"
+ln -s "$ancestor_moved" "$ancestor_sub"
+printf 'previous-ancestor-hash\n' >"$test_tmp/ancestor.hashes"
+bootstrap_stage3_hash_bound_root="$ancestor_root"
+if bootstrap_stage3_hash_bound_path_list "$test_tmp/ancestor.paths" \
+        "$test_tmp/ancestor.meta" "$test_tmp/ancestor.hashes" 1 \
+        >/dev/null 2>&1; then
+    fail "ancestor symlink substitution was accepted by bound hashing"
+fi
+unset bootstrap_stage3_hash_bound_root
+grep -Fqx 'previous-ancestor-hash' "$test_tmp/ancestor.hashes" ||
+    fail "ancestor symlink substitution replaced the prior result"
+
+# Exercise the stable two-argument snapshot API with a deterministic swap
+# between its scan and hash phases. The old implementation publishes the
+# moved leaf; the bound implementation fails before publication.
+api_ancestor_root="$test_tmp/api-ancestor-root"
+api_ancestor_sub="$api_ancestor_root/sub"
+api_ancestor_moved="$test_tmp/api-ancestor-moved"
+mkdir -p "$api_ancestor_sub"
+printf 'api ancestor inside\n' >"$api_ancestor_sub/file"
+swap_bin="$test_tmp/ancestor-swap-bin"
+mkdir "$swap_bin"
+swap_real_perl=$(command -v perl)
+cat >"$swap_bin/perl" <<'EOF'
+#!/bin/sh
+"$BOOTSTRAP_STAGE3_TEST_REAL_PERL" "$@"
+status=$?
+if [ "${BOOTSTRAP_STAGE3_TEST_SWAP:-}" = 1 ] &&
+        [ ! -e "$BOOTSTRAP_STAGE3_TEST_SWAP_MARKER" ]; then
+    mv "$BOOTSTRAP_STAGE3_TEST_SWAP_SUB" \
+        "$BOOTSTRAP_STAGE3_TEST_SWAP_MOVED" || exit 1
+    ln -s "$BOOTSTRAP_STAGE3_TEST_SWAP_MOVED" \
+        "$BOOTSTRAP_STAGE3_TEST_SWAP_SUB" || exit 1
+    : >"$BOOTSTRAP_STAGE3_TEST_SWAP_MARKER"
+fi
+exit "$status"
+EOF
+chmod 755 "$swap_bin/perl"
+if PATH="$swap_bin:$PATH" \
+    BOOTSTRAP_STAGE3_TEST_REAL_PERL="$swap_real_perl" \
+    BOOTSTRAP_STAGE3_TEST_SWAP=1 \
+    BOOTSTRAP_STAGE3_TEST_SWAP_MARKER="$test_tmp/ancestor-swap.marker" \
+    BOOTSTRAP_STAGE3_TEST_SWAP_SUB="$api_ancestor_sub" \
+    BOOTSTRAP_STAGE3_TEST_SWAP_MOVED="$api_ancestor_moved" \
+    bootstrap_stage3_directory_snapshot "$test_tmp/api-ancestor.snapshot" \
+        "$api_ancestor_root" >/dev/null 2>&1; then
+    fail "two-argument ancestor swap was accepted by snapshot"
+fi
+[ ! -e "$test_tmp/api-ancestor.snapshot" ] ||
+    fail "ancestor swap left a published snapshot"
+
 ln -s plain.txt "$fixture/rejected-link"
 if bootstrap_stage3_directory_snapshot "$test_tmp/symlink.snapshot" "$fixture" \
     >/dev/null 2>&1; then
@@ -92,5 +310,23 @@ if [ "$(uname -s)" = Linux ] && \
             "/proc/$$/fd/8" >/dev/null 2>&1; then
     fail "procfd authority snapshot accepted a descendant symlink"
 fi
+
+# The snapshot reuses the bootstrap job count and keeps the per-worker floor
+# bounded. Ten requested jobs over an 8192-file manifest admit min(8, host
+# CPUs) workers, never an unbounded one-process-per-file fanout.
+SIMPLE_NATIVE_BUILD_THREADS=10
+snapshot_workers=$(bootstrap_stage3_hash_worker_count 8192)
+snapshot_cpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null ||
+    sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || printf '1')
+case "$snapshot_cpu" in
+    ''|*[!0-9]*) snapshot_cpu=1 ;;
+esac
+[ "$snapshot_cpu" -ge 1 ] 2>/dev/null || snapshot_cpu=1
+snapshot_expected=8
+[ "$snapshot_cpu" -lt "$snapshot_expected" ] &&
+    snapshot_expected=$snapshot_cpu
+[ "$snapshot_workers" -eq "$snapshot_expected" ] ||
+    fail "unexpected fingerprint worker cap: $snapshot_workers"
+unset SIMPLE_NATIVE_BUILD_THREADS
 
 echo "PASS: bootstrap Stage 3 directory snapshot streams large authorities"
