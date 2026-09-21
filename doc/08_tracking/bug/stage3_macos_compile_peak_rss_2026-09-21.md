@@ -86,10 +86,12 @@ allocation and message interpolation. The policy is isolated in
 `compiler.hir.reexport_diagnostic_policy` so the default and enabled behavior
 can be exercised without a full bootstrap. A unit spec verifies constructor
 behavior for unset, `0`, and `1`, and invokes the actual failed-chase reporter.
-A reciprocal resource spec repeatedly compares the parent renderer with the
-fixed production caller at 10,000/20,000 misses using live-object and live-heap
-measurements. It also runs the enabled production caller 32 times, including
-stderr emission, under a one-second timing bound.
+A reciprocal resource spec compares three parent renderer plus injectable-sink
+trials with three fixed production-caller trials at 20,000 misses, using median
+elapsed, live-object, and live-heap measurements. It also runs three enabled
+production trials of eight calls, including stderr emission, under a one-second
+median timing bound. The incoming diagnostic environment is restored before
+profiles or assertions run.
 
 Verification on the admitted Stage 2 producer:
 
