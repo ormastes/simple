@@ -1,0 +1,86 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
+    "$root/scripts/bootstrap/bootstrap-session-exec.c" -o "$work/session-exec"
+TMPDIR=$work perl -MPOSIX - "$root" "$work/session-exec" <<'PERL'
+use strict;
+use warnings;
+use Time::HiRes qw(time);
+my ($root, $helper) = @ARGV;
+POSIX::setsid() >= 0 or die "test setsid: $!\n";
+$ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = "$$";
+$ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} = $helper;
+my $checks = 0;
+sub check { my ($ok, $name) = @_; die "FAIL: $name\n" unless $ok; ++$checks; }
+sub status { system @_; return $? >> 8; }
+sub capture {
+    open(my $read, '-|', @_) or die "capture: $!";
+    local $/; my $text = <$read>;
+    close($read) or die "capture command failed: $?";
+    return $text;
+}
+check(status($helper, '--check') == 0, 'session leader admission');
+my $identity = 'print "$$ ".getpgrp()."\n"; system($ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC}, "--check"); exit($? >> 8)';
+for my $launcher ([$helper, '--'],
+        ['perl', "$root/scripts/check/lib/portable-session-exec.pl"],
+        ['sh', "$root/scripts/bootstrap/run-process-group-timeout.shs", '5', '0']) {
+    my $out = capture(@$launcher, 'perl', '-e', $identity);
+    my ($pid, $pgid) = split /\s+/, $out;
+    check($pid == $pgid && $pgid != $$, 'nested group remains in verified session');
+    check(status(@$launcher, 'sh', '-c', 'exit 37') == 37, 'exit status preserved');
+}
+for my $value ('', '0', '-1', 'abc', '1', '999999999999999999999999') {
+    local $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = $value;
+    check(status($helper, '--', 'sh', '-c', 'exit 99') == 125, 'bad SID fails before exec');
+}
+{
+    local $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC};
+    delete $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC};
+    check(status($helper, '--', 'true') == 125, 'missing peer variable rejected');
+    check(status('sh', "$root/scripts/bootstrap/run-process-group-timeout.shs", '2', '0', 'true') == 125,
+        'timeout wrapper refuses fallback');
+}
+# The exact shell launcher embedded in Simple must select the helper and never
+# detach. This exercises its emitted shell, not a source-matched Simple binary.
+open(my $source, '<', "$root/src/lib/nogc_sync_mut/io/process_ops.spl") or die $!;
+my @launch = grep { /sid_fn = "sid\(\).*SIMPLE_BOOTSTRAP_SESSION_EXEC/ } <$source>;
+close $source;
+@launch == 1 or die "expected one guarded Simple shell launcher";
+my ($shell) = $launch[0] =~ /sid_fn = "(.*)"/;
+$shell =~ s/\\"/"/g;
+check(status('sh', '-c', $shell . 'sid "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check') == 0,
+    'Simple emitted launcher retains SID');
+{
+    local $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = '1';
+    check(status('sh', '-c', $shell . 'sid true') == 125, 'Simple emitted launcher rejects mismatch');
+}
+# Forking followed by setsid succeeds at OS level; the next contract admission
+# must reject the changed SID. This is detection, not syscall prevention.
+my $escaped = fork(); defined $escaped or die $!;
+if (!$escaped) { POSIX::setsid() >= 0 or exit 98; exec $helper, '--', 'sh', '-c', 'exit 99'; exit 97; }
+waitpid($escaped, 0);
+check(($? >> 8) == 125, 'successful setsid escape rejected before payload');
+pipe(my $ready_r, my $ready_w) or die $!;
+$escaped = fork(); defined $escaped or die $!;
+if (!$escaped) {
+    close $ready_r;
+    POSIX::setsid() >= 0 or exit 98;
+    syswrite($ready_w, 'R'); close $ready_w;
+    sleep 10; exit 0;
+}
+close $ready_w; my $ready; sysread($ready_r, $ready, 1) == 1 or die 'escape readiness'; close $ready_r;
+my $observed = capture($helper, '--sid', "$escaped");
+kill 'KILL', -$escaped; waitpid($escaped, 0);
+check($observed eq "$escaped $escaped\n", 'batch observer exposes escaped SID to guard');
+check(status('sh', "$root/scripts/bootstrap/run-process-group-timeout-test.shs") == 0,
+    'timeout still kills TERM-resistant descendant group');
+# Preserve stdin and argument bytes through the new group helper.
+check(capture($helper, '--', 'printf', '%s', "a b'c") eq "a b'c", 'argument bytes preserved');
+my $started = time;
+for (1..20) { status($helper, '--', 'true') == 0 or die 'launch failed'; }
+my $elapsed = time - $started;
+printf "PASS: %d checks; 20 helper launches %.3fs (no compiler performance claim)\n", $checks, $elapsed;
+PERL

@@ -787,7 +787,7 @@ fn _process_observation_result_error_v1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason)
-use std.io_runtime.{env_get, read_file_text_result}
+use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -1430,22 +1430,14 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val inner_cmd = child_script.replace("'", "'\\''")
     val stdout_path = stdout_file.replace("'", "'\\''")
     val stderr_path = stderr_file.replace("'", "'\\''")
-    # `setsid` is util-linux and does NOT exist on macOS, where this line failed
-    # with `/bin/sh: line 0: exec: setsid: not found` and exit 127 -- which
-    # surfaced as an UNDIAGNOSABLE Stage-2 capability failure after a ~25 min
-    # compile, because the probe itself had already reported PASS.
-    # perl ships with macOS and POSIX::setsid() is the same syscall, so the
-    # fallback keeps the session-leader property this code depends on: the inner
-    # `$$` written to pgid_file must be a process-GROUP leader or
-    # _process_kill_group's `kill -- -PGID` cannot reap the tree.
-    # Detected in the shell rather than via std.nogc_sync_mut.platform.is_macos()
-    # on purpose: host_os() shells out to `uname`, and this IS the process
-    # runner, so importing it here would recurse. `command -v setsid` also keeps
-    # Linux byte-identical (it resolves, so the exact previous command runs) and
-    # covers any Unix lacking setsid rather than just Darwin.
-    # Note the perl form needs no `-w`: it execs in-place, so the exit status
-    # propagates through the same process chain instead of via a wait layer.
-    val sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- \"$@\"; fi; }; "
+    # The sampled bootstrap guard owns the session. Its prebuilt syscall
+    # helper verifies the actual SID, creates only a process group, and execs.
+    # A partial/malformed contract must never fall back to a detached session.
+    val bootstrap_sid = env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID")
+    val bootstrap_exec = env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC")
+    var sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 125; exec @ARGV or exit 127' -- \"$@\"; fi; }; "
+    if bootstrap_sid != nil or bootstrap_exec != nil:
+        sid_fn = "sid(){ case \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" in /*) ;; *) exit 125 ;; esac; exec \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" -- \"$@\"; }; "
     val redirected_cmd = "{sid_fn}sid sh -c '{inner_cmd}' > '{stdout_path}' 2> '{stderr_path}'"
 
     proc_slot_acquire()
@@ -1853,6 +1845,12 @@ fn _process_kill_group(pgid_file: text):
         return
     val pgid = file_read_text(pgid_file).trim()
     if pgid == "":
+        return
+    if env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID") != nil or env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC") != nil:
+        # This is a nested PGID, never the enclosing guard SID. Whole-session
+        # cleanup belongs to the outer guard when the bootstrap command fails.
+        val cleanup = "case \"$1\" in ''|*[!0-9]*|0|1) exit 125 ;; esac; kill -TERM \"-$1\" 2>/dev/null; sleep 0.5; kill -KILL \"-$1\" 2>/dev/null; true"
+        _process_run_bounded_raw("sh", ["-c", cleanup, "sh", pgid], 5000, 4096)
         return
     _process_run_bounded_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)
     _process_run_bounded_raw("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000, 4096)

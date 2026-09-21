@@ -15,6 +15,14 @@ $SIG{__DIE__} = sub {
     exit(126);
 };
 
+my $session_helper;
+if (exists($ENV{SIMPLE_BOOTSTRAP_SESSION_ID}) || exists($ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC})) {
+    $session_helper = $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} // '';
+    $session_helper =~ m{\A/} or die "bounded-log-error: incomplete session contract\n";
+    system {$session_helper} $session_helper, '--check';
+    $? == 0 or die "bounded-log-error: session validation failed\n";
+}
+
 my $IS_LINUX = $^O eq 'linux';
 my $IS_DARWIN = $^O eq 'darwin';
 my $IS_FREEBSD = $^O eq 'freebsd';
@@ -137,7 +145,13 @@ defined($pid) or die "bounded-log-error: fork: $!\n";
 if (!$pid) {
     close($stream_r); close($ready_r); close($exec_r);
     $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = 'DEFAULT';
-    setsid() >= 0 or POSIX::_exit(125);
+    if (defined($session_helper)) {
+        system {$session_helper} $session_helper, '--check';
+        $? == 0 or POSIX::_exit(125);
+        POSIX::setpgid(0, 0) == 0 or POSIX::_exit(125);
+    } else {
+        setsid() >= 0 or POSIX::_exit(125);
+    }
     if ($IS_DARWIN) {
         chdir($original_cwd) or POSIX::_exit(125);
         close($original_cwd) or POSIX::_exit(125);
@@ -358,7 +372,7 @@ my $receipt_text = join('',
     "max_bytes=$option{'max-bytes'}\n", "bytes_captured=$bytes_captured\n",
     "timeout_seconds=$option{'timeout-seconds'}\n",
     "term_grace_seconds=$option{'term-grace-seconds'}\n",
-    "combined_stream=stdout-stderr\n", "process_group=setsid\n",
+    "combined_stream=stdout-stderr\n", "process_group=" . (defined($session_helper) ? "setpgid" : "setsid") . "\n",
     "artifact_limit=none\n", "log_leaf=$option{'log-leaf'}\n",
     "log_sha256=$log_sha256\n");
 sysopen(my $receipt, $receipt_tmp_ref,
