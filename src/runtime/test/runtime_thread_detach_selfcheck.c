@@ -86,6 +86,12 @@ int main(void) {
         }
         wait_for(&records_live, 0);
         assert(rt_thread_is_done(handle) == 1);
+        switch (variant) {
+            case 0: puts("detach_isolated: worker_completed record_reclaimed"); break;
+            case 1: puts("detach_with_args: worker_completed record_reclaimed"); break;
+            case 2: puts("join: result=42 record_reclaimed"); break;
+            case 3: puts("detach_completed: record_reclaimed"); break;
+        }
     }
     /* Exhaust admission after native creation; failure must release its share. */
     int64_t handles[MAX_HANDLES - 1];
@@ -102,6 +108,7 @@ int main(void) {
     atomic_store(&proceed, 1);
     wait_for(&records_live, 0);
     for (int i = 0; i < MAX_HANDLES - 1; i++) free_handle(handles[i]);
+    puts("handle_exhaustion: worker_completed record_reclaimed");
     puts("runtime thread detach selfcheck: PASS");
     return 0;
 }

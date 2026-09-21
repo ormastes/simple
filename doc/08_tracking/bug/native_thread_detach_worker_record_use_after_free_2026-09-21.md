@@ -30,6 +30,21 @@ creation with an exhausted public handle table. Every case checks final
 reclamation. The test uses a fail-fast unused pool-entry provider, not a success
 stub. The app environment/process guard also passes.
 
+Executable integration SSpec:
+`test/02_integration/runtime/thread_detach_lifetime_spec.spl`. It compiles and
+runs the current provider through the native probe, requires a successful
+child exit, and checks separate receipts for both detached spawn APIs, join,
+completed detach, and handle exhaustion. This exercises live workers rather
+than matching implementation source text. Each receipt follows the native
+scenario's lifetime and final reclamation assertions.
+
+The updated native probe with all scenario receipts passes. SSpec execution
+is pending a refreshed full self-hosted CLI: the admitted Stage 2 has no
+`test` command. An attempted released-binary invocation was subsequently
+identified as using the Rust seed and is not accepted as verification; it
+also failed while parsing the existing `io/process_ops.spl` dependency before
+executing the scenario.
+
 AddressSanitizer binaries stalled before emitting output: the baseline was
 stopped after a 15-second bounded retry and the fixed check timed out at
 25 seconds. The passing evidence is the ordinary native ownership probe;
