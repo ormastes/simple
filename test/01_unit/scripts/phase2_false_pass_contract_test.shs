@@ -1,0 +1,92 @@
+#!/bin/sh
+# Execute the real outer runners with deterministic compiler/verifier boundaries.
+# These contract fixtures do not claim a native platform/bootstrap PASS.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/bin" "$tmp/runtime"
+cat >"$tmp/bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$TEST_OS"
+EOF
+cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
+#!/bin/sh
+for arg do case "$arg" in --work-root=*) work=${arg#*=};; esac; done
+mkdir -p "$work/outputs/compiler-tools/fixture"
+cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
+cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_test_runner"
+EOF
+cat >"$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+cat >"$tmp/tool" <<'EOF'
+#!/bin/sh
+case "$1" in
+run) echo 42;;
+native-build)
+    [ "$TEST_CASE" != stale ] || exit 0
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --output ]; then shift; printf '#!/bin/sh\necho 42\n' >"$1"; chmod +x "$1"; break; fi
+        shift
+    done;;
+*)
+    case "$TEST_CASE" in
+        zero) echo 'Results: 0 total, 0 passed, 0 failed';;
+        missing) :;;
+        failed) echo 'Results: 2 total, 1 passed, 1 failed';;
+        skipped) echo 'Results: 2 total, 2 passed, 0 failed, 1 skipped';;
+        inconsistent) echo 'Results: 3 total, 2 passed, 0 failed';;
+        duplicate) printf 'Results: 0 total, 0 passed, 0 failed\nResults: 2 total, 2 passed, 0 failed\n';;
+        nonzero) echo 'Results: 2 total, 2 passed, 0 failed'; exit 7;;
+        timeout) exit 124;;
+        binding)
+            case " $* " in *" --assert-ran "*) ;; *) exit 8;; esac
+            for option in --no-cache --no-db --no-session-daemon --sequential; do
+                case " $* " in *" $option "*) ;; *) exit 8;; esac
+            done
+            [ "${SIMPLE_BINARY:-}" = "${0%/*}/simple_cli" ] && [ "${SIMPLE_TEST_BINARY:-}" = "${0%/*}/simple_cli" ] || exit 8
+            echo 'Results: 2 total, 2 passed, 0 failed';;
+        *) echo 'Results: 2 total, 2 passed, 0 failed';;
+    esac;;
+esac
+EOF
+chmod +x "$tmp/tool" "$tmp/bin/uname" "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
+export TEST_TOOL="$tmp/tool"
+export PATH="$tmp/bin:$PATH"
+failed=0
+checks=0
+for os in Linux FreeBSD; do
+    export TEST_OS=$os
+    runner=$(printf '%s' "$os" | tr '[:upper:]' '[:lower:]')
+    for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout; do
+        export TEST_CASE=$scenario
+        work="$tmp/$os-$scenario"
+        mkdir -p "$work/post-phase2-fixture"
+        printf '#!/bin/sh\necho 42\n' >"$work/post-phase2-fixture/phase2-module-probe"
+        chmod +x "$work/post-phase2-fixture/phase2-module-probe"
+        set -- "--compiler=$tmp/tool" --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "--runtime-path=$tmp/runtime" "--work-root=$work" "--source-root=$tmp/source"
+        if [ "$os" = FreeBSD ]; then
+            set -- "$@" --phase=stage2 --hash-policy=canonical
+        fi
+        status=0
+        sh "$root/scripts/bootstrap/run-$runner-phase2-tests.shs" "$@" >"$tmp/run.log" 2>&1 || status=$?
+        checks=$((checks + 1))
+        case "$scenario" in
+            good|binding) expected=0;;
+            *) expected=1;;
+        esac
+        if { [ "$expected" = 0 ] && [ "$status" != 0 ]; } || { [ "$expected" = 1 ] && [ "$status" = 0 ]; }; then
+            echo "FAIL: $os $scenario unexpected status $status"
+            failed=$((failed + 1))
+        fi
+        if [ "$expected" = 1 ] && grep -qx 'overall=PASS' "$work/post-phase2-summary.env" 2>/dev/null; then
+            echo "FAIL: $os $scenario published PASS"
+            failed=$((failed + 1))
+        fi
+    done
+done
+echo "$checks runner scenarios; $failed failures"
+[ "$failed" = 0 ]
