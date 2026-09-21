@@ -66,6 +66,29 @@ This reproduction used `--threads 8` with the explicit diagnostic
 jobs=8 SCV coordinator. The normal coordinator correctly refused this new
 worktree before compilation because its SCV journal had not been initialized.
 
+The follow-up source correction keeps the inventory's closure on canonical
+leaf owners: space-token splitting, crypto word operations, and UTF-8 byte
+conversion were extracted unchanged from their broad modules. Original module
+paths re-export the same APIs. SHA core reads now use indexed accesses within
+the existing bounds, and hexadecimal output uses the established substring API
+over the ASCII digit alphabet. Inventory deletion builds ordered survivors
+because the Phase 2 MIR lowerer does not support array `remove(index)`.
+No digest algorithm, canonicalization rule, or inventory schema changed.
+
+The executable fixture additionally checks externally pinned empty/ASCII SHA
+digests, UTF-8 byte conversion and pure-Simple digest fallback, scalar SHA block
+processing, token trimming, ordered deletion, and deletion idempotence. These
+new assertions are authored pending the refreshed Phase 2 producer. The
+underlying broad-module `StringBuilder`, binary-inspection byte-method, and
+general range/iteration/inferred-enum MIR limitations remain production compiler
+blockers until their own native checks pass; shrinking this fixture's import
+closure alone does not qualify those surfaces or canonical Stage 3.
+
+`src/lib/common/text_bytes.spl` owns the raw `rt_text_to_bytes` and
+`rt_bytes_to_text` boundary formerly owned by `string_core.spl`. It is listed
+as a sanctioned runtime provider because these are runtime ABI primitives;
+callers use its semantic wrappers and do not declare or call the ABI directly.
+
 The native fixture authors 256 repeated event scopes with digest/lifetime
 checks, nested-scope refusal, a 2,048-entry reversed batch, and duplicate
 generation checks. Its `--baseline` mode retains unscoped per-file work for

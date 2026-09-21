@@ -4,10 +4,34 @@ use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
 use compiler.hir.hir_lowering.transient_ownership.{transient_scope_begin, transient_scope_pause, transient_scope_end}
 use std.scv.compile_source_inventory_core.{CompileSourceEventV1, CompileSourceInventoryV1, compile_source_inventory_initial_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_apply_event_v1, compile_source_inventory_encode_v1}
 use std.nogc_sync_mut.sffi.fs.{fs_read_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex, sha256_bytes_scalar}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.text_whitespace.{split_whitespace}
 
 extern fn rt_cli_get_args() -> [text]
 
 fn main() -> i64:
+    if sha256_text("") != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855":
+        return 12
+    if sha256_text("abc") != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad":
+        return 13
+    val utf8 = text_to_utf8_bytes("é")
+    if utf8.len() != 2 or utf8[0] != 195 or utf8[1] != 169:
+        return 14
+    if sha256_u8_hex(utf8) != "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c":
+        return 15
+    val abc_scalar = sha256_bytes_scalar([97, 98, 99])
+    val scalar_expected = [186, 120, 22, 191, 143, 1, 207, 234, 65, 65, 64, 222, 93, 174, 34, 35, 176, 3, 97, 163, 150, 23, 122, 156, 180, 16, 255, 97, 242, 0, 21, 173]
+    if abc_scalar.len() != scalar_expected.len():
+        return 16
+    var digest_index = 0
+    while digest_index < scalar_expected.len():
+        if abc_scalar[digest_index] != scalar_expected[digest_index]:
+            return 16
+        digest_index = digest_index + 1
+    val words = split_whitespace("  alpha   beta\t  ")
+    if words.len() != 2 or words[0] != "alpha" or words[1] != "beta":
+        return 17
     val fixture = "test/fixtures/scv_inventory_memory/main.spl"
     val expected = compile_source_inventory_git_event_v1("create", fixture, fs_read_text(fixture) ?? "")
     val baseline = rt_cli_get_args().contains("--baseline")
@@ -59,5 +83,14 @@ fn main() -> i64:
     val unchanged = compile_source_inventory_apply_event_v1(first.inventory!, expected)
     if not unchanged.valid or unchanged.inventory!.generation != 1 or unchanged.content_changed:
         return 11
-    print "scv-inventory-memory: PASS retained=256 sorted=2048 duplicate-generation=1"
+    val delete_middle = CompileSourceEventV1("git", "delete", initial!.entries[1024].source_identity, "", "", "", "", "", 0)
+    val removed = compile_source_inventory_apply_event_v1(initial!, delete_middle)
+    if not removed.valid or removed.inventory!.entries.len() != 2047 or removed.inventory!.generation != 2049:
+        return 18
+    if removed.inventory!.entries[1023].source_identity != initial!.entries[1023].source_identity or removed.inventory!.entries[1024].source_identity != initial!.entries[1025].source_identity:
+        return 19
+    val absent = compile_source_inventory_apply_event_v1(removed.inventory!, delete_middle)
+    if absent.content_changed or absent.inventory!.generation != 2049:
+        return 20
+    print "scv-inventory-memory: PASS retained=256 sorted=2048 duplicate-generation=1 hashes=utf8+scalar delete=ordered+idempotent"
     0
