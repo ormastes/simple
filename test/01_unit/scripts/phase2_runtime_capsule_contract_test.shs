@@ -35,7 +35,7 @@ chmod 755 "$tmp/compiler"
 make_authority "$tmp/authority"
 capsule=$($tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output")
 $tool verify "$capsule"
-[ "$(stat -c '%a' "$capsule")" = 500 ] || fail 'capsule is writable'
+[ "$(find "$capsule" -prune -perm 0500 -print)" = "$capsule" ] || fail 'capsule mode is not 0500'
 [ -f "$capsule/libsimple_native_all.a" ] || fail 'native_all missing'
 
 if $tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output" >/dev/null 2>&1; then
@@ -110,6 +110,27 @@ if $tool verify "$writable" >/dev/null 2>&1; then fail 'writable leaf accepted';
 writable_dir=$(fresh_capsule writable-dir)
 chmod u+w "$writable_dir"
 if $tool verify "$writable_dir" >/dev/null 2>&1; then fail 'writable directory accepted'; fi
+
+# An unsuccessful permission scan must never be treated as an empty result.
+# BSD find rejecting GNU -perm /0222 caused exactly this false admission.
+scan_error=$(fresh_capsule scan-error)
+real_find=$(command -v find)
+mkdir "$tmp/failing-find"
+cat >"$tmp/failing-find/find" <<'EOF'
+#!/bin/sh
+for arg do
+  if [ "$arg" = -perm ]; then
+    echo 'find: fixture permission scan failure' >&2
+    exit 42
+  fi
+done
+exec "$CAPSULE_TEST_REAL_FIND" "$@"
+EOF
+chmod +x "$tmp/failing-find/find"
+if PATH="$tmp/failing-find:$PATH" CAPSULE_TEST_REAL_FIND="$real_find" \
+   $tool verify "$scan_error" >/dev/null 2>&1; then
+  fail 'failed permission scan accepted'
+fi
 
 symlinked=$(fresh_capsule symlinked)
 chmod u+w "$symlinked"; mv "$symlinked/deps" "$symlinked/deps.real"; ln -s deps.real "$symlinked/deps"
