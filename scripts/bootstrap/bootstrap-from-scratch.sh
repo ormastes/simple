@@ -3439,6 +3439,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
           fi
         fi
+        # Publish the platform's runtime names and bind the exact capsule to
+        # this admission before exposing a completed Stage 2 to verification.
+        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
+          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
+          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
+          exit 1
+        }
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
           sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \

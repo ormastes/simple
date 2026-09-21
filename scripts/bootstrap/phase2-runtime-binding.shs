@@ -1,0 +1,151 @@
+#!/bin/sh
+# Bind a published capsule to the exact Stage 2 admission; never search targets.
+set -eu
+tool_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+die() { echo "phase2-runtime-binding: $*" >&2; exit 2; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+value() {
+  [ "$(awk -F= -v key="$1" '$1 == key {n++} END {print n+0}' "$2")" = 1 ] || return 1
+  sed -n "s/^$1=//p" "$2"
+}
+
+verify_runtime_leaves() {
+  runtime_base=$1
+  snapshot=$(value runtime_snapshot_path "$admission") || return 1
+  snapshot_sha=$(value runtime_snapshot_sha256 "$admission") || return 1
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
+  [ "$(hash_file "$snapshot")" = "$snapshot_sha" ] || return 1
+  if [ -f "$runtime_base/simple_native_all.lib" ]; then
+    [ ! -e "$runtime_base/libsimple_native_all.a" ] || return 1
+    layout=windows-msvc
+  else
+    layout=posix
+  fi
+  case "$layout" in
+    posix) native=libsimple_native_all.a; stamp=simple.inputs.sha256; backfill=libsimple_compiler_backfill.a ;;
+    windows-msvc) native=simple_native_all.lib; stamp=simple.exe.inputs.sha256; backfill=simple_compiler_backfill.lib ;;
+    *) return 1 ;;
+  esac
+  relative=$(value relative_path "$runtime_base/hosted-runtime.env") || return 1
+  case "$relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  case "${relative#deps/}" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  [ -d "$runtime_base" ] && [ ! -L "$runtime_base" ] && [ ! -L "$runtime_base/deps" ] || return 1
+  set -- "$native" "$stamp" hosted-runtime.env "$relative"
+  absent=$backfill
+  case "$(value backfill_status "$runtime_base/$stamp")" in
+    present) set -- "$@" "$backfill"; absent=- ;;
+    absent) [ ! -e "$runtime_base/$backfill" ] && [ ! -L "$runtime_base/$backfill" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  # Bind only the leaves the capsule consumes; unrelated Cargo dependencies
+  # can be large. The canonical directory snapshot itself is admission-hashed.
+  perl -MDigest::SHA -e '
+    use strict; use warnings;
+    my ($snapshot, $base, $absent, @leaves) = @ARGV;
+    open(my $input, "<", $snapshot) or die "open runtime snapshot: $!\n";
+    my %hash;
+    while (my $line = <$input>) {
+      chomp $line;
+      $line =~ /^file-hex:((?:[0-9a-f]{2})+):[01]:([0-9a-f]{64})$/
+        or die "invalid runtime snapshot record\n";
+      my ($leaf, $digest) = (pack("H*", $1), $2);
+      !exists($hash{$leaf}) or die "duplicate runtime snapshot leaf\n";
+      $hash{$leaf} = $digest;
+    }
+    $absent eq "-" || !exists($hash{$absent}) or die "admitted backfill was omitted\n";
+    for my $leaf (@leaves) {
+      exists($hash{$leaf}) or die "unadmitted runtime leaf: $leaf\n";
+      my $file = "$base/$leaf";
+      -f $file && !-l $file or die "invalid runtime leaf: $leaf\n";
+      my $digest = Digest::SHA->new(256);
+      $digest->addfile($file, "b");
+      $digest->hexdigest eq $hash{$leaf} or die "runtime leaf differs from admission: $leaf\n";
+    }
+  ' "$snapshot" "$runtime_base" "$absent" "$@" || return 1
+  [ "$(hash_file "$snapshot")" = "$snapshot_sha" ] || return 1
+}
+[ $# -ge 2 ] || die 'expected publish or resolve and compiler'
+operation=$1
+compiler=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)/$(basename -- "$2")
+admission=$(dirname -- "$compiler")/admission.env
+binding=$(dirname -- "$compiler")/runtime-capsule.env
+[ -f "$compiler" ] && [ ! -L "$compiler" ] || die 'invalid compiler'
+[ -f "$admission" ] && [ ! -L "$admission" ] || die 'missing Stage 2 admission'
+[ "$(value schema "$admission")" = simple-bootstrap-stage2-admission-v2 ] || die 'unsupported admission'
+[ "$(value status "$admission")" = admitted ] || die 'compiler is not admitted'
+[ "$(value candidate_path "$admission")" = "$compiler" ] || die 'admission compiler path mismatch'
+compiler_sha=$(hash_file "$compiler")
+[ "$(value candidate_sha256 "$admission")" = "$compiler_sha" ] || die 'admission compiler hash mismatch'
+admission_sha=$(hash_file "$admission")
+case "$operation" in
+  publish)
+    [ $# -eq 4 ] || die 'usage: publish COMPILER AUTHORITY OUTPUT_ROOT'
+    authority=$(CDPATH= cd -- "$3" && pwd -P)
+    [ "$(value runtime_authority_path "$admission")" = "$authority" ] || die 'admission runtime path mismatch'
+    temporary="$binding.tmp.$$"
+    lock="$binding.publish-lock"
+    mkdir "$lock" 2>/dev/null || die 'binding publication already active'
+    trap 'rm -f "$temporary"; rmdir "$lock"' EXIT HUP INT TERM
+    verify_runtime_leaves "$authority" || die 'current runtime authority differs from Stage 2 admission'
+    mkdir -p "$4"
+    output_root=$(CDPATH= cd -- "$4" && pwd -P)
+    capsule="$output_root/$compiler_sha"
+    if [ -e "$capsule" ] || [ -L "$capsule" ]; then
+      sh "$tool_dir/phase2-runtime-capsule.shs" verify "$capsule" || die 'retained capsule is invalid'
+    else
+      capsule=$(sh "$tool_dir/phase2-runtime-capsule.shs" publish "$compiler" "$authority" "$output_root") || die 'capsule publication failed'
+    fi
+    verify_runtime_leaves "$capsule" || die 'capsule runtime differs from Stage 2 admission'
+    verify_runtime_leaves "$authority" || die 'current runtime authority differs from Stage 2 admission'
+    [ "$(value compiler_sha256 "$capsule/phase2-runtime-capsule.env")" = "$compiler_sha" ] || die 'capsule compiler mismatch'
+    [ "$(value sha256 "$capsule/hosted-runtime.env")" = "$(value hosted_runtime_sha256 "$admission")" ] || die 'capsule hosted runtime mismatch'
+    [ "$(hash_file "$admission")" = "$admission_sha" ] &&
+      [ "$(hash_file "$compiler")" = "$compiler_sha" ] || die 'admission changed while publishing'
+    if [ -e "$binding" ] || [ -L "$binding" ]; then
+      [ -f "$binding" ] && [ ! -L "$binding" ] || die 'invalid existing binding'
+      [ "$(value schema "$binding")" = simple-phase2-runtime-binding-v1 ] &&
+        [ "$(value compiler_sha256 "$binding")" = "$compiler_sha" ] &&
+        [ "$(value admission_sha256 "$binding")" = "$admission_sha" ] &&
+        [ "$(value capsule_path "$binding")" = "$capsule" ] &&
+        [ "$(value capsule_receipt_sha256 "$binding")" = "$(hash_file "$capsule/phase2-runtime-capsule.env")" ] ||
+        die 'refusing to replace a different binding'
+    else
+      {
+      echo schema=simple-phase2-runtime-binding-v1
+      echo compiler_sha256="$compiler_sha"
+      echo admission_sha256="$admission_sha"
+      echo capsule_path="$capsule"
+      echo capsule_receipt_sha256="$(hash_file "$capsule/phase2-runtime-capsule.env")"
+      } >"$temporary"
+      chmod 400 "$temporary"
+      mv "$temporary" "$binding"
+    fi
+    rmdir "$lock"
+    trap - EXIT HUP INT TERM
+    ;;
+  resolve)
+    [ $# -eq 4 ] || die 'usage: resolve COMPILER SOURCE_ROOT WORK_ROOT'
+    [ -f "$binding" ] && [ ! -L "$binding" ] || die 'missing capsule binding'
+    [ "$(value schema "$binding")" = simple-phase2-runtime-binding-v1 ] || die 'unsupported binding'
+    [ "$(value compiler_sha256 "$binding")" = "$compiler_sha" ] || die 'binding compiler mismatch'
+    [ "$(value admission_sha256 "$binding")" = "$admission_sha" ] || die 'binding admission mismatch'
+    capsule=$(value capsule_path "$binding")
+    sh "$tool_dir/phase2-runtime-capsule.shs" verify "$capsule" || die 'invalid bound capsule'
+    [ "$(hash_file "$capsule/phase2-runtime-capsule.env")" = "$(value capsule_receipt_sha256 "$binding")" ] || die 'binding capsule receipt mismatch'
+    verify_runtime_leaves "$capsule" || die 'bound runtime differs from Stage 2 admission'
+    # Recompute the same source inventory used for admission. A retained binary
+    # from before a source fix cannot acquire current Phase 2 test authority.
+    . "$tool_dir/../check/lib/bootstrap-stage3/authority.shs"
+    . "$tool_dir/../check/lib/bootstrap-stage3/command-snapshot.shs"
+    mkdir -p "$4"
+    source_snapshot="$4/phase2-current-source.txt"
+    bootstrap_stage3_source_snapshot "$source_snapshot" "$3" || die 'cannot snapshot current source'
+    [ "$(hash_file "$source_snapshot")" = "$(value source_snapshot_sha256 "$admission")" ] || die 'Stage 2 admission is stale for current source'
+    ;;
+  *) die 'expected publish or resolve' ;;
+esac
+[ "$(value compiler_sha256 "$capsule/phase2-runtime-capsule.env")" = "$compiler_sha" ] || die 'capsule compiler mismatch'
+[ "$(value sha256 "$capsule/hosted-runtime.env")" = "$(value hosted_runtime_sha256 "$admission")" ] || die 'capsule hosted runtime mismatch'
+[ "$(hash_file "$admission")" = "$admission_sha" ] &&
+  [ "$(hash_file "$compiler")" = "$compiler_sha" ] || die 'admission changed while binding'
+printf '%s\n' "$capsule"
