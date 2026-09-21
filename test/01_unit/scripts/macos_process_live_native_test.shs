@@ -12,8 +12,6 @@ if PATH=$system_path command -v stdbuf >/dev/null 2>&1; then
   echo 'stock-macOS fixture unexpectedly contains stdbuf' >&2
   exit 1
 fi
-PATH=$system_path "$fixture" >"$work/without.log" 2>&1
-grep -q '^PASS: macOS live process' "$work/without.log"
 cat >"$work/stdbuf" <<'EOF'
 #!/bin/sh
 [ "$1" = -oL ] && [ "$2" = -eL ] || exit 91
@@ -22,7 +20,21 @@ printf 'used\n' >>"$MACOS_STDBUF_MARKER"
 exec "$@"
 EOF
 chmod +x "$work/stdbuf"
-PATH="$work:$system_path" MACOS_STDBUF_MARKER="$work/marker" "$fixture" >"$work/with.log" 2>&1
-grep -q '^PASS: macOS live process' "$work/with.log"
-[ "$(wc -l <"$work/marker" | tr -d ' ')" = 2 ]
-echo 'PASS: native live process with absent and present stdbuf'
+quoted_tmp="$work/tmp 'double\" dollar\$ backtick\` slash\\"
+mkdir "$work/plain" "$quoted_tmp"
+for process_tmp in "$work/plain" "$quoted_tmp"; do
+  PATH=$system_path TMPDIR="$process_tmp" "$fixture" >"$work/without.log" 2>&1
+  grep -q '^PASS: macOS live process' "$work/without.log"
+  PATH="$work:$system_path" TMPDIR="$process_tmp" MACOS_STDBUF_MARKER="$work/marker" "$fixture" >"$work/with.log" 2>&1
+  grep -q '^PASS: macOS live process' "$work/with.log"
+  find "$process_tmp" -mindepth 1 -print >"$work/remnants" || {
+    echo 'FAIL: process temporary-directory scan failed' >&2
+    exit 1
+  }
+  [ ! -s "$work/remnants" ] || {
+    echo 'FAIL: process capture or group files were not removed' >&2
+    exit 1
+  }
+done
+[ "$(wc -l <"$work/marker" | tr -d ' ')" = 4 ]
+echo 'PASS: native live process with absent and present stdbuf, quoted TMPDIR, and cleanup'
