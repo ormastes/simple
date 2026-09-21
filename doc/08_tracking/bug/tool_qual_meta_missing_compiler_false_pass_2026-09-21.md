@@ -25,3 +25,15 @@ the same stdout as successful runs, so their exit status is decisive.
 
 No compiler bootstrap or real compiler corpus qualification was performed;
 these tests qualify the shell runner's handling of executable outcomes.
+
+## Review follow-up: malformed repetition counts
+
+Review found a second false PASS with `META_K=0x2` and a missing compiler: shell
+numeric comparisons rejected the hexadecimal value and skipped every execution,
+while `printf %d` accepted it in the final PASS message. Validation now requires
+canonical decimal digits, a value of at least two, and a successful shell integer
+comparison. Explicitly empty and out-of-range values also fail closed.
+
+`sh test/00_unit/scripts/tool_qual_meta_count_spec.shs` reproduces the hexadecimal
+false PASS before the follow-up fix. It checks ten rejected inputs and verifies
+actual child execution counts for `META_K=2`, `META_K=3`, and the unset default.
