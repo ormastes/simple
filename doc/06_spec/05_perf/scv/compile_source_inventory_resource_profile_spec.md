@@ -24,8 +24,23 @@ growth is reported even when allocator noise makes the difference negative.
 Internal elapsed measurements exclude post-run digest verification and, for
 reduction, identical input construction. Peak RSS includes the whole process.
 
-The collector verifies the producer, provenance, sanity, admission authority,
-and hosted runtime archive hashes. It bounds compilation to 180 seconds and
+Both hashing modes additionally record the exact `rt_heap_registry_count`
+delta around event construction, before printing or post-run assertions.
+At both sizes the scoped route must retain less than half the unscoped live
+objects. This has no RSS or timing allowance: the original unscoped retention
+mutation leaves the same scratch registered and fails. A positive count is
+mandatory, so a missing/stubbed counter cannot pass. The native unit spec
+`test/01_unit/lib/scv/compile_source_inventory_reclamation_spec.spl` warms
+literal caches, compares both routes, and includes an unscoped-versus-unscoped
+negative control for the same reclamation predicate.
+
+The collector verifies parent schemas and supported authority, then invokes
+the canonical `bootstrap_stage3_verify_stage2_admission_receipt` validator.
+This binds the candidate path/hash, source/tool snapshots, frozen runtime,
+ABI policy, sanity/receiver evidence and companion logs. Parent snapshot hashes
+must match the admission, and the requested producer must match the admitted
+candidate. `--admission-only` runs that validation without executing a compiler.
+It bounds compilation to 180 seconds and
 each workload to 60 seconds, preserving stdout/timing logs in a unique
 `build/scv-resource-profile.*` directory. A crash, timeout, missing completion,
 duplicate field, invalid number, empty digest, or absent memory measurement
@@ -66,3 +81,19 @@ All adjacent receipts and the admitted hosted archive matched their hashes.
 The below-budget failed compile is not successful memory qualification. No
 native workload executed. Shell syntax and the collector help path passed;
 the refreshed self-hosted test runner is still needed for the complete SSpec.
+
+### Review corrections
+
+Five synthetic negative receipt cases (missing schema, unsupported authority,
+wrong candidate, wrong runtime and missing sanity evidence) all returned exit 1
+before their sentinel producer was invoked. They are exercised by
+`test/01_unit/lib/scv/compile_source_inventory_profile_admission_spec.spl`.
+The supporting negative fixture itself executed successfully; the SSpec runner
+remains unavailable.
+
+Canonical admission replay of the formerly selected producer now refuses its
+sanity version binding: the receipt records `1.0.1-beta.1`, while this remote
+checkout's canonical version is `1.0.0-beta.14`. No new compile was attempted.
+The preceding MIR attempt used the earlier incomplete collector checks and is
+diagnostic history only. Live-object reclamation and its mutation control are
+authored pending a producer that passes full admission and supports execution.
