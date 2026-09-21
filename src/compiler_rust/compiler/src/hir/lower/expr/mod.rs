@@ -1044,7 +1044,12 @@ impl Lowerer {
         if recv_ty == TypeId::ANY {
             let mut trait_return: Option<TypeId> = None;
             let mut traits_disagree = false;
-            for trait_info in self.module.trait_infos.values() {
+            for (lookup_name, trait_info) in &self.module.trait_infos {
+                // Alias keys remain available for direct MIR dispatch, but a
+                // stale alias snapshot is not another trait declaration.
+                if lookup_name != &trait_info.name {
+                    continue;
+                }
                 let Some(sig) = trait_info.methods.get(method) else {
                     continue;
                 };
@@ -1965,12 +1970,6 @@ mod trait_alias_tests {
             .insert("ABackend".to_string(), stale_alias.clone());
         lowerer.module.trait_infos.insert("BBackend".to_string(), stale_alias);
         lowerer.module.trait_infos.insert("Backend".to_string(), canonical);
-        lowerer
-            .method_return_types
-            .insert("BoolImpl.poll".to_string(), TypeId::BOOL);
-        lowerer
-            .method_return_types
-            .insert("IntImpl.poll".to_string(), TypeId::I64);
 
         let infos = lowerer.canonical_trait_infos();
         assert_eq!(infos.len(), 1, "alias snapshots are lookup entries, not declarations");
@@ -1979,6 +1978,18 @@ mod trait_alias_tests {
             Some(TypeId::BOOL),
             "the map entry keyed by the canonical name is authoritative"
         );
+        assert_eq!(
+            lowerer.lookup_method_return_type_inner(TypeId::ANY, "poll"),
+            TypeId::BOOL,
+            "canonical trait consensus must work before any impl methods are registered"
+        );
+
+        lowerer
+            .method_return_types
+            .insert("BoolImpl.poll".to_string(), TypeId::BOOL);
+        lowerer
+            .method_return_types
+            .insert("IntImpl.poll".to_string(), TypeId::I64);
         assert_eq!(
             lowerer.lookup_method_return_type_inner(TypeId::ANY, "poll"),
             TypeId::BOOL,

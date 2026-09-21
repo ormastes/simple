@@ -1541,6 +1541,53 @@ fn read(backend: BackendAlias) -> i64:
     }
 
     #[test]
+    fn aliased_imported_trait_from_variant_folder_preserves_selected_slots() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/01_unit/compiler/module_resolver/fixtures/variants/lib/crypto")
+            .canonicalize()
+            .expect("checked-in variant fixtures");
+        // The selected overlay and the default both define CryptoBackend, but
+        // available has a different slot. This catches accidental fallback to
+        // a base directory even if the authored alias and method name survive.
+        for (selection, expected_slot) in [("openssl", 1), ("default", 0)] {
+            let dir = create_test_project();
+            let src = dir.path().join("src");
+            let main_path = src.join("main.spl");
+            let source = r#"use crypto.backend.{CryptoBackend as SelectedBackend}
+use crypto.provider.{name}
+
+fn selected_name() -> text:
+    name()
+
+fn available(backend: SelectedBackend) -> bool:
+    backend.available()
+"#;
+            fs::write(&main_path, source).unwrap();
+            let ast = Parser::new(source).parse().expect("variant consumer parses");
+            let resolver = ModuleResolver::new(dir.path().to_path_buf(), src).with_var_roots(vec![
+                fixtures.join(selection),
+                fixtures.join("default"),
+            ]);
+            let mut lowerer = Lowerer::with_module_resolver(resolver, main_path);
+            let lowered = lowerer.lower_module(&ast).expect("cross-folder variant import lowers");
+            let metadata = lowered.trait_infos.get("SelectedBackend").expect("alias metadata");
+            assert_eq!(metadata.name, "CryptoBackend");
+            assert_eq!(metadata.get_vtable_slot("available"), Some(expected_slot));
+            assert_eq!(metadata.get_method("available").unwrap().return_type, TypeId::BOOL);
+            let mir = crate::mir::lower_to_mir(&lowered).expect("variant call lowers to MIR");
+            let available = mir.functions.iter().find(|function| function.name == "available").unwrap();
+            assert!(available.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
+                matches!(instruction, crate::mir::MirInst::MethodCallVirtual { vtable_slot, .. }
+                    if *vtable_slot == expected_slot)
+            }), "{selection} must use its selected declaration's vtable slot");
+            assert!(available.blocks.iter().flat_map(|block| &block.instructions).all(|instruction| {
+                !matches!(instruction, crate::mir::MirInst::MethodCallStatic { func_name, .. }
+                    if func_name == "available")
+            }), "variant trait must not degrade to a bare static method");
+        }
+    }
+
+    #[test]
     fn import_target_intersection_matches_group_reexports() {
         let requested = ImportTarget::Single("shell".to_string());
         let available = ImportTarget::Group(vec![
