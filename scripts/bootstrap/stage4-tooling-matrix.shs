@@ -46,6 +46,16 @@ exact_env_schema() {
   [ "$schema_actual" -eq "$schema_expected" ] || return 1
 }
 
+valid_worker_run_identity() {
+  worker_identity=$1
+  case "$worker_identity" in run.*.*) ;; *) return 1 ;; esac
+  worker_identity_parts=${worker_identity#run.}
+  worker_identity_pid=${worker_identity_parts%%.*}
+  worker_identity_sequence=${worker_identity_parts#*.}
+  case "$worker_identity_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$worker_identity_sequence" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 matrix_id=
 compiler_manifest=
 cli_journal=
@@ -120,8 +130,7 @@ config="$work_root/config.env"
 receipt_dir="$state"
 if [ -n "$worker_task" ]; then
   case "$worker_task" in *[!A-Za-z0-9_]*) die "invalid worker task" ;; esac
-  case "$worker_run" in run.[0-9]*) ;; *) die "worker requires parent run identity" ;; esac
-  case "${worker_run#run.}" in *[!0-9]*) die "invalid parent run identity" ;; esac
+  valid_worker_run_identity "$worker_run" || die "invalid parent run identity"
   worker_run_dir="$work_root/scheduler/$worker_run"
   receipt_dir="$worker_run_dir/drafts"
   [ -d "$receipt_dir" ] && [ ! -L "$receipt_dir" ] || die "worker draft directory is unavailable"
@@ -2015,10 +2024,61 @@ scheduler_cancel_all() {
   done
 }
 
-scheduler_interrupted() {
+scheduler_allocate_run_dir() {
+  scheduler_allocate_root=$1
+  scheduler_allocate_attempt=0
+  while [ "$scheduler_allocate_attempt" -lt 1000 ]; do
+    scheduler_allocate_candidate="$scheduler_allocate_root/run.$$.$scheduler_allocate_attempt"
+    if mkdir "$scheduler_allocate_candidate" 2>/dev/null; then
+      scheduler_run_dir=$scheduler_allocate_candidate
+      {
+        echo 'schema=Stage4SchedulerRunOwnerV1'
+        echo "pid=$$"
+        echo "matrix_hash=$matrix_hash"
+        echo "config_hash=$config_hash"
+      } >"$scheduler_run_dir/owner.env.tmp" || die "cannot write scheduler ownership"
+      mv "$scheduler_run_dir/owner.env.tmp" "$scheduler_run_dir/owner.env" || die "cannot publish scheduler ownership"
+      mkdir "$scheduler_run_dir/active" "$scheduler_run_dir/worker-meta" \
+        "$scheduler_run_dir/drafts" "$scheduler_run_dir/committed" || die "cannot initialize scheduler state"
+      return 0
+    fi
+    [ -e "$scheduler_allocate_candidate" ] || die "cannot allocate scheduler run directory"
+    scheduler_allocate_attempt=$((scheduler_allocate_attempt + 1))
+  done
+  die "scheduler run namespace exhausted"
+}
+
+scheduler_cleanup_run_dir() {
+  scheduler_cleanup_root=$1
+  scheduler_cleanup_dir=$2
+  case "$scheduler_cleanup_dir" in
+    "$scheduler_cleanup_root"/run.$$.*) ;;
+    *) return 1 ;;
+  esac
+  scheduler_cleanup_sequence=${scheduler_cleanup_dir#"$scheduler_cleanup_root/run.$$."}
+  case "$scheduler_cleanup_sequence" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$scheduler_cleanup_dir" ] && [ ! -L "$scheduler_cleanup_dir" ] || return 1
+  scheduler_cleanup_owner="$scheduler_cleanup_dir/owner.env"
+  [ -f "$scheduler_cleanup_owner" ] && [ ! -L "$scheduler_cleanup_owner" ] || return 1
+  [ "$(wc -l <"$scheduler_cleanup_owner" | tr -d ' ')" -eq 4 ] || return 1
+  grep -Fxq 'schema=Stage4SchedulerRunOwnerV1' "$scheduler_cleanup_owner" || return 1
+  grep -Fxq "pid=$$" "$scheduler_cleanup_owner" || return 1
+  grep -Fxq "matrix_hash=$matrix_hash" "$scheduler_cleanup_owner" || return 1
+  grep -Fxq "config_hash=$config_hash" "$scheduler_cleanup_owner" || return 1
+  rm -rf "$scheduler_cleanup_dir"
+}
+
+scheduler_exit_cleanup() {
+  [ -n "${scheduler_run_dir:-}" ] || return 0
   scheduler_cancel_all "$scheduler_run_dir"
+  scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir" || :
+}
+
+scheduler_interrupted() {
+  [ -z "${scheduler_run_dir:-}" ] || scheduler_cancel_all "$scheduler_run_dir"
   write_summary
-  rm -rf "$scheduler_run_dir"
+  [ -z "${scheduler_run_dir:-}" ] || \
+    scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir" || die "cannot clean owned scheduler state"
   trap - EXIT INT TERM HUP
   exit 143
 }
@@ -2030,13 +2090,12 @@ run_scheduler_parent() {
   mkdir -p "$scheduler_root" || die "cannot create scheduler root"
   scheduler_capture_identity "$scheduler_parent_identity_before"
   scheduler_identity_matches_config "$scheduler_parent_identity_before" || die "frozen identity drift before scheduler dispatch"
-  scheduler_run_dir="$scheduler_root/run.$$"
-  mkdir -p "$scheduler_run_dir/active" "$scheduler_run_dir/worker-meta" \
-    "$scheduler_run_dir/drafts" "$scheduler_run_dir/committed" || die "cannot create scheduler state"
+  scheduler_run_dir=
+  trap 'scheduler_interrupted' INT TERM HUP
+  trap 'scheduler_exit_cleanup' EXIT
+  scheduler_allocate_run_dir "$scheduler_root"
   cp "$scheduler_parent_identity_before" "$scheduler_run_dir/identity-before" || die "cannot freeze worker identity"
   scheduler_admitted_identity_hash=$(hash_file "$scheduler_run_dir/identity-before")
-  trap 'scheduler_interrupted' INT TERM HUP
-  trap 'scheduler_cancel_all "$scheduler_run_dir"' EXIT
   scheduler_pending="$scheduler_run_dir/pending"
   : >"$scheduler_pending"
   while IFS="$(printf '\t')" read -r scheduler_task scheduler_required scheduler_deps; do
@@ -2091,6 +2150,7 @@ run_scheduler_parent() {
   fi
   scheduler_write_manifest "$scheduler_run_dir"
   write_summary
+  scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir" || die "cannot clean owned scheduler state"
   trap - EXIT INT TERM HUP
 }
 

@@ -100,6 +100,15 @@ schema, result, config, and source identity, then atomically commits the task re
 in frozen matrix order. Dependencies become ready only after this parent commit.
 The schedule is atomically published at `scheduler/schedule.tsv`.
 Supervisor PIDs and actual child session/group IDs are recorded separately.
+Each parent invocation atomically allocates a unique `run.<pid>.<sequence>`
+directory and publishes a `Stage4SchedulerRunOwnerV1` marker bound to its PID,
+matrix hash, and config hash. A reused PID therefore cannot inherit stale draft,
+session, or committed markers from an earlier process. Allocation never removes
+an existing run directory, since it may belong to a concurrent invocation.
+Normal and signal cleanup remove only a nonsymlink run directory whose complete
+owner marker still matches the current parent and admitted identities. The
+focused allocation regression is
+`test/02_integration/bootstrap_stage4_scheduler_run_allocation_test.shs`.
 The parent captures and verifies the complete frozen source/tool identity before
 dispatch and after all workers stop. Workers currently capture current source
 snapshots before and after their task and compare them with the admitted config;
