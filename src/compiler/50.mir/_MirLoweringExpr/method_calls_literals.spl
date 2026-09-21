@@ -3344,6 +3344,49 @@ impl MirLowering:
                     if val byte_at_local = byte_at_result:
                         return byte_at_local
 
+                # Primitive float rounding methods have no MethodResolver
+                # symbol.  Leaving them as `f64.floor` / `f64.ceil` /
+                # `f64.round` MethodCallStatic instructions makes LLVM's
+                # builtin-receiver guard reject them: those qualified names
+                # are receiver annotations, not linkable symbols.  Route the
+                # exact zero-argument float shapes through the typed runtime
+                # ABI after custom-owner recovery above has had first chance.
+                # This is also shared by the interpreter and loader compiler
+                # lanes because the choice is made once in MIR.
+                val float_rounding_shape = (
+                    args.len() == 0 and
+                    (method == "floor" or method == "ceil" or method == "round"))
+                if float_rounding_shape:
+                    var float_rounding_receiver = false
+                    if val known_rounding_type = self.local_mir_type_of(unresolved_receiver_local):
+                        match known_rounding_type.kind:
+                            case MirTypeKind.F64:
+                                float_rounding_receiver = true
+                            case _: ()
+                    if float_rounding_receiver:
+                        var b_rounding = self.builder
+                        var float_rounding_symbol = "rt_math_round"
+                        if method == "floor":
+                            float_rounding_symbol = "rt_math_floor"
+                        if method == "ceil":
+                            float_rounding_symbol = "rt_math_ceil"
+                        val float_rounding_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str(float_rounding_symbol),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [MirType.f64()],
+                                return_type: MirType.f64(),
+                                is_variadic: false
+                            )))
+                        ))
+                        val float_rounding_result = b_rounding.emit_call(
+                            float_rounding_op,
+                            [mir_operand_copy(unresolved_receiver_local)],
+                            MirType.f64()
+                        )
+                        self.builder = b_rounding
+                        if val rounded_local = float_rounding_result:
+                            return rounded_local
+
                 # Primitive/text `.to_text()` and `.to_string()` share the
                 # existing interpolation renderer, but only after custom
                 # struct methods had first chance to resolve above.
