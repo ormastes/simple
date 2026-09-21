@@ -3,7 +3,16 @@
 set -eu
 
 die() { echo "phase2-runtime-capsule: $*" >&2; exit 2; }
-hash_file() { sha256sum "$1" | awk '{print $1}'; }
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+hash_lines() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+  else shasum -a 256 | awk '{print $1}'
+  fi
+}
 value() { sed -n "s/^$1=//p" "$2" | head -n 1; }
 require_unique_keys() {
   file=$1; shift
@@ -61,7 +70,7 @@ verify_capsule() {
   [ -f "$capsule/$hosted_relative" ] && [ ! -L "$capsule/$hosted_relative" ] || return 1
   [ "$(hash_file "$capsule/$hosted_relative")" = "$hosted_sha" ] || return 1
   [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
-  aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha" | sha256sum | awk '{print $1}')
+  aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha" | hash_lines)
   [ "$(value capsule_identity_sha256 "$receipt")" = "$aggregate" ] || return 1
   # `-perm /MODE` (any of these bits) is a GNU findutils extension. BSD find,
   # which is what /bin/sh gets on macOS, rejects it with
@@ -108,7 +117,7 @@ case ${1:-} in
     hosted_receipt_sha=$(hash_file "$authority/hosted-runtime.env")
     stamp_sha=$(hash_file "$authority/simple.inputs.sha256")
     backfill_sha=$(value backfill_sha256 "$authority/simple.inputs.sha256")
-    aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha" | sha256sum | awk '{print $1}')
+    aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha" | hash_lines)
     {
       echo schema=simple-phase2-runtime-capsule-v1
       echo status=frozen

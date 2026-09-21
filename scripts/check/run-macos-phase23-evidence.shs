@@ -1,0 +1,84 @@
+#!/bin/sh
+# Produce and verify macOS Stage 2/3 evidence through admitted runtime capsules.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+bootstrap_root=${SIMPLE_WORKTREE_STORAGE_ROOT:-$root/.simple/storage}/build/bootstrap
+verify_root=${PHASE23_VERIFY_ROOT:-$root/build/verify}
+bootstrap=${PHASE23_BOOTSTRAP_COMMAND:-$root/scripts/bootstrap/bootstrap-from-scratch.sh}
+verifier=${PHASE23_VERIFIER_COMMAND:-$root/scripts/bootstrap/bootstrap-phase-verification.shs}
+capsule_tool=${PHASE23_CAPSULE_COMMAND:-$root/scripts/bootstrap/phase2-runtime-capsule.shs}
+evidence_tool=${PHASE23_EVIDENCE_COMMAND:-$root/scripts/check/check-bootstrap-phase-evidence.shs}
+
+if [ -n "${PHASE23_BOOTSTRAP_COMMAND:-}${PHASE23_VERIFIER_COMMAND:-}${PHASE23_CAPSULE_COMMAND:-}${PHASE23_EVIDENCE_COMMAND:-}" ] &&
+   [ "${PHASE23_CONTRACT_TEST:-0}" != 1 ]; then
+  echo 'phase23 command overrides are test-only' >&2
+  exit 2
+fi
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+stage_dir_with() {
+  marker=$1 found= count=0
+  for dir in "$bootstrap_root"/stage3/*; do
+    [ -f "$dir/$marker" ] || continue
+    found=$dir
+    count=$((count + 1))
+  done
+  [ "$count" -eq 1 ] || {
+    echo "expected one platform Stage 3 directory with $marker; found $count" >&2
+    return 1
+  }
+  printf '%s\n' "$found"
+}
+
+source_sha=$(git -C "$root" rev-parse HEAD)
+mkdir -p "$verify_root"
+
+SIMPLE_NO_STUB_FALLBACK=1 sh "$bootstrap" \
+  --full-bootstrap --stop-after-stage2 --strategy=full \
+  --produce-stage3-receipt=verify-landed-compiler-fix --jobs=8 \
+  --progress="$bootstrap_root/macos-pr-stage2.progress"
+
+stage_dir=$(stage_dir_with stage2-admitted/admission.env)
+stage2="$stage_dir/stage2-admitted/simple"
+authority="$stage_dir/stage2-runtime-authority"
+[ -x "$stage2" ] && [ -d "$authority" ] || exit 1
+stage2_sha=$(hash_file "$stage2")
+stage2_capsule=$(sh "$capsule_tool" publish "$stage2" "$authority" \
+  "$bootstrap_root/phase-runtime-capsules/stage2")
+sh "$capsule_tool" verify "$stage2_capsule"
+BOOTSTRAP_VERIFY_BUILD_THREADS=8 sh "$verifier" \
+  --phase=stage2 --compiler="$stage2" --compiler-sha256="$stage2_sha" \
+  --strategy=full --hash-policy=canonical --source-root="$root" \
+  --runtime-path="$stage2_capsule" --work-root="$verify_root/macos-stage2" \
+  --timeout-seconds=7200
+printf 'source_git_sha=%s\n' "$source_sha" >>"$verify_root/macos-stage2/summary.env"
+sh "$evidence_tool" stage2 "$verify_root/macos-stage2/summary.env" completed \
+  "$root" "$source_sha"
+
+receipt="$bootstrap_root/stage3-planner-admission.receipt"
+[ -f "$receipt" ] || exit 1
+SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$bootstrap_root" \
+  sh "$bootstrap" --resume-stage3-from-admitted="$bootstrap_root" \
+    --bootstrap-receipt="$receipt" --jobs=1
+
+stage_dir=$(stage_dir_with provenance.env)
+stage3="$stage_dir/simple"
+[ -x "$stage3" ] || exit 1
+stage3_sha=$(hash_file "$stage3")
+stage3_capsule=$(sh "$capsule_tool" publish "$stage3" "$authority" \
+  "$bootstrap_root/phase-runtime-capsules/stage3")
+sh "$capsule_tool" verify "$stage3_capsule"
+BOOTSTRAP_VERIFY_BUILD_THREADS=8 sh "$verifier" \
+  --phase=stage3 --compiler="$stage3" --compiler-sha256="$stage3_sha" \
+  --strategy=full --hash-policy=canonical --source-root="$root" \
+  --runtime-path="$stage3_capsule" --work-root="$verify_root/macos-stage3" \
+  --timeout-seconds=7200
+printf 'source_git_sha=%s\n' "$source_sha" >>"$verify_root/macos-stage3/summary.env"
+sh "$evidence_tool" stage3 "$verify_root/macos-stage3/summary.env" completed \
+  "$root" "$source_sha"
