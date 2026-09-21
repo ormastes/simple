@@ -1,0 +1,1005 @@
+# Linux OCI LinuxOciRuntimeProviderV1.
+#
+# The provider owns the Linux edge only.  It uses argv vectors through the
+# process facade and never builds a shell command.  Podman is the default
+# engine because its supported Linux mode is rootless; Docker and bare runc
+# are accepted only when explicitly selected by an already-positive host
+# probe.  This module does not install tools, change uid maps, change kernel
+# policy, or infer capability from an engine name.
+
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1,
+    RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1, RuntimeValidationV1,
+    RuntimeProbeV1, RuntimeIntentV1, RuntimeProviderContractV1,
+    RuntimeProviderV1,
+    RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
+    RUNTIME_PHASE_EXITED, RUNTIME_PHASE_STOPPED, RUNTIME_PHASE_DESTROYED,
+    RUNTIME_PHASE_UNKNOWN, RUNTIME_STATUS_OK, RUNTIME_STATUS_REJECTED,
+    RUNTIME_STATUS_BLOCKED, runtime_identity_empty, runtime_command_empty,
+    runtime_state_empty, RUNTIME_PRIVILEGE_ROOTLESS, RUNTIME_PRIVILEGE_ROOT,
+    RUNTIME_PRIVILEGE_UNKNOWN}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded, file_lock, file_unlock}
+use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
+
+pub const OCI_ENGINE_PODMAN = "podman"
+pub const OCI_ENGINE_DOCKER = "docker"
+pub const OCI_ENGINE_RUNC = "runc"
+pub const OCI_DEFAULT_ENGINE = OCI_ENGINE_PODMAN
+pub const OCI_DEFAULT_TIMEOUT_MS: i64 = 30000
+pub const OCI_DEFAULT_STOP_TIMEOUT_SECONDS: i64 = 10
+pub const OCI_MAX_OUTPUT_BYTES: i64 = 1048576
+
+pub const OCI_REASON_PROVIDER_UNAVAILABLE = "oci-provider-live-execution-unavailable"
+
+pub fn linux_oci_provider_contract() -> RuntimeProviderContractV1:
+    RuntimeProviderContractV1(provider_id: "linux-oci-v1", version: 1,
+        supports_recovery: true, supports_logs: true)
+
+pub struct LinuxOciRequestV1:
+    pod_uid: text
+    attempt: i64
+    # Filled from the durable intent record during restart recovery. Empty on
+    # first create; the provider then mints and labels one before side effects.
+    operation_id: text
+    image: text
+    bundle_path: text
+    command: [text]
+    args: [text]
+    timeout_ms: i64
+
+pub struct ScriptedCommandResultV1:
+    operation: text
+    program: text
+    args: [text]
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+struct RuntimeExecResultV1:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    matched: bool
+
+# A class is used here so the in-memory ownership table is mutated only by the
+# provider.  The table is an execution cache, not durable authority: recover()
+# revalidates every identity against the native engine before adopting it.
+pub class LinuxOciRuntimeProviderV1:
+    platform: text
+    engine: text
+    state_dir: text
+    node_boot_id: text
+    provider_generation: i64
+    timeout_ms: i64
+    live_enabled: bool
+    scripted: bool
+    scripted_results: [ScriptedCommandResultV1]
+    var intents: [RuntimeIntentV1]
+    var states: [RuntimeStateV1]
+    var operation_sequence: i64
+    var scripted_cursor: i64
+
+impl LinuxOciRuntimeProviderV1:
+    pub static fn new(platform: text, engine: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64,
+            live_enabled: bool = true,
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> LinuxOciRuntimeProviderV1:
+        val effective_timeout = if timeout_ms > 0 then timeout_ms else OCI_DEFAULT_TIMEOUT_MS
+        var provider = LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
+            state_dir: state_dir, node_boot_id: node_boot_id,
+            provider_generation: provider_generation,
+            timeout_ms: effective_timeout, live_enabled: live_enabled,
+            scripted: false, scripted_results: [], intents: [], states: [],
+            operation_sequence: 0, scripted_cursor: 0)
+        provider
+
+    # A deterministic executor seam for contract tests.  Each result is
+    # matched by operation, program, and exact argv; an unmatched command is
+    # a failed scripted execution, never an implicit success.
+    pub static fn scripted(platform: text, engine: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64,
+            results: [ScriptedCommandResultV1],
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> LinuxOciRuntimeProviderV1:
+        val effective_timeout = if timeout_ms > 0 then timeout_ms else OCI_DEFAULT_TIMEOUT_MS
+        LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
+            state_dir: state_dir, node_boot_id: node_boot_id,
+            provider_generation: provider_generation,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true,
+            scripted_results: results, intents: [], states: [],
+            operation_sequence: 0, scripted_cursor: 0)
+
+    pub static fn scripted_with_intents(platform: text, engine: text,
+            state_dir: text, node_boot_id: text, provider_generation: i64,
+            intents: [RuntimeIntentV1],
+            results: [ScriptedCommandResultV1],
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> LinuxOciRuntimeProviderV1:
+        val effective_timeout = if timeout_ms > 0 then timeout_ms else OCI_DEFAULT_TIMEOUT_MS
+        LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
+            state_dir: state_dir, node_boot_id: node_boot_id,
+            provider_generation: provider_generation,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true,
+            scripted_results: results, intents: intents, states: [],
+            operation_sequence: 0, scripted_cursor: 0)
+
+    fn _probe() -> RuntimeProbeV1:
+        val valid = self.validate_probe_config()
+        if not valid.accepted:
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: false, healthy: false, launch_capable: false,
+                privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: valid.reason)
+        if self.scripted:
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: true, healthy: true, launch_capable: true,
+                privilege: if self.engine == OCI_ENGINE_DOCKER then RUNTIME_PRIVILEGE_ROOT else RUNTIME_PRIVILEGE_ROOTLESS,
+                reason: "scripted-provider")
+        if not self.live_enabled:
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: false, healthy: false, launch_capable: false,
+                privilege: RUNTIME_PRIVILEGE_UNKNOWN,
+                reason: OCI_REASON_PROVIDER_UNAVAILABLE)
+        val run = process_run_timeout(self.engine, ["--version"], self.timeout_ms)
+        if run.2.to_i64() != 0:
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: false, healthy: false, launch_capable: false,
+                privilege: RUNTIME_PRIVILEGE_UNKNOWN,
+                reason: "engine-probe-failed: " + run.1.trim())
+        var health_args: [text] = ["info", "--format"]
+        if self.engine == OCI_ENGINE_DOCKER:
+            health_args.push("{{.ServerVersion}}")
+        else:
+            health_args.push("{{.Host.Security.Rootless}}")
+        val health = process_run_timeout(self.engine, health_args, self.timeout_ms)
+        if health.2.to_i64() != 0 or health.0.trim() == "" or
+                (self.engine == OCI_ENGINE_PODMAN and health.0.trim() != "true"):
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: true, healthy: false, launch_capable: false,
+                privilege: RUNTIME_PRIVILEGE_UNKNOWN,
+                reason: "engine-health-or-launch-capability-unavailable: " + health.1.trim())
+        RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+            engine_present: true, healthy: true, launch_capable: true,
+            privilege: if self.engine == OCI_ENGINE_DOCKER then RUNTIME_PRIVILEGE_ROOT else RUNTIME_PRIVILEGE_ROOTLESS,
+            reason: "engine version and health/capability probes answered")
+
+    fn validate_probe_config() -> RuntimeValidationV1:
+        if self.platform != "linux":
+            return RuntimeValidationV1(accepted: false,
+                reason: "unsupported-platform: linux OCI provider received " + self.platform)
+        if self.engine != OCI_ENGINE_PODMAN and self.engine != OCI_ENGINE_DOCKER:
+            return RuntimeValidationV1(accepted: false,
+                reason: "unsupported-engine: " + self.engine)
+        if self.node_boot_id == "" or self.provider_generation <= 0:
+            return RuntimeValidationV1(accepted: false,
+                reason: "provider-identity-invalid")
+        RuntimeValidationV1(accepted: true, reason: "")
+
+    pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
+        if self.platform != "linux":
+            return RuntimeValidationV1(accepted: false,
+                reason: "unsupported-platform: linux OCI provider received " + self.platform)
+        if self.engine != OCI_ENGINE_PODMAN and self.engine != OCI_ENGINE_DOCKER:
+            return RuntimeValidationV1(accepted: false,
+                reason: "unsupported-engine: " + self.engine)
+        if self.state_dir == "":
+            return RuntimeValidationV1(accepted: false, reason: "state-directory-empty")
+        if self.state_dir.contains("..") or self.state_dir.contains("\n") or
+                self.state_dir.contains("\r"):
+            return RuntimeValidationV1(accepted: false,
+                reason: "state-directory-unsafe")
+        if self.node_boot_id == "":
+            return RuntimeValidationV1(accepted: false, reason: "node-boot-id-empty")
+        if self.provider_generation <= 0:
+            return RuntimeValidationV1(accepted: false,
+                reason: "provider-generation-invalid")
+        if request.pod_uid == "":
+            return RuntimeValidationV1(accepted: false, reason: "pod-uid-empty")
+        if not _safe_token(request.pod_uid):
+            return RuntimeValidationV1(accepted: false,
+                reason: "pod-uid-contains-unsafe-character")
+        if request.attempt <= 0:
+            return RuntimeValidationV1(accepted: false, reason: "attempt-invalid")
+        if request.operation_id != "" and not _safe_token(request.operation_id):
+            return RuntimeValidationV1(accepted: false,
+                reason: "operation-id-contains-unsafe-character")
+        if request.image == "":
+            return RuntimeValidationV1(accepted: false,
+                reason: "image-empty")
+        if not _locked_image(request.image):
+            return RuntimeValidationV1(accepted: false,
+                reason: "image-must-use-sha256-digest")
+        if self.engine == OCI_ENGINE_RUNC:
+            return RuntimeValidationV1(accepted: false,
+                reason: "unsupported-engine: runc-lifecycle-not-qualified")
+        if request.image.contains("\n") or request.image.contains("\r"):
+            return RuntimeValidationV1(accepted: false,
+                reason: "image-contains-control-character")
+        for item in request.command:
+            if item == "":
+                return RuntimeValidationV1(accepted: false,
+                    reason: "command-contains-empty-argument")
+        for item in request.args:
+            if item.contains("\n") or item.contains("\r"):
+                return RuntimeValidationV1(accepted: false,
+                    reason: "argument-contains-control-character")
+        RuntimeValidationV1(accepted: true, reason: "")
+
+    # Reserve the logical attempt before any native side effect.  This is the
+    # synchronous half of prepare_pod; the native engine is still untouched.
+    me prepare_pod(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if not valid.accepted:
+            return self._rejected("prepare_pod", valid.reason, runtime_command_empty())
+        val existing = self._find(request.pod_uid, request.attempt)
+        if existing >= 0:
+            val current = self.states[existing]
+            return self._ok("prepare_pod", current,
+                RuntimeCommandV1(operation: "prepare_pod", program: "", args: []),
+                "logical attempt already prepared")
+        val id = RuntimeIdentityV1(pod_uid: request.pod_uid,
+            attempt: request.attempt, provider_generation: self.provider_generation,
+            operation_id: self._next_operation("prepare"), engine: self.engine,
+            native_id: "", node_boot_id: self.node_boot_id)
+        val state = RuntimeStateV1(phase: RUNTIME_PHASE_PREPARED,
+            identity: id, exit_code: -1, reason: "prepared")
+        self.states.push(state)
+        self._ok("prepare_pod", state,
+            RuntimeCommandV1(operation: "prepare_pod", program: "", args: []),
+            "prepared")
+
+    # Materialize a non-running native workload.  An unavailable host lane is
+    # a typed BLOCKED result and cannot mutate the state table.
+    me create(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if not valid.accepted:
+            return self._rejected("create", valid.reason, runtime_command_empty())
+        val index = self._find(request.pod_uid, request.attempt)
+        if index < 0:
+            val prepared = self.prepare_pod(request)
+            if prepared.status != RUNTIME_STATUS_OK:
+                return prepared
+        val state_index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[state_index]
+        if current.phase == RUNTIME_PHASE_CREATED or
+                current.phase == RUNTIME_PHASE_RUNNING or
+                current.phase == RUNTIME_PHASE_EXITED or
+                current.phase == RUNTIME_PHASE_STOPPED:
+            return self._ok("create", current,
+                RuntimeCommandV1(operation: "create", program: "", args: []),
+                "idempotent existing native workload")
+        if current.phase == RUNTIME_PHASE_DESTROYED:
+            return self._rejected("create", "attempt-already-destroyed",
+                runtime_command_empty())
+        self._load_persisted_intent(request)
+        val saved_intent = self._intent_for(request.pod_uid, request.attempt)
+        if saved_intent.operation_id != "":
+            # A previous create may have timed out after native side effects.
+            # Inspect/adopt the exact owned identity before permitting any
+            # retry; ambiguity is returned to the caller and never duplicated.
+            return self.recover(request)
+        val operation_id = if request.operation_id != "": request.operation_id
+            elif saved_intent.operation_id != "": saved_intent.operation_id
+            else: self._next_operation("create")
+        val command = build_create_command(self.engine, self.state_dir, request,
+            operation_id, self.provider_generation, self.node_boot_id)
+        if command.0 != "":
+            return self._rejected("create", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("create", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        if not self._save_intent(request, operation_id, "", RUNTIME_PHASE_PREPARED):
+            return self._rejected("create", "intent-journal-write-failed",
+                runtime_command_empty())
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._create_failure_with_recovery(request,
+                self._rejected_with_output("create", current, command.1,
+                    "scripted-command-not-found", run.stdout, run.stderr, run.exit_code))
+        if run.exit_code != 0:
+            return self._create_failure_with_recovery(request,
+                self._rejected_with_output("create", current, command.1,
+                    "native-create-failed", run.stdout, run.stderr, run.exit_code))
+        val native_id = run.stdout.trim().split("\n")[0].trim()
+        if native_id == "":
+            return self._create_failure_with_recovery(request,
+                self._rejected_with_output("create", current, command.1,
+                    "native-create-returned-empty-id", run.stdout, run.stderr, run.exit_code))
+        var identity = current.identity
+        identity.native_id = native_id
+        identity.operation_id = operation_id
+        val created = RuntimeStateV1(phase: RUNTIME_PHASE_CREATED,
+            identity: identity, exit_code: -1, reason: "created")
+        self.states[state_index] = created
+        if not self._save_intent(request, operation_id, native_id, RUNTIME_PHASE_CREATED):
+            val cleanup = self.destroy(request, true)
+            var failed = self._rejected_with_output("create", created, command.1,
+                "intent-journal-update-failed", run.stdout, run.stderr, run.exit_code)
+            failed.reason = failed.reason + "; cleanup: " + cleanup.reason
+            return failed
+        self._ok("create", created, command.1, "created")
+
+    me start(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val current_result = self._current_for(request, "start")
+        if current_result.status != RUNTIME_STATUS_OK:
+            return current_result
+        self._load_persisted_intent(request)
+        val index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[index]
+        if current.phase == RUNTIME_PHASE_RUNNING:
+            return self._ok("start", current,
+                RuntimeCommandV1(operation: "start", program: "", args: []),
+                "idempotent already-running workload")
+        if current.phase != RUNTIME_PHASE_CREATED:
+            return self._rejected("start", "invalid-state-for-start-" + current.phase,
+                runtime_command_empty())
+        val command = build_start_command(self.engine, self.state_dir,
+            current.identity.native_id)
+        if command.0 != "":
+            return self._rejected("start", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("start", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("start", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("start", current, command.1,
+                "native-start-failed", run.stdout, run.stderr, run.exit_code)
+        val started = RuntimeStateV1(phase: RUNTIME_PHASE_RUNNING,
+            identity: current.identity, exit_code: -1, reason: "running")
+        self.states[index] = started
+        self._ok("start", started, command.1, "started")
+
+    me inspect(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val current_result = self._current_for(request, "inspect")
+        if current_result.status != RUNTIME_STATUS_OK:
+            return current_result
+        val index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[index]
+        val command = build_inspect_command(self.engine, self.state_dir,
+            current.identity.native_id)
+        if command.0 != "":
+            return self._rejected("inspect", command.0, runtime_command_empty())
+        if self.engine == OCI_ENGINE_RUNC:
+            return self._rejected("inspect", "runc-recovery-requires-identity-labels",
+                command.1)
+        if not self.live_enabled:
+            return self._blocked("inspect", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("inspect", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("inspect", current, command.1,
+                "native-inspect-failed", run.stdout, run.stderr, run.exit_code)
+        match recover_state_from_inspect(self.engine, run.stdout, request,
+                current.identity.operation_id, current.identity.native_id,
+                self.provider_generation, self.node_boot_id):
+            case Err(reason):
+                self._rejected_with_output("inspect", current, command.1,
+                    reason, run.stdout, run.stderr, run.exit_code)
+            case Ok(observed):
+                self.states[index] = observed
+                self._ok("inspect", observed, command.1, "inspected")
+
+    me wait(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val current_result = self._current_for(request, "wait")
+        if current_result.status != RUNTIME_STATUS_OK:
+            return current_result
+        val index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[index]
+        if current.phase == RUNTIME_PHASE_EXITED or
+                current.phase == RUNTIME_PHASE_STOPPED:
+            return self._ok("wait", current,
+                RuntimeCommandV1(operation: "wait", program: "", args: []),
+                "idempotent terminal observation")
+        if current.phase != RUNTIME_PHASE_RUNNING:
+            return self._rejected("wait", "invalid-state-for-wait-" + current.phase,
+                runtime_command_empty())
+        val command = build_wait_command(self.engine, self.state_dir,
+            current.identity.native_id)
+        if command.0 != "":
+            return self._rejected("wait", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("wait", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("wait", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("wait", current, command.1,
+                "native-wait-failed", run.stdout, run.stderr, run.exit_code)
+        val raw_code = run.stdout.trim()
+        if raw_code == "" or raw_code.to_i64().to_text() != raw_code:
+            return self._rejected_with_output("wait", current, command.1,
+                "native-wait-returned-invalid-exit-code", run.stdout, run.stderr, run.exit_code)
+        val exited = RuntimeStateV1(phase: RUNTIME_PHASE_EXITED,
+            identity: current.identity, exit_code: raw_code.to_i64(), reason: "exited")
+        self.states[index] = exited
+        self._ok("wait", exited, command.1, "exited")
+
+    pub fn logs(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val current_result = self._current_for(request, "logs")
+        if current_result.status != RUNTIME_STATUS_OK:
+            return current_result
+        val index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[index]
+        if current.phase != RUNTIME_PHASE_RUNNING and
+                current.phase != RUNTIME_PHASE_EXITED and
+                current.phase != RUNTIME_PHASE_STOPPED:
+            return self._rejected("logs", "invalid-state-for-logs-" + current.phase,
+                runtime_command_empty())
+        val command = build_logs_command(self.engine, self.state_dir,
+            current.identity.native_id)
+        if command.0 != "":
+            return self._rejected("logs", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("logs", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("logs", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("logs", current, command.1,
+                "native-logs-failed", run.stdout, run.stderr, run.exit_code)
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "logs",
+            command: command.1, state: current, exit_code: current.exit_code,
+            stdout: run.stdout, stderr: run.stderr, reason: "observed")
+
+    me stop(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val current_result = self._current_for(request, "stop")
+        if current_result.status != RUNTIME_STATUS_OK:
+            return current_result
+        val index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[index]
+        if current.phase == RUNTIME_PHASE_STOPPED or current.phase == RUNTIME_PHASE_EXITED:
+            return self._ok("stop", current,
+                RuntimeCommandV1(operation: "stop", program: "", args: []),
+                "idempotent terminal stop")
+        if current.phase != RUNTIME_PHASE_RUNNING and
+                current.phase != RUNTIME_PHASE_CREATED:
+            return self._rejected("stop", "invalid-state-for-stop-" + current.phase,
+                runtime_command_empty())
+        val command = build_stop_command(self.engine, self.state_dir,
+            current.identity.native_id, OCI_DEFAULT_STOP_TIMEOUT_SECONDS)
+        if command.0 != "":
+            return self._rejected("stop", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("stop", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("stop", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("stop", current, command.1,
+                "native-stop-failed", run.stdout, run.stderr, run.exit_code)
+        val stopped = RuntimeStateV1(phase: RUNTIME_PHASE_STOPPED,
+            identity: current.identity, exit_code: current.exit_code, reason: "stopped")
+        self.states[index] = stopped
+        self._ok("stop", stopped, command.1, "stopped")
+
+    me destroy(request: LinuxOciRequestV1, force: bool = false) -> RuntimeOperationV1:
+        val current_result = self._current_for(request, "destroy")
+        if current_result.status != RUNTIME_STATUS_OK:
+            return current_result
+        val index = self._find(request.pod_uid, request.attempt)
+        val current = self.states[index]
+        if current.phase == RUNTIME_PHASE_DESTROYED:
+            return self._ok("destroy", current,
+                RuntimeCommandV1(operation: "destroy", program: "", args: []),
+                "idempotent already-destroyed workload")
+        if current.phase == RUNTIME_PHASE_RUNNING and not force:
+            return self._rejected("destroy", "running-workload-requires-force",
+                runtime_command_empty())
+        if current.phase != RUNTIME_PHASE_CREATED and
+                current.phase != RUNTIME_PHASE_RUNNING and
+                current.phase != RUNTIME_PHASE_EXITED and
+                current.phase != RUNTIME_PHASE_STOPPED:
+            return self._rejected("destroy", "invalid-state-for-destroy-" + current.phase,
+                runtime_command_empty())
+        val command = build_destroy_command(self.engine, self.state_dir,
+            current.identity.native_id, force)
+        if command.0 != "":
+            return self._rejected("destroy", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("destroy", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("destroy", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("destroy", current, command.1,
+                "native-destroy-failed", run.stdout, run.stderr, run.exit_code)
+        val destroyed = RuntimeStateV1(phase: RUNTIME_PHASE_DESTROYED,
+            identity: current.identity, exit_code: current.exit_code, reason: "destroyed")
+        self.states[index] = destroyed
+        if not self._save_intent(request, current.identity.operation_id,
+                current.identity.native_id, RUNTIME_PHASE_DESTROYED):
+            return self._rejected_with_output("destroy", destroyed, command.1,
+                "intent-journal-update-failed", run.stdout, run.stderr, run.exit_code)
+        self._ok("destroy", destroyed, command.1, "destroyed")
+
+    me recover(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if not valid.accepted:
+            return self._rejected("recover", valid.reason, runtime_command_empty())
+        if self.engine == OCI_ENGINE_RUNC:
+            return self._rejected("recover", "runc-recovery-requires-identity-labels",
+                runtime_command_empty())
+        self._load_persisted_intent(request)
+        val index = self._find(request.pod_uid, request.attempt)
+        val saved_intent = self._intent_for(request.pod_uid, request.attempt)
+        var expected_operation_id = request.operation_id
+        var expected_native_id = ""
+        if saved_intent.operation_id != "" and request.operation_id != "" and
+                request.operation_id != saved_intent.operation_id:
+            return self._rejected("recover", "intent-operation-id-mismatch",
+                runtime_command_empty())
+        if saved_intent.operation_id != "": expected_operation_id = saved_intent.operation_id
+        if expected_native_id == "": expected_native_id = saved_intent.native_id
+        if saved_intent.provider_generation > 0 and
+                saved_intent.provider_generation != self.provider_generation:
+            return self._rejected("recover", "intent-provider-generation-mismatch",
+                runtime_command_empty())
+        if saved_intent.node_boot_id != "" and
+                saved_intent.node_boot_id != self.node_boot_id:
+            return self._rejected("recover", "intent-node-boot-id-mismatch",
+                runtime_command_empty())
+        var current = runtime_state_empty()
+        if index >= 0:
+            current = self.states[index]
+            if current.phase != RUNTIME_PHASE_PREPARED:
+                if expected_operation_id != "" and
+                        current.identity.operation_id != expected_operation_id:
+                    return self._rejected("recover", "state-operation-id-mismatch",
+                        runtime_command_empty())
+                expected_operation_id = current.identity.operation_id
+                expected_native_id = current.identity.native_id
+        if expected_operation_id == "":
+            return self._rejected("recover", "recovery-operation-id-missing",
+                runtime_command_empty())
+        val lookup_name = match linux_oci_container_name(request.pod_uid, request.attempt):
+            case Err(reason): return self._rejected("recover", reason, runtime_command_empty())
+            case Ok(name): name
+        val inspect_id = if expected_native_id != "" then expected_native_id else lookup_name
+        val command = build_inspect_command(self.engine, self.state_dir, inspect_id)
+        if command.0 != "":
+            return self._rejected("recover", command.0, runtime_command_empty())
+        if not self.live_enabled:
+            return self._blocked("recover", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
+        val run = self._execute(command.1)
+        if not run.matched:
+            return self._rejected_with_output("recover", current, command.1,
+                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+        if run.exit_code != 0:
+            return self._rejected_with_output("recover", current, command.1,
+                "native-recover-inspect-failed", run.stdout, run.stderr, run.exit_code)
+        match recover_state_from_inspect(self.engine, run.stdout, request,
+                expected_operation_id, expected_native_id,
+                self.provider_generation, self.node_boot_id):
+            case Err(reason):
+                self._rejected_with_output("recover", current, command.1,
+                    reason, run.stdout, run.stderr, run.exit_code)
+            case Ok(recovered):
+                if index >= 0:
+                    self.states[index] = recovered
+                else:
+                    self.states.push(recovered)
+                self._ok("recover", recovered, command.1, "recovered")
+
+    pub fn state_for(request: LinuxOciRequestV1) -> RuntimeStateV1:
+        val index = self._find(request.pod_uid, request.attempt)
+        if index < 0:
+            return runtime_state_empty()
+        self.states[index]
+
+    pub fn intent_for(request: LinuxOciRequestV1) -> RuntimeIntentV1:
+        self._load_persisted_intent(request)
+        self._intent_for(request.pod_uid, request.attempt)
+
+    pub fn persist_intent(request: LinuxOciRequestV1, operation_id: text) -> bool:
+        val valid = self.validate(request)
+        if not valid.accepted or operation_id == "" or not _safe_token(operation_id):
+            return false
+        self._save_intent(request, operation_id, "", RUNTIME_PHASE_PREPARED)
+
+    # The optional capabilities are explicit.  A caller must never interpret
+    # empty output as a successful logs/stats observation.
+    pub fn logs_unavailable() -> RuntimeOperationV1:
+        RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: "logs",
+            command: runtime_command_empty(), state: runtime_state_empty(),
+            exit_code: -1, stdout: "", stderr: "",
+            reason: "optional-capability-unavailable: logs")
+
+    pub fn stats_unavailable() -> RuntimeOperationV1:
+        RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: "stats",
+            command: runtime_command_empty(), state: runtime_state_empty(),
+            exit_code: -1, stdout: "", stderr: "",
+            reason: "optional-capability-unavailable: stats")
+
+    # Intent is written before create executes.  A single newline-delimited
+    # record is used so restart recovery does not depend on the provider's
+    # in-memory table.  The temporary file plus rename keeps a torn write from
+    # becoming authority for a later recovery.
+    fn _journal_path(request: LinuxOciRequestV1) -> text:
+        self.state_dir + "/runtime-intent-" + request.pod_uid + "-" +
+            request.attempt.to_text() + "-" + self.provider_generation.to_text()
+
+    fn _intent_line(intent: RuntimeIntentV1) -> text:
+        ["runtime-intent-v1", intent.pod_uid, intent.attempt.to_text(),
+            intent.provider_generation.to_text(), intent.operation_id,
+            intent.engine, intent.native_id, intent.node_boot_id,
+            intent.phase].join("|")
+
+    fn _write_intent_journal(request: LinuxOciRequestV1) -> bool:
+        if self.scripted: return true
+        if self.state_dir == "": return false
+        var lines: [text] = []
+        val intent = self._intent_for(request.pod_uid, request.attempt)
+        if intent.operation_id == "": return false
+        lines.push(self._intent_line(intent))
+        val path = self._journal_path(request)
+        val lock = file_lock(path + ".lock", 5)
+        if lock < 0: return false
+        val written = file_atomic_write_mode(path, lines.join("\n"), 0o600)
+        file_unlock(lock)
+        written
+
+    me _load_persisted_intent(request: LinuxOciRequestV1):
+        if self.state_dir == "":
+            return
+        val path = self._journal_path(request)
+        if not file_is_regular_no_follow(path):
+            return
+        val content = match file_read_regular_no_follow_bounded(path, OCI_MAX_OUTPUT_BYTES):
+            case Ok(value): value.trim()
+            case Err(_): return
+        if content == "":
+            return
+        val fields = content.split("|")
+        if fields.len() != 9 or fields[0] != "runtime-intent-v1" or
+                fields[1] != request.pod_uid or
+                fields[2] != request.attempt.to_text() or
+                fields[3] != self.provider_generation.to_text() or
+                not _safe_token(fields[4]) or fields[5] != self.engine or
+                (fields[6] != "" and not _safe_token(fields[6])) or
+                fields[7] != self.node_boot_id or not _valid_intent_phase(fields[8]):
+            return
+        val loaded = RuntimeIntentV1(pod_uid: fields[1],
+            attempt: fields[2].to_i64(), provider_generation: fields[3].to_i64(),
+            operation_id: fields[4], engine: fields[5], native_id: fields[6],
+            node_boot_id: fields[7], phase: fields[8])
+        var index = 0
+        while index < self.intents.len():
+            if self.intents[index].pod_uid == loaded.pod_uid and
+                    self.intents[index].attempt == loaded.attempt:
+                self.intents[index] = loaded
+                return
+            index = index + 1
+        self.intents.push(loaded)
+
+    fn _find(request_pod_uid: text, request_attempt: i64) -> i64:
+        var index = 0
+        while index < self.states.len():
+            val identity = self.states[index].identity
+            if identity.pod_uid == request_pod_uid and identity.attempt == request_attempt:
+                return index
+            index = index + 1
+        -1
+
+    fn _intent_for(request_pod_uid: text, request_attempt: i64) -> RuntimeIntentV1:
+        for intent in self.intents:
+            if intent.pod_uid == request_pod_uid and intent.attempt == request_attempt:
+                return intent
+        RuntimeIntentV1(pod_uid: "", attempt: 0, provider_generation: 0,
+            operation_id: "", engine: "", native_id: "", node_boot_id: "",
+            phase: "")
+
+    me _save_intent(request: LinuxOciRequestV1, operation_id: text,
+            native_id: text, phase: text):
+        var index = 0
+        while index < self.intents.len():
+            if self.intents[index].pod_uid == request.pod_uid and
+                    self.intents[index].attempt == request.attempt:
+                self.intents[index] = RuntimeIntentV1(pod_uid: request.pod_uid,
+                    attempt: request.attempt, provider_generation: self.provider_generation,
+                    operation_id: operation_id, engine: self.engine,
+                    native_id: native_id, node_boot_id: self.node_boot_id, phase: phase)
+                return self._write_intent_journal(request)
+            index = index + 1
+        self.intents.push(RuntimeIntentV1(pod_uid: request.pod_uid,
+            attempt: request.attempt, provider_generation: self.provider_generation,
+            operation_id: operation_id, engine: self.engine,
+            native_id: native_id, node_boot_id: self.node_boot_id, phase: phase))
+        self._write_intent_journal(request)
+
+    fn _execute(command: RuntimeCommandV1) -> RuntimeExecResultV1:
+        if self.scripted:
+            if self.scripted_cursor >= self.scripted_results.len():
+                return RuntimeExecResultV1(stdout: "", stderr: "scripted-command-not-found",
+                    exit_code: -1, matched: false)
+            val scripted = self.scripted_results[self.scripted_cursor]
+            if scripted.operation == command.operation and
+                    scripted.program == command.program and
+                    _args_equal(scripted.args, command.args):
+                self.scripted_cursor = self.scripted_cursor + 1
+                if scripted.stdout.len() > OCI_MAX_OUTPUT_BYTES or
+                        scripted.stderr.len() > OCI_MAX_OUTPUT_BYTES:
+                    return RuntimeExecResultV1(stdout: "", stderr: "output-limit-exceeded",
+                        exit_code: -1, matched: true)
+                return RuntimeExecResultV1(stdout: scripted.stdout,
+                    stderr: scripted.stderr, exit_code: scripted.exit_code,
+                    matched: true)
+            return RuntimeExecResultV1(stdout: "", stderr: "scripted-command-not-found",
+                exit_code: -1, matched: false)
+        if not self.live_enabled:
+            return RuntimeExecResultV1(stdout: "", stderr: OCI_REASON_PROVIDER_UNAVAILABLE,
+                exit_code: -1, matched: false)
+        val run = process_run_bounded(command.program, command.args, self.timeout_ms,
+            OCI_MAX_OUTPUT_BYTES)
+        RuntimeExecResultV1(stdout: run.0, stderr: run.1,
+            exit_code: run.2.to_i64(), matched: true)
+
+    fn _create_failure_with_recovery(request: LinuxOciRequestV1,
+            failure: RuntimeOperationV1) -> RuntimeOperationV1:
+        val recovery = self.recover(request)
+        if recovery.status == RUNTIME_STATUS_OK:
+            return recovery
+        var merged = failure
+        merged.reason = failure.reason + "; recovery: " + recovery.reason
+        merged
+
+    me _next_operation(prefix: text) -> text:
+        self.operation_sequence = self.operation_sequence + 1
+        prefix + "-" + self.operation_sequence.to_text()
+
+    fn _current_for(request: LinuxOciRequestV1, operation: text) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if not valid.accepted:
+            return self._rejected(operation, valid.reason, runtime_command_empty())
+        self._load_persisted_intent(request)
+        val index = self._find(request.pod_uid, request.attempt)
+        if index < 0:
+            return self._rejected(operation, "attempt-not-prepared", runtime_command_empty())
+        val state = self.states[index]
+        if state.identity.provider_generation != self.provider_generation:
+            return self._rejected(operation, "provider-generation-mismatch",
+                runtime_command_empty())
+        if state.identity.node_boot_id != self.node_boot_id:
+            return self._rejected(operation, "node-boot-id-mismatch", runtime_command_empty())
+        self._ok(operation, state,
+            RuntimeCommandV1(operation: operation, program: "", args: []), "")
+
+    fn _ok(operation: text, state: RuntimeStateV1,
+            command: RuntimeCommandV1, reason: text) -> RuntimeOperationV1:
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: command, state: state, exit_code: state.exit_code,
+            stdout: "", stderr: "", reason: reason)
+
+    fn _blocked(operation: text, reason: text,
+            command: RuntimeCommandV1) -> RuntimeOperationV1:
+        RuntimeOperationV1(status: RUNTIME_STATUS_BLOCKED, operation: operation,
+            command: command, state: runtime_state_empty(), exit_code: -1,
+            stdout: "", stderr: "", reason: reason)
+
+    fn _rejected(operation: text, reason: text,
+            command: RuntimeCommandV1) -> RuntimeOperationV1:
+        RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
+            command: command, state: runtime_state_empty(), exit_code: -1,
+            stdout: "", stderr: "", reason: reason)
+
+    fn _rejected_with_output(operation: text, state: RuntimeStateV1,
+            command: RuntimeCommandV1, reason: text, stdout: text, stderr: text,
+            exit_code: i64) -> RuntimeOperationV1:
+        RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
+            command: command, state: state, exit_code: exit_code,
+            stdout: stdout, stderr: stderr, reason: reason)
+
+impl RuntimeProviderV1 for LinuxOciRuntimeProviderV1:
+    me fn probe() -> RuntimeProbeV1:
+        self._probe()
+
+fn _safe_token(value: text) -> bool:
+    if value == "": return false
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    var index = 0
+    while index < value.len():
+        if not allowed.contains(value.substring(index, index + 1)):
+            return false
+        index = index + 1
+    true
+
+fn _locked_image(value: text) -> bool:
+    val marker = "@sha256:"
+    val at = value.index_of(marker)
+    if at < 1: return false
+    val digest_start = at + marker.len()
+    if value.len() - digest_start != 64: return false
+    val hex = "0123456789abcdefABCDEF"
+    var index = digest_start
+    while index < value.len():
+        if not hex.contains(value.substring(index, index + 1)):
+            return false
+        index = index + 1
+    true
+
+fn _valid_intent_phase(value: text) -> bool:
+    value == RUNTIME_PHASE_PREPARED or value == RUNTIME_PHASE_CREATED or
+        value == RUNTIME_PHASE_RUNNING or value == RUNTIME_PHASE_EXITED or
+        value == RUNTIME_PHASE_STOPPED or value == RUNTIME_PHASE_DESTROYED
+
+fn _args_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+pub fn linux_oci_container_name(pod_uid: text, attempt: i64) -> Result<text, text>:
+    if not _safe_token(pod_uid):
+        return Err("pod-uid-contains-unsafe-character")
+    if attempt <= 0:
+        return Err("attempt-invalid")
+    Ok("simpleorch-" + pod_uid + "-" + attempt.to_text())
+
+fn _native_id_valid(native_id: text) -> bool:
+    _safe_token(native_id)
+
+fn _base_command(engine: text, operation: text, state_dir: text,
+        native_id: text) -> Result<RuntimeCommandV1, text>:
+    if engine != OCI_ENGINE_PODMAN and engine != OCI_ENGINE_DOCKER and
+            engine != OCI_ENGINE_RUNC:
+        return Err("unsupported-engine: " + engine)
+    if native_id == "" or not _native_id_valid(native_id):
+        return Err("native-id-invalid")
+    if engine == OCI_ENGINE_RUNC:
+        if state_dir == "": return Err("state-directory-empty")
+        return Ok(RuntimeCommandV1(operation: operation, program: engine,
+            args: ["--root", state_dir, operation, native_id]))
+    Ok(RuntimeCommandV1(operation: operation, program: engine,
+        args: [operation, native_id]))
+
+# Return `(error, command)` so command construction is fully testable without
+# invoking a host runtime.
+pub fn build_create_command(engine: text, state_dir: text,
+        request: LinuxOciRequestV1, operation_id: text,
+        provider_generation: i64, node_boot_id: text) -> (text, RuntimeCommandV1):
+    match linux_oci_container_name(request.pod_uid, request.attempt):
+        case Err(reason): return (reason, runtime_command_empty())
+        case Ok(name):
+            if provider_generation <= 0:
+                return ("provider-generation-invalid", runtime_command_empty())
+            if node_boot_id == "":
+                return ("node-boot-id-empty", runtime_command_empty())
+            if operation_id == "":
+                return ("operation-id-empty", runtime_command_empty())
+            if engine != OCI_ENGINE_PODMAN and engine != OCI_ENGINE_DOCKER and
+                    engine != OCI_ENGINE_RUNC:
+                return ("unsupported-engine: " + engine, runtime_command_empty())
+            if engine == OCI_ENGINE_RUNC:
+                if request.bundle_path == "":
+                    return ("runc-bundle-path-empty", runtime_command_empty())
+                return ("", RuntimeCommandV1(operation: "create", program: engine,
+                    args: ["--root", state_dir, "create", "--bundle",
+                        request.bundle_path, name]))
+            if request.image == "":
+                return ("image-empty", runtime_command_empty())
+            if not _locked_image(request.image):
+                return ("image-must-use-sha256-digest", runtime_command_empty())
+            var args: [text] = ["create", "--name", name,
+                "--label", "io.simpleorch.pod_uid=" + request.pod_uid,
+                "--label", "io.simpleorch.attempt=" + request.attempt.to_text(),
+                "--label", "io.simpleorch.node_boot_id=" + node_boot_id,
+                "--label", "io.simpleorch.provider_generation=" + provider_generation.to_text(),
+                "--label", "io.simpleorch.operation_id=" + operation_id,
+                request.image]
+            for value in request.command:
+                args.push(value)
+            for value in request.args:
+                args.push(value)
+            ("", RuntimeCommandV1(operation: "create", program: engine, args: args))
+
+pub fn build_start_command(engine: text, state_dir: text,
+        native_id: text) -> (text, RuntimeCommandV1):
+    match _base_command(engine, "start", state_dir, native_id):
+        case Err(reason): (reason, runtime_command_empty())
+        case Ok(command): ("", command)
+
+pub fn build_wait_command(engine: text, state_dir: text,
+        native_id: text) -> (text, RuntimeCommandV1):
+    if engine == OCI_ENGINE_RUNC:
+        return ("runc-wait-requires-external-reaper", runtime_command_empty())
+    match _base_command(engine, "wait", state_dir, native_id):
+        case Err(reason): (reason, runtime_command_empty())
+        case Ok(command): ("", command)
+
+pub fn build_logs_command(engine: text, state_dir: text,
+        native_id: text) -> (text, RuntimeCommandV1):
+    if engine == OCI_ENGINE_RUNC:
+        return ("optional-capability-unavailable: logs", runtime_command_empty())
+    if native_id == "" or not _native_id_valid(native_id):
+        return ("native-id-invalid", runtime_command_empty())
+    ("", RuntimeCommandV1(operation: "logs", program: engine,
+        args: ["logs", native_id]))
+
+pub fn build_stop_command(engine: text, state_dir: text,
+        native_id: text, timeout_seconds: i64) -> (text, RuntimeCommandV1):
+    if timeout_seconds <= 0:
+        return ("stop-timeout-invalid", runtime_command_empty())
+    if engine == OCI_ENGINE_RUNC:
+        match _base_command(engine, "kill", state_dir, native_id):
+            case Err(reason): (reason, runtime_command_empty())
+            case Ok(command): ("", command)
+    else:
+        if native_id == "" or not _native_id_valid(native_id):
+            return ("native-id-invalid", runtime_command_empty())
+        ("", RuntimeCommandV1(operation: "stop", program: engine,
+            args: ["stop", "--time", timeout_seconds.to_text(), native_id]))
+
+pub fn build_destroy_command(engine: text, state_dir: text,
+        native_id: text, force: bool) -> (text, RuntimeCommandV1):
+    if engine == OCI_ENGINE_RUNC:
+        if native_id == "" or not _native_id_valid(native_id):
+            return ("native-id-invalid", runtime_command_empty())
+        var args: [text] = ["--root", state_dir, "delete"]
+        if force: args.push("--force")
+        args.push(native_id)
+        return ("", RuntimeCommandV1(operation: "destroy", program: engine, args: args))
+    if native_id == "" or not _native_id_valid(native_id):
+        return ("native-id-invalid", runtime_command_empty())
+    var args: [text] = ["rm"]
+    if force: args.push("--force")
+    args.push(native_id)
+    ("", RuntimeCommandV1(operation: "destroy", program: engine, args: args))
+
+pub fn build_inspect_command(engine: text, state_dir: text,
+        native_id: text) -> (text, RuntimeCommandV1):
+    if engine == OCI_ENGINE_RUNC:
+        return ("runc-inspect-does-not-prove-provider-identity", runtime_command_empty())
+    if native_id == "" or not _native_id_valid(native_id):
+        return ("native-id-invalid", runtime_command_empty())
+    # Four labels plus the native id and status are returned in a stable order.
+    val format = "{{{{ index .Config.Labels \"io.simpleorch.pod_uid\" }}}}|" +
+        "{{{{ index .Config.Labels \"io.simpleorch.attempt\" }}}}|" +
+        "{{{{ index .Config.Labels \"io.simpleorch.node_boot_id\" }}}}|" +
+        "{{{{ index .Config.Labels \"io.simpleorch.provider_generation\" }}}}|" +
+        "{{{{ index .Config.Labels \"io.simpleorch.operation_id\" }}}}|" +
+        "{{{{.Id}}}}|{{{{.State.Status}}}}"
+    ("", RuntimeCommandV1(operation: "inspect", program: engine,
+        args: ["inspect", "--format", format, native_id]))
+
+pub fn recover_state_from_inspect(engine: text, output: text,
+        request: LinuxOciRequestV1, expected_operation_id: text,
+        expected_native_id: text, provider_generation: i64,
+        node_boot_id: text) -> Result<RuntimeStateV1, text>:
+    if engine == OCI_ENGINE_RUNC:
+        return Err("runc-recovery-requires-identity-labels")
+    val fields = output.trim().split("|")
+    if fields.len() != 7:
+        return Err("inspect-identity-shape-invalid")
+    if fields[0] != request.pod_uid:
+        return Err("inspect-pod-uid-mismatch")
+    if fields[1] != request.attempt.to_text():
+        return Err("inspect-attempt-mismatch")
+    if fields[2] != node_boot_id:
+        return Err("inspect-node-boot-id-mismatch")
+    if fields[3] != provider_generation.to_text():
+        return Err("inspect-provider-generation-mismatch")
+    if fields[4] == "" or fields[4] != expected_operation_id:
+        return Err("inspect-operation-id-mismatch")
+    if fields[5] == "" or not _native_id_valid(fields[5]):
+        return Err("inspect-native-id-invalid")
+    if expected_native_id != "" and fields[5] != expected_native_id:
+        return Err("inspect-native-id-mismatch")
+    var phase = RUNTIME_PHASE_UNKNOWN
+    if fields[6] == "created": phase = RUNTIME_PHASE_CREATED
+    elif fields[6] == "running": phase = RUNTIME_PHASE_RUNNING
+    elif fields[6] == "exited": phase = RUNTIME_PHASE_EXITED
+    elif fields[6] == "stopped": phase = RUNTIME_PHASE_STOPPED
+    elif fields[6] == "dead": phase = RUNTIME_PHASE_STOPPED
+    else: return Err("inspect-state-unsupported: " + fields[6])
+    Ok(RuntimeStateV1(phase: phase,
+        identity: RuntimeIdentityV1(pod_uid: request.pod_uid,
+            attempt: request.attempt, provider_generation: provider_generation,
+            operation_id: fields[4], engine: engine,
+            native_id: fields[5], node_boot_id: node_boot_id),
+        exit_code: -1, reason: "recovered"))

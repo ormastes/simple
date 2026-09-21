@@ -31,6 +31,13 @@ use app.io.mod.{process_run_timeout, file_read, host_os}
 use std.common.contracts.orchestration.resource_v1.{RejectionV1, PodSpecV1}
 use std.common.contracts.orchestration.ci_v1.{JobV1, PipelineV1, OrderedJobV1,
     expand_pipeline, RUN_POLICY_ALWAYS}
+use std.common.contracts.container.runtime_v1.{RuntimeOperationV1,
+    RUNTIME_STATUS_OK, RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED,
+    runtime_command_empty, runtime_state_empty}
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{LinuxOciRuntimeProviderV1,
+    LinuxOciRequestV1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.io_runtime.{dir_remove_all}
 
 pub const VERDICT_PASS = "PASS"
 pub const VERDICT_FAIL = "FAIL"
@@ -67,6 +74,10 @@ pub struct JobReceiptV1:
     exit_code: i64
     stdout: text
     node_boot_id: text
+    native_id: text
+    provider_generation: i64
+    operation_id: text
+    runtime_state_dir: text
 
 pub struct RunReceiptV1:
     run_id: text
@@ -140,16 +151,8 @@ pub fn probe_container_lane() -> ProbeV1:
         return ProbeV1(available: true, engine: ENGINE_DOCKER, privilege: PRIVILEGE_ROOT,
             reason: "docker daemon reachable; this lane is root-privileged")
 
-    if engine_present(ENGINE_RUNC):
-        val nest = userns_nesting()
-        if nest.0 and subid_mapping():
-            return ProbeV1(available: true, engine: ENGINE_RUNC, privilege: PRIVILEGE_ROOTLESS,
-                reason: "runc present with rootless prerequisites; no image management")
-        return ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
-            reason: "runc-rootless-unavailable: userns-nesting-denied (" + nest.1 + ")")
-
     ProbeV1(available: false, engine: "", privilege: PRIVILEGE_UNKNOWN,
-        reason: "no-container-engine: none of podman, docker or runc answered --version")
+        reason: "no-qualified-container-engine: podman or docker did not answer a positive probe")
 
 # "" when this runner can execute the job shape, else why not.
 fn job_shape_error(spec: PodSpecV1) -> text:
@@ -176,17 +179,120 @@ fn run_process_job(name: text, spec: PodSpecV1, boot: text) -> JobReceiptV1:
         reason = "exited 0"
     JobReceiptV1(job_name: name, attempt: 1, runtime_class: spec.runtime_class,
                  verdict: verdict, reason: reason, exit_code: rc,
-                 stdout: res.0, node_boot_id: boot)
+                 stdout: res.0, node_boot_id: boot, native_id: "",
+                 provider_generation: 0, operation_id: "", runtime_state_dir: "")
 
 fn blocked_receipt(name: text, spec: PodSpecV1, reason: text, boot: text) -> JobReceiptV1:
     JobReceiptV1(job_name: name, attempt: 0, runtime_class: spec.runtime_class,
                  verdict: VERDICT_BLOCKED, reason: reason, exit_code: 0,
-                 stdout: "", node_boot_id: boot)
+                 stdout: "", node_boot_id: boot, native_id: "",
+                 provider_generation: 0, operation_id: "", runtime_state_dir: "")
 
 fn not_run_receipt(name: text, spec: PodSpecV1, reason: text, boot: text) -> JobReceiptV1:
     JobReceiptV1(job_name: name, attempt: 0, runtime_class: spec.runtime_class,
                  verdict: VERDICT_NOT_RUN, reason: reason, exit_code: 0,
-                 stdout: "", node_boot_id: boot)
+                 stdout: "", node_boot_id: boot, native_id: "",
+                 provider_generation: 0, operation_id: "", runtime_state_dir: "")
+
+fn container_operation_receipt(name: text, spec: PodSpecV1,
+        result: RuntimeOperationV1, boot: text, attempt: i64,
+        state_dir: text) -> JobReceiptV1:
+    val blocked = result.status == RUNTIME_STATUS_BLOCKED
+    val verdict = if blocked then VERDICT_BLOCKED else VERDICT_FAIL
+    JobReceiptV1(job_name: name, attempt: attempt, runtime_class: spec.runtime_class,
+        verdict: verdict, reason: result.reason, exit_code: result.exit_code,
+        stdout: result.stdout, node_boot_id: boot,
+        native_id: result.state.identity.native_id,
+        provider_generation: result.state.identity.provider_generation,
+        operation_id: result.state.identity.operation_id,
+        runtime_state_dir: state_dir)
+
+fn merge_container_cleanup(primary: RuntimeOperationV1,
+        cleanup: RuntimeOperationV1) -> RuntimeOperationV1:
+    if cleanup.status == RUNTIME_STATUS_OK: return primary
+    var merged = cleanup
+    merged.reason = primary.reason + "; cleanup: " + cleanup.reason
+    if cleanup.status != RUNTIME_STATUS_BLOCKED:
+        merged.status = RUNTIME_STATUS_REJECTED
+    merged
+
+fn canonical_runtime_token(value: text) -> text:
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    var out = ""
+    var index = 0
+    while index < value.len():
+        val c = value.substring(index, index + 1)
+        if allowed.contains(c): out = out + c
+        else: out = out + "-"
+        index = index + 1
+    if out == "": "run"
+    else: out
+
+# Real native-container execution is wired through LinuxOciRuntimeProviderV1. The
+# caller has already completed the positive host probe; any provider failure
+# remains a receipt failure/block and is never downgraded to native-process.
+fn run_container_job(name: text, spec: PodSpecV1, boot: text,
+        probe: ProbeV1, run_id: text) -> JobReceiptV1:
+    val c = spec.containers[0]
+    val journal_root = match secure_temp_dir("/tmp", "simpleorch-"):
+        case Ok(path): path
+        case Err(_): return blocked_receipt(name, spec,
+            "secure-runtime-state-directory-unavailable", boot)
+    val provider = LinuxOciRuntimeProviderV1.new("linux", probe.engine, journal_root,
+        boot, 1, true, DEFAULT_JOB_TIMEOUT_MS)
+    val provider_probe = provider.probe()
+    if not provider_probe.launch_capable:
+        val unavailable = RuntimeOperationV1(status: RUNTIME_STATUS_BLOCKED,
+            operation: "probe", command: runtime_command_empty(),
+            state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "",
+            reason: provider_probe.reason)
+        return container_operation_receipt(name, spec, unavailable, boot, 0, journal_root)
+    val request = LinuxOciRequestV1(pod_uid: "run-" + canonical_runtime_token(run_id) +
+        "-" + canonical_runtime_token(name),
+        attempt: 1, operation_id: "", image: c.image, bundle_path: "",
+        command: c.command, args: c.args, timeout_ms: DEFAULT_JOB_TIMEOUT_MS)
+    val prepared = provider.prepare_pod(request)
+    if prepared.status != RUNTIME_STATUS_OK:
+        return container_operation_receipt(name, spec, prepared, boot, 0, journal_root)
+    val created = provider.create(request)
+    if created.status != RUNTIME_STATUS_OK:
+        if created.state.identity.native_id != "":
+            val cleanup = provider.destroy(request, true)
+            return container_operation_receipt(name, spec,
+                merge_container_cleanup(created, cleanup), boot, 1, journal_root)
+        return container_operation_receipt(name, spec, created, boot, 1, journal_root)
+    val started = provider.start(request)
+    if started.status != RUNTIME_STATUS_OK:
+        val cleanup = provider.destroy(request, true)
+        return container_operation_receipt(name, spec,
+            merge_container_cleanup(started, cleanup), boot, 1, journal_root)
+    val waited = provider.wait(request)
+    if waited.status != RUNTIME_STATUS_OK:
+        val stopped = provider.stop(request)
+        val cleanup = provider.destroy(request, true)
+        return container_operation_receipt(name, spec,
+            merge_container_cleanup(merge_container_cleanup(waited, stopped), cleanup), boot, 1, journal_root)
+    val logs = provider.logs(request)
+    if logs.status != RUNTIME_STATUS_OK:
+        val cleanup = provider.destroy(request, true)
+        return container_operation_receipt(name, spec,
+            merge_container_cleanup(logs, cleanup), boot, 1, journal_root)
+    val destroyed = provider.destroy(request, false)
+    if destroyed.status != RUNTIME_STATUS_OK:
+        return container_operation_receipt(name, spec, destroyed, boot, 1, journal_root)
+    if not dir_remove_all(journal_root):
+        var cleanup_failure = destroyed
+        cleanup_failure.status = RUNTIME_STATUS_REJECTED
+        cleanup_failure.reason = "destroyed; runtime-state-cleanup-failed"
+        return container_operation_receipt(name, spec, cleanup_failure, boot, 1, journal_root)
+    JobReceiptV1(job_name: name, attempt: 1, runtime_class: spec.runtime_class,
+        verdict: if waited.state.exit_code == 0 then VERDICT_PASS else VERDICT_FAIL,
+        reason: if waited.state.exit_code == 0 then "exited 0; destroyed" else "exit status " + waited.state.exit_code.to_text() + "; destroyed",
+        exit_code: waited.state.exit_code, stdout: logs.stdout, node_boot_id: boot,
+        native_id: waited.state.identity.native_id,
+        provider_generation: waited.state.identity.provider_generation,
+        operation_id: waited.state.identity.operation_id,
+        runtime_state_dir: journal_root)
 
 fn verdict_of(name: text, receipts: [JobReceiptV1]) -> text:
     for r in receipts:
@@ -231,12 +337,7 @@ pub fn run_pipeline(p: PipelineV1, templates: Dict<text, JobV1>, run_id: text) -
             if not probe.available:
                 receipts.push(blocked_receipt(name, spec, probe.reason, boot))
                 continue
-            # A real native-container launch belongs to the OCI provider, which
-            # is not implemented in this slice. Refuse rather than run the
-            # workload on a weaker lane.
-            receipts.push(blocked_receipt(name, spec,
-                "oci-provider-not-implemented: host lane probes available but the " +
-                "native-container provider is the next slice", boot))
+            receipts.push(run_container_job(name, spec, boot, probe, run_id))
             continue
 
         receipts.push(run_process_job(name, spec, boot))

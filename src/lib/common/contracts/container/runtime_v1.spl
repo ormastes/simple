@@ -1,0 +1,227 @@
+# Common lifecycle values for host container providers.
+#
+# This module deliberately contains no process, filesystem, or platform calls.
+# A provider owns native command assembly and execution; the common layer only
+# carries the identity and observation values that make a lifecycle recoverable.
+# Simple has no trait syntax for a mutable provider port.  These values and
+# operation names are therefore the portable RuntimeProviderV1 contract; the
+# Linux leaf owns the mutable executor and must preserve these invariants.
+
+pub const RUNTIME_PROVIDER_V1_VERSION: i64 = 1
+
+pub const RUNTIME_PHASE_PREPARED = "prepared"
+pub const RUNTIME_PHASE_CREATED = "created"
+pub const RUNTIME_PHASE_RUNNING = "running"
+pub const RUNTIME_PHASE_EXITED = "exited"
+pub const RUNTIME_PHASE_STOPPED = "stopped"
+pub const RUNTIME_PHASE_DESTROYED = "destroyed"
+pub const RUNTIME_PHASE_UNKNOWN = "unknown"
+
+pub const RUNTIME_STATUS_OK = "ok"
+pub const RUNTIME_STATUS_REJECTED = "rejected"
+pub const RUNTIME_STATUS_BLOCKED = "blocked"
+
+pub const RUNTIME_PRIVILEGE_ROOTLESS = "rootless"
+pub const RUNTIME_PRIVILEGE_ROOT = "root"
+pub const RUNTIME_PRIVILEGE_UNKNOWN = "unknown"
+
+# Portable provider admission metadata.  Mutable lifecycle methods remain in
+# platform leaves because Simple has no trait syntax for that port.
+pub struct RuntimeProviderContractV1:
+    provider_id: text
+    version: i64
+    supports_recovery: bool
+    supports_logs: bool
+
+# Native identity is intentionally more than a PID or a user-chosen name.
+# `operation_id` makes retries attributable to one attempt and
+# `provider_generation` prevents an old provider instance from adopting a new
+# workload with the same logical name.
+pub struct RuntimeIdentityV1:
+    pod_uid: text
+    attempt: i64
+    provider_generation: i64
+    operation_id: text
+    engine: text
+    native_id: text
+    node_boot_id: text
+
+pub struct RuntimeCommandV1:
+    operation: text
+    program: text
+    args: [text]
+
+pub struct RuntimeStateV1:
+    phase: text
+    identity: RuntimeIdentityV1
+    exit_code: i64
+    reason: text
+
+# All provider operations return this envelope. `status` is one of the three
+# constants above; a non-OK result never advances the stored lifecycle state.
+pub struct RuntimeOperationV1:
+    status: text
+    operation: text
+    command: RuntimeCommandV1
+    state: RuntimeStateV1
+    exit_code: i64
+    stdout: text
+    stderr: text
+    reason: text
+
+pub struct RuntimeProbeV1:
+    provider: text
+    engine: text
+    engine_present: bool
+    healthy: bool
+    launch_capable: bool
+    privilege: text
+    reason: text
+
+# The intent is the durable handoff between the controller and a provider.
+# Providers may keep it in a journal owned by the caller; this value contains
+# enough identity to resume after the provider process itself restarts.
+pub struct RuntimeIntentV1:
+    pod_uid: text
+    attempt: i64
+    provider_generation: i64
+    operation_id: text
+    engine: text
+    native_id: text
+    node_boot_id: text
+    phase: text
+
+pub struct RuntimeValidationV1:
+    accepted: bool
+    reason: text
+
+# Shared admission port implemented by every provider leaf. Lifecycle request
+# values remain leaf-specific until a common request schema is admitted; all
+# lifecycle results still use these common operation envelopes.
+pub trait RuntimeProviderV1:
+    fn probe() -> RuntimeProbeV1
+
+pub fn runtime_identity_empty() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "", attempt: 0, provider_generation: 0,
+        operation_id: "", engine: "", native_id: "", node_boot_id: "")
+
+pub fn runtime_command_empty() -> RuntimeCommandV1:
+    RuntimeCommandV1(operation: "", program: "", args: [])
+
+pub fn runtime_state_empty() -> RuntimeStateV1:
+    RuntimeStateV1(phase: RUNTIME_PHASE_UNKNOWN,
+        identity: runtime_identity_empty(), exit_code: -1, reason: "")
+
+pub fn runtime_validation(accepted: bool, reason: text) -> RuntimeValidationV1:
+    RuntimeValidationV1(accepted: accepted, reason: reason)
+
+pub fn runtime_operation_empty() -> RuntimeOperationV1:
+    RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: "",
+        command: runtime_command_empty(), state: runtime_state_empty(),
+        exit_code: -1, stdout: "", stderr: "", reason: "")
+
+pub fn runtime_probe_unavailable(provider: text, engine: text,
+        reason: text) -> RuntimeProbeV1:
+    RuntimeProbeV1(provider: provider, engine: engine, engine_present: false,
+        healthy: false, launch_capable: false,
+        privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: reason)
+
+# Pure lifecycle transition oracle shared by provider tests and recovery code.
+# Native execution is deliberately outside this function.  A provider may
+# apply a transition only after its command has returned a positively checked
+# result, which keeps a timeout/error from advancing model state.
+pub fn runtime_transition(state: RuntimeStateV1, operation: text,
+        native_id: text, exit_code: i64, force: bool) -> RuntimeOperationV1:
+    if operation == "create":
+        if state.phase != RUNTIME_PHASE_PREPARED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "invalid-state-for-create-" + state.phase)
+        if native_id == "":
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "native-id-empty")
+        var identity = state.identity
+        identity.native_id = native_id
+        val next = RuntimeStateV1(phase: RUNTIME_PHASE_CREATED,
+            identity: identity, exit_code: -1, reason: "created")
+        return RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: runtime_command_empty(), state: next, exit_code: -1,
+            stdout: "", stderr: "", reason: "created")
+    if operation == "start":
+        if state.phase == RUNTIME_PHASE_RUNNING:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_OK,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: state.exit_code, stdout: "", stderr: "",
+                reason: "idempotent-already-running")
+        if state.phase != RUNTIME_PHASE_CREATED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "invalid-state-for-start-" + state.phase)
+        val next = RuntimeStateV1(phase: RUNTIME_PHASE_RUNNING,
+            identity: state.identity, exit_code: -1, reason: "running")
+        return RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: runtime_command_empty(), state: next, exit_code: -1,
+            stdout: "", stderr: "", reason: "started")
+    if operation == "wait":
+        if state.phase == RUNTIME_PHASE_EXITED or state.phase == RUNTIME_PHASE_STOPPED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_OK,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: state.exit_code, stdout: "", stderr: "",
+                reason: "idempotent-terminal-observation")
+        if state.phase != RUNTIME_PHASE_RUNNING:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "invalid-state-for-wait-" + state.phase)
+        val next = RuntimeStateV1(phase: RUNTIME_PHASE_EXITED,
+            identity: state.identity, exit_code: exit_code, reason: "exited")
+        return RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: runtime_command_empty(), state: next, exit_code: exit_code,
+            stdout: "", stderr: "", reason: "exited")
+    if operation == "stop":
+        if state.phase == RUNTIME_PHASE_STOPPED or state.phase == RUNTIME_PHASE_EXITED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_OK,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: state.exit_code, stdout: "", stderr: "",
+                reason: "idempotent-terminal-stop")
+        if state.phase != RUNTIME_PHASE_RUNNING and state.phase != RUNTIME_PHASE_CREATED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "invalid-state-for-stop-" + state.phase)
+        val next = RuntimeStateV1(phase: RUNTIME_PHASE_STOPPED,
+            identity: state.identity, exit_code: state.exit_code, reason: "stopped")
+        return RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: runtime_command_empty(), state: next, exit_code: state.exit_code,
+            stdout: "", stderr: "", reason: "stopped")
+    if operation == "destroy":
+        if state.phase == RUNTIME_PHASE_DESTROYED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_OK,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: state.exit_code, stdout: "", stderr: "",
+                reason: "idempotent-already-destroyed")
+        if state.phase == RUNTIME_PHASE_RUNNING and not force:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "running-workload-requires-force")
+        if state.phase != RUNTIME_PHASE_CREATED and
+                state.phase != RUNTIME_PHASE_RUNNING and
+                state.phase != RUNTIME_PHASE_EXITED and
+                state.phase != RUNTIME_PHASE_STOPPED:
+            return RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+                operation: operation, command: runtime_command_empty(), state: state,
+                exit_code: -1, stdout: "", stderr: "",
+                reason: "invalid-state-for-destroy-" + state.phase)
+        val next = RuntimeStateV1(phase: RUNTIME_PHASE_DESTROYED,
+            identity: state.identity, exit_code: state.exit_code, reason: "destroyed")
+        return RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: runtime_command_empty(), state: next, exit_code: state.exit_code,
+            stdout: "", stderr: "", reason: "destroyed")
+    RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
+        command: runtime_command_empty(), state: state, exit_code: -1,
+        stdout: "", stderr: "", reason: "unsupported-transition-" + operation)
