@@ -2,17 +2,19 @@
 
 Source: `test/05_perf/compiler/hir_reexport_diagnostic_resource_spec.spl`.
 
-The profile constructs the production `HirLowering` context, confirms its
-cached diagnostic boolean matches the production environment resolver, and
-then exercises the exact renderer used for a failed facade re-export chase.
-With diagnostics disabled, 10,000 and 20,000 misses must render zero bytes,
-retain no more than eight live heap objects, scale within 3x plus a 20 ms noise
-allowance, and complete the larger case within one second. No environment
-lookup occurs inside either measured loop.
+The profile constructs the production `HirLowering` context with the diagnostic
+environment unset and calls the actual failed-chase reporting method. Repeated
+10,000 and 20,000 miss rows compare that fixed caller with the parent behavior,
+which rendered the detailed receipt on every miss. The fixed rows must emit
+nothing and retain no more than eight live objects; the parent control must
+retain thousands of objects, grow with the repetition count, render more than
+5 MiB, and consume more live heap than the fixed row. No environment lookup
+occurs inside a measured miss loop.
 
-An explicitly enabled 2,000-miss run is the negative control. It must render
-more than 500,000 bytes and allocate more than 1,000 live objects, proving the
-profile can detect accidental restoration of unconditional detailed receipts.
+An explicitly enabled 32-miss production run includes actual stderr emission,
+must report all 32 emissions, and must finish within one second. The 20,000
+parent-control renderer must finish within five seconds, preserving a bounded
+enabled-path timing oracle without flooding test output.
 
 This bounded profile prevents memory and performance regressions in the
 corrected owner. It does not certify the full jobs=8 Stage 3 RSS budget.
