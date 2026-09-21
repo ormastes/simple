@@ -54,7 +54,7 @@ failures in the inventory and summary. A nonzero runner status is preserved.
 the shell runner records only its admitted passed/failed/skipped counters.
 
 The phase-owned full CLI and standalone test runner also run the compiler
-bootstrap suite and `compiler/loader/module_loader_relocation_spec.spl` in explicit
+bootstrap suite and `compiler/loader/module_loader_segment_transaction_spec.spl` in explicit
 interpreter and compile modes. Every focused row uses `--assert-ran`, isolated
 cache/database/session state, strict terminal JSON, nonzero executed counts,
 and the frozen command-owner receipt. The receipt binds the compiler snapshot
@@ -68,7 +68,8 @@ Each task summary retains `elapsed_seconds` and `max_rss_kib` when GNU time
 rusage is available; inventory TSV rows retain their own RSS and the suite row
 retains the maximum. `timing_scope=post-admission-excludes-git-lfs-checkout`
 separates repository checkout/LFS materialization from compiler and test time.
-Hosts without GNU rusage report `max_rss_kib=unavailable` explicitly.
+Git-for-Windows hosts retain process-tree RSS from MSYS `/proc`. BSD and macOS
+hosts without GNU rusage report `max_rss_kib=unavailable` explicitly.
 
 ### Phase 2 post-admission runtime
 
