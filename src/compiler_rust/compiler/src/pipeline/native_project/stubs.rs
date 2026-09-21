@@ -480,6 +480,34 @@ dangling and the source must be repaired.",
     ))
 }
 
+/// Refuse a freestanding weak stub for every unresolved pure-Simple module
+/// symbol. A missing `lib__*` or `os__*` provider is a closure failure, not a
+/// runtime compatibility symbol: fabricating a nil-returning body would turn a
+/// deterministic link error into silent kernel behavior.
+fn unresolved_simple_module_closure_report(
+    needs_stub: &[String],
+    defined: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if let Some(report) = stale_module_move_report(needs_stub, defined) {
+        return Some(report);
+    }
+    let mut missing: Vec<&str> = needs_stub
+        .iter()
+        .filter_map(|symbol| simple_module_symbol_tail(symbol).map(|_| symbol.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    missing.sort_unstable();
+    Some(format!(
+        "freestanding link refused: {} pure-Simple module closure symbol(s) are undefined:\n  {}\n\
+A `lib__*` or `os__*` symbol must be supplied by the kernel closure; refusing to \
+fabricate a weak nil-returning stub.",
+        missing.len(),
+        missing.join("\n  ")
+    ))
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
@@ -582,7 +610,7 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| s != "main" && s != "_main")
         .collect();
 
-    // Stale-object-cache consistency check (runs BEFORE the unresolved-mode
+    // Pure-Simple closure consistency check (runs BEFORE the unresolved-mode
     // match, so `DeferToLinker` / `EmitStubs` cannot swallow it).
     //
     // An undefined `lib__*` / `os__*` symbol whose bare function name IS defined
@@ -597,7 +625,7 @@ pub(crate) fn generate_stub_object_freestanding(
     // (`cross_module_layout_fingerprint` in `native_project::mod`): it catches
     // the class even if a future key change regresses. It deliberately does NOT
     // touch the `rt_*` channels.
-    if let Some(report) = stale_module_move_report(&needs_stub, &defined) {
+    if let Some(report) = unresolved_simple_module_closure_report(&needs_stub, &defined) {
         return Err(report);
     }
 
@@ -1502,6 +1530,23 @@ mod tests {
         // Tail extraction takes everything after the LAST separator.
         assert_eq!(simple_module_symbol_tail(live), Some("skip_wrap_spaces"));
         assert_eq!(simple_module_symbol_tail("os__kernel__mm__map_page"), Some("map_page"));
+    }
+
+    #[test]
+    fn unresolved_bytespan_method_is_refused_before_weak_stub_fallback() {
+        let missing = "lib__common__bytes__span__ByteSpan_dot_starts_with";
+        let defined: HashSet<String> = ["lib__common__bytes__span__ByteSpan_dot_len"]
+            .iter()
+            .map(|symbol| (*symbol).to_string())
+            .collect();
+
+        let report = unresolved_simple_module_closure_report(&[missing.to_string()], &defined)
+            .expect("a missing ByteSpan method must fail before a weak stub is emitted");
+        assert!(report.contains(missing));
+        assert!(report.contains("freestanding link refused"));
+        assert!(report.contains("weak nil-returning stub"));
+
+        assert!(unresolved_simple_module_closure_report(&["rt_array_copy".to_string()], &defined).is_none());
     }
 
     #[test]

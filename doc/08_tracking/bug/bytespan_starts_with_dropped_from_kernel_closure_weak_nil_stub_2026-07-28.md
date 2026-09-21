@@ -29,6 +29,19 @@ Three sibling methods from the SAME module (`src/lib/common/bytes/span.spl`)
 ARE present as real `T` definitions, so the module was compiled — only
 `starts_with` and `equals` were dropped from its object.
 
+## Source fix update (2026-09-21)
+
+The freestanding seed stub boundary now rejects every unresolved pure-Simple
+`lib__*` or `os__*` module symbol before either deferred-link or weak-stub
+handling. This closes the exact `ByteSpan_dot_starts_with` shape even when no
+same-named provider survived under another module prefix. Runtime ABI symbols
+such as `rt_*` remain outside this check.
+
+`stubs::tests::unresolved_bytespan_method_is_refused_before_weak_stub_fallback`
+uses the missing ByteSpan method and verifies the diagnostic names it and
+refuses a weak nil-returning stub. A rebuilt seed/compiler and a SimpleOS kernel
+closure run are still required before this record can close.
+
 ## It is reached (PROVEN)
 
 21 references, all `movabs $0x8844960,%reg` (there is no relative
