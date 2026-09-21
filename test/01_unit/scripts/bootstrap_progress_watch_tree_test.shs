@@ -28,6 +28,64 @@ field() {
   printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field_name}=//p"
 }
 
+# Deterministic Darwin/BSD process-table provider. The production watcher still
+# uses real ps by default; this injection makes snapshot failures, PID reuse,
+# process-group membership, and exclusion independently reproducible.
+fake_ps="${test_tmp}/fake-ps.sh"
+cat >"${fake_ps}" <<'EOF'
+#!/bin/sh
+set -eu
+count=0
+[ ! -f "${FAKE_PS_COUNT}" ] || count=$(cat "${FAKE_PS_COUNT}")
+count=$((count + 1))
+printf '%s\n' "${count}" >"${FAKE_PS_COUNT}"
+root=${BOOTSTRAP_WATCH_METRICS_ROOT}
+exclude=${BOOTSTRAP_WATCH_METRICS_EXCLUDE}
+row() { printf '%s %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"; }
+birth_a='Sun Sep 21 10:00:00 2026'
+birth_b='Sun Sep 21 10:00:01 2026'
+case "${FAKE_PS_MODE}" in
+  fail) exit 1 ;;
+  fail_first)
+    [ "${count}" -ne 1 ] || exit 1
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    ;;
+  busy)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    [ "${count}" -eq 1 ] && child_time=0:00.10 || child_time=0:00.70
+    row 710 "${root}" 700 200 "${birth_a}" "${child_time}" worker
+    ;;
+  reuse)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    [ "${count}" -eq 1 ] && child_birth=${birth_a} || child_birth=${birth_b}
+    row 711 "${root}" 700 200 "${child_birth}" 0:00.20 recycled
+    ;;
+  pgroup)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    row 712 "${root}" 700 200 "${birth_a}" 0:00.10 child
+    row 713 1 700 400 "${birth_a}" 0:00.10 orphan
+    ;;
+  exclude)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    row 714 "${root}" 700 200 "${birth_a}" 0:00.10 child
+    row "${exclude}" "${root}" 700 500 "${birth_a}" 0:00.10 watcher
+    row 715 "${exclude}" 700 600 "${birth_a}" 0:00.10 watcher_child
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "${fake_ps}"
+
+fake_sample() {
+  fake_mode=$1
+  fake_log="${test_tmp}/fake-${fake_mode}.log"
+  fake_count="${test_tmp}/fake-${fake_mode}.count"
+  FAKE_PS_MODE=${fake_mode} FAKE_PS_COUNT=${fake_count} \
+    BOOTSTRAP_WATCH_PS_COMMAND=${fake_ps} \
+    sh "${watcher}" --pid="${leaf_pid}" --progress-log="${fake_log}" --once
+  tail -n 1 "${fake_log}"
+}
+
 # Exact case: include the watched shell and its child, but not this independent
 # watcher process.
 sh -c 'sleep 30 & wait' &
@@ -96,6 +154,47 @@ terminal_line=$(tail -n 1 "${leaf_log}")
 [ "$(field tasks_remaining "${terminal_line}")" -eq 0 ] || fail "terminal tasks remaining is not zero"
 [ "$(field terminal "${terminal_line}")" = "succeeded" ] || fail "terminal state missing"
 [ "$(field cached "${terminal_line}")" -eq 7 ] || fail "terminal cached count missing"
+
+# A failed ps snapshot reports unavailable evidence and a scan miss. It must
+# never fabricate a zero-sized live tree.
+failed_snapshot_line=$(fake_sample fail)
+[ "$(field tree_processes "${failed_snapshot_line}")" = unknown ] ||
+  fail "failed ps snapshot fabricated a process count"
+[ "$(field tree_rss_kb "${failed_snapshot_line}")" = unknown ] ||
+  fail "failed ps snapshot fabricated zero RSS"
+[ "$(field tree_scan_misses "${failed_snapshot_line}")" -eq 1 ] ||
+  fail "failed ps snapshot did not report a scan miss"
+
+# A failed warmup must not establish CPU state for the subsequent good sample.
+failed_warmup_line=$(fake_sample fail_first)
+[ "$(field tree_cpu_pct "${failed_warmup_line}")" = unknown ] ||
+  fail "failed warmup established a fabricated CPU baseline"
+
+# CPU is a delta across two snapshots, not lifetime-average ps CPU.
+busy_line=$(fake_sample busy)
+busy_cpu=$(field tree_cpu_pct "${busy_line}")
+awk -v value="${busy_cpu}" 'BEGIN { exit !(value > 0 && value <= 100) }' ||
+  fail "busy child CPU delta was not measured: ${busy_cpu}"
+
+# Reusing a PID with a different lstart identity counts the new process lifetime
+# instead of inheriting or subtracting the dead process's CPU baseline.
+reuse_line=$(fake_sample reuse)
+reuse_cpu=$(field tree_cpu_pct "${reuse_line}")
+awk -v value="${reuse_cpu}" 'BEGIN { exit !(value >= 10 && value <= 20) }' ||
+  fail "recycled PID inherited its predecessor CPU baseline: ${reuse_cpu}"
+
+# Parent-chain totals and process-group totals are deliberately independent.
+pgroup_line=$(fake_sample pgroup)
+[ "$(field tree_processes "${pgroup_line}")" -eq 2 ] || fail "parent tree included orphan"
+[ "$(field tree_pgroup_processes "${pgroup_line}")" -eq 3 ] || fail "process group lost orphan"
+[ "$(field tree_rss_kb "${pgroup_line}")" -eq 300 ] || fail "parent tree RSS is wrong"
+[ "$(field tree_rss_pgroup_kb "${pgroup_line}")" -eq 700 ] || fail "process group RSS is wrong"
+
+# The watcher and every nested watcher child are excluded from both totals.
+exclude_line=$(fake_sample exclude)
+[ "$(field tree_processes "${exclude_line}")" -eq 2 ] || fail "watcher subtree entered parent tree"
+[ "$(field tree_pgroup_processes "${exclude_line}")" -eq 2 ] || fail "watcher subtree entered process group"
+[ "$(field tree_rss_kb "${exclude_line}")" -eq 300 ] || fail "watcher subtree entered tree RSS"
 
 # Adjacent exited case: preserve the existing terminal event without fake metrics.
 sleep 0 &
