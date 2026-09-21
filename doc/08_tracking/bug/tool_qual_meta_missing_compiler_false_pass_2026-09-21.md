@@ -37,3 +37,15 @@ comparison. Explicitly empty and out-of-range values also fail closed.
 `sh test/00_unit/scripts/tool_qual_meta_count_spec.shs` reproduces the hexadecimal
 false PASS before the follow-up fix. It checks ten rejected inputs and verifies
 actual child execution counts for `META_K=2`, `META_K=3`, and the unset default.
+
+## Executable SSpec coverage
+
+`test/01_unit/scripts/tool_qual_meta_execution_spec.spl` directly executes the
+production qualification script against a temporary corpus. Its two examples
+reproduce the absent-compiler false PASS and `META_K=0x2` zero-execution false
+PASS, asserting the exit code, diagnostic, and absence of a passing verdict.
+
+SSpec execution is pending a refreshed admitted full CLI: the available admitted
+Stage2 binary does not provide `test`. No Rust seed or stale July CLI was used.
+The shell regression evidence above remains valid; it is not reported as an
+executed SSpec result.
