@@ -341,6 +341,11 @@ run_task() {
       fi
       ;;
   esac
+  if [ "$status" -eq 0 ] && ! validate_test_result_log "$task" "$log"; then
+    printf 'bootstrap-phase-verification: test task lacks a non-vacuous all-passed result: %s\n' \
+      "$task" >>"$log"
+    status=94
+  fi
   artifact_status=not-applicable
   artifact_sha256=-
   if [ -n "$expected_executable" ]; then
@@ -549,6 +554,34 @@ validate_stage4_tooling_receipt() {
   done
 }
 
+# A test runner can return zero after recording assertion failures (for
+# example, a wrapper that normalizes its child status). Test-producing matrix
+# rows must carry a non-vacuous all-passed result in their log; exit status
+# alone is not evidence.
+validate_test_result_log() {
+  vtrl_task=$1
+  vtrl_log=$2
+  case "$vtrl_task" in
+    compiler_bootstrap_tests|compiler_bootstrap_compile_tests|compiler_unit_tests|mcp_behavior|mcp_behavior_compile) ;;
+    *) return 0 ;;
+  esac
+  awk '
+    /^Results:/ {
+      rows++
+      if ($0 !~ /^Results: [0-9]+ total, [0-9]+ passed, [0-9]+ failed$/) {
+        bad=1
+        next
+      }
+      total=$2; passed=$4; failed=$6
+      sub(/,$/, "", total); sub(/,$/, "", passed)
+      if (total ~ /^0[0-9]/ || passed ~ /^0[0-9]/ || failed ~ /^0[0-9]/ ||
+          total == 0 || failed != 0 || passed != total) bad=1
+    }
+    /^Results:/ && ($0 ~ /skipped/ || $0 ~ /cached/) { bad=1 }
+    END { exit !(rows == 1 && !bad) }
+  ' "$vtrl_log"
+}
+
 matrix_failed=0
 run_matrix_task() {
   task=$1
@@ -600,14 +633,20 @@ run_compiler_unit_tests() {
       printf 'command-owner receipt mismatch before %s\n' "$relative" >>"$log"
       status=90
     else
+      row_output="$logs/${task}.rows.$spec_count.log"
       (
         cd "$source_root" || exit 125
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
           "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-            "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable
-      ) >>"$log" 2>&1 || status=$?
+            "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable --assert-ran --no-cache
+      ) >"$row_output" 2>&1 || status=$?
+      cat "$row_output" >>"$log"
+      if [ "$status" -eq 0 ] && ! validate_test_result_log compiler_unit_tests "$row_output"; then
+        printf 'test result evidence rejected for %s\n' "$relative" >>"$log"
+        status=94
+      fi
       if ! validate_command_owner_receipt "$command_owner_receipt"; then
         printf 'command-owner receipt changed during %s\n' "$relative" >>"$log"
         status=90
@@ -702,12 +741,22 @@ run_repository_full_tests() {
       fi
     fi
     if [ "$status" -eq 0 ]; then
-      row_json=$(grep -E '^\{"success":' "$row_output" | tail -n 1 || :)
+      row_json_lines=$(grep -E '^\{"success":' "$row_output" || :)
+      row_json_count=$(printf '%s\n' "$row_json_lines" | awk 'NF { n++ } END { print n + 0 }')
+      [ "$row_json_count" -eq 1 ] || status=93
+      row_json=$row_json_lines
       row_success=$(printf '%s\n' "$row_json" | sed -n 's/^{"success":true,.*/true/p')
       row_spec_success=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"success":true.*/true/p')
       row_passed=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_passed":\([0-9][0-9]*\).*/\1/p')
       row_failed=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_failed":\([0-9][0-9]*\).*/\1/p')
       row_skipped=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_skipped":\([0-9][0-9]*\).*/\1/p')
+      row_pending=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_pending":\([0-9][0-9]*\).*/\1/p')
+      row_timed_out=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_timed_out":\([0-9][0-9]*\).*/\1/p')
+      row_cached=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_cached":\([0-9][0-9]*\).*/\1/p')
+      case "$row_passed:$row_failed:$row_skipped:$row_pending:$row_timed_out:$row_cached" in
+        *[!0-9:]*|0[0-9]*:*|*:0[0-9]*:*|*:*:0[0-9]*:*|*:*:*:0[0-9]*:*|*:*:*:*:0[0-9]*:*|*:*:*:*:*:0[0-9]*) status=91 ;;
+      esac
+      case "$row_json" in *'"cached"'*) status=93 ;; esac
       case "$row_success" in true) ;; *) status=93 ;; esac
       case "$row_spec_success" in true) ;; *) status=93 ;; esac
       numeric_rows=1
@@ -716,6 +765,10 @@ run_repository_full_tests() {
       case "$row_skipped" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
       if [ "$numeric_rows" -eq 1 ]; then
         [ "$row_failed" -eq 0 ] || status=93
+        [ "$row_skipped" -eq 0 ] || status=92
+        [ "${row_pending:-0}" -eq 0 ] || status=93
+        [ "${row_timed_out:-0}" -eq 0 ] || status=93
+        [ "${row_cached:-0}" -eq 0 ] || status=93
         executed=$((row_passed + row_failed))
         [ "$executed" -gt 0 ] || [ "$status" -ne 0 ] || status=92
       fi
