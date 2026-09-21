@@ -100,6 +100,13 @@ case " $* " in
     if [ "${PHASE_NO_FOCUSED_JSON:-0}" = 1 ] && \
        [ "${1:-}" = "${PHASE_LOADER_ORACLE:?}" ]; then
       :
+    elif [ "${PHASE_AMBIGUOUS_REPOSITORY_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_spec.spl ]; then
+      echo '{"success":true,"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_AMBIGUOUS_REPOSITORY_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     elif [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
       echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
@@ -396,6 +403,29 @@ for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS PHASE_NONZ
     "$failed_work/logs/repository_full_tests.inventory.tsv" ||
     fail "zero-exit failed JSON mode $failed_mode did not terminalize as a failure"
 done
+
+# Repository inventory rows have the same canonical terminal-JSON contract as
+# focused rows. Duplicate object keys and multiple terminal rows are ambiguous
+# even when a grep/sed parser could select values that look successful.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_AMBIGUOUS_REPOSITORY_JSON=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/ambiguous-repository-json-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "ambiguous repository terminal JSON was admitted"
+awk -F '\t' '$1 ~ /fixture_spec[.]spl$/ && $2 == "FAIL" && $3 == 91 && \
+  $4 == 0 { found=1 } END { exit !found }' \
+  "$tmp/ambiguous-repository-json-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "duplicate-key repository row did not fail canonical validation"
+awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 91 && \
+  $4 == 0 { found=1 } END { exit !found }' \
+  "$tmp/ambiguous-repository-json-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "multiple-terminal-row repository output did not fail canonical validation"
 
 # A test runner can be executable and return zero while changing the full CLI.
 # The verifier must reject it after the invocation instead of admitting a
