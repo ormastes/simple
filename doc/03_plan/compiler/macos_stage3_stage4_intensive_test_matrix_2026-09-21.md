@@ -17,7 +17,10 @@
    Retain `selected-build-jobs.env`, the Stage 2 admission, runtime capsule,
    planner receipt, compiler SHA-256, log, wall time, and maximum RSS. The
    requested compile budget is less than 1 GiB maximum RSS; a higher value is a
-   resource failure even when compilation exits zero.
+   resource failure even when compilation exits zero. The live Stage 2
+   measurement of approximately **3,457,344 KiB** is therefore a resource
+   **FAIL**, not passing bootstrap evidence; rerunning the same unchanged build
+   does not resolve it.
 3. Execute the exact `--resume-stage3-from-admitted=... --bootstrap-receipt=...`
    command printed by step 2. Do not pass `--jobs=8`: Stage 3 resume accepts
    only omitted `--jobs` or `--jobs=1` and pins the self-host recompile to one
@@ -45,6 +48,16 @@ All must print `PASS`. They prove discovery failures cannot admit a partial
 inventory, each discovered compiler spec is executed, Stage 3/4 command owners
 are receipt bound, zero-output or zero-execution JSON fails, and Darwin uses
 the portable loader oracle.
+
+**P1 prerequisite:** `run_repository_full_tests` currently extracts the last
+JSON-looking line with `grep`/`sed`, unlike focused and compiler inventory rows
+that use `validate-test-runner-json.pl`. The three gates above do not prove that
+repository-full rows reject ambiguous or multiple terminal JSON documents.
+Before Stage 3/4 full results can be trusted, route repository-full rows through
+the strict validator and add a contract test covering zero, malformed,
+ambiguous/multiple, skipped-only, failed, and valid single terminal JSON. Until
+that lands and passes, classify `repository_full_tests` evidence as untrusted
+and the intensive matrix as incomplete even if `overall=PASS` is printed.
 
 ## Canonical phase verification
 
@@ -92,6 +105,11 @@ The `full` matrix covers, in order:
   interpreter mode;
 - MCP integration in interpreter and compile modes, plus MCP/LSP help probes.
 
+The compiler and repository-wide inventories are interpreter-only. Compile-mode
+coverage is limited to the compiler bootstrap subset, one Darwin loader oracle,
+and MCP integration. Do not describe this matrix as full compile-mode coverage
+of the compiler, loader, or libraries.
+
 ## Authoritative PASS evidence
 
 A phase passes only when its `summary.env` ends with `terminal_failures=0` and
@@ -108,4 +126,6 @@ artifact, hash mismatch, malformed JSON, skipped-only/zero-execution output,
 or an ABI diagnostic in a help probe as failure. Interpreter results are the
 semantic ground truth because SMF/compiled modes have known false-green risks;
 the compile-mode rows are required differential evidence and do not replace
-the interpreter rows.
+the interpreter rows. This PASS definition becomes authoritative for the full
+repository inventory only after the P1 strict JSON parser prerequisite above is
+satisfied.
