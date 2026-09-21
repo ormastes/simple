@@ -196,6 +196,7 @@ fi
   echo "compiler_hash_status=$hash_status"
   echo "runtime_path=${runtime_path:--}"
   echo "native_internal_timeout_seconds=$native_internal_timeout"
+  echo "timing_scope=post-admission-excludes-git-lfs-checkout"
   if [ "$phase" = stage1 ]; then
     echo "phase1_generation=$p1a_generation"
     echo "phase1_admission_path=$p1a_marker"
@@ -204,9 +205,43 @@ fi
   fi
 } >>"$summary"
 
+rss_time=""
+rss_probe="$tmp/phase-verification-rss-probe"
+if [ -x /usr/bin/time ] &&
+   /usr/bin/time -f '%M' -o "$rss_probe" true >/dev/null 2>&1 &&
+   grep -Eq '^[1-9][0-9]*$' "$rss_probe"; then
+  rss_time=/usr/bin/time
+fi
+rm -f "$rss_probe"
+echo "max_rss_measurement=$([ -n "$rss_time" ] && echo gnu-time-rusage-kib || echo unavailable)" >>"$summary"
+
+run_measured_timeout() {
+  metric_file=$1
+  measured_timeout=$2
+  measured_grace=$3
+  shift 3
+  if [ -n "$rss_time" ]; then
+    "$rss_time" -f '%M' -o "$metric_file" \
+      "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+      "$measured_timeout" "$measured_grace" "$@"
+  else
+    printf 'unavailable\n' >"$metric_file"
+    "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+      "$measured_timeout" "$measured_grace" "$@"
+  fi
+}
+
+read_max_rss_kib() {
+  metric_file=$1
+  metric=$(tail -n 1 "$metric_file" 2>/dev/null || :)
+  case "$metric" in
+    [1-9][0-9]*) printf '%s\n' "$metric" ;;
+    *) printf 'unavailable\n' ;;
+  esac
+}
+
 run_with_timeout() {
-  "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-    "$timeout_seconds" 15 "$@"
+  run_measured_timeout "$active_rss_file" "$timeout_seconds" 15 "$@"
 }
 
 run_task() {
@@ -215,6 +250,7 @@ run_task() {
   expected_executable=""
   task_command_owner_receipt=""
   task_stage4_tooling_receipt=""
+  require_test_json=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --verification-expect-executable=*)
@@ -229,10 +265,16 @@ run_task() {
         task_stage4_tooling_receipt=${1#*=}
         shift
         ;;
+      --verification-require-test-json)
+        require_test_json=1
+        shift
+        ;;
       *) break ;;
     esac
   done
   log="$logs/$task.log"
+  active_rss_file="$logs/$task.max-rss-kib"
+  rm -f "$active_rss_file"
   started=$(date +%s)
   status=0
   command_owner_before=not-applicable
@@ -241,6 +283,16 @@ run_task() {
   stage4_tooling_after=not-applicable
   stage4_snapshot_before=not-applicable
   stage4_snapshot_after=not-applicable
+  executed=not-applicable
+  test_passed=not-applicable
+  test_failed=not-applicable
+  test_skipped=not-applicable
+  if [ "$require_test_json" -eq 1 ]; then
+    executed=0
+    test_passed=0
+    test_failed=0
+    test_skipped=0
+  fi
   if [ -n "$task_command_owner_receipt" ]; then
     if ! validate_command_owner_receipt "$task_command_owner_receipt"; then
       printf 'bootstrap-phase-verification: command-owner receipt is not current before invocation: %s\n' \
@@ -300,6 +352,26 @@ run_task() {
     if [ "$phase" = stage1 ] && [ "$status" -eq 0 ]; then
       bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-after.env" >>"$log" 2>&1 || status=89
     fi
+  fi
+  if [ "$status" -eq 0 ] && [ "$require_test_json" -eq 1 ]; then
+    test_json_status=0
+    test_counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" \
+      "$log" 2>>"$log") || test_json_status=$?
+    if [ -n "$test_counts" ]; then
+      test_tab=$(printf '\t')
+      test_old_ifs=$IFS
+      IFS=$test_tab
+      set -- $test_counts
+      IFS=$test_old_ifs
+      [ "$#" -eq 3 ] || test_json_status=91
+    fi
+    if [ "$#" -eq 3 ] && [ -n "$test_counts" ]; then
+      test_passed=$1
+      test_failed=$2
+      test_skipped=$3
+      executed=$((test_passed + test_failed))
+    fi
+    status=$test_json_status
   fi
   if [ -n "$task_command_owner_receipt" ] && [ "$command_owner_before" = PASS ]; then
     if validate_command_owner_receipt "$task_command_owner_receipt"; then
@@ -367,6 +439,7 @@ run_task() {
     fi
   fi
   ended=$(date +%s)
+  max_rss_kib=$(read_max_rss_kib "$active_rss_file")
   if [ "$phase" = stage1 ] && [ "$status" -eq 0 ] && [ "$artifact_status" = present ]; then
     bootstrap_phase1_register_tool "$expected_executable" "$artifact_sha256" || status=89
   fi
@@ -378,15 +451,17 @@ run_task() {
     *) result=FAIL ;;
   esac
   if [ -n "$expected_executable" ]; then
-    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s\n' \
-      "$task" "$result" "$status" "$((ended - started))" "$log" \
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
       "$expected_executable" "$artifact_status" "$artifact_sha256" \
-      "$stage4_snapshot_before" "$stage4_snapshot_after" >>"$summary"
+      "$stage4_snapshot_before" "$stage4_snapshot_after" "$executed" "$test_passed" \
+      "$test_failed" "$test_skipped" >>"$summary"
   else
-    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|command_owner_before=%s|command_owner_after=%s|stage4_tooling_before=%s|stage4_tooling_after=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s\n' \
-      "$task" "$result" "$status" "$((ended - started))" "$log" \
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|command_owner_before=%s|command_owner_after=%s|stage4_tooling_before=%s|stage4_tooling_after=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
       "$command_owner_before" "$command_owner_after" "$stage4_tooling_before" "$stage4_tooling_after" \
-      "$stage4_snapshot_before" "$stage4_snapshot_after" >>"$summary"
+      "$stage4_snapshot_before" "$stage4_snapshot_after" "$executed" "$test_passed" \
+      "$test_failed" "$test_skipped" >>"$summary"
   fi
   [ "$status" -eq 0 ]
 }
@@ -403,11 +478,17 @@ write_command_owner_receipt() {
   runner_sha=$5
   mcp=$6
   mcp_sha=$7
+  if [ -z "$mcp" ] || [ -z "$mcp_sha" ]; then
+    mcp=-
+    mcp_sha=-
+  fi
   if [ -e "$receipt" ]; then
     [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
     [ "$(manifest_value schema "$receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
     [ "$(manifest_value status "$receipt")" = frozen ] || return 1
     [ "$(manifest_value phase "$receipt")" = "$phase" ] || return 1
+    [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
+    [ "$(manifest_value runtime_identity_sha256 "$receipt")" = "$runtime_cache_identity" ] || return 1
     [ "$(manifest_value compiler_cli_path "$receipt")" = "$cli" ] || return 1
     [ "$(manifest_value compiler_cli_sha256 "$receipt")" = "$cli_sha" ] || return 1
     [ "$(manifest_value test_runner_path "$receipt")" = "$runner" ] || return 1
@@ -423,6 +504,8 @@ write_command_owner_receipt() {
       echo 'schema=simple-bootstrap-command-owners-v3'
       echo 'status=frozen'
       echo "phase=$phase"
+      echo "compiler_snapshot_sha256=$snapshot_sha"
+      echo "runtime_identity_sha256=$runtime_cache_identity"
       echo "compiler_cli_path=$cli"
       echo "compiler_cli_sha256=$cli_sha"
       echo "test_runner_path=$runner"
@@ -443,6 +526,8 @@ validate_command_owner_receipt() {
   [ "$(manifest_value schema "$vcor_receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
   [ "$(manifest_value status "$vcor_receipt")" = frozen ] || return 1
   [ "$(manifest_value phase "$vcor_receipt")" = "$phase" ] || return 1
+  [ "$(manifest_value compiler_snapshot_sha256 "$vcor_receipt")" = "$snapshot_sha" ] || return 1
+  [ "$(manifest_value runtime_identity_sha256 "$vcor_receipt")" = "$runtime_cache_identity" ] || return 1
   vcor_cli=$(manifest_value compiler_cli_path "$vcor_receipt")
   vcor_cli_sha=$(manifest_value compiler_cli_sha256 "$vcor_receipt")
   vcor_runner=$(manifest_value test_runner_path "$vcor_receipt")
@@ -451,13 +536,17 @@ validate_command_owner_receipt() {
   vcor_mcp_sha=$(manifest_value mcp_server_sha256 "$vcor_receipt")
   [ "$vcor_cli" = "$compiler_cli" ] && [ "$vcor_cli_sha" = "$compiler_cli_sha" ] || return 1
   [ "$vcor_runner" = "$test_runner" ] && [ "$vcor_runner_sha" = "$test_runner_sha" ] || return 1
-  [ "$vcor_mcp" = "$mcp_server" ] && [ "$vcor_mcp_sha" = "$mcp_server_sha" ] || return 1
   [ -f "$vcor_cli" ] && [ ! -L "$vcor_cli" ] && [ -x "$vcor_cli" ] || return 1
   [ -f "$vcor_runner" ] && [ ! -L "$vcor_runner" ] && [ -x "$vcor_runner" ] || return 1
-  [ -f "$vcor_mcp" ] && [ ! -L "$vcor_mcp" ] && [ -x "$vcor_mcp" ] || return 1
   [ "$(hash_file "$vcor_cli")" = "$vcor_cli_sha" ] || return 1
   [ "$(hash_file "$vcor_runner")" = "$vcor_runner_sha" ] || return 1
-  [ "$(hash_file "$vcor_mcp")" = "$vcor_mcp_sha" ] || return 1
+  if [ "$vcor_mcp" = - ]; then
+    [ "$vcor_mcp_sha" = - ] || return 1
+  else
+    [ "$vcor_mcp" = "$mcp_server" ] && [ "$vcor_mcp_sha" = "$mcp_server_sha" ] || return 1
+    [ -f "$vcor_mcp" ] && [ ! -L "$vcor_mcp" ] && [ -x "$vcor_mcp" ] || return 1
+    [ "$(hash_file "$vcor_mcp")" = "$vcor_mcp_sha" ] || return 1
+  fi
 }
 
 # Stage 4 must prove that every producer invocation and final tooling receipt
@@ -588,7 +677,7 @@ run_compiler_unit_tests() {
   : >"$log"
   row_dir="$logs/${task}.rows"
   mkdir -p "$row_dir"
-  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\n' >"$inventory"
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\tmax_rss_kib\n' >"$inventory"
   # A walk can emit valid paths before failing. Check it separately from sort
   # so a nonempty partial manifest cannot be admitted as the full unit suite.
   if ! find "$source_root/test/01_unit/compiler" -type f -name '*_spec.spl' -print \
@@ -608,11 +697,13 @@ run_compiler_unit_tests() {
   passed_count=0
   timeout_count=0
   crash_count=0
+  max_rss_kib=0
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     spec_count=$((spec_count + 1))
     relative=${spec#"$source_root/"}
     row_output="$row_dir/$spec_count.json.log"
+    row_rss_file="$row_dir/$spec_count.max-rss-kib"
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
     executed=0
@@ -628,8 +719,9 @@ run_compiler_unit_tests() {
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
-          "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-            "$spec_timeout_seconds" 15 "$test_runner" "$relative" \
+          SIMPLE_BIN="$compiler_cli" \
+          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+            "$test_runner" "$relative" \
             --mode=interpreter --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon --sequential --json
       ) >"$row_output" 2>&1 || status=$?
@@ -659,15 +751,20 @@ run_compiler_unit_tests() {
       fi
       status=$row_json_status
     fi
+    row_max_rss_kib=$(read_max_rss_kib "$row_rss_file")
+    case "$row_max_rss_kib" in
+      [1-9][0-9]*)
+        [ "$row_max_rss_kib" -le "$max_rss_kib" ] || max_rss_kib=$row_max_rss_kib ;;
+    esac
     result=FAIL
     case "$status" in
       0) result=PASS; passed_count=$((passed_count + 1)) ;;
       124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
       134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
     esac
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
-      "$row_skipped" "$row_output" >>"$inventory"
+      "$row_skipped" "$row_output" "$row_max_rss_kib" >>"$inventory"
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
@@ -678,8 +775,9 @@ run_compiler_unit_tests() {
   ended=$(date +%s)
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
-    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" "$spec_count" \
+  [ "$max_rss_kib" -gt 0 ] || max_rss_kib=unavailable
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$max_rss_kib" "$log" "$inventory" "$spec_count" \
     "$passed_count" "$timeout_count" "$crash_count" \
     "$command_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
@@ -711,18 +809,20 @@ run_repository_full_tests() {
   : >"$log"
   row_dir="$logs/${task}.rows"
   mkdir -p "$row_dir"
-  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\n' >"$inventory"
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\tmax_rss_kib\n' >"$inventory"
   started=$(date +%s)
   failed=0
   spec_count=0
   passed_count=0
   timeout_count=0
   crash_count=0
+  max_rss_kib=0
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     spec_count=$((spec_count + 1))
     relative=${spec#"$source_root/"}
     row_output="$row_dir/$spec_count.json.log"
+    row_rss_file="$row_dir/$spec_count.max-rss-kib"
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
     executed=0
@@ -738,9 +838,10 @@ run_repository_full_tests() {
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
+          SIMPLE_BIN="$compiler_cli" \
           SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
-          "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-            "$spec_timeout_seconds" 15 "$test_runner" "$relative" \
+          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+            "$test_runner" "$relative" \
             --mode=interpreter --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon --sequential --json
       ) >"$row_output" 2>&1 || status=$?
@@ -769,15 +870,20 @@ run_repository_full_tests() {
         [ "$executed" -gt 0 ] || [ "$status" -ne 0 ] || status=92
       fi
     fi
+    row_max_rss_kib=$(read_max_rss_kib "$row_rss_file")
+    case "$row_max_rss_kib" in
+      [1-9][0-9]*)
+        [ "$row_max_rss_kib" -le "$max_rss_kib" ] || max_rss_kib=$row_max_rss_kib ;;
+    esac
     result=FAIL
     case "$status" in
       0) result=PASS; passed_count=$((passed_count + 1)) ;;
       124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
       134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
     esac
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
-      "$row_skipped" "$row_output" >>"$inventory"
+      "$row_skipped" "$row_output" "$row_max_rss_kib" >>"$inventory"
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
@@ -788,8 +894,9 @@ run_repository_full_tests() {
   ended=$(date +%s)
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
-    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" \
+  [ "$max_rss_kib" -gt 0 ] || max_rss_kib=unavailable
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$max_rss_kib" "$log" "$inventory" \
     "$spec_count" "$passed_count" "$timeout_count" "$crash_count" \
     "$full_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
@@ -900,7 +1007,7 @@ else
     record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
   fi
 
-  if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ] && [ -n "$mcp_server_sha" ]; then
+  if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
     command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
       sha256sum | awk '{print $1}')
     command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
@@ -966,11 +1073,29 @@ else
      [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
      [ -n "$command_owner_receipt" ]; then
     run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt" \
-      env SIMPLE_BINARY="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/bootstrap --mode=interpreter --unstable
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/bootstrap --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon --sequential --json
     run_matrix_task compiler_bootstrap_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
-      env SIMPLE_BINARY="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/bootstrap --mode=compile --unstable
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/bootstrap --mode=compile --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon --sequential --json
+    # The full compiler inventory below covers loader sources in interpreter
+    # mode. Keep one explicit loader behavior oracle in both execution modes so
+    # a phase cannot claim compiler/loader coverage from the bootstrap subset
+    # or from source discovery alone.
+    run_matrix_task loader_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon --sequential --json
+    run_matrix_task loader_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=compile --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon --sequential --json
     if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then
       matrix_failed=1
     fi
@@ -979,10 +1104,17 @@ else
       matrix_failed=1
     fi
   else
-    test_owner_reason=test-runner-artifact-not-built
-    [ "$test_runner_ready" -ne 1 ] || test_owner_reason=full-cli-artifact-not-built
+    if [ "$compiler_cli_ready" -ne 1 ]; then
+      test_owner_reason=full-cli-artifact-not-built
+    elif [ "$test_runner_ready" -ne 1 ]; then
+      test_owner_reason=test-runner-artifact-not-built
+    else
+      test_owner_reason=command-owner-receipt-not-built
+    fi
     record_unsupported_task compiler_bootstrap_tests "$test_owner_reason"
     record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
+    record_unsupported_task loader_interpreter_tests "$test_owner_reason"
+    record_unsupported_task loader_compile_tests "$test_owner_reason"
     if [ "$strategy" = full ]; then
       record_unsupported_task compiler_unit_tests "$test_owner_reason"
       if [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; then
@@ -1012,8 +1144,9 @@ else
 fi
 
 if [ "$phase" != stage1 ] && [ "${compiler_cli_ready:-0}" -eq 1 ] && \
-   [ "${test_runner_ready:-0}" -eq 1 ] && [ -x "$compiler_cli" ] && \
-   [ -x "$test_runner" ] && [ -n "${command_owner_receipt:-}" ]; then
+   [ "${test_runner_ready:-0}" -eq 1 ] && [ "${mcp_build_ready:-0}" -eq 1 ] && \
+   [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && [ -x "$mcp_server" ] && \
+   [ -n "${command_owner_receipt:-}" ]; then
   if [ "$phase" = stage4 ]; then
     if [ -n "$stage4_tooling_receipt" ]; then
       run_matrix_task mcp_behavior --verification-command-owner-receipt="$command_owner_receipt" \
@@ -1045,8 +1178,15 @@ if [ "$phase" != stage1 ] && [ "${compiler_cli_ready:-0}" -eq 1 ] && \
       --assert-ran --no-cache --no-db --no-session-daemon --sequential
   fi
 else
-  behavior_owner_reason=test-runner-artifact-not-built
-  [ "${test_runner_ready:-0}" -ne 1 ] || behavior_owner_reason=full-cli-artifact-not-built
+  if [ "${compiler_cli_ready:-0}" -ne 1 ]; then
+    behavior_owner_reason=full-cli-artifact-not-built
+  elif [ "${test_runner_ready:-0}" -ne 1 ]; then
+    behavior_owner_reason=test-runner-artifact-not-built
+  elif [ "${mcp_build_ready:-0}" -ne 1 ]; then
+    behavior_owner_reason=mcp-server-artifact-not-built
+  else
+    behavior_owner_reason=command-owner-receipt-not-built
+  fi
   record_unsupported_task mcp_behavior "$behavior_owner_reason"
   record_unsupported_task mcp_behavior_compile "$behavior_owner_reason"
 fi
