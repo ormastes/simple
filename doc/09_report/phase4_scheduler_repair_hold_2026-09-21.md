@@ -92,3 +92,26 @@ passed, but they do not substitute for the unexecuted behavioral tail.
 
 The bootstrap coordinator owns integration. These lanes must use isolated
 worktrees and avoid concurrent edits to the same scheduler or canonical fixture.
+
+## Rebase and publication scope
+
+The frozen repair commit was `9f336c327fd55f773cc5c268dd7f2115864a0252`.
+The user then authorized fetching and linearly rebasing onto
+`origin/main` (`e0dd873da1b7828389db4eb60e82972cc8245313`). Rebase completed
+as `c62c5ca6877c8312085a697d7f9cb819035bcc1d`. Two adjacent conflicts kept
+both main's live-phase manifest configuration and this branch's job count.
+The saved six-path manifest confirms **six present, zero lost**: four paths
+are byte-identical; the scheduler and fixture also contain preserved upstream
+changes. Evidence: `build/review/phase4-rebase-integrity.json`.
+
+The 49-row behavioral results above belong exclusively to the frozen
+**pre-rebase** source. No behavioral run was performed against rebased source.
+Main adds four matrix rows (three tooling suites plus `phase_live_services`),
+bringing the matrix to 53, but the merged canonical fixture expects 52 rows
+and two blocked rows. This additional static source/fixture mismatch is an
+admission blocker; the live-services prerequisite can add another blocked row.
+Preserving these upstream changes does not establish their correctness.
+
+PR #1224 may share this state only as **draft / HOLD**. The residual run-directory
+P1, fixture counter proposal, upstream row-count mismatch, unexecuted behavioral
+tail, and unmeasured parity/resources remain explicit follow-up gates.
