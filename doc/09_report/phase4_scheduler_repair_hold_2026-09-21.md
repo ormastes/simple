@@ -66,6 +66,25 @@ new per-invocation dependency boundary. This needs an exclusive fresh run
 allocation plus a reproducing collision regression. It was not changed after
 the freeze and must remain visible during independent exact-head review.
 
+Additional independent static **P1**, reported against exact head
+`8dc16544fcec106add0757125a997e38ec775c2a`: `run_logged`,
+`run_logged_append`, and `run_logged_with_input` invoke GNU `timeout` without
+`--foreground`. These nested timeout/tool processes can have process groups
+outside the worker session leader's group. The scheduler signals only its
+supervisor PID, and supervisor cleanup targets the worker leader's group.
+Consequently nested groups may survive cancellation while scheduler state is
+removed. Recording the actual worker group does not establish containment of
+those nested groups. This finding is static; no implementation change or new
+runtime reproduction was attempted after the three-cycle cap.
+
+Required follow-up: add a canonical cancellation regression using real nested
+timeout/tool descendants and record their PIDs and process groups. Exercise all
+three logged-command helpers, scheduler cancellation, and deadline cleanup;
+assert that every owned descendant/group has terminated and been reaped before
+invocation state is removed. Repair containment only with retained before/after
+evidence and independent exact-head review. Both residual production P1 findings
+remain admission blockers.
+
 No time/RSS improvement is claimed. Actual before/after source-tree scans remain
 per worker; the guide now records this cost instead of claiming an immutable
 snapshot optimization. Shell syntax and working environment/artifact guards
@@ -81,8 +100,10 @@ passed, but they do not substitute for the unexecuted behavioral tail.
    production follow-up. Retain negative/resume/timeout/TERM evidence and stop
    at the fresh task's explicit cycle limit.
 3. **Containment reviewer:** independently inspect supervisor PID versus child
-   session ownership and Windows/MSYS behavior using a separate focused harness.
-   Do not infer Windows process cleanup from this Linux/WSL run.
+   session ownership, including nested GNU timeout groups, and Windows/MSYS
+   behavior using a separate canonical cancellation regression. Prove descendant
+   termination/reaping precedes state removal. Do not infer Windows process
+   cleanup from this Linux/WSL run.
 4. **Performance/evidence owner:** define and collect equivalent jobs=1/parallel
    wall-time and max-RSS evidence after correctness gates pass; preserve current
    source validation while investigating repeated scans.
@@ -113,5 +134,5 @@ admission blocker; the live-services prerequisite can add another blocked row.
 Preserving these upstream changes does not establish their correctness.
 
 PR #1224 may share this state only as **draft / HOLD**. The residual run-directory
-P1, fixture counter proposal, upstream row-count mismatch, unexecuted behavioral
+and nested-process-group P1 findings, fixture counter proposal, upstream row-count mismatch, unexecuted behavioral
 tail, and unmeasured parity/resources remain explicit follow-up gates.
