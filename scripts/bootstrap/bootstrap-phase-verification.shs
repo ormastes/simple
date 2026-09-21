@@ -259,9 +259,15 @@ run_measured_timeout() {
       "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
       "$measured_timeout" "$measured_grace" "$@"
   elif [ "$rss_measurement" = proc-group-rss-kib ]; then
+    # The sampler must background the timeout wrapper, but a noninteractive
+    # POSIX shell otherwise replaces that asynchronous command's stdin with
+    # /dev/null. Snapshot the caller stream before `&`; the nested timeout
+    # wrapper then preserves the same stream for its session leader.
+    exec 4<&0
     "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@" &
+      "$measured_timeout" "$measured_grace" "$@" <&4 &
     measured_pid=$!
+    exec 4<&-
     peak_rss_kib=0
     while kill -0 "$measured_pid" 2>/dev/null; do
       measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
