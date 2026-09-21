@@ -426,10 +426,20 @@ public static class MaterializerApi {
             }
         } finally { foreach (var h in held) h.Dispose(); }
     }
+    static void RejectAncestorTarget(SafeFileHandle target, List<SafeFileHandle> held, int linkParentCount) {
+        var expected = Identity(target);
+        for (int n = 0; n < linkParentCount; n++) {
+            var ancestor = Identity(held[n]);
+            if (ancestor.Volume == expected.Volume && ancestor.IndexHigh == expected.IndexHigh && ancestor.IndexLow == expected.IndexLow)
+                throw new IOException("target.ancestor-cycle");
+        }
+    }
     public static void Validate(string link, string target, bool directory) {
         var held = new List<SafeFileHandle>();
         try {
-            Parents(link, false, held); Parents(target, false, held);
+            Parents(link, false, held);
+            int linkParentCount = held.Count;
+            Parents(target, false, held);
             using (var raw = Open(link, true, 0)) {
                 var tag = Tag(raw);
                 if (directory ? tag.Tag != 0xA0000003u : (tag.Attributes & 0x400) != 0)
@@ -439,6 +449,7 @@ public static class MaterializerApi {
                     var et = Tag(expected);
                     if ((et.Attributes & 0x400) != 0) throw new IOException("target.reparse");
                     if (((et.Attributes & 0x10) != 0) != directory) throw new IOException("target.kind");
+                    if (directory) RejectAncestorTarget(expected, held, linkParentCount);
                     using (var final = Open(link, false, 0)) {
                         var x = Identity(final); var y = Identity(expected);
                         if (x.Volume != y.Volume || x.IndexHigh != y.IndexHigh || x.IndexLow != y.IndexLow)
@@ -451,9 +462,14 @@ public static class MaterializerApi {
     public static void Create(string link, string target, bool directory) {
         var held = new List<SafeFileHandle>();
         try {
-            Parents(link, false, held); Parents(target, false, held);
+            Parents(link, false, held);
+            int linkParentCount = held.Count;
+            Parents(target, false, held);
             var expected = Open(target, true, 0x80000000); held.Add(expected);
             if ((Tag(expected).Attributes & 0x400) != 0) throw new IOException("target.reparse");
+            // Compare held identities, so case and short-path spellings cannot
+            // turn a directory alias into a recursive ancestor junction.
+            if (directory) RejectAncestorTarget(expected, held, linkParentCount);
             using (var placeholder = Open(link, true, 0x80010000)) {
                 if ((Tag(placeholder).Attributes & 0x410) != 0) throw new IOException("placeholder.kind");
                 using (var input = new FileStream(placeholder, FileAccess.Read)) {

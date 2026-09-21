@@ -1,0 +1,74 @@
+#!/bin/sh
+set -Eeuo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/setup/host-env.shs"
+host_env_apply_path
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'BLOCKED: Windows/MSYS required' >&2; exit 77 ;; esac
+for tool in git mktemp cygpath powershell; do
+    command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool" >&2; exit 77; }
+done
+
+mkdir -p "$root/build/test-tmp"
+tmp=$(mktemp -d "$root/build/test-tmp/materializer-cycle.XXXXXX")
+export TMPDIR="$tmp"
+# Keep fixtures/logs for inspection; never recursively remove a rejected cycle.
+printf 'FIXTURES=%s\n' "$tmp"
+
+new_repo() {
+    repo="$tmp/$1"
+    mkdir -p "$repo/outer" "$repo/outer-sibling"
+    git -C "$repo" init -q
+    git -C "$repo" config core.symlinks false
+    git -C "$repo" config core.autocrlf false
+    git -C "$repo" config user.email test@example.invalid
+    git -C "$repo" config user.name materializer-cycle-test
+    printf 'payload\n' >"$repo/outer/payload"
+    printf 'sibling\n' >"$repo/outer-sibling/payload"
+    printf '%s' "$2" >"$repo/outer/back"
+    blob=$(git -C "$repo" hash-object -w --stdin <"$repo/outer/back")
+    git -C "$repo" add outer/payload outer-sibling/payload
+    git -C "$repo" update-index --add --cacheinfo "120000,$blob,outer/back"
+    git -C "$repo" commit -qm fixture
+}
+refuse_cycle() {
+    if sh "$root/scripts/setup/materialize-symlinks-windows.shs" --strict-missing "$repo" >"$tmp/$1.log" 2>&1; then
+        echo "FAIL: accepted ancestor cycle $1" >&2
+        exit 1
+    fi
+    grep -Fq 'target.ancestor-cycle' "$tmp/$1.log" || { cat "$tmp/$1.log" >&2; exit 1; }
+}
+
+new_repo ancestor ../outer
+refuse_cycle ancestor
+test -f "$repo/outer/back"
+test "$(cat "$repo/outer/back")" = ../outer
+
+new_repo case-alias ../OUTER
+refuse_cycle case-alias
+test -f "$repo/outer/back"
+test "$(cat "$repo/outer/back")" = ../OUTER
+
+new_repo existing ../outer
+FIXTURE_LINK="$(cygpath -w "$repo/outer/back")" FIXTURE_TARGET="$(cygpath -w "$repo/outer")" \
+    powershell -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference="Stop"
+    [IO.File]::Delete($env:FIXTURE_LINK)
+    New-Item -ItemType Junction -Path $env:FIXTURE_LINK -Target $env:FIXTURE_TARGET | Out-Null
+    '
+refuse_cycle existing
+# Remove only the junction itself, leaving its target intact.
+FIXTURE_LINK="$(cygpath -w "$repo/outer/back")" powershell -NoProfile -NonInteractive -Command '[IO.Directory]::Delete($env:FIXTURE_LINK, $false)'
+test "$(cat "$repo/outer/payload")" = payload
+
+# A lexical prefix is not ancestry: this ordinary sibling remains admissible,
+# and a second pass validates the existing junction without recreating it.
+new_repo sibling ../outer-sibling
+for phase in create existing; do
+    sh "$root/scripts/setup/materialize-symlinks-windows.shs" --strict-missing "$repo" >"$tmp/sibling-$phase.log" 2>&1 || {
+        cat "$tmp/sibling-$phase.log" >&2; exit 1;
+    }
+    test "$(cat "$repo/outer/back/payload")" = sibling
+done
+grep -Fq 'created=1 already_ok=0' "$tmp/sibling-create.log"
+grep -Fq 'created=0 already_ok=1' "$tmp/sibling-existing.log"
+echo 'PASS: ancestor cycles refused before mutation; sibling create/idempotence preserved'
