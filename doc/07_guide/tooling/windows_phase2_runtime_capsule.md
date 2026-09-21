@@ -19,6 +19,14 @@ selection or version parsing. Real Phase 2 acceptance therefore also requires
 the producer's tool-authority receipt proving this prerequisite. A retained
 older admission cannot satisfy the Windows bootstrap acceptance criterion.
 
+The canonical writer emits only v2 capsule receipts and binds the required,
+unique `artifact_layout` into the aggregate identity. The reader retains v1
+compatibility for POSIX capsules only: v1 must omit `artifact_layout` and always
+resolves the POSIX filenames. A v2 receipt must contain exactly one supported
+`artifact_layout` (`posix` or `windows-msvc`). Missing, duplicate, unsupported,
+or contradictory layout declarations fail closed in both the capsule verifier
+and the phase consumer.
+
 The v2 capsule receipt binds its platform layout into the aggregate identity.
 MSVC capsules retain `simple.exe`, `simple_native_all.lib`,
 `simple_compiler_backfill.lib` when present, and `simple.exe.inputs.sha256`.
