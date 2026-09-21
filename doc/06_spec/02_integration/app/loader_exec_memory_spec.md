@@ -1,136 +1,55 @@
-# Loader Exec Memory Specification
+# Loader executable memory
 
-> <details>
+Source: `test/02_integration/app/loader_exec_memory_spec.spl`
 
-<!-- sdn-diagram:id=loader_exec_memory_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+Requirement: `REQ-SSPEC-INTEGRATION`.
 
-```sdn id=loader_exec_memory_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+This manual describes the production loader mapping and function-call checks.
+Execution against an admitted Phase 2 compiler and test runner is pending.
+This is an authored manual; regeneration by the admitted `spipe-docgen` remains
+part of verification.
 
-loader_exec_memory_spec
-```
+| Scenario | Hosts | Required observations |
+|---|---|---|
+| copies real bytes into a loader-owned mapping | All supported hosts | Positive address, four bytes written at offset 64, exact readback, successful release |
+| rejects invalid sizes and function addresses deterministically | All supported hosts | Zero and negative sizes rejected, null call returns the expected error, null release rejected |
+| seals and executes an x86_64 function through the production loader | x86_64 only | Writable allocation, six bytes written, successful executable transition, `Ok(42)`, successful release |
 
-</details>
+## Copy bytes into a real mapping
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+1. Allocate 4096 bytes through `native_alloc_exec_memory`.
+2. Write `[17, 34, 51, 68]` at offset 64 through `native_write_exec_memory`.
+3. Read four bytes from the same offset through `native_mmap_read_bytes`.
+4. Release the mapping and check the exact write count, readback, and release
+   result.
 
-```ascii generated-from=loader_exec_memory_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
+## Reject invalid requests
 
-</details>
-<!-- sdn-diagram:end -->
+1. Request allocations of zero and negative size; both must return zero.
+2. Call address zero through `native_call_function_0`; it must return the
+   documented error without invoking an entry point.
+3. Release address zero; the loader must reject it.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+The allocation checks use deterministic invalid inputs. Large positive virtual
+allocations may legitimately succeed on operating systems with overcommit.
 
-<details>
-<summary>Full Scenario Manual</summary>
+## Execute an x86_64 function
 
-# Loader Exec Memory Specification
+1. Allocate a writable mapping and copy `mov eax, 42; ret` into it.
+2. Change the mapping to executable through `native_make_executable`.
+3. Call the mapped entry point through the production Result-returning API.
+4. Release the mapping, then require `Ok(42)` and successful release.
 
-## Scenarios
+This no-argument code works with the x86_64 Windows and POSIX calling
+conventions. Other architectures register only the two architecture-independent
+scenarios; they do not claim machine-code execution coverage.
 
-### Exec memory mapping
+## Evidence
 
-#### x86_64 only
+Run this spec separately in interpreter and compile modes through the admitted
+Phase 2 command owners. Require three executed scenarios on x86_64 and retain
+both terminal JSON results. A source review or an unadmitted release executable
+does not satisfy this gate.
 
-#### skips on non-x86_64 hosts
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect true
-```
-
-</details>
-
-#### maps executable memory and runs a tiny function
-
-- assert true
-   - Expected: written equals `code.len() as i64`
-- assert true
-   - Expected: result equals `42`
-- assert true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# Machine code: mov eax, 42; ret
-val code: [u8] = [184, 42, 0, 0, 0, 195]
-
-val addr = native_alloc_exec_memory(code.len() as i64)
-assert_true(addr > 0)
-
-val written = native_write_exec_memory(addr, code, 0)
-expect(written).to_equal(code.len() as i64)
-
-val made_exec = native_make_executable(addr, code.len() as i64)
-assert_true(made_exec)
-
-val result = native_call_function_0(addr)
-expect(result).to_equal(42)
-
-val freed = native_free_exec_memory(addr, code.len() as i64)
-assert_true(freed)
-```
-
-</details>
-
-#### fails gracefully on oversized allocation
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val huge_size = 1_099_511_627_776i64  # 1 TB
-val addr = native_alloc_exec_memory(huge_size)
-expect(addr).to_equal(0)
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/loader_exec_memory_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Exec memory mapping
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
+See `doc/09_report/loader_binary_phase2_verification_2026-09-21.md` for the exact
+admission blocker, existing test coverage, and resume commands.
