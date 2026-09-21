@@ -45,6 +45,13 @@ sub exec_program {
     exec {$ARGV[0]} @ARGV or die "exec $ARGV[0] failed: $!\n";
 }
 
+# Under the sampled guard, nested launchers retain its session boundary.
+if (exists($ENV{SIMPLE_BOOTSTRAP_SESSION_ID}) || exists($ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC})) {
+    my $helper = $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} // '';
+    $helper =~ m{\A/} or die "incomplete bootstrap session contract\n";
+    exec {$helper} $helper, '--', @ARGV or die "bootstrap session exec: $!\n";
+}
+
 my $session = setsid();
 if (defined($session) && $session >= 0) {
     die "setsid unexpectedly succeeded while fallback was required\n"
