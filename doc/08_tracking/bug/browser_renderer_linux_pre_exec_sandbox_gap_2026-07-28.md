@@ -67,6 +67,11 @@ the mandatory namespace phase. The check now calls the actual
 environment, then proves that `rt_browser_renderer_namespaces_active()` agrees
 with the observed `/proc/self/ns/net` identity. A denied namespace request is
 reported as `unavailable`; a claimed active namespace must change identity.
+On the verification host it reported `namespaces=unavailable`, with
+`net:[4026531833] -> net:[4026531833]`. This direct preinit probe does not
+prove a UID or root-drop property; the current preinit implementation does not
+claim one, and installed renderer evidence must cover the remaining runtime
+contract.
 
 This restores source-level admission evidence for the pre-exec stage. The
 installed pure-Simple ready/frame artifact remains the outstanding release
