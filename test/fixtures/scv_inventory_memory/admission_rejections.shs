@@ -1,0 +1,63 @@
+#!/bin/sh
+# Negative-only fixture: receipt-shaped fake producers must never be invoked.
+set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+TASK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/scv-admission-negative.XXXXXX")
+trap 'rm -rf "$TASK_DIR"' EXIT HUP INT TERM
+hash_file() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+    else sha256sum "$1" | awk '{print $1}'; fi
+}
+for defect in schema authority candidate runtime sanity; do
+    fixture=$TASK_DIR/$defect
+    mkdir -p "$fixture/stage2-admitted" "$fixture/stage2-runtime-authority/deps"
+    candidate=$fixture/stage2-admitted/simple
+    cat >"$candidate" <<'SENTINEL'
+#!/bin/sh
+: >"$SCV_SENTINEL_INVOKED"
+exit 73
+SENTINEL
+    chmod +x "$candidate"
+    candidate_hash=$(hash_file "$candidate")
+    runtime=$fixture/stage2-runtime-authority/deps/libspl_hosted_runtime-negative.rlib
+    printf 'negative fixture, not a runtime\n' >"$runtime"
+    admission=$fixture/stage2-admitted/admission.env
+    candidate_path=$candidate
+    [ "$defect" != candidate ] || candidate_path=$fixture/unrelated-candidate
+    runtime_hash=$(hash_file "$runtime")
+    [ "$defect" != runtime ] || runtime_hash=invalid
+    cat >"$admission" <<EOF
+schema=simple-bootstrap-stage2-admission-v2
+status=admitted
+candidate_path=$candidate_path
+candidate_sha256=$candidate_hash
+runtime_authority_path=$fixture/stage2-runtime-authority
+hosted_runtime_relative_path=deps/libspl_hosted_runtime-negative.rlib
+hosted_runtime_sha256=$runtime_hash
+build_args_sha256=$candidate_hash
+EOF
+    # These rows satisfy the former collector but omit actual sanity evidence.
+    admission_hash=$(hash_file "$admission")
+    provenance=$fixture/stage2-admitted/stage2-provenance.receipt
+    sanity=$fixture/stage2-admitted/stage2-sanity.receipt
+    authority=explicit-full-bootstrap-stage2-trust-root
+    [ "$defect" != authority ] || authority=untrusted-fabrication
+    {
+        [ "$defect" = schema ] || printf 'schema=simple-bootstrap-stage2-parent-provenance-v1\n'
+        printf 'stage2-provenance: pure-simple\nauthority=%s\n' "$authority"
+        printf 'candidate_sha256=%s\nadmission_receipt_path=%s\nadmission_receipt_sha256=%s\n' "$candidate_hash" "$admission" "$admission_hash"
+    } >"$provenance"
+    {
+        printf 'schema=simple-bootstrap-stage2-parent-sanity-v1\nstage2-sanity: pass\n'
+        printf 'candidate_sha256=%s\nadmission_receipt_path=%s\nadmission_receipt_sha256=%s\n' "$candidate_hash" "$admission" "$admission_hash"
+    } >"$sanity"
+    result=0
+    # Invoke the normal collector, not an injected admission callback. An old
+    # collector reaches the sentinel; the executable spec rejects that result.
+    SCV_SENTINEL_INVOKED="$fixture/invoked" SCV_PROFILE_COMPILER="$candidate" \
+        sh "$ROOT_DIR/scripts/check/check-scv-inventory-resource-profile.shs" \
+        >"$fixture/out" 2>"$fixture/err" || result=$?
+    invoked=0
+    [ ! -f "$fixture/invoked" ] || invoked=1
+    printf '%s_exit=%s\n%s_invoked=%s\n' "$defect" "$result" "$defect" "$invoked"
+done
