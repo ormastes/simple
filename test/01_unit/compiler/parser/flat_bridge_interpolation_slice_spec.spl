@@ -1,0 +1,60 @@
+"""The rich AST bridge preserves interpolation expressions without retaining
+an array of single-character fragments during its scan.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.core.ast.{ast_reset}
+use compiler.core.parser.{parser_set_had_error}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{flat_bridge_build_string_interps}
+use compiler.frontend.parser_types_expr.{ExprKind}
+
+val OPEN_BRACE: text = "{"
+val CLOSE_BRACE: text = "}"
+
+fn reset_interpolation_parser():
+    ast_reset()
+    parser_set_had_error(false)
+
+describe "flat bridge interpolation fragment slicing":
+    it "preserves expression order and span across adjacent regions":
+        reset_interpolation_parser()
+        val span = Span.new(10, 30, 2, 4)
+        val value = OPEN_BRACE + "first" + CLOSE_BRACE + OPEN_BRACE + "second" + CLOSE_BRACE
+        val parts = flat_bridge_build_string_interps(value, span)
+        expect(parts.len()).to_equal(2)
+        match parts[0].expr.kind:
+            case ExprKind.Ident(name): expect(name).to_equal("first")
+            case _: expect(false).to_equal(true)
+        match parts[1].expr.kind:
+            case ExprKind.Ident(name): expect(name).to_equal("second")
+            case _: expect(false).to_equal(true)
+        expect(parts[0].span.start).to_equal(10)
+        expect(parts[1].span.end).to_equal(30)
+
+    it "preserves nested braces within one fragment":
+        reset_interpolation_parser()
+        val value = OPEN_BRACE + "pick(" + OPEN_BRACE + "1: 2" + CLOSE_BRACE + ")" + CLOSE_BRACE
+        expect(flat_bridge_build_string_interps(value, Span.default()).len()).to_equal(1)
+
+    it "skips escaped braces and accepts a following expression":
+        reset_interpolation_parser()
+        val value = OPEN_BRACE + OPEN_BRACE + "literal" + CLOSE_BRACE + CLOSE_BRACE + OPEN_BRACE + "name" + CLOSE_BRACE
+        expect(flat_bridge_build_string_interps(value, Span.default()).len()).to_equal(1)
+
+    it "rejects malformed and unmatched regions then recovers":
+        reset_interpolation_parser()
+        expect(flat_bridge_build_string_interps(OPEN_BRACE + "a +" + CLOSE_BRACE, Span.default()).len()).to_equal(0)
+        expect(flat_bridge_build_string_interps(OPEN_BRACE + "a", Span.default()).len()).to_equal(0)
+        expect(flat_bridge_build_string_interps(OPEN_BRACE + "good" + CLOSE_BRACE, Span.default()).len()).to_equal(1)
+        expect(flat_bridge_build_string_interps("plain", Span.default()).len()).to_equal(0)
+
+    it "materializes completed regions without per-character fragment storage":
+        val source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        val begin = source.index_of("fn flat_bridge_build_string_interps(")
+        val finish = source.index_of("fn flat_bridge_decode_brace_escapes(")
+        expect(begin >= 0 and finish > begin).to_equal(true)
+        val body = source.substring(begin, finish)
+        expect(body.count("value.substring(inner_start, i)")).to_equal(1)
+        expect(body.count("inner_parts")).to_equal(0)
