@@ -1,0 +1,119 @@
+"""
+Pure-Simple frontend AST coverage for placeholder lambdas passed as callbacks.
+
+The deployed Rust seed returns `<lambda>` for the value-based callback cases.
+These checks execute the working-copy parser and find matching call nodes with
+lambda-shaped callback arguments. They do not establish root reachability or
+runtime behavior; the separate fixture retains that pending value proof.
+"""
+
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{
+    EXPR_IDENT, EXPR_LAMBDA, EXPR_CALL, EXPR_METHOD_CALL,
+    expr_count, expr_tag, expr_s_val, expr_left, expr_args, expr_stmts
+}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+
+fn parse_direct_call_arg(source: text, callee: text) -> i64:
+    ast_reset()
+    if not core_frontend_parse_reset(source, "placeholder_callback_probe.spl"):
+        return -1
+    var eid = 0
+    while eid < expr_count():
+        if expr_tag[eid] == EXPR_CALL:
+            val callee_eid = expr_left[eid]
+            if callee_eid >= 0 and expr_tag[callee_eid] == EXPR_IDENT and expr_s_val[callee_eid] == callee:
+                val args = expr_args[eid]
+                if args.len() == 1:
+                    return args[0]
+        eid = eid + 1
+    -1
+
+fn parse_method_call_arg(source: text, method: text) -> i64:
+    ast_reset()
+    if not core_frontend_parse_reset(source, "placeholder_callback_probe.spl"):
+        return -1
+    var eid = 0
+    while eid < expr_count():
+        if expr_tag[eid] == EXPR_METHOD_CALL and expr_s_val[eid] == method:
+            val args = expr_args[eid]
+            if args.len() == 1:
+                return args[0]
+        eid = eid + 1
+    -1
+
+fn lambda_param_count(lambda_eid: i64) -> i64:
+    if lambda_eid < 0 or expr_tag[lambda_eid] != EXPR_LAMBDA:
+        return -1
+    expr_args[lambda_eid].len()
+
+fn lambda_has_body(lambda_eid: i64) -> bool:
+    lambda_eid >= 0 and expr_tag[lambda_eid] == EXPR_LAMBDA and expr_stmts[lambda_eid].len() == 1
+
+describe "placeholder lambda callback argument ownership":
+    it "finds named explicit and placeholder callback argument shapes":
+        val named = parse_direct_call_arg(
+            "fn add_one(x): x + 1\nfn call_once(f): f(10)\ncall_once(add_one)\n", "call_once")
+        expect(named).to_be_greater_than(-1)
+        expect(expr_tag[named]).to_equal(EXPR_IDENT)
+
+        val explicit = parse_direct_call_arg(
+            "fn call_once(f): f(10)\ncall_once(\\x: x + 1)\n", "call_once")
+        expect(explicit).to_be_greater_than(-1)
+        expect(expr_tag[explicit]).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(explicit)).to_equal(1)
+
+        val placeholder = parse_direct_call_arg(
+            "fn call_once(f): f(10)\ncall_once(_1 + 1)\n", "call_once")
+        expect(placeholder).to_be_greater_than(-1)
+        expect(expr_tag[placeholder]).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(placeholder)).to_equal(1)
+        expect(lambda_has_body(placeholder)).to_equal(true)
+
+    it "finds a lambda-shaped argument on a pmap-shaped free-function call":
+        val source = "fn pmap(items, f):\n" +
+            "    var result = []\n" +
+            "    var i = 0\n" +
+            "    while i < len(items):\n" +
+            "        result.push(f(items[i]))\n" +
+            "        i = i + 1\n" +
+            "    result\n" +
+            "pmap([1, 2, 3], _1 + 1)\n"
+        ast_reset()
+        expect(core_frontend_parse_reset(source, "placeholder_callback_pmap.spl")).to_equal(true)
+        var callback = -1
+        var eid = 0
+        while eid < expr_count():
+            if expr_tag[eid] == EXPR_CALL:
+                val callee_eid = expr_left[eid]
+                if callee_eid >= 0 and expr_tag[callee_eid] == EXPR_IDENT and expr_s_val[callee_eid] == "pmap":
+                    val args = expr_args[eid]
+                    if args.len() == 2:
+                        callback = args[1]
+            eid = eid + 1
+        expect(callback).to_be_greater_than(-1)
+        expect(expr_tag[callback]).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(callback)).to_equal(1)
+        expect(lambda_has_body(callback)).to_equal(true)
+
+    it "finds lambda-shaped arguments for built-in map and multi-hop calls":
+        val mapped = parse_method_call_arg("[1, 2, 3].map(_1 + 1)\n", "map")
+        expect(mapped).to_be_greater_than(-1)
+        expect(expr_tag[mapped]).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(mapped)).to_equal(1)
+
+        val forwarded = parse_direct_call_arg(
+            "fn call_once(f): f(10)\nfn forward_once(f): call_once(f)\nforward_once(_1 + 1)\n",
+            "forward_once")
+        expect(forwarded).to_be_greater_than(-1)
+        expect(expr_tag[forwarded]).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(forwarded)).to_equal(1)
+
+    it "finds numbered placeholder arity at a callback-shaped node":
+        val numbered = parse_direct_call_arg(
+            "fn call_two(f): f(4, 9)\ncall_two(_2 - _1)\n", "call_two")
+        expect(numbered).to_be_greater_than(-1)
+        expect(expr_tag[numbered]).to_equal(EXPR_LAMBDA)
+        expect(lambda_param_count(numbered)).to_equal(2)
+        expect(lambda_has_body(numbered)).to_equal(true)
