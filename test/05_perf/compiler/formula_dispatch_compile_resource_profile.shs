@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+# Cold native compile profile for the former 600-second / 3-GiB Formula leaf.
+# The caller must provide an admitted self-hosted Phase 2+ compiler. The test
+# deliberately fails closed instead of selecting the Rust seed.
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+SIMPLE=${SIMPLE_FORMULA_PROFILE_BIN:-}
+case "$SIMPLE" in
+  /*) ;;
+  *) echo "FAIL: SIMPLE_FORMULA_PROFILE_BIN must be an absolute admitted self-hosted binary" >&2; exit 2 ;;
+esac
+[ -x "$SIMPLE" ] || { echo "FAIL: compiler is not executable: $SIMPLE" >&2; exit 2; }
+
+case "$("$SIMPLE" --version 2>&1)" in
+  *bootstrap*|*self-host*) ;;
+  *) echo "FAIL: compiler does not identify as self-hosted/bootstrap" >&2; exit 2 ;;
+esac
+
+RUN=${FORMULA_PROFILE_RUN_DIR:-"$ROOT/build/test_tmp/formula-dispatch-profile.$$"}
+mkdir -p "$RUN/cache" "$RUN/frontend" "$RUN/hir"
+OUT=$RUN/formula
+STDOUT=$RUN/stdout.log
+STDERR=$RUN/stderr.log
+TIME=$RUN/time.log
+START=$(date +%s)
+
+set +e
+if [ "$(uname -s)" = Darwin ]; then
+  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TIMEOUT=300 \
+  SIMPLE_NATIVE_BUILD_CACHE_DIR="$RUN/cache" \
+  SIMPLE_FRONTEND_CACHE_DIR="$RUN/frontend" SIMPLE_HIR_CACHE_DIR="$RUN/hir" \
+    /usr/bin/time -l "$SIMPLE" native-build \
+      "$ROOT/src/app/office/sheets/formula.spl" \
+      --source "$ROOT/src/app" --source "$ROOT/src/lib" --entry-closure \
+      --backend=llvm --cache-dir="$RUN/cache" -o "$OUT" \
+      >"$STDOUT" 2>"$STDERR"
+  STATUS=$?
+  sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]]*maximum resident set size$/\1/p' "$STDERR" | tail -1 >"$TIME"
+else
+  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_TIMEOUT=300 \
+  SIMPLE_NATIVE_BUILD_CACHE_DIR="$RUN/cache" \
+  SIMPLE_FRONTEND_CACHE_DIR="$RUN/frontend" SIMPLE_HIR_CACHE_DIR="$RUN/hir" \
+    /usr/bin/time -f '%M' -o "$TIME" "$SIMPLE" native-build \
+      "$ROOT/src/app/office/sheets/formula.spl" \
+      --source "$ROOT/src/app" --source "$ROOT/src/lib" --entry-closure \
+      --backend=llvm --cache-dir="$RUN/cache" -o "$OUT" \
+      >"$STDOUT" 2>"$STDERR"
+  STATUS=$?
+fi
+set -e
+
+ELAPSED=$(( $(date +%s) - START ))
+[ "$STATUS" -eq 0 ] || { tail -80 "$STDERR" >&2; echo "FAIL: native build status=$STATUS" >&2; exit 1; }
+grep -Fq '0 failed' "$STDOUT" || { cat "$STDOUT" >&2; echo "FAIL: build did not report zero failures" >&2; exit 1; }
+[ -x "$OUT" ] || { echo "FAIL: native output missing" >&2; exit 1; }
+
+RSS=$(sed -n '1p' "$TIME")
+case "$RSS" in ''|*[!0-9]*) echo "FAIL: max RSS missing" >&2; exit 1 ;; esac
+if [ "$(uname -s)" != Darwin ]; then RSS=$((RSS * 1024)); fi
+
+[ "$ELAPSED" -lt 300 ] || { echo "FAIL: elapsed_seconds=$ELAPSED ceiling=299" >&2; exit 1; }
+[ "$RSS" -lt 1000000000 ] || { echo "FAIL: max_rss_bytes=$RSS ceiling=999999999" >&2; exit 1; }
+
+echo "PASS formula_dispatch_compile elapsed_seconds=$ELAPSED max_rss_bytes=$RSS compiler=$SIMPLE output=$OUT"
