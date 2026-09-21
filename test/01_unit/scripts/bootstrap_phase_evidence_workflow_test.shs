@@ -1,0 +1,236 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+validator="$root/scripts/check/check-bootstrap-phase-evidence.shs"
+workflow="$root/.github/workflows/macos-phase23-evidence.yml"
+runner="$root/scripts/check/run-macos-phase23-evidence.shs"
+source_sha=$(git -C "$root" rev-parse HEAD)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase-evidence-contract.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "bootstrap_phase_evidence_workflow_test: $*" >&2; exit 1; }
+
+grep -Fq 'runs-on: macos-15' "$workflow" || fail 'macOS runner is not fixed'
+grep -Fq 'run-macos-phase23-evidence.shs' "$workflow" || fail 'canonical evidence runner is absent'
+grep -Fq -- '--jobs=8' "$runner" || fail 'Stage 2 does not request eight jobs'
+grep -Fq -- '--jobs=1' "$runner" || fail 'Stage 3 is not pinned to one job'
+grep -Fq -- '--phase=stage2' "$runner" || fail 'Stage 2 verification is absent'
+grep -Fq -- '--phase=stage3' "$runner" || fail 'Stage 3 verification is absent'
+grep -Fq 'cancel-in-progress: false' "$workflow" || fail 'evidence can be cancelled as stale'
+if grep -Eq '^[[:space:]]+paths:' "$workflow"; then
+  fail 'path filtering can omit the required PR evidence job'
+fi
+if grep -Eq 'continue-on-error:[[:space:]]*true|bootstrap-phase-verification.*\|\|[[:space:]]*true' "$workflow"; then
+  fail 'phase verification is advisory'
+fi
+
+make_fixture() {
+  dir=$1 state=$2 executed=$3 spec_count=$4 overall=$5
+  mkdir -p "$dir"
+  cat >"$dir/inventory.tsv" <<EOF
+spec	result	status	executed	passed	failed	skipped	evidence	max_rss_kib
+test/a_spec.spl	PASS	0	$executed	$executed	0	0	row.log	100
+EOF
+  cat >"$dir/summary.env" <<EOF
+schema=bootstrap-phase-verification-v1
+phase=stage2
+strategy=full
+hash_policy=canonical
+expected_compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+actual_compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+compiler_hash_status=PASS
+source_git_sha=$source_sha
+runtime_path=$dir/runtime
+task=compiler_unit_tests|result=PASS|status=0|spec_count=$spec_count|passed_count=$spec_count|timeout_count=0|crash_count=0|inventory=$dir/inventory.tsv|command_owner_receipt=$dir/owner.env
+task=compiler_bootstrap_tests|result=PASS|status=0|executed=1|passed=1|failed=0|skipped=0|command_owner_before=PASS|command_owner_after=PASS
+task=compiler_bootstrap_compile_tests|result=PASS|status=0|executed=1|passed=1|failed=0|skipped=0|command_owner_before=PASS|command_owner_after=PASS
+task=loader_interpreter_tests|result=PASS|status=0|executed=1|passed=1|failed=0|skipped=0|command_owner_before=PASS|command_owner_after=PASS
+task=loader_compile_tests|result=PASS|status=0|executed=1|passed=1|failed=0|skipped=0|command_owner_before=PASS|command_owner_after=PASS
+task=library_check|result=PASS|status=0|executed=0|passed=0|failed=0|skipped=0|command_owner_before=PASS|command_owner_after=PASS
+command_owner_receipt=$dir/owner.env
+command_owner_receipt_sha256=OWNER_SHA
+terminal_failures=0
+overall=$overall
+EOF
+  mkdir -p "$dir/runtime"
+  cat >"$dir/runtime/phase2-runtime-capsule.env" <<EOF
+schema=simple-phase2-runtime-capsule-v1
+status=frozen
+compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+capsule_identity_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$dir/owner.env" <<EOF
+schema=simple-bootstrap-command-owners-v3
+status=frozen
+phase=stage2
+compiler_snapshot_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+runtime_identity_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+compiler_cli_path=$dir/compiler-cli
+compiler_cli_sha256=CLI_SHA
+test_runner_path=$dir/test-runner
+test_runner_sha256=RUNNER_SHA
+EOF
+  printf '#!/bin/sh\nexit 0\n' >"$dir/compiler-cli"
+  printf '#!/bin/sh\nexit 0\n' >"$dir/test-runner"
+  chmod +x "$dir/compiler-cli" "$dir/test-runner"
+  cli_sha=$(shasum -a 256 "$dir/compiler-cli" | awk '{print $1}')
+  runner_sha=$(shasum -a 256 "$dir/test-runner" | awk '{print $1}')
+  sed -i.bak -e "s/CLI_SHA/$cli_sha/" -e "s/RUNNER_SHA/$runner_sha/" "$dir/owner.env"
+  rm -f "$dir/owner.env.bak"
+  owner_sha=$(shasum -a 256 "$dir/owner.env" | awk '{print $1}')
+  sed -i.bak "s/OWNER_SHA/$owner_sha/" "$dir/summary.env"
+  rm -f "$dir/summary.env.bak"
+  if [ "$state" = completed ]; then
+    "$validator" stage2 "$dir/summary.env" "$state" "$root" "$source_sha" >/dev/null
+  else
+    ! "$validator" stage2 "$dir/summary.env" "$state" "$root" "$source_sha" >/dev/null 2>&1
+  fi
+}
+
+make_fixture "$tmp/pass" completed 1 1 PASS || fail 'valid evidence rejected'
+make_fixture "$tmp/skipped" skipped 1 1 PASS || fail 'skipped evidence admitted'
+make_fixture "$tmp/queued" queued 1 1 PASS || fail 'queued evidence admitted'
+if make_fixture "$tmp/zero" completed 0 1 PASS 2>/dev/null; then
+  fail 'zero-execution evidence admitted'
+fi
+if make_fixture "$tmp/not-pass" completed 1 1 FAIL 2>/dev/null; then
+  fail 'non-PASS evidence admitted'
+fi
+
+clone_pass() {
+  name=$1
+  cp -R "$tmp/pass" "$tmp/$name"
+  sed -i.bak "s|$tmp/pass|$tmp/$name|g" "$tmp/$name/summary.env" "$tmp/$name/owner.env"
+  rm -f "$tmp/$name/summary.env.bak" "$tmp/$name/owner.env.bak"
+  sha=$(shasum -a 256 "$tmp/$name/owner.env" | awk '{print $1}')
+  sed -i.bak "s/^command_owner_receipt_sha256=.*/command_owner_receipt_sha256=$sha/" "$tmp/$name/summary.env"
+  rm -f "$tmp/$name/summary.env.bak"
+}
+clone_pass skipped_library
+sed -i.bak 's/task=library_check|result=PASS/task=library_check|result=SKIPPED/' "$tmp/skipped_library/summary.env"
+rm -f "$tmp/skipped_library/summary.env.bak"
+if "$validator" stage2 "$tmp/skipped_library/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'skipped library check admitted'
+fi
+clone_pass stale_source
+sed -i.bak 's/^source_git_sha=.*/source_git_sha=0000000000000000000000000000000000000000/' "$tmp/stale_source/summary.env"
+rm -f "$tmp/stale_source/summary.env.bak"
+if "$validator" stage2 "$tmp/stale_source/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'stale source revision admitted'
+fi
+clone_pass runtime_mismatch
+sed -i.bak 's/^capsule_identity_sha256=.*/capsule_identity_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' "$tmp/runtime_mismatch/runtime/phase2-runtime-capsule.env"
+rm -f "$tmp/runtime_mismatch/runtime/phase2-runtime-capsule.env.bak"
+if "$validator" stage2 "$tmp/runtime_mismatch/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'runtime identity mismatch admitted'
+fi
+clone_pass duplicate_spec
+cat >>"$tmp/duplicate_spec/inventory.tsv" <<EOF
+test/a_spec.spl	PASS	0	1	1	0	0	row2.log	100
+EOF
+sed -i.bak 's/spec_count=1|passed_count=1/spec_count=2|passed_count=2/' "$tmp/duplicate_spec/summary.env"
+rm -f "$tmp/duplicate_spec/summary.env.bak"
+if "$validator" stage2 "$tmp/duplicate_spec/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'duplicate inventory spec admitted'
+fi
+clone_pass symlink_inventory
+mv "$tmp/symlink_inventory/inventory.tsv" "$tmp/outside-inventory.tsv"
+ln -s "$tmp/outside-inventory.tsv" "$tmp/symlink_inventory/inventory.tsv"
+if "$validator" stage2 "$tmp/symlink_inventory/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'symlink inventory admitted'
+fi
+clone_pass missing_identity
+sed -i.bak '/^test_runner_path=/d' "$tmp/missing_identity/owner.env"
+rm -f "$tmp/missing_identity/owner.env.bak"
+sha=$(shasum -a 256 "$tmp/missing_identity/owner.env" | awk '{print $1}')
+sed -i.bak "s/^command_owner_receipt_sha256=.*/command_owner_receipt_sha256=$sha/" "$tmp/missing_identity/summary.env"
+rm -f "$tmp/missing_identity/summary.env.bak"
+if "$validator" stage2 "$tmp/missing_identity/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'missing test-runner identity admitted'
+fi
+
+cp -R "$tmp/pass" "$tmp/stage3"
+sed -i.bak "s|$tmp/pass|$tmp/stage3|g" "$tmp/stage3/summary.env"
+rm -f "$tmp/stage3/summary.env.bak"
+sed -i.bak 's/^phase=stage2$/phase=stage3/' "$tmp/stage3/summary.env"
+rm -f "$tmp/stage3/summary.env.bak"
+sed -i.bak 's/^phase=stage2$/phase=stage3/' "$tmp/stage3/owner.env"
+rm -f "$tmp/stage3/owner.env.bak"
+stage3_owner_sha=$(shasum -a 256 "$tmp/stage3/owner.env" | awk '{print $1}')
+sed -i.bak "s/^command_owner_receipt_sha256=.*/command_owner_receipt_sha256=$stage3_owner_sha/" "$tmp/stage3/summary.env"
+rm -f "$tmp/stage3/summary.env.bak"
+if "$validator" stage3 "$tmp/stage3/summary.env" completed "$root" "$source_sha" >/dev/null 2>&1; then
+  fail 'Stage 3 admitted without repository inventory'
+fi
+cat >>"$tmp/stage3/summary.env" <<EOF
+task=repository_full_tests|result=PASS|status=0|spec_count=1|passed_count=1|timeout_count=0|crash_count=0|inventory=$tmp/stage3/inventory.tsv|command_owner_receipt=$tmp/stage3/owner.env
+EOF
+"$validator" stage3 "$tmp/stage3/summary.env" completed "$root" "$source_sha" >/dev/null ||
+  fail 'valid Stage 3 repository inventory rejected'
+
+# Exercise the workflow-owned runner without compiling. The fake producer uses
+# the real centralized path shape, including the platform directory, and the
+# log proves both verifier calls receive distinct compiler/capsule authorities.
+contract="$tmp/runner"
+storage="$contract/storage"
+mkdir -p "$contract/bin"
+cat >"$contract/bin/bootstrap" <<'EOF'
+#!/bin/sh
+set -eu
+root=$SIMPLE_WORKTREE_STORAGE_ROOT/build/bootstrap
+platform=aarch64-apple-darwin
+dir=$root/stage3/$platform
+mkdir -p "$dir/stage2-admitted" "$dir/stage2-runtime-authority"
+case " $* " in
+  *' --resume-stage3-from-admitted='*)
+    cp "$dir/stage2-admitted/simple" "$dir/simple"
+    printf 'stage3\n' >>"$dir/simple"
+    chmod +x "$dir/simple"
+    : >"$dir/provenance.env" ;;
+  *)
+    printf '#!/bin/sh\nexit 0\n' >"$dir/stage2-admitted/simple"
+    chmod +x "$dir/stage2-admitted/simple"
+    : >"$dir/stage2-admitted/admission.env"
+    : >"$root/stage3-planner-admission.receipt" ;;
+esac
+printf '%s\n' "$*" >>"$PHASE23_CONTRACT_LOG.bootstrap"
+EOF
+cat >"$contract/bin/capsule" <<'EOF'
+#!/bin/sh
+set -eu
+case $1 in
+  publish)
+    sha=$(shasum -a 256 "$2" | awk '{print $1}')
+    dir=$4/$sha
+    mkdir -p "$dir"
+    : >"$dir/phase2-runtime-capsule.env"
+    printf '%s\n' "$dir"
+    printf '%s|%s\n' "$2" "$dir" >>"$PHASE23_CONTRACT_LOG.capsule" ;;
+  verify) test -f "$2/phase2-runtime-capsule.env" ;;
+esac
+EOF
+cat >"$contract/bin/verifier" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$PHASE23_CONTRACT_LOG.verifier"
+for arg in "$@"; do case $arg in --work-root=*) mkdir -p "${arg#*=}"; : >"${arg#*=}/summary.env";; esac; done
+EOF
+cat >"$contract/bin/evidence" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$PHASE23_CONTRACT_LOG.evidence"
+EOF
+chmod +x "$contract/bin/"*
+PHASE23_CONTRACT_TEST=1 PHASE23_CONTRACT_LOG="$contract/calls" \
+SIMPLE_WORKTREE_STORAGE_ROOT="$storage" PHASE23_VERIFY_ROOT="$contract/verify" \
+PHASE23_BOOTSTRAP_COMMAND="$contract/bin/bootstrap" \
+PHASE23_CAPSULE_COMMAND="$contract/bin/capsule" \
+PHASE23_VERIFIER_COMMAND="$contract/bin/verifier" \
+PHASE23_EVIDENCE_COMMAND="$contract/bin/evidence" \
+  sh "$runner"
+[ "$(wc -l <"$contract/calls.verifier" | tr -d ' ')" = 2 ] || fail 'runner did not reach both verifiers'
+grep -Fq -- '--phase=stage2' "$contract/calls.verifier" || fail 'Stage 2 verifier was not reached'
+grep -Fq -- '--phase=stage3' "$contract/calls.verifier" || fail 'Stage 3 verifier was not reached'
+grep -Fq 'phase-runtime-capsules/stage2/' "$contract/calls.verifier" || fail 'Stage 2 capsule handoff missing'
+grep -Fq 'phase-runtime-capsules/stage3/' "$contract/calls.verifier" || fail 'Stage 3 capsule handoff missing'
+
+echo 'bootstrap_phase_evidence_workflow_test: PASS'
