@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mkdir "$tmp/bin"
+real_ps=$(command -v ps)
+cat >"$tmp/bin/ps" <<EOF
+#!/bin/sh
+sleep .04
+exec "$real_ps" "\$@"
+EOF
+chmod +x "$tmp/bin/ps"
+# macOS may spend hundreds of milliseconds admitting a new executable script.
+# Warm this artificial sampler before measuring the deliberate 40 ms delay.
+"$tmp/bin/ps" -p $$ >/dev/null
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/cadence.env" -- sleep .65
+awk -F= '/^sample_gap_max_ms=/ { print; if ($2 >= 130) exit 1 }' "$tmp/cadence.env" || fail 'sample time added to interval'
+status=0
+perl "$guard" --timeout-seconds=1 --receipt="$tmp/deadline.env" -- sleep 1.01 || status=$?
+[ "$status" -eq 124 ] || fail "late completion bypassed deadline: $status"
+status=0
+perl "$guard" --timeout-seconds=1 --term-grace-seconds=1 -- /bin/sh -c \
+    'trap '\''echo flushed >"$1"; exit 0'\'' TERM; sleep 10 & wait' sh "$tmp/flushed" || status=$?
+[ "$status" -eq 124 ] && [ -s "$tmp/flushed" ] || fail 'timeout lost TERM/grace flushing'
+cat >"$tmp/bin/ps" <<'EOF'
+#!/bin/sh
+sleep 10
+EOF
+status=0
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/stalled.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/started" >"$tmp/stalled.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$tmp/started" ] || fail 'hung sampler released command'
+echo 'PASS: sampling cadence, late completion timeout and hung startup sampler'
