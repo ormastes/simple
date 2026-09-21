@@ -494,6 +494,10 @@ done
 # including its exact TERM forwarding and process-group cleanup semantics.
 mv "$fake_root/scripts/bootstrap/fixture-process-group-timeout.shs" \
   "$fake_root/scripts/bootstrap/run-process-group-timeout.shs"
+# The four boundary probes above deliberately invoke real link workers before
+# rejecting their draft receipts. Keep their receipts and logs, but isolate the
+# full-matrix link-count oracle from those earlier fixture invocations.
+: >"$FAKE_LINK_COUNT"
 # An existing receipt alone must not release a dependency in the current run.
 sed -n '/^scheduler_task_dependencies_terminal() {$/,/^}$/p' "$runner" >"$fixture/dependency-owner.sh"
 (
@@ -525,13 +529,13 @@ unset FAKE_GATE_DELAY
 summary="$fake_root/build/mini_builds/stage4_tooling_full/summary.env"
 grep -Fxq 'overall=BLOCKED' "$summary" || fail "unfinished required rows did not remain fail-closed"
 grep -Fxq 'admission_eligible=false' "$summary" || fail "blocked matrix claimed admission eligibility"
-grep -Fxq 'terminal_count=52' "$summary" || fail "full matrix did not terminalize"
+grep -Fxq 'terminal_count=53' "$summary" || fail "full matrix did not terminalize"
 grep -Fxq 'passed=47' "$summary" || fail "full matrix PASS distribution changed"
 grep -Fxq 'failed=0' "$summary" || fail "full matrix masked a failed row"
-grep -Fxq 'blocked=2' "$summary" || fail "full matrix blocked-row distribution changed"
+grep -Fxq 'blocked=3' "$summary" || fail "full matrix blocked-row distribution changed"
 grep -Fxq 'remaining=0' "$summary" || fail "full matrix retained pending rows"
 grep -Fxq 'unsupported=3' "$summary" || fail "optional unsupported rows missing"
-grep -Fxq 'required_not_pass=2' "$summary" || fail "required blocked count changed"
+grep -Fxq 'required_not_pass=3' "$summary" || fail "required blocked count changed"
 grep -Fxq 'optional_failed=0' "$summary" || fail "optional failure aggregate wrong"
 grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "blocked matrix claimed zero compiler files"
 full_parallel_max=$(awk -F '\t' '$1 == "full" && $3 > max { max=$3 } END { print max + 0 }' "$FAKE_CONCURRENCY_AUDIT")
@@ -539,10 +543,73 @@ full_parallel_max=$(awk -F '\t' '$1 == "full" && $3 > max { max=$3 } END { print
 [ "$full_parallel_max" -le 16 ] || fail "scheduler exceeded the effective jobs bound"
 schedule="$fake_root/build/mini_builds/stage4_tooling_full/scheduler/schedule.tsv"
 schedule_rows=$(wc -l <"$schedule" | tr -d ' ')
-[ "$((schedule_rows - 1))" -eq 52 ] || fail "scheduler manifest row count changed"
+[ "$((schedule_rows - 1))" -eq 53 ] || fail "scheduler manifest row count changed"
 tail -n +2 "$schedule" | cut -f1 >"$fixture/schedule-order"
 cut -f1 "$fake_root/build/mini_builds/stage4_tooling_full/matrix.tsv" >"$fixture/matrix-order"
 cmp -s "$fixture/schedule-order" "$fixture/matrix-order" || fail "parent aggregation lost manifest order"
+cat >"$fixture/expected-matrix-identities" <<'EXPECTED_MATRIX_IDENTITIES'
+link_cli
+link_mcp
+link_lsp
+cli_help
+cli_version
+mcp_help
+mcp_version
+lsp_help
+lsp_version
+core_runtime_smoke
+redeploy_sanity
+compiler_check
+library_check
+mcp_check
+lsp_check
+essential_tools
+lint_help
+lint_focused
+duplicate_help
+duplicate_focused
+format_fixed_focused_regression
+compiler_bootstrap_tests
+compiler_core_tests
+compiler_full_tests
+tooling_contract_tests
+mcp_unit_tests
+lsp_unit_tests
+lsp_log_modes_tests
+mcp_protocol
+mcp_focused
+lsp_protocol
+mcp_stdio_integration
+lsp_stdio_integration
+test_daemon
+examples_check
+fmt
+fix
+verify
+spipe_docgen
+spipe_suite
+devhub_suite
+caret_suite
+phase_live_services
+native_build
+security
+build
+run
+doc_coverage
+vscode_dispatch
+electron_dispatch
+vscode_external
+electron_external
+simple_core_smoke
+EXPECTED_MATRIX_IDENTITIES
+[ "$(wc -l <"$fixture/expected-matrix-identities" | tr -d ' ')" -eq 53 ] ||
+  fail "fixture matrix identity inventory changed"
+[ "$(sort "$fixture/expected-matrix-identities" | uniq | wc -l | tr -d ' ')" -eq 53 ] ||
+  fail "fixture matrix identity inventory contains duplicates"
+sort "$fixture/expected-matrix-identities" >"$fixture/expected-matrix-identities.sorted"
+sort "$fixture/matrix-order" >"$fixture/matrix-order.sorted"
+cmp -s "$fixture/expected-matrix-identities.sorted" "$fixture/matrix-order.sorted" ||
+  fail "source and fixture matrix identity sets differ"
 awk -F '\t' '
   NR == 1 { next }
   $4 == "executed" {
@@ -579,6 +646,18 @@ while IFS="$(printf '\t')" read -r matrix_task matrix_required matrix_deps; do
         grep -Fxq 'executed_test_count=0' "$matrix_receipt" || fail "$matrix_task claimed examples"
         grep -Fxq 'pass_marker=-' "$matrix_receipt" || fail "$matrix_task claimed a PASS marker"
         grep -Fxq 'command_path=-' "$matrix_receipt" || fail "$matrix_task retained a command transcript"
+        ;;
+      phase_live_services)
+        grep -Fxq 'result=BLOCKED_UPSTREAM' "$matrix_receipt" || fail "$matrix_task was not blocked"
+        grep -Fxq 'status=phase-live-prerequisite-missing' "$matrix_receipt" || fail "$matrix_task blocker status changed"
+        grep -Fxq 'command_executed=false' "$matrix_receipt" || fail "$matrix_task claimed command execution"
+        grep -Fxq 'test_executed=false' "$matrix_receipt" || fail "$matrix_task claimed test execution"
+        grep -Fxq 'executed_test_count=0' "$matrix_receipt" || fail "$matrix_task claimed examples"
+        grep -Fxq 'pass_marker=-' "$matrix_receipt" || fail "$matrix_task claimed a PASS marker"
+        grep -Fxq 'command_path=-' "$matrix_receipt" || fail "$matrix_task retained a command transcript"
+        grep -Fq 'BLOCKED: phase live manifest and host Python verifier required' \
+          "$fake_root/build/mini_builds/stage4_tooling_full/logs/$matrix_task.log" ||
+          fail "$matrix_task blocker evidence changed"
         ;;
       *) grep -Fxq 'result=PASS' "$matrix_receipt" || fail "$matrix_task required row did not PASS" ;;
     esac
@@ -634,7 +713,9 @@ done
 [ "$(grep -Fxc "$fake_root/test/01_unit/compiler/bootstrap/fake_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "bootstrap shard was not disjoint"
 [ "$(grep -Fxc "$fake_root/test/01_unit/compiler/fake_full_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "full compiler shard was not disjoint"
 [ "$(grep -Fxc "$fake_root/test/01_unit/compiler_core/fake_core_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "compiler-core shard was not distinct"
-[ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq 3 ] || fail "approved tool set was not linked exactly once"
+full_link_count=$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')
+[ "$full_link_count" -eq 3 ] ||
+  fail "approved tool set was not linked exactly once (observed $full_link_count links)"
 
 for negative_mode in zero missing fail omit focused-wrong; do
   negative_status=0
