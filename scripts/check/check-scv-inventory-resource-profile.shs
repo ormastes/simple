@@ -1,0 +1,102 @@
+#!/bin/sh
+# Collector for the executable SCV resource SSpec; no bootstrap or seed fallback.
+set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT_DIR"
+fail() { printf 'SCV profile: %s\n' "$*" >&2; exit 1; }
+case "${1:-}" in
+    --help)
+        printf '%s\n' 'SCV_PROFILE_COMPILER=/absolute/admitted/stage2/simple sh scripts/check/check-scv-inventory-resource-profile.shs' \
+          'Compiles one native fixture, then measures scoped/baseline and batch/sequential at N/2N.' \
+          'Run test/05_perf/scv/compile_source_inventory_resource_profile_spec.spl for semantic/resource assertions.'
+        exit 0 ;;
+    '') ;;
+    *) fail 'unknown argument' ;;
+esac
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+    else sha256sum "$1" | awk '{print $1}'; fi
+}
+receipt_value() {
+    awk -F= -v wanted="$2" '$1 == wanted {n++; value=substr($0,length($1)+2)} END {if (n != 1 || value == "") exit 1; print value}' "$1"
+}
+COMPILER=${SCV_PROFILE_COMPILER:-}
+[ -n "$COMPILER" ] && [ -x "$COMPILER" ] || fail 'SCV_PROFILE_COMPILER must name an admitted pure-Simple executable'
+COMPILER=$(CDPATH= cd -- "$(dirname -- "$COMPILER")" && pwd -P)/$(basename -- "$COMPILER")
+PROVENANCE=$(dirname -- "$COMPILER")/stage2-provenance.receipt
+SANITY=$(dirname -- "$COMPILER")/stage2-sanity.receipt
+[ -f "$PROVENANCE" ] && [ -f "$SANITY" ] || fail 'missing Stage 2 admission receipts'
+grep -qx 'stage2-provenance: pure-simple' "$PROVENANCE" || fail 'producer is not pure-Simple'
+grep -qx 'stage2-sanity: pass' "$SANITY" || fail 'producer sanity is not admitted'
+COMPILER_HASH=$(sha256_file "$COMPILER")
+[ "$(receipt_value "$PROVENANCE" candidate_sha256)" = "$COMPILER_HASH" ] || fail 'provenance hash mismatch'
+[ "$(receipt_value "$SANITY" candidate_sha256)" = "$COMPILER_HASH" ] || fail 'sanity hash mismatch'
+ADMISSION=$(receipt_value "$PROVENANCE" admission_receipt_path)
+[ -f "$ADMISSION" ] || fail 'missing admission authority'
+[ "$(receipt_value "$SANITY" admission_receipt_path)" = "$ADMISSION" ] || fail 'admission authorities differ'
+ADMISSION_HASH=$(sha256_file "$ADMISSION")
+[ "$(receipt_value "$PROVENANCE" admission_receipt_sha256)" = "$ADMISSION_HASH" ] || fail 'admission hash mismatch'
+[ "$(receipt_value "$SANITY" admission_receipt_sha256)" = "$ADMISSION_HASH" ] || fail 'sanity admission hash mismatch'
+[ "$(receipt_value "$ADMISSION" status)" = admitted ] || fail 'producer is not admitted'
+[ "$(receipt_value "$ADMISSION" candidate_sha256)" = "$COMPILER_HASH" ] || fail 'admission candidate mismatch'
+RUNTIME_DIR=$(receipt_value "$ADMISSION" runtime_authority_path)
+RUNTIME_ARCHIVE=$RUNTIME_DIR/$(receipt_value "$ADMISSION" hosted_runtime_relative_path)
+[ -f "$RUNTIME_ARCHIVE" ] || fail 'missing admitted runtime archive'
+[ "$(sha256_file "$RUNTIME_ARCHIVE")" = "$(receipt_value "$ADMISSION" hosted_runtime_sha256)" ] || fail 'runtime archive hash mismatch'
+if command -v timeout >/dev/null 2>&1; then TIMEOUT=$(command -v timeout);
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT=$(command -v gtimeout);
+else fail 'timeout or gtimeout is required for bounded measurement'; fi
+case "$(uname -s)" in Darwin) TIME_STYLE=darwin ;; Linux) TIME_STYLE=linux ;; *) fail 'peak RSS collector supports Darwin and Linux' ;; esac
+mkdir -p "$ROOT_DIR/build"
+BUILD_DIR=$(mktemp -d "$ROOT_DIR/build/scv-resource-profile.XXXXXX")
+printf 'SCV evidence: %s\n' "$BUILD_DIR" >&2
+printf 'compiler_sha256=%s\n' "$COMPILER_HASH"
+
+measure() {
+    row=$1
+    limit=$2
+    shift 2
+    result=0
+    if [ "$TIME_STYLE" = darwin ]; then
+        "$TIMEOUT" -k 3 "$limit" /usr/bin/time -lp "$@" >"$BUILD_DIR/$row.out" 2>"$BUILD_DIR/$row.time" || result=$?
+        rss=$(awk '/maximum resident set size/ {print $1}' "$BUILD_DIR/$row.time")
+        elapsed=$(awk '$1 == "real" {printf "%.0f", $2 * 1000000}' "$BUILD_DIR/$row.time")
+    else
+        "$TIMEOUT" -k 3 "$limit" /usr/bin/time -f 'SCV_RSS_KIB=%M\nSCV_WALL_SECONDS=%e' "$@" >"$BUILD_DIR/$row.out" 2>"$BUILD_DIR/$row.time" || result=$?
+        rss=$(awk -F= '$1 == "SCV_RSS_KIB" {printf "%.0f", $2 * 1024}' "$BUILD_DIR/$row.time")
+        elapsed=$(awk -F= '$1 == "SCV_WALL_SECONDS" {printf "%.0f", $2 * 1000000}' "$BUILD_DIR/$row.time")
+    fi
+    if [ "$result" -ne 0 ]; then
+        tail -n 8 "$BUILD_DIR/$row.out" >&2
+        tail -n 8 "$BUILD_DIR/$row.time" >&2
+        fail "$row failed (exit $result); no completed profile"
+    fi
+    case "$rss" in ''|*[!0-9]*) fail "$row missing numeric peak RSS" ;; esac
+    case "$elapsed" in ''|*[!0-9]*) fail "$row missing numeric wall time" ;; esac
+    [ "$rss" -gt 0 ] && [ "$rss" -lt 1000000000 ] || fail "$row exceeded strict 1 GB peak RSS cap ($rss bytes)"
+    printf '%s_peak_rss_bytes=%s\n' "$row" "$rss"
+    if [ "$row" = compile ]; then
+        [ "$elapsed" -gt 0 ] || fail 'compile wall time is not measurable'
+        printf 'compile_elapsed_us=%s\n' "$elapsed"
+    else
+        [ "$(grep -c '^SCV_PROFILE_DONE$' "$BUILD_DIR/$row.out")" = 1 ] || fail "$row missing native completion"
+        for field in count elapsed_us digest; do
+            value=$(receipt_value "$BUILD_DIR/$row.out" "$field") || fail "$row missing/duplicate $field"
+            printf '%s_%s=%s\n' "$row" "$field" "$value"
+        done
+    fi
+}
+
+# Bare positional native-build is the admitted Stage 2 entry. Direct mode is
+# a micro compile, not the full jobs=8 SCV coordinator qualification.
+measure compile 180 env SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_RUNTIME_PATH="$RUNTIME_DIR" \
+    SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NATIVE_BUILD_CLEAN=1 "$COMPILER" native-build \
+    test/fixtures/scv_inventory_memory/profile.spl -o "$BUILD_DIR/profile"
+[ -x "$BUILD_DIR/profile" ] || fail 'compiler did not produce an executable'
+for mode in scoped baseline batch sequential; do
+    measure "${mode}_n" 60 "$BUILD_DIR/profile" "--$mode"
+    measure "${mode}_double" 60 "$BUILD_DIR/profile" "--$mode" --double
+done
+[ "$(sha256_file "$COMPILER")" = "$COMPILER_HASH" ] || fail 'compiler changed during measurement'
+printf 'complete=yes\n'
