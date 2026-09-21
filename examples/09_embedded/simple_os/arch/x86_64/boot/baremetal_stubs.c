@@ -14760,7 +14760,11 @@ __attribute__((naked)) static void _rich_fault_entry(void)
         "movq $0x3, %%rax\n\t"
         "iretq\n\t"
         "6:\n\t"
+        /* Restoring the nine scratch registers removed 72 bytes and flipped
+         * RSP%16 relative to _rich_fault_print; reserve one word so the fatal
+         * handler sees the same SysV entry alignment as the printer. */
         "movq (%%rsp), %%rdi\n\t"
+        "subq $8, %%rsp\n\t"
         "callq spl_x86_on_kernel_ud2_fault\n\t"
         "cli\n\t"
         "7:\n\t"
