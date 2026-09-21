@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Date:** 2026-09-03  **Status:** open — real defect, cost ~1h and one wrongly-killed chain
+**Date:** 2026-09-03  **Status:** source fixed 2026-09-21 — fresh FreeBSD `--full` QEMU receipt still pending
 
 ## Symptom
 
@@ -81,3 +81,32 @@ A stall verdict needs a **CPU-time delta over an interval**, not a status field.
 `ps -o time= -p <pid>` sampled twice, 45s apart, settled in one command what the
 monitor got wrong for 155 consecutive samples.
 
+## FreeBSD QEMU reproduction and source fix (2026-09-21)
+
+The canonical QEMU run reproduced the same failure on FreeBSD: the watched
+shell was PID 1900, the watcher was PID 2159, and the active Stage 2 compiler
+was PID 35183 in the watched process group at 829.9% CPU. FreeBSD has no Linux
+`/proc`, so the `/proc` sampler returned `tree_processes=0` and `tree_cpu_pct=0.0`
+while the build was working. The run was left untouched.
+
+The watcher now selects a portable `ps` backend when the watched `/proc` stat
+is unavailable (or when `BOOTSTRAP_WATCH_PROCESS_SOURCE=ps` is used by a
+fixture). It reads the complete parent tree and dedicated process group,
+derives instantaneous CPU from `ps` cumulative `time`, identifies processes
+with stable `lstart`, and leaves CPU `unknown` when the process table cannot
+prove a sample. Unknown metrics cannot advance the stall streak.
+
+Reproduction evidence on the host, using an absent `/proc` path as a FreeBSD
+fixture, is deliberately red on the pre-fix source and green after the fix:
+
+```
+pre-fix:  tree_processes=0, tree_cpu_pct=0.0  (expected failure)
+post-fix: tree_processes=3, tree_cpu_pct=0.0, tree_cpu_basis=ps-tree (pass)
+```
+
+The deterministic unit fixture is
+`test/01_unit/scripts/bootstrap_progress_watch_tree_test.shs`; it exercises
+the forced `ps` backend and passes alongside the Linux `/proc` tree checks.
+This source fix does not claim the outstanding full-QEMU acceptance row in
+`doc/03_plan/sys_test/native_platform_arch_matrix.md`; that row still needs a
+fresh `check-freebsd-bootstrap-qemu.shs --full` receipt.

@@ -2,7 +2,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-watcher="${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs"
+watcher="${BOOTSTRAP_WATCH_SCRIPT:-${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs}"
 test_tmp=$(mktemp -d)
 owned_pids=
 
@@ -50,6 +50,92 @@ nested_line=$(tail -n 1 "${nested_log}")
   fail "nested tree RSS does not exceed root RSS"
 [ "$(field done "${nested_line}")" = "unknown" ] || fail "missing event did not fall back to unknown"
 [ "$(field terminal "${nested_line}")" = "unknown" ] || fail "missing terminal did not fall back to unknown"
+
+# FreeBSD/macOS do not expose Linux /proc. Force the portable ps backend on
+# this Linux host so the same parent-tree contract is covered without a VM.
+ps_nested_log="${test_tmp}/nested-ps.log"
+BOOTSTRAP_WATCH_PROCESS_SOURCE=ps sh "${watcher}" --pid="${nested_root}" \
+  --progress-log="${ps_nested_log}" --once
+ps_nested_line=$(tail -n 1 "${ps_nested_log}")
+[ "$(field tree_processes "${ps_nested_line}")" -eq 2 ] ||
+  fail "ps backend tree count is not exactly two"
+[ "$(field tree_cpu_basis "${ps_nested_line}")" = "ps-tree" ] ||
+  fail "ps backend did not publish its tree CPU basis"
+
+# Deterministic two-sample CPU and process-group fixture. The fake ps table
+# keeps the parent and one child at zero CPU, then advances a reparented row in
+# the root's PGID. This proves the fallback sees work after a parent-chain
+# break, derives a delta across samples, and refuses a false stall verdict.
+ps_fixture_dir="${test_tmp}/ps-bin"
+mkdir -p "${ps_fixture_dir}"
+ps_counter="${test_tmp}/ps-counter"
+ps_stub="${ps_fixture_dir}/ps"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'case "$2" in' \
+  '  lstart=) printf "%s\n" "Mon Sep 21 00:00:00 2026"; exit 0 ;;' \
+  '  etime=) printf "%s\n" "00:10"; exit 0 ;;' \
+  'esac' \
+  'case "$2" in' \
+  '  -axo)' \
+  '    count=$(sed -n "1p" "$FIXTURE_COUNTER" 2>/dev/null || printf "0")' \
+  '    case "$count" in ""|*[!0-9]*) count=0 ;; esac' \
+  '    count=$((count + 1))' \
+  '    printf "%s\n" "$count" >"$FIXTURE_COUNTER"' \
+  '    child=987654321' \
+  '    orphan=987654322' \
+  '    printf "%s\n" "PID PPID PGID STATE LSTART TIME RSS COMMAND"' \
+  '    printf "%s %s %s S Mon Sep 21 00:00:00 2026 0:00.00 100 sh\n" "$FIXTURE_ROOT" 1 "$FIXTURE_ROOT"' \
+  '    printf "%s %s %s R Mon Sep 21 00:00:00 2026 0:00.00 100 awk\n" "$child" "$FIXTURE_ROOT" "$FIXTURE_ROOT"' \
+  '    printf "%s %s %s R Mon Sep 21 00:00:00 2026 0:%02d.00 1000 orphan\n" "$orphan" 1 "$FIXTURE_ROOT" "$count"' \
+  '    exit 0 ;;' \
+  'esac' \
+  'exit 1' >"${ps_stub}"
+chmod +x "${ps_stub}"
+ps_fixture_root_pid=
+sleep 30 &
+ps_fixture_root_pid=$!
+owned_pids="${ps_fixture_root_pid} ${owned_pids}"
+printf 'milestone=ps-pgroup\nmain_log=%s\n' "${test_tmp}/ps-pgroup.log" >"${test_tmp}/ps-pgroup.state"
+printf '%s\n' abc >"${test_tmp}/ps-pgroup.log"
+set +e
+FIXTURE_ROOT="${ps_fixture_root_pid}" FIXTURE_COUNTER="${ps_counter}" \
+  PATH="${ps_fixture_dir}:${PATH}" BOOTSTRAP_WATCH_PROCESS_SOURCE=ps \
+  BOOTSTRAP_WATCH_STALL_SAMPLES=2 timeout 5 sh "${watcher}" \
+  --pid="${ps_fixture_root_pid}" --state-file="${test_tmp}/ps-pgroup.state" \
+  --progress-log="${test_tmp}/ps-pgroup.progress" --interval=1 \
+  >/dev/null 2>&1
+ps_fixture_status=$?
+set -e
+[ "${ps_fixture_status}" -eq 124 ] ||
+  fail "two-sample ps fixture exited ${ps_fixture_status}, expected timeout 124"
+ps_pgroup_line=$(tail -n 1 "${test_tmp}/ps-pgroup.progress")
+[ "$(field tree_processes "${ps_pgroup_line}")" -eq 2 ] ||
+  fail "ps fixture parent tree count is not two"
+[ "$(field tree_pgroup_processes "${ps_pgroup_line}")" -eq 3 ] ||
+  fail "ps fixture process-group count is not three"
+[ "$(field tree_cpu_basis "${ps_pgroup_line}")" = "ps-pgroup" ] ||
+  fail "ps fixture did not select process-group CPU basis"
+ps_pgroup_cpu=$(field tree_cpu_pct "${ps_pgroup_line}")
+ps_cpu_samples=0
+while IFS= read -r ps_sample_line; do
+  ps_sample_cpu=$(field tree_cpu_pct "${ps_sample_line}")
+  case "${ps_sample_cpu}" in
+    unknown|'') continue ;;
+  esac
+  ps_cpu_samples=$((ps_cpu_samples + 1))
+  awk -v cpu="${ps_sample_cpu}" 'BEGIN { exit !(cpu + 0 >= 50 && cpu + 0 <= 150) }' ||
+    fail "ps fixture CPU delta was ${ps_sample_cpu}; expected stable 50..150 percent"
+done <"${test_tmp}/ps-pgroup.progress"
+[ "${ps_cpu_samples}" -ge 2 ] ||
+  fail "ps fixture produced ${ps_cpu_samples} numeric CPU samples, expected at least two"
+if grep -Fq 'status=alive-no-progress' "${test_tmp}/ps-pgroup.progress"; then
+  fail "busy ps process-group fixture was reported alive-no-progress"
+fi
+printf 'ps-fixture: tree_cpu_pct=%s basis=%s tree_processes=%s pgroup_processes=%s false_stall=false\n' \
+  "${ps_pgroup_cpu}" "$(field tree_cpu_basis "${ps_pgroup_line}")" \
+  "$(field tree_processes "${ps_pgroup_line}")" \
+  "$(field tree_pgroup_processes "${ps_pgroup_line}")"
 
 # Adjacent leaf case: a process with no descendants has identical root/tree RSS.
 sleep 30 &
