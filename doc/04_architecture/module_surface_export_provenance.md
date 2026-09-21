@@ -49,6 +49,14 @@ after Stage 4 evidence is stable.
 
 ## Boundaries
 
+Streaming HIR keeps registry-derived resolution caches in the reusable
+`HirLowering` owner. Each module's transient scope must promote those cache
+roots before teardown, including keys, nested values, dictionaries and scalar
+index mirrors. The driver owns the scope boundary; 20.hir enumerates retained
+cache ownership through `promote_resolution_caches_transient_owner`. Importer
+symbols and scratch remain per-module. This lifecycle correction was diagnosed
+on native macOS arm64 on 2026-09-21; other hosts are outside that evidence.
+
 - 10.frontend continues to own syntax. No parser representation migration is
   required in the immediate slice.
 - 20.hir owns compact surface semantics and export provenance.
@@ -73,6 +81,12 @@ nodes by physical identity plus content fingerprint and invalidate reverse
 dependents on export-edge changes.
 
 ## Performance and observability
+
+Streaming export-origin first/revisit passes own one transient scope per
+surface. Only the current origin index's six projections and failure text
+escape it. Registry-wide indexes keep their ownership; importer-qualified
+glob misses are evicted before HIR promotion. The macOS Stage 3 jobs=8
+process peak-RSS budget is below 1,000,000,000 bytes, currently unmet.
 
 Finalization runs once per surface set and lookup replaces repeated recursive
 scans. Debug counters record surfaces, export edges, fixpoint rounds, cycles,

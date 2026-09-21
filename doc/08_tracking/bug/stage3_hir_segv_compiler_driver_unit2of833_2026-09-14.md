@@ -1,5 +1,106 @@
 # Stage 3 native-build SEGVs in the HIR phase at unit 2 of 833 (`compiler.driver.driver*`)
 
+## Round 28 (2026-09-21) — macOS retained HIR cache lifetime identified
+
+Scope: native `aarch64-apple-darwin` only. Base `c71a262f5f8`, rebuilt through
+the canonical Stage 2 admission lane. This does not establish the cause or
+resolution of another host's historical failures.
+
+A single entry importing `compiler.driver.driver_public_api.{interpret_file}`
+reduces the failure to 30 modules. HIR finishes the entry and then stalls at
+`driver_public_api.spl` (`done=1 total=30`, roughly 490 MiB RSS). A native
+`sample` capture places the loop in `HirLowering.reexport_root_memo_lookup`,
+calling `rt_array_get`. An ordinary two-module function import completes.
+The scalar name-index operations also pass when compiled in isolation.
+
+The streaming driver creates one `HirLowering` before the module loop.
+`lower_streaming_surface_source` then opens and ends a transient allocation
+scope for each file. It promoted the HIR result, diagnostics, flat HIR row,
+and frontend registries, but omitted the resolution caches that
+`begin_module` deliberately retains. In particular, the first re-export
+query replaces its memo arrays inside the first transient scope. Ending that
+scope frees those arrays. A subsequent hash-chain lookup reads freed array
+handles; invalid reads become nil and then index zero, so the chain need not
+terminate. Retained dictionaries and dynamic key strings have the same
+ownership omission.
+
+The proposed fix adds `promote_resolution_caches_transient_owner` and invokes
+it while the scope is paused, before teardown. Its explicit root set covers
+the package, declaration, sibling, explicit dependency, payload miss, impl,
+name, glob miss and re-export caches, including their scalar mirrors.
+Importer symbol tables and temporary lowering graphs remain reclaimable.
+The importer-specific `imported_enum_owner_rows` mirror is now reset with
+its companion dictionaries in `begin_module`.
+
+Regression artifacts:
+
+- `test/fixtures/hir_resolution_cache_scope/main.spl`: cross-module function
+  signature with a separate result-type owner; must compile and print
+  `hir-resolution-cache-scope-ok`.
+- `test/01_unit/compiler/hir/hir_resolution_cache_transient_owner_spec.spl`:
+  two native transient scopes, retained negative results and dynamic text,
+  rejection outside a paused scope, and importer-local owner-row cleanup.
+
+### Focused verification (2026-09-21)
+
+Patched Stage 2 was admitted on macOS arm64. Binary SHA-256:
+`3d888a91386a1c18e8ad2851b3d46d669862b2871ca43ac4490e6ca1ff215a65`.
+
+- The 30-module reduction clears the former stall: `driver_public_api.spl`
+  advances from HIR done 1 to done 2 in 13 ms. It subsequently exits 1 with
+  48 unresolved-import diagnostics from its incomplete dependency closure.
+  This establishes progress past the sampled loop, not a successful build.
+- The three-file fixture compiles, links in 8.041 s, and prints
+  `hir-resolution-cache-scope-ok`, exit 0. Its imported function signature
+  refers to the separately owned struct; the executable checks a scalar
+  function result to avoid conflating ownership with aggregate ABI behavior.
+- An earlier struct round-trip variant reached all five HIR module aliases
+  but aborted in native codegen (exit 134): `unsupported LLVM value conversion
+  from double to ptr`. The variant constructed `ResultValue(code: 42)`,
+  passed it through `round_trip(value: ResultValue) -> ResultValue`, then
+  read `.code` via `result_code(value: ResultValue) -> i64`. This remains an
+  open backend issue, not a grammar workaround or a claimed fix.
+- The separate `transient_lifetime.spl` native fixture exercises two paused
+  scopes, promoted cache arrays and newly appended text. Its first native
+  compile exits 1 with `compiled unit has no usable capsule result:
+  identity-invalid`; no executable or lifetime PASS is claimed.
+- The compiler-only Stage 2 does not execute the SSpec runner. The new unit
+  spec remains unexecuted. Canonical Stage 3 is pending a frozen-tree receipt
+  after syncing newer main; a preflight receipt mismatch is not a Stage 3
+  compiler result.
+
+The successful fixture used the pure-Simple bare positional entry route:
+
+```sh
+SIMPLE_BOOTSTRAP=1 \
+SIMPLE_BINARY="$PWD/.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple" \
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
+SIMPLE_STAGE3_STREAMING_SURFACES=1 SIMPLE_NATIVE_ARENA_DECLS=1 \
+SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+SIMPLE_RUNTIME_PATH="$PWD/.simple/storage/build/bootstrap/stage3/aarch64-apple-darwin/stage2-runtime-authority" \
+sh scripts/bootstrap/run-process-group-timeout.shs 120 3 \
+  .simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple native-build \
+  test/fixtures/hir_resolution_cache_scope/main.spl \
+  --backend llvm --runtime-bundle core-c-bootstrap \
+  --cache-dir build/native_probe/three-module-final-cache \
+  --runtime-path .simple/storage/build/bootstrap/stage3/aarch64-apple-darwin/stage2-runtime-authority \
+  -o build/native_probe/three-module-final
+build/native_probe/three-module-final
+```
+
+For the lifetime probe the entry was `transient_lifetime.spl`, cache suffix
+`lifetime-cache`, and output suffix `lifetime`. For the 30-module probe the
+entry was `build/native_probe/import_root/main.spl`, importing
+`compiler.driver.driver_public_api.{interpret_file}` with a zero-returning
+`main`. Evidence is retained under `build/native_probe`: `import_root/sample.txt`,
+`import_root/native.log`, `import_root/patched.log`, `three-module-after.log`,
+`three-module-final.log`, and `lifetime.log`.
+
+Status: fix implemented with focused import regression passing; full macOS
+Stage 3 and native lifetime spec verification remain pending.
+Tracking row: `stage3_macos_hir_resolution_cache_lifetime_2026_09_21` in
+`doc/08_tracking/bug/bug_db.sdn`.
+
 - **Filed:** 2026-09-14
 - **Status:** OPEN — blocks every Stage 3 / Stage 4 / deploy on macOS arm64
 - **Tree:** `origin/main` `4f4d0e12832` (includes #951, #952, #955, #968)

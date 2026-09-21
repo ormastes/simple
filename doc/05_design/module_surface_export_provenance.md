@@ -27,6 +27,14 @@ native integer indices; use `contains_key` plus bracket access.
 
 ## Integration
 
+After streaming module lowering, pause the transient scope and promote HIR,
+diagnostics and `HirLowering.promote_resolution_caches_transient_owner()` before
+ending it. The helper batches only registry-derived cache roots and frees its
+temporary root vector. It must traverse previously retained arrays again when
+the current module appended new strings or rows. A false promotion result
+rolls back the flat HIR row and fails the module. `begin_module` resets the
+importer-specific enum owner rows with the enum owner dictionary.
+
 Finalize in streaming parsing, retained module rebuild, and C-entry surface
 construction. `register_imported_symbol` checks direct declarations, then the
 map. Glob registration enumerates direct public names plus re-export map names
@@ -35,6 +43,12 @@ and calls the same registration path. Fallback calls to
 resolved or ambiguous result.
 
 ## Errors
+
+The streaming origin resolver pauses its per-surface allocation scope,
+promotes the six index projections plus any error text, and ends the scope
+before returning. A caller-owned active scope is rejected without closing it.
+First and revisit passes use the same cleanup; the legacy entrypoint keeps
+unscoped behavior for callers managing their own lifetime.
 
 Diagnostics include facade module/path, public name, edge spelling, and
 canonical candidates. Missing target, non-public target, cycle, ambiguity, and

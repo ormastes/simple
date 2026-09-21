@@ -1,5 +1,8 @@
 # Module Surface Export Provenance Architecture — TLDR
 
+Streaming export resolution reclaims scratch per surface. The macOS jobs=8
+compiler peak-RSS target is below 1 GB and remains an open verification gate.
+
 Precompute compact re-export ownership once per `ModuleSurface` set so HIR no
 longer repeatedly guesses declaration origins through depth-capped facade walks.
 
@@ -18,6 +21,8 @@ longer repeatedly guesses declaration origins through depth-capped facade walks.
 - hot path: average O(1) provenance lookup replaces repeated recursive scans.
 - cache/index: compilation-local immutable map bound to source fingerprints.
 - invalidation: any import/export/source change rebuilds the surface set.
+- ownership: promote retained HIR resolution-cache roots before ending each
+  streaming module scope; reset importer-local enum owner rows.
 - perf/RSS: no more than 5% regression; record edges, rounds, fallback count,
   elapsed time, and retained bytes.
 

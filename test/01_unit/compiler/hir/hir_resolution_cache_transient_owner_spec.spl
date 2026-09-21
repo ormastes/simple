@@ -1,0 +1,104 @@
+"""
+## Purpose and audience
+Verify that frozen-registry caches survive the streaming HIR module boundary
+without retaining importer-local state. For compiler ownership maintainers.
+
+## Operator workflow
+Run this spec with a qualified native SSpec runner. The focused macOS bootstrap
+regression is test/fixtures/hir_resolution_cache_scope/main.spl, compiled by
+an admitted Stage 2 using a bare positional native-build entry.
+
+## Compatibility and limitations
+This exercises native transient allocation; interpreted execution is not
+evidence of native ownership. The macOS Stage 3 reproduction is recorded in
+doc/08_tracking/bug/stage3_hir_segv_compiler_driver_unit2of833_2026-09-14.md.
+"""
+# @tag: unit, compiler, hir, native
+# @req REQ-HIR-CACHE-SCOPE-001
+
+use std.spec.{describe, it, expect}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_array_len(value: Any) -> i64
+
+describe("streaming HIR resolution cache ownership", fn():
+    it("retains cache rows and newly appended values across two module scopes", fn():
+        step("Create a frozen registry and a reusable lowerer")
+        val surface = ModuleSurface.empty("cache_scope.owner")
+        val registry = ModuleSurfacesByName.from_parts(
+            [surface], {"cache_scope.owner": 0}, ["cache_scope.owner"], [0]).unwrap()
+        var lowering = hirlowering_for_module("first.spl", registry)
+
+        step("Populate resolution caches inside the first transient scope")
+        val began = rt_transient_array_scope_begin()
+        val missing = lowering.find_reexport_source(0, "missing")
+        val found = missing.found
+        lowering.name_index_put("surface F callable", 7)
+        lowering.explicit_dep_memo_record("owner Item", 0, "Item" + "Name")
+        lowering.surface_package_name_memo_record("owner", "cache" + ".scope")
+        lowering.payload_origin_miss_memo_record("owner Missing")
+        lowering.glob_reachable_miss_memo_record("generation owner Missing")
+        val paused = rt_transient_array_scope_pause()
+        val promoted = lowering.promote_resolution_caches_transient_owner()
+        val ended = rt_transient_array_scope_end()
+        expect(began).to_equal(true)
+        expect(found).to_equal(false)
+        expect(paused).to_equal(true)
+        expect(promoted).to_equal(true)
+        expect(ended).to_equal(true)
+
+        step("Read the retained native arrays before following any hash chain")
+        # Runtime validation makes the pre-fix failure bounded: freed arrays
+        # report length zero instead of entering a chain whose nil reads are 0.
+        val reexport_rows = rt_array_len(lowering.reexport_root_memo_keys)
+        expect(reexport_rows).to_equal(1)
+        if reexport_rows != 1:
+            return
+        expect(lowering.reexport_root_memo_lookup("0 missing")).to_equal(0)
+        expect(lowering.name_index_positions_values[0]).to_equal(7)
+        expect(lowering.explicit_dep_target_memo_item_values[0]).to_equal("ItemName")
+        expect(lowering.surface_package_name_memo_values[0]).to_equal("cache.scope")
+        expect(rt_array_len(lowering.payload_origin_miss_memo_keys)).to_equal(1)
+        expect(rt_array_len(lowering.glob_reachable_miss_memo_keys)).to_equal(0)
+
+        step("Append a new value during the next module and retain both rows")
+        lowering.begin_module("second.spl")
+        val second_began = rt_transient_array_scope_begin()
+        lowering.reexport_root_memo_record("1 next", 0, "fresh" + "Item")
+        val second_paused = rt_transient_array_scope_pause()
+        val second_promoted = lowering.promote_resolution_caches_transient_owner()
+        val second_ended = rt_transient_array_scope_end()
+        expect(second_began).to_equal(true)
+        expect(second_paused).to_equal(true)
+        expect(second_promoted).to_equal(true)
+        expect(second_ended).to_equal(true)
+        expect(lowering.reexport_root_memo_lookup("0 missing")).to_equal(0)
+        expect(lowering.reexport_root_memo_lookup("1 next")).to_equal(1)
+        expect(lowering.reexport_root_memo_item_values[1]).to_equal("freshItem")
+    )
+
+    it("refuses promotion when no transient scope is paused", fn():
+        step("Attempt ownership promotion outside a transient scope")
+        var lowering = hirlowering_for_module("outside.spl", ModuleSurfacesByName.empty())
+        expect(lowering.promote_resolution_caches_transient_owner()).to_equal(false)
+    )
+
+    it("clears enum owner rows belonging to the previous importer", fn():
+        step("Move from one importer to the next")
+        var lowering = hirlowering_for_module("first.spl", ModuleSurfacesByName.empty())
+        lowering.imported_enum_owner_rows.push("Kind\u001fowner.first")
+        lowering.glob_reachable_miss_memo_record("generation first Missing")
+        lowering.begin_module("second.spl")
+        expect(lowering.imported_enum_owner_rows.len()).to_equal(0)
+        expect(lowering.glob_reachable_miss_memo_keys.len()).to_equal(0)
+        expect(lowering.glob_reachable_importer_owner).to_equal("")
+        expect(lowering.glob_reachable_importer_index).to_equal(-1)
+    )
+)

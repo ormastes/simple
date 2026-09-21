@@ -11,7 +11,82 @@ use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_array_free(array: [Any])
+
 impl HirLowering:
+    me promote_resolution_caches_transient_owner() -> bool:
+        """Retain frozen-registry facts across a streaming module scope.
+
+        The lowerer is constructed before the per-file transient scope, but
+        cache rows and replacement arrays are allocated during lowering.
+        begin_module deliberately retains these caches. Promote their roots
+        while the scope is paused, before its allocations are reclaimed.
+        Keep importer symbol tables and lowering scratch out of this graph.
+        """
+        # A glob miss is qualified by this importer. The next module cannot
+        # reuse it, so leave its old rows in the dying scope instead of making
+        # every importer's negative queries process-lifetime allocations.
+        self.clear_importer_glob_resolution_cache()
+        var roots: [Any] = []
+        roots.push(self.field_package_dep_memo)
+        roots.push(self.surface_package_name_memo)
+        roots.push(self.surface_package_name_memo_keys)
+        roots.push(self.surface_package_name_memo_values)
+        roots.push(self.surface_package_name_memo_hash_buckets)
+        roots.push(self.surface_package_name_memo_hash_next)
+        roots.push(self.surface_decl_owners)
+        roots.push(self.surface_decl_pair_names)
+        roots.push(self.surface_decl_pair_surfaces)
+        roots.push(self.surface_decl_pair_hash_buckets)
+        roots.push(self.surface_decl_pair_hash_next)
+        roots.push(self.package_sibling_names)
+        roots.push(self.package_sibling_canons)
+        roots.push(self.surface_index_by_name)
+        roots.push(self.explicit_dep_target_memo)
+        roots.push(self.explicit_dep_item_memo)
+        roots.push(self.explicit_dep_target_memo_keys)
+        roots.push(self.explicit_dep_target_memo_target_values)
+        roots.push(self.explicit_dep_target_memo_item_values)
+        roots.push(self.explicit_dep_target_memo_hash_buckets)
+        roots.push(self.explicit_dep_target_memo_hash_next)
+        roots.push(self.payload_origin_miss_memo)
+        roots.push(self.payload_origin_miss_memo_keys)
+        roots.push(self.payload_origin_miss_memo_hash_buckets)
+        roots.push(self.payload_origin_miss_memo_hash_next)
+        roots.push(self.impl_index_built)
+        roots.push(self.impl_index_positions)
+        roots.push(self.impl_method_name_index)
+        roots.push(self.impl_trait_name_index)
+        roots.push(self.name_index_built)
+        roots.push(self.name_index_positions)
+        roots.push(self.name_index_keys)
+        roots.push(self.name_index_positions_values)
+        roots.push(self.name_index_hash_buckets)
+        roots.push(self.name_index_hash_next)
+        roots.push(self.name_index_built_keys)
+        roots.push(self.name_index_built_buckets)
+        roots.push(self.name_index_built_next)
+        roots.push(self.reexport_root_memo_index)
+        roots.push(self.reexport_root_memo_item)
+        roots.push(self.reexport_root_memo_keys)
+        roots.push(self.reexport_root_memo_index_values)
+        roots.push(self.reexport_root_memo_item_values)
+        roots.push(self.reexport_root_memo_hash_buckets)
+        roots.push(self.reexport_root_memo_hash_next)
+        val promoted = rt_transient_heap_promote(roots)
+        rt_array_free(roots)
+        promoted
+
+    me clear_importer_glob_resolution_cache():
+        self.glob_reachable_miss_memo = {}
+        self.glob_reachable_miss_memo_keys = []
+        self.glob_reachable_miss_memo_hash_buckets = []
+        self.glob_reachable_miss_memo_hash_next = []
+        self.glob_reachable_miss_memo_hash_mask = 0
+        self.glob_reachable_importer_owner = ""
+        self.glob_reachable_importer_index = -1
+
     # Re-entrancy stack accessors for `imported_type_methods_in_progress`.
     #
     # These keep the guard's push/peek/pop behind the HirLowering extension
@@ -91,6 +166,8 @@ impl HirLowering:
         self.imported_traits = {}
         self.imported_enums = {}
         self.imported_enum_owners = {}
+        self.imported_enum_owner_rows = []
+        self.clear_importer_glob_resolution_cache()
         self.materialized_payload_origins = {}
         self.materialized_payload_bindings = {}
         # Must already be empty here (the guard pops what it pushes, and the
