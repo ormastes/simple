@@ -15,6 +15,23 @@ if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
     echo "SKIP: arm64 macOS native ABI fixture"
     exit 0
 fi
+runtime_receipt=$runtime_path/phase2-runtime-capsule.env
+if [ ! -f "$runtime_receipt" ] || [ -L "$runtime_receipt" ]; then
+    echo "FAIL: runtime path is not an admitted Phase 2 capsule" >&2
+    exit 2
+fi
+if ! sh scripts/bootstrap/phase2-runtime-capsule.shs verify "$runtime_path" >/dev/null; then
+    echo "FAIL: runtime capsule verification failed" >&2
+    exit 2
+fi
+runtime_identity=$(sed -n 's/^capsule_identity_sha256=//p' "$runtime_receipt")
+case "$runtime_identity" in
+    ''|*[!0-9a-f]*) echo "FAIL: runtime capsule identity is malformed" >&2; exit 2 ;;
+esac
+if [ "${#runtime_identity}" -ne 64 ]; then
+    echo "FAIL: runtime capsule identity is malformed" >&2
+    exit 2
+fi
 
 work=build/test/llvm_actual_join_close_path
 source_file=src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl
@@ -25,10 +42,21 @@ alias_object=$work/host_aliases.o
 artifact=$work/arena_actual_join
 log=$work/build.log
 receipt=$work/receipt.txt
+receipt_tmp=$work/receipt.tmp
+hashes=$work/hashes.txt
+# A stale executable or receipt must never satisfy this evidence owner after a
+# failed compile.  Recreate the complete output root for every invocation.
+rm -rf "$work"
 mkdir -p "$work/cache"
 cat "$source_file" "$tail_file" > "$fixture"
-clang -c test/fixtures/compiler/llvm_actual_join_runtime_stubs.c -o "$runtime_object"
-clang -c test/fixtures/compiler/llvm_actual_join_host_aliases_arm64_macos.s -o "$alias_object"
+if ! clang -c test/fixtures/compiler/llvm_actual_join_runtime_stubs.c -o "$runtime_object"; then
+    echo "FAIL: clang could not compile the runtime probe" >&2
+    exit 1
+fi
+if ! clang -c test/fixtures/compiler/llvm_actual_join_host_aliases_arm64_macos.s -o "$alias_object"; then
+    echo "FAIL: clang could not compile the callback aliases" >&2
+    exit 1
+fi
 
 SIMPLE_LINK_OBJECTS="$PWD/$runtime_object:$PWD/$alias_object" /usr/bin/time -l \
     "$compiler" native-build --timeout 300 --runtime-bundle host-gpu \
@@ -58,15 +86,27 @@ if [ "$max_rss_bytes" -ge 1073741824 ]; then
     exit 1
 fi
 
-{
-    echo schema=llvm-actual-join-close-path-v1
-    echo result=PASS
-    echo behavior=ACTUAL-JOIN-CLOSE-FAIL-PASS
-    echo elapsed_seconds=$elapsed_seconds
-    echo max_rss_bytes=$max_rss_bytes
-    shasum -a 256 "$compiler" "$source_file" "$tail_file" \
+if ! shasum -a 256 "$compiler" "$runtime_receipt" "$source_file" "$tail_file" \
         test/fixtures/compiler/llvm_actual_join_runtime_stubs.c \
         test/fixtures/compiler/llvm_actual_join_host_aliases_arm64_macos.s \
-        "$fixture" "$artifact"
-} >"$receipt"
+        "$fixture" "$artifact" >"$hashes"; then
+    echo "FAIL: could not bind evidence hashes" >&2
+    exit 1
+fi
+
+{
+    echo schema=llvm-actual-join-close-path-v3
+    echo result=PASS
+    echo behavior=ACTUAL-JOIN-CLOSE-FAIL-PASS
+    echo close_call_count=1
+    echo close_last_handle=73
+    echo runtime_capsule_identity_sha256=$runtime_identity
+    echo elapsed_seconds=$elapsed_seconds
+    echo max_rss_bytes=$max_rss_bytes
+    cat "$hashes"
+} >"$receipt_tmp" || {
+    echo "FAIL: could not publish evidence receipt" >&2
+    exit 1
+}
+mv "$receipt_tmp" "$receipt"
 cat "$receipt"
