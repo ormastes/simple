@@ -89,9 +89,19 @@ path and its Status line as the citation. Original documentation is unchanged.
 | `value_access_ownership_spec_never_executes_2026-09-18` | P2 | open |
 
 Existing row bytes and lifecycle values remain unchanged. The resulting CRC32
-is `2308762869`, resealed by the canonical tool. No TODO IDs were regenerated.
+was `2308762869`, resealed by the canonical tool. No TODO IDs were regenerated.
 The TODO README's incorrect legacy/deprecated notice is replaced with the actual
 canonical directory and numeric-ID contract.
+
+At the user's direction, the remaining unresolved document backlog is now
+attached to the canonical databases: 846 bug documents are registered in
+`bugs_active`, and 15 TODO documents receive stable numeric rows. Together with
+the three rows above, this registers all 864 unresolved documents identified by
+the baseline audit. An authored P0-P3 value is retained when present. Where the
+document has no priority, P3 is an explicit schema placeholder marked
+`untriaged`; it is not a severity or closure decision. Every new row remains
+open and points back to its document as the evidence owner. Existing lifecycle
+values remain unchanged. The bug database CRC32 is now `1699616582`.
 
 ## Executable regression and evidence
 
@@ -106,10 +116,12 @@ TODO rows, curated TODO rows, token boundaries, fenced examples, marker-only
 notes, reverse links, exact date identity, malformed fields, cross-table duplicate
 IDs, and missing database errors. Fifteen executable fixtures pass.
 
-The production audit remains intentionally FAIL: 1,689 rows, 4,550 non-index
-documents, and 927 findings after the three additions. That includes 846 exact-ID
-bug-document gaps, 15 TODO-document gaps, 46 reverse document gaps, and 20
-malformed rows. This audit is not enabled as a new CI merge gate over that backlog.
+The post-registration production audit remains intentionally FAIL: 2,550 rows,
+4,550 non-index documents, and 66 findings. All document-to-database attachment
+gaps are closed. The remaining findings are 46 database rows without an exact
+document and 20 malformed pre-existing rows. They are reverse-link/schema repair
+work rather than missing database attachment. This audit is not enabled as a new
+CI merge gate over that backlog.
 
 The final MSYS audit took 14.41 seconds and reported maximum
 RSS 125,496 KiB through `/usr/bin/time -v`, while independent fixture/DB checks
@@ -121,9 +133,8 @@ fixture results do not establish acceptance of any tracked implementation.
 Retained local evidence is under `build/tracking-audit/`: original inventory,
 related-platform inventory, registration fixture log, the prior guard's orphan
 log, full audit output, resource measurement, unique-ID gate, and CRC reseal log.
-The final unique-ID check passes over 3,039 rows in six SDN tables; that includes
-description/strategy tables as well as the 1,689 bug/TODO records. A byte comparison
-proves all original DB body bytes remain after excluding the six added record
-and description lines. The direct-env guard passes; tracked executable specs
-under `doc/06_spec` remain zero.
+The earlier unique-ID check passed over 3,039 rows in six SDN tables. The
+post-registration audit parses 2,550 bug/TODO rows without duplicate-ID findings.
+The direct-env guard passes; tracked executable specs under `doc/06_spec` remain
+zero.
 Independent admission review and CI gates remain required before merge.
