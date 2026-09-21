@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+# Regression coverage for scripts/check/lib/bootstrap-stage3/authority.shs.
+# FreeBSD bootstrap must preserve an explicitly admitted C compiler instead of
+# silently replacing it with the host's ambient `cc`.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+authority="$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-freebsd-cc-unit.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+cc="$tmp/explicit-clang"
+printf '#!/bin/sh\nexit 0\n' >"$cc"
+chmod +x "$cc"
+
+selected=$(CC="$cc" sh -c \
+    '. "$1"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority") || {
+    printf 'FAIL: FreeBSD CC selection returned a non-zero status\n' >&2
+    exit 1
+}
+
+if [ "$selected" != "$cc" ]; then
+    printf 'FAIL: expected explicit CC %s, selected %s\n' "$cc" "$selected" >&2
+    exit 1
+fi
+
+printf 'PASS: FreeBSD bootstrap preserves explicit CC (%s)\n' "$selected"
