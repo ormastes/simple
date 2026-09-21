@@ -120,11 +120,15 @@ int main(void) {
         const char* argv[] = {
             "cmd.exe", "/c",
             "for /L %i in (1,1,2000) do @echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NULL};
-        char capped[1001];
+        /* The destination is deliberately larger than the policy cap. This
+         * exposes direct-ABI implementations that use storage capacity as the
+         * retained-output limit. */
+        char capped[4097];
         (void)rt_process_run_owned_bounded("cmd.exe", argv, 30000, 1000,
                                            capped, sizeof(capped), err, sizeof(err), &r);
         check("truncation flagged", r.stdout_truncated == 1, "no truncation recorded");
-        check("cap respected", r.stdout_bytes_kept <= 1000, "buffer overrun");
+        check("policy cap respected", r.stdout_bytes_kept == 1000,
+              "max_output_bytes ignored");
         check("seen exceeds kept", r.stdout_bytes_seen > r.stdout_bytes_kept,
               "seen not counted past the cap");
     }

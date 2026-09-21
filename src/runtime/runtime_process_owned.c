@@ -4288,6 +4288,7 @@ typedef struct OwnedWinStream {
     HANDLE write_end;
     char* buf;
     uint64_t cap;      /* buffer capacity in bytes, including the NUL slot */
+    uint64_t limit;    /* policy cap, which may be smaller than the buffer */
     uint64_t seen;     /* total bytes the child produced */
     uint64_t kept;     /* bytes actually retained in buf */
     int truncated;
@@ -4433,7 +4434,9 @@ static int owned_win_drain(OwnedWinStream* s) {
         }
         s->seen += got;
         if (s->cap > 0) {
-            uint64_t room = s->cap - 1 - s->kept;
+            uint64_t buffer_room = s->cap - 1 - s->kept;
+            uint64_t policy_room = s->kept < s->limit ? s->limit - s->kept : 0;
+            uint64_t room = buffer_room < policy_room ? buffer_room : policy_room;
             uint64_t take = got < room ? (uint64_t)got : room;
             if (take) {
                 memcpy(s->buf + s->kept, chunk, (size_t)take);
@@ -4478,10 +4481,16 @@ static bool owned_win_run_bounded_impl(const char* cmd, const char* const* argv,
     if (timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS) timeout_ms = RT_OWNED_ABI_MAX_TIMEOUT_MS;
     if (out_cap) out[0] = '\0';
     if (err_cap) err[0] = '\0';
-    (void)max_output_bytes; /* the caps carried by out_cap/err_cap are authority */
+    /* Apply the policy cap independently from the caller's storage capacity.
+     * This mirrors the POSIX implementation and keeps direct ABI callers from
+     * retaining more output than max_output_bytes declares. */
+    uint64_t out_limit = out_cap > 0 && max_output_bytes > out_cap - 1
+        ? out_cap - 1 : max_output_bytes;
+    uint64_t err_limit = err_cap > 0 && max_output_bytes > err_cap - 1
+        ? err_cap - 1 : max_output_bytes;
 
-    OwnedWinStream so = {NULL, NULL, out, out_cap, 0, 0, 0};
-    OwnedWinStream se = {NULL, NULL, err, err_cap, 0, 0, 0};
+    OwnedWinStream so = {NULL, NULL, out, out_cap, out_limit, 0, 0, 0};
+    OwnedWinStream se = {NULL, NULL, err, err_cap, err_limit, 0, 0, 0};
     HANDLE job = NULL;
     HANDLE child_stdin = INVALID_HANDLE_VALUE;
     char* cmdline = NULL;
