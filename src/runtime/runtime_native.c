@@ -11345,13 +11345,91 @@ int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
 /* Non-accelerator native bridges. Text parameters use the ABI selected by
  * the caller: path_parent is (ptr, len); the legacy filename/extension
  * aliases receive a tagged RuntimeValue. */
+static int rt_path_parent_is_separator_for(uint8_t byte, int windows) {
+    /* Win32 accepts both spellings, and callers routinely preserve whichever
+     * spelling entered through argv or a project file. Scan bytes only: both
+     * separators are ASCII and cannot occur inside a UTF-8 continuation. */
+    return byte == (uint8_t)'/' || (windows && byte == (uint8_t)'\\');
+}
+
+static int rt_path_parent_is_separator(uint8_t byte) {
+#if defined(_WIN32)
+    return rt_path_parent_is_separator_for(byte, 1);
+#else
+    /* A backslash is an ordinary filename byte on POSIX. */
+    return rt_path_parent_is_separator_for(byte, 0);
+#endif
+}
+
+#if defined(SIMPLE_RUNTIME_TESTING)
+int rt_path_parent_is_separator_for_test(uint8_t byte, int windows) {
+    return rt_path_parent_is_separator_for(byte, windows != 0);
+}
+#endif
+
+#if defined(_WIN32)
+static int rt_path_parent_ascii_equal(uint8_t byte, char upper) {
+    return byte == (uint8_t)upper || byte == (uint8_t)(upper + ('a' - 'A'));
+}
+
+/* Number of bytes in a Windows root, including its final separator when one
+ * exists. This keeps a direct child's parent absolute and stops at a UNC share
+ * rather than walking into the server component. */
+static int64_t rt_path_parent_windows_root_len(const uint8_t* path, int64_t len) {
+    if (len >= 3 && path[1] == (uint8_t)':' &&
+            rt_path_parent_is_separator(path[2])) return 3;
+
+    int64_t unc_start = -1;
+    if (len >= 2 && rt_path_parent_is_separator(path[0]) &&
+            rt_path_parent_is_separator(path[1])) {
+        unc_start = 2;
+        if (len >= 8 && path[2] == (uint8_t)'?' &&
+                rt_path_parent_is_separator(path[3]) &&
+                rt_path_parent_ascii_equal(path[4], 'U') &&
+                rt_path_parent_ascii_equal(path[5], 'N') &&
+                rt_path_parent_ascii_equal(path[6], 'C') &&
+                rt_path_parent_is_separator(path[7])) {
+            unc_start = 8;
+        } else if (len >= 7 && path[2] == (uint8_t)'?' &&
+                rt_path_parent_is_separator(path[3]) && path[5] == (uint8_t)':' &&
+                rt_path_parent_is_separator(path[6])) {
+            return 7;
+        }
+    }
+    if (unc_start >= 0) {
+        int64_t i = unc_start;
+        while (i < len && !rt_path_parent_is_separator(path[i])) i++;
+        if (i >= len) return len;
+        i++;
+        while (i < len && !rt_path_parent_is_separator(path[i])) i++;
+        return i < len ? i + 1 : i;
+    }
+    return len > 0 && rt_path_parent_is_separator(path[0]) ? 1 : 0;
+}
+#endif
+
 int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     if (!path_ptr || path_len <= 0) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    int64_t root_len = rt_path_parent_windows_root_len(path_ptr, path_len);
+    if (path_len <= root_len) return rt_string_new(NULL, 0);
+#else
+    int64_t root_len = 0;
+#endif
     int64_t end = path_len;
-    while (end > 1 && path_ptr[end - 1] == '/') end--;
+    while (end > (root_len > 1 ? root_len : 1) &&
+            rt_path_parent_is_separator(path_ptr[end - 1])) end--;
+#if defined(_WIN32)
+    if (end <= root_len) return rt_string_new(NULL, 0);
+#endif
     int64_t slash = end - 1;
-    while (slash >= 0 && path_ptr[slash] != '/') slash--;
+    while (slash >= 0 && !rt_path_parent_is_separator(path_ptr[slash])) slash--;
     if (slash < 0) return rt_string_new((const uint8_t*)".", 1);
+#if defined(_WIN32)
+    if (root_len > 0 && slash < root_len) {
+        return rt_string_new(path_ptr, (uint64_t)root_len);
+    }
+#endif
     if (slash == 0) return rt_string_new(path_ptr, 1);
     return rt_string_new(path_ptr, (uint64_t)slash);
 }
