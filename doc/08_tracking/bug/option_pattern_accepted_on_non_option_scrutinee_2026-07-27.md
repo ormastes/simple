@@ -960,10 +960,10 @@ The focused pure-Simple owner spec is
 source change it passed 1/5 examples: `Some` and `None` on concrete non-Option
 types were accepted, genuine Option payload bindings were not typed, and an
 unresolved scrutinee was not constrained. After the source change it passes
-5/5 through the seed diagnostic runner. Controls prove that a genuine
+6/6 through the seed diagnostic runner. Controls prove that a genuine
 `Optional<i64>` is accepted with an `i64` payload binding, an unresolved type is
-constrained to `Optional<T>`, and a named user enum may retain a variant called
-`Some`.
+constrained to `Optional<T>`, `Ref<Optional<i64>>` retains match
+auto-dereference, and a named user enum may retain a variant called `Some`.
 
 The earlier subprocess class spec is not sufficient acceptance evidence: its
 negative cases discard process status and stderr and assert only that stdout
