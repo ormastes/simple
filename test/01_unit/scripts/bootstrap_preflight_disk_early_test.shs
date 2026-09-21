@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+checker="$root/scripts/check/check-bootstrap-preflight.shs"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-preflight-disk.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT INT TERM
+mkdir "$tmp/bin"
+cat >"$tmp/bin/df" <<'EOF'
+#!/bin/sh
+[ "$1" = -Pk ] || exit 3
+[ "${PREFLIGHT_FIXTURE_DF_FAIL:-0}" -ne 1 ] || exit 3
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fixture 99999999 1 %s 1%% /\n' "$PREFLIGHT_FIXTURE_FREE_KIB"
+[ "${PREFLIGHT_FIXTURE_DF_FAIL:-0}" -ne 2 ] || exit 3
+EOF
+chmod +x "$tmp/bin/df"
+cat >"$tmp/bin/cargo" <<'EOF'
+#!/bin/sh
+: >"$PREFLIGHT_FIXTURE_CARGO_MARKER"
+exit 99
+EOF
+chmod +x "$tmp/bin/cargo"
+
+MIN_FREE_GB=20 PREFLIGHT_FIXTURE_FREE_KIB=$((19 * 1024 * 1024)) \
+  PREFLIGHT_FIXTURE_CARGO_MARKER="$tmp/cargo-invoked" \
+  PATH="$tmp/bin:$PATH" sh "$checker" --disk-only >"$tmp/low.out" 2>&1 && {
+  echo 'FAIL: low disk admitted before Cargo' >&2
+  exit 1
+}
+grep -Fxq 'FAIL — disk-space(19GiB<20)' "$tmp/low.out"
+[ ! -e "$tmp/cargo-invoked" ]
+
+MIN_FREE_GB=20 PREFLIGHT_FIXTURE_FREE_KIB=$((20 * 1024 * 1024)) \
+  PREFLIGHT_FIXTURE_CARGO_MARKER="$tmp/cargo-invoked" \
+  PATH="$tmp/bin:$PATH" sh "$checker" --disk-only >"$tmp/ok.out" 2>&1
+grep -Fxq 'PASS — disk-space(20GiB>=20)' "$tmp/ok.out"
+[ ! -e "$tmp/cargo-invoked" ]
+
+if MIN_FREE_GB=20 PREFLIGHT_FIXTURE_DF_FAIL=1 \
+  PREFLIGHT_FIXTURE_FREE_KIB=$((20 * 1024 * 1024)) \
+  PATH="$tmp/bin:$PATH" sh "$checker" --disk-only >"$tmp/df-failed.out" 2>&1; then
+  echo 'FAIL: failed disk measurement admitted before Cargo' >&2
+  exit 1
+fi
+grep -Fxq 'ERROR — disk space could not be measured' "$tmp/df-failed.out"
+
+if MIN_FREE_GB=20 PREFLIGHT_FIXTURE_DF_FAIL=2 \
+  PREFLIGHT_FIXTURE_FREE_KIB=$((20 * 1024 * 1024)) \
+  PATH="$tmp/bin:$PATH" sh "$checker" --disk-only >"$tmp/df-partial.out" 2>&1; then
+  echo 'FAIL: failed disk measurement with partial output admitted' >&2
+  exit 1
+fi
+grep -Fxq 'ERROR — disk space could not be measured' "$tmp/df-partial.out"
+
+if MIN_FREE_GB=invalid PREFLIGHT_FIXTURE_FREE_KIB=$((20 * 1024 * 1024)) \
+  PATH="$tmp/bin:$PATH" sh "$checker" --disk-only >"$tmp/invalid-floor.out" 2>&1; then
+  echo 'FAIL: invalid disk floor admitted' >&2
+  exit 1
+fi
+grep -Fxq 'ERROR — invalid MIN_FREE_GB' "$tmp/invalid-floor.out"
+
+early=$(grep -n -F 'check-bootstrap-preflight.shs" --disk-only' "$bootstrap" | cut -d: -f1)
+cargo=$(grep -n -F 'run_rust_authority_cargo rust-seed-build' "$bootstrap" | cut -d: -f1)
+authoritative=$(grep -n -F '    --seed="${seed_bin}" --config="${bootstrap_preflight_config}"' "$bootstrap" | cut -d: -f1)
+[ -n "$early" ] && [ -n "$cargo" ] && [ -n "$authoritative" ]
+[ "$early" -lt "$cargo" ] && [ "$cargo" -lt "$authoritative" ] || {
+  echo 'FAIL: disk admission is not before Cargo with authoritative recheck later' >&2
+  exit 1
+}
+echo 'PASS — early disk guard refuses low space before Cargo and preserves authoritative recheck'

@@ -41,6 +41,7 @@ fi
 export CARGO_TARGET_DIR
 NO_CARGO=0
 SELFTEST_ONLY=0
+DISK_ONLY=0
 RECEIPT_PATH=
 VERIFY_RECEIPT=
 PREFLIGHT_CONFIG=unspecified
@@ -50,12 +51,13 @@ for a in "$@"; do
   case "$a" in
     --no-cargo) NO_CARGO=1 ;;
     --selftest) SELFTEST_ONLY=1 ;;
+    --disk-only) DISK_ONLY=1 ;;
     --receipt=*) RECEIPT_PATH=${a#*=} ;;
     --verify-receipt=*) VERIFY_RECEIPT=${a#*=} ;;
     --config=*) PREFLIGHT_CONFIG=${a#*=} ;;
     --expect-config=*) EXPECTED_CONFIG=${a#*=} ;;
     --seed=*) SEED_PATH=${a#*=} ;;
-    *) echo "usage: $0 [--no-cargo] [--selftest] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT] [--expect-config=TEXT] [--seed=PATH]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
+    *) echo "usage: $0 [--no-cargo] [--selftest] [--disk-only] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT] [--expect-config=TEXT] [--seed=PATH]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
   esac
 done
 
@@ -65,6 +67,14 @@ hash_file() {
   else
     shasum -a 256 "$1" | awk '{print $1}'
   fi
+}
+
+preflight_disk_free_gib() {
+  mkdir -p "$ROOT/build" || return 2
+  _df_output=$(df -Pk "$ROOT/build") || return 2
+  _free_kib=$(printf '%s\n' "$_df_output" | awk 'NR==2{print $4}') || return 2
+  case "$_free_kib" in ''|*[!0-9]*) return 2 ;; esac
+  echo $((_free_kib / 1024 / 1024))
 }
 
 manifest_value() {
@@ -131,6 +141,17 @@ verify_receipt() {
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$TMP"' EXIT
+
+if [ "$DISK_ONLY" -eq 1 ] && {
+  [ -n "$RECEIPT_PATH" ] || [ -n "$VERIFY_RECEIPT" ] ||
+  [ "$NO_CARGO" -ne 0 ] || [ "$SELFTEST_ONLY" -ne 0 ];
+}; then
+  echo "ERROR — disk-only mode does not produce or verify receipts or skip checks"
+  exit 2
+fi
+case "$MIN_FREE_GB" in
+  ''|*[!0-9]*) echo "ERROR — invalid MIN_FREE_GB"; exit 2 ;;
+esac
 
 if [ -n "$VERIFY_RECEIPT" ]; then
   [ -z "$RECEIPT_PATH" ] && [ "$SELFTEST_ONLY" -eq 0 ] || {
@@ -239,6 +260,21 @@ if [ "$SELFTEST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# A cheap admission before Cargo prevents spending minutes rebuilding the
+# Rust seed when the existing 20 GiB full-preflight floor is already unmet.
+# The ordinary post-Cargo check below remains authoritative and remeasures.
+if [ "$DISK_ONLY" -eq 1 ]; then
+  free_gb=$(preflight_disk_free_gib) || {
+    echo "ERROR — disk space could not be measured"; exit 2;
+  }
+  if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+    echo "FAIL — disk-space(${free_gb}GiB<${MIN_FREE_GB})"
+    exit 1
+  fi
+  echo "PASS — disk-space(${free_gb}GiB>=${MIN_FREE_GB})"
+  exit 0
+fi
+
 if [ -n "$RECEIPT_PATH" ]; then
   mkdir "$TMP/start-bindings" || exit 2
   capture_bindings "$TMP/start-bindings" || {
@@ -294,13 +330,11 @@ rm -rf "$PROBE_DIR"
 
 # ---- 4. disk space on build/ partition ----
 CHECKED=$((CHECKED+1))
-mkdir -p "$ROOT/build" 2>/dev/null
-free_kb=$(df -Pk "$ROOT/build" | awk 'NR==2{print $4}')
+free_gb=$(preflight_disk_free_gib)
 _rc=$?
-if [ "$_rc" -ne 0 ] || [ -z "${free_kb:-}" ]; then
+if [ "$_rc" -ne 0 ]; then
   FAILS="$FAILS disk-unreadable"
 else
-  free_gb=$((free_kb / 1024 / 1024))
   if [ "$free_gb" -ge "$MIN_FREE_GB" ]; then
     echo "check disk: ok (${free_gb} GiB free >= ${MIN_FREE_GB})"
   else
