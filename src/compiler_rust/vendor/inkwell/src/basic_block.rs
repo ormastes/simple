@@ -5,7 +5,7 @@ use llvm_sys::core::{
     LLVMGetBasicBlockTerminator, LLVMGetFirstInstruction, LLVMGetFirstUse, LLVMGetLastInstruction,
     LLVMGetNextBasicBlock, LLVMGetPreviousBasicBlock, LLVMGetTypeContext, LLVMIsABasicBlock, LLVMIsConstant,
     LLVMMoveBasicBlockAfter, LLVMMoveBasicBlockBefore, LLVMPrintTypeToString, LLVMPrintValueToString,
-    LLVMRemoveBasicBlockFromParent, LLVMReplaceAllUsesWith, LLVMTypeOf,
+    LLVMRemoveBasicBlockFromParent, LLVMReplaceAllUsesWith, LLVMSetValueName2, LLVMTypeOf,
 };
 use llvm_sys::prelude::{LLVMBasicBlockRef, LLVMValueRef};
 
@@ -31,18 +31,25 @@ pub struct BasicBlock<'ctx> {
 }
 
 impl<'ctx> BasicBlock<'ctx> {
-    pub(crate) unsafe fn new(basic_block: LLVMBasicBlockRef) -> Option<Self> {
-        if basic_block.is_null() {
-            return None;
+    /// Create a basic block from an [LLVMBasicBlockRef].
+    ///
+    /// # Safety
+    ///
+    /// The ref must be valid and point to a valid LLVM basic block.
+    pub unsafe fn new(basic_block: LLVMBasicBlockRef) -> Option<Self> {
+        unsafe {
+            if basic_block.is_null() {
+                return None;
+            }
+
+            // NOTE: There is a LLVMBasicBlockAsValue but it might be the same as casting
+            assert!(!LLVMIsABasicBlock(basic_block as LLVMValueRef).is_null());
+
+            Some(BasicBlock {
+                basic_block,
+                _marker: PhantomData,
+            })
         }
-
-        // NOTE: There is a LLVMBasicBlockAsValue but it might be the same as casting
-        assert!(!LLVMIsABasicBlock(basic_block as LLVMValueRef).is_null());
-
-        Some(BasicBlock {
-            basic_block,
-            _marker: PhantomData,
-        })
     }
 
     /// Acquires the underlying raw pointer belonging to this `BasicBlock` type.
@@ -288,9 +295,9 @@ impl<'ctx> BasicBlock<'ctx> {
     ///
     /// let void_type = context.void_type();
     /// let i32_type = context.i32_type();
-    /// #[cfg(not(any(feature = "llvm15-0", feature = "llvm16-0", feature = "llvm17-0", feature = "llvm18-0")))]
+    /// #[cfg(feature = "typed-pointers")]
     /// let i32_ptr_type = i32_type.ptr_type(AddressSpace::default());
-    /// #[cfg(any(feature = "llvm15-0", feature = "llvm16-0", feature = "llvm17-0", feature = "llvm18-0"))]
+    /// #[cfg(not(feature = "typed-pointers"))]
     /// let i32_ptr_type = context.ptr_type(AddressSpace::default());
     ///
     /// let fn_type = void_type.fn_type(&[i32_ptr_type.into()], false);
@@ -413,14 +420,16 @@ impl<'ctx> BasicBlock<'ctx> {
     /// assert!(function.get_basic_blocks().is_empty());
     /// ```
     pub unsafe fn delete(self) -> Result<(), ()> {
-        // This method is UB if the parent no longer exists, so we must check for parent (or encode into type system)
-        if self.get_parent().is_none() {
-            return Err(());
+        unsafe {
+            // This method is UB if the parent no longer exists, so we must check for parent (or encode into type system)
+            if self.get_parent().is_none() {
+                return Err(());
+            }
+
+            LLVMDeleteBasicBlock(self.basic_block);
+
+            Ok(())
         }
-
-        LLVMDeleteBasicBlock(self.basic_block);
-
-        Ok(())
     }
 
     /// Obtains the `ContextRef` this `BasicBlock` belongs to.
@@ -471,18 +480,13 @@ impl<'ctx> BasicBlock<'ctx> {
     pub fn set_name(&self, name: &str) {
         let c_string = to_c_str(name);
 
-        #[cfg(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0"))]
-        {
-            use llvm_sys::core::LLVMSetValueName;
-
-            unsafe { LLVMSetValueName(LLVMBasicBlockAsValue(self.basic_block), c_string.as_ptr()) };
-        }
-        #[cfg(not(any(feature = "llvm4-0", feature = "llvm5-0", feature = "llvm6-0")))]
-        {
-            use llvm_sys::core::LLVMSetValueName2;
-
-            unsafe { LLVMSetValueName2(LLVMBasicBlockAsValue(self.basic_block), c_string.as_ptr(), name.len()) };
-        }
+        unsafe {
+            LLVMSetValueName2(
+                LLVMBasicBlockAsValue(self.basic_block),
+                c_string.as_ptr(),
+                c_string.to_bytes().len(),
+            )
+        };
     }
 
     /// Replaces all uses of this basic block with another.
@@ -506,7 +510,7 @@ impl<'ctx> BasicBlock<'ctx> {
     ///
     /// bb1.replace_all_uses_with(&bb2);
     ///
-    /// assert_eq!(branch_inst.get_operand(0).unwrap().right().unwrap(), bb2);
+    /// assert_eq!(branch_inst.get_operand(0).unwrap().unwrap_block(), bb2);
     /// ```
     pub fn replace_all_uses_with(self, other: &BasicBlock<'ctx>) {
         let value = unsafe { LLVMBasicBlockAsValue(self.basic_block) };
@@ -576,18 +580,20 @@ impl<'ctx> BasicBlock<'ctx> {
     /// assert!(unsafe { next_bb.get_address() }.is_some());
     /// ```
     pub unsafe fn get_address(self) -> Option<PointerValue<'ctx>> {
-        let parent = self.get_parent()?;
+        unsafe {
+            let parent = self.get_parent()?;
 
-        // Taking the address of the entry block is illegal.
-        self.get_previous_basic_block()?;
+            // Taking the address of the entry block is illegal.
+            self.get_previous_basic_block()?;
 
-        let value = PointerValue::new(LLVMBlockAddress(parent.as_value_ref(), self.basic_block));
+            let value = PointerValue::new(LLVMBlockAddress(parent.as_value_ref(), self.basic_block));
 
-        if value.is_null() {
-            return None;
+            if value.is_null() {
+                return None;
+            }
+
+            Some(value)
         }
-
-        Some(value)
     }
 }
 

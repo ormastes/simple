@@ -88,7 +88,7 @@ impl LlvmBackend {
         if outputs.is_empty() {
             return Ok(());
         }
-        let Some(ret) = call.try_as_basic_value().left() else {
+        let Some(ret) = call.try_as_basic_value().basic() else {
             return Err(crate::error::factory::llvm_build_failed(
                 "inline_asm",
                 "asm with outputs returned no value",
@@ -124,11 +124,10 @@ impl LlvmBackend {
         if self.mem_order_mode.get() & MEM_ORDER_NO_REORDER == 0 {
             return Ok(());
         }
-        let single_thread = self.context_ref().get_kind_id("singlethread");
         builder
             .build_fence(
                 inkwell::AtomicOrdering::SequentiallyConsistent,
-                single_thread as i32,
+                true,
                 "",
             )
             .map_err(|e| crate::error::factory::llvm_build_failed("no_reorder_fence", &e))?;

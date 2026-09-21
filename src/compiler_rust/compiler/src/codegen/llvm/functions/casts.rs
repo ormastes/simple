@@ -65,7 +65,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_int", &e))?;
                     let raw_i64 = call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| CompileError::semantic(format!("{unwrap_name} returned no value")))?
                         .into_int_value();
                     let narrowed = match *to_type {

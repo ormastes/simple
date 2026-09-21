@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+compiler_manifest="$root/src/compiler_rust/compiler/Cargo.toml"
+inkwell_manifest="$root/src/compiler_rust/vendor/inkwell/Cargo.toml"
+inkwell_lib="$root/src/compiler_rust/vendor/inkwell/src/lib.rs"
+llvm_sys_manifest="$root/src/compiler_rust/vendor/aya-llvm-sys/Cargo.toml"
+llvm_sys_build="$root/src/compiler_rust/vendor/aya-llvm-sys/build.rs"
+legacy_llvm_sys="$root/src/compiler_rust/vendor/llvm-sys"
+lock="$root/src/compiler_rust/Cargo.lock"
+check="$root/scripts/check/check-rust-llvm23-binding.shs"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+authority="$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+contains() { grep -Fq -- "$2" "$1" || fail "missing '$2' in $1"; }
+rejects() {
+    if grep -Fq -- "$2" "$1"; then
+        fail "forbidden '$2' remains in $1"
+    fi
+}
+
+contains "$compiler_manifest" 'features = ["llvm23-1-force-dynamic"]'
+rejects "$compiler_manifest" 'llvm18-0'
+contains "$inkwell_manifest" '[dependencies.llvm-sys-231]'
+contains "$inkwell_manifest" 'package = "aya-llvm-sys"'
+contains "$inkwell_manifest" 'llvm23-1 = ["llvm-sys-231"]'
+contains "$inkwell_manifest" 'llvm23-1-force-dynamic = ['
+contains "$inkwell_lib" '#[cfg(feature = "llvm23-1")]'
+contains "$inkwell_lib" 'pub extern crate llvm_sys_231 as llvm_sys;'
+contains "$llvm_sys_manifest" 'name = "aya-llvm-sys"'
+contains "$llvm_sys_manifest" 'version = "231.0.0-rc2"'
+contains "$llvm_sys_manifest" 'links = "llvm-23"'
+contains "$llvm_sys_build" 'LLVM-C.lib'
+contains "$llvm_sys_build" 'cargo:rustc-link-lib=dylib=LLVM-C'
+contains "$lock" 'name = "aya-llvm-sys"'
+contains "$lock" 'version = "231.0.0-rc2"'
+rejects "$lock" 'name = "llvm-sys"'
+[ ! -e "$legacy_llvm_sys" ] || fail "legacy LLVM 18 vendor directory remains"
+contains "$check" '23.1.1'
+contains "$check" 'LLVM_SYS_231_PREFIX'
+contains "$check" 'cargo check --locked --offline -p simple-compiler --features llvm'
+contains "$authority" 'llvm-clang-cl-version=%s'
+contains "$authority" 'Windows bootstrap requires clang-cl 23.1.1'
+contains "$bootstrap" 'rust_llvm_clang_cl_version'
+contains "$bootstrap" 'cc_abs=${rust_llvm_clang_cl_path}'
+
+printf 'PASS: Rust LLVM binding pins LLVM-C and physical clang-cl to 23.1.1\n'

@@ -2,11 +2,17 @@ use llvm_sys::prelude::LLVMTypeRef;
 
 use std::fmt::Debug;
 
+use crate::AddressSpace;
 use crate::support::LLVMString;
 use crate::types::enums::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
-use crate::types::{ArrayType, FloatType, FunctionType, IntType, PointerType, StructType, Type, VectorType, VoidType};
-use crate::values::{FloatMathValue, FloatValue, IntMathValue, IntValue, PointerMathValue, PointerValue, VectorValue};
-use crate::AddressSpace;
+use crate::types::{
+    ArrayType, FloatType, FunctionType, IntType, PointerType, ScalableVectorType, StructType, Type, VectorType,
+    VoidType,
+};
+use crate::values::{
+    FloatMathValue, FloatValue, IntMathValue, IntValue, PointerMathValue, PointerValue, ScalableVectorValue,
+    VectorValue,
+};
 
 /// Accessor to the inner LLVM type reference
 pub unsafe trait AsTypeRef {
@@ -95,6 +101,24 @@ pub unsafe trait BasicType<'ctx>: AnyType<'ctx> {
         unsafe { Type::new(self.as_type_ref()).size_of() }
     }
 
+    /// Gets the alignment of this `BasicType`. Value may vary depending on the target architecture.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use inkwell::context::Context;
+    /// use inkwell::types::BasicType;
+    ///
+    /// let context = Context::create();
+    /// let i8_type = context.i8_type();
+    /// let i8_type_alignment = i8_type.get_alignment();
+    ///
+    /// assert_eq!(i8_type_alignment.get_zero_extended_constant(), Some(1));
+    /// ```
+    fn get_alignment(&self) -> IntValue<'ctx> {
+        unsafe { Type::new(self.as_type_ref()).get_alignment() }
+    }
+
     /// Create an `ArrayType` with this `BasicType` as its elements.
     ///
     /// Example:
@@ -128,10 +152,15 @@ pub unsafe trait BasicType<'ctx>: AnyType<'ctx> {
     /// ```
     #[cfg_attr(
         any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
+            all(feature = "llvm15-0", not(feature = "typed-pointers")),
+            all(feature = "llvm16-0", not(feature = "typed-pointers")),
             feature = "llvm17-0",
-            feature = "llvm18-0"
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1",
+            feature = "llvm23-1",
         ),
         deprecated(
             note = "Starting from version 15.0, LLVM doesn't differentiate between pointer types. Use Context::ptr_type instead."
@@ -168,8 +197,8 @@ pub unsafe trait PointerMathType<'ctx>: BasicType<'ctx> {
     type PtrConvType: IntMathType<'ctx>;
 }
 
-trait_type_set! {AnyType: AnyTypeEnum, BasicTypeEnum, IntType, FunctionType, FloatType, PointerType, StructType, ArrayType, VoidType, VectorType}
-trait_type_set! {BasicType: BasicTypeEnum, IntType, FloatType, PointerType, StructType, ArrayType, VectorType}
+trait_type_set! {AnyType: AnyTypeEnum, BasicTypeEnum, IntType, FunctionType, FloatType, PointerType, StructType, ArrayType, VoidType, VectorType, ScalableVectorType}
+trait_type_set! {BasicType: BasicTypeEnum, IntType, FloatType, PointerType, StructType, ArrayType, VectorType, ScalableVectorType}
 
 unsafe impl<'ctx> IntMathType<'ctx> for IntType<'ctx> {
     type ValueType = IntValue<'ctx>;
@@ -183,6 +212,12 @@ unsafe impl<'ctx> IntMathType<'ctx> for VectorType<'ctx> {
     type PtrConvType = VectorType<'ctx>;
 }
 
+unsafe impl<'ctx> IntMathType<'ctx> for ScalableVectorType<'ctx> {
+    type ValueType = ScalableVectorValue<'ctx>;
+    type MathConvType = ScalableVectorType<'ctx>;
+    type PtrConvType = ScalableVectorType<'ctx>;
+}
+
 unsafe impl<'ctx> FloatMathType<'ctx> for FloatType<'ctx> {
     type ValueType = FloatValue<'ctx>;
     type MathConvType = IntType<'ctx>;
@@ -193,6 +228,11 @@ unsafe impl<'ctx> FloatMathType<'ctx> for VectorType<'ctx> {
     type MathConvType = VectorType<'ctx>;
 }
 
+unsafe impl<'ctx> FloatMathType<'ctx> for ScalableVectorType<'ctx> {
+    type ValueType = ScalableVectorValue<'ctx>;
+    type MathConvType = ScalableVectorType<'ctx>;
+}
+
 unsafe impl<'ctx> PointerMathType<'ctx> for PointerType<'ctx> {
     type ValueType = PointerValue<'ctx>;
     type PtrConvType = IntType<'ctx>;
@@ -201,4 +241,9 @@ unsafe impl<'ctx> PointerMathType<'ctx> for PointerType<'ctx> {
 unsafe impl<'ctx> PointerMathType<'ctx> for VectorType<'ctx> {
     type ValueType = VectorValue<'ctx>;
     type PtrConvType = VectorType<'ctx>;
+}
+
+unsafe impl<'ctx> PointerMathType<'ctx> for ScalableVectorType<'ctx> {
+    type ValueType = ScalableVectorValue<'ctx>;
+    type PtrConvType = ScalableVectorType<'ctx>;
 }

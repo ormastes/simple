@@ -484,7 +484,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # nothing, the LLVM object stage returns 'llc not found', and Stage 2
     # sanity fails. Same reasoning as CC and INCLUDE/LIB below: a tool
     # this stage must execute cannot be reached without it.
-    # SIMPLE_LLVM_BIN / LLVM_SYS_180_PREFIX: the backend's tool finder
+    # SIMPLE_LLVM_BIN / LLVM_SYS_231_PREFIX: the backend's tool finder
     # (_env_tool_dirs in 95.interp/interpreter/llvm/tools.spl) consults these
     # BEFORE any PATH lookup, and the Windows MSVC lane already exports the
     # latter. Absent from this allowlist they never reach the child, so the
@@ -492,7 +492,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # LLVM object stage returned 'llc not found' -- which surfaced only as
     # 'backend object-path status 1'. The mechanism already existed; it just
     # could not see its own configuration.
-    printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_231_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *windows-gnu*)
             printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC'
@@ -608,6 +608,30 @@ bootstrap_stage3_canonical_path() {
 bootstrap_stage3_canonical_file() {
     [ -f "$1" ] || return 1
     bootstrap_stage3_canonical_path "$1"
+}
+
+# MSYS command lookup accepts a native `tool.exe` when asked for `tool`, but
+# reports the extensionless spelling.  Cwd::abs_path preserves that spelling
+# even though only the `.exe` file exists.  Executing the alias through a
+# later clean `env -i` native launch is not a stable Windows authority (it can
+# fail with shell status 125).  Bind the physical executable spelling before
+# hashing or launching it.
+bootstrap_stage3_canonical_native_command() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_native_command=$1
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            case "$bootstrap_stage3_native_command" in
+                *.exe) ;;
+                *)
+                    [ -f "${bootstrap_stage3_native_command}.exe" ] &&
+                        bootstrap_stage3_native_command=\
+"${bootstrap_stage3_native_command}.exe"
+                    ;;
+            esac
+            ;;
+    esac
+    bootstrap_stage3_canonical_file "$bootstrap_stage3_native_command"
 }
 
 # Resolve a Stage 3 output directory against the two explicit trust roots.
@@ -1463,25 +1487,116 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     export PATH
     bootstrap_stage3_llvm_config=$(command -v llvm-config) || return 1
     bootstrap_stage3_llvm_config_canonical=$(
-        perl -MCwd=abs_path -e \
-            'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+        bootstrap_stage3_canonical_native_command \
             "$bootstrap_stage3_llvm_config"
     ) || return 1
+    bootstrap_stage3_llvm_config_sha256=$(
+        bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_llvm_config_canonical"
+    ) || return 1
     bootstrap_stage3_llvm_version=$(
-        env -i PATH="$PATH" LC_ALL=C LANG=C \
-            "$bootstrap_stage3_llvm_config" --version
+        bootstrap_stage3_native_metadata_probe llvm-config-version \
+            "$bootstrap_stage3_llvm_config_canonical" --version
     ) || return 1
     bootstrap_stage3_llvm_major=${bootstrap_stage3_llvm_version%%.*}
     case "$bootstrap_stage3_llvm_major" in
         ''|*[!0-9]*) return 1 ;;
     esac
     bootstrap_stage3_llvm_prefix=$(
-        env -i PATH="$PATH" LC_ALL=C LANG=C \
-            "$bootstrap_stage3_llvm_config" --prefix
+        bootstrap_stage3_native_metadata_probe llvm-config-prefix \
+            "$bootstrap_stage3_llvm_config_canonical" --prefix
     ) || return 1
     bootstrap_stage3_llvm_prefix=$(
         CDPATH= cd -- "$bootstrap_stage3_llvm_prefix" && pwd -P
     ) || return 1
+    [ "$bootstrap_stage3_llvm_config_sha256" = \
+        "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_llvm_config_canonical")" ] || return 1
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            # The official LLVM 23 Windows archive is a static LLVM build, so
+            # llvm-config advertises its build-tree static dependency closure.
+            # That closure is not the installed C API contract: it may contain
+            # private build paths and component names absent from the package.
+            # Rust bindings load the installed C API through the package's
+            # LLVM-C import library and runtime DLL. Bind those exact files and
+            # never reinterpret llvm-config's private static build paths.
+            [ "$bootstrap_stage3_llvm_version" = 23.1.1 ] || {
+                echo "llvm authority: Windows bootstrap requires LLVM 23.1.1, found ${bootstrap_stage3_llvm_version}" >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_c_import_requested=\
+"$bootstrap_stage3_llvm_prefix/lib/LLVM-C.lib"
+            bootstrap_stage3_llvm_c_runtime_requested=\
+"$bootstrap_stage3_llvm_prefix/bin/LLVM-C.dll"
+            bootstrap_stage3_llvm_c_import=$(
+                bootstrap_stage3_canonical_file \
+                    "$bootstrap_stage3_llvm_c_import_requested"
+            ) || {
+                echo "llvm authority: LLVM 23.1.1 Windows package is missing its C API import library: ${bootstrap_stage3_llvm_c_import_requested}" >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_c_runtime=$(
+                bootstrap_stage3_canonical_file \
+                    "$bootstrap_stage3_llvm_c_runtime_requested"
+            ) || {
+                echo "llvm authority: LLVM 23.1.1 Windows package is missing its C API runtime DLL: ${bootstrap_stage3_llvm_c_runtime_requested}" >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_clang_cl_requested=\
+"$bootstrap_stage3_llvm_prefix/bin/clang-cl.exe"
+            if [ ! -f "$bootstrap_stage3_llvm_clang_cl_requested" ]; then
+                bootstrap_stage3_llvm_clang_cl_requested=\
+"$bootstrap_stage3_llvm_prefix/bin/clang-cl"
+            fi
+            bootstrap_stage3_llvm_clang_cl=$(
+                bootstrap_stage3_canonical_file \
+                    "$bootstrap_stage3_llvm_clang_cl_requested"
+            ) || {
+                echo "llvm authority: LLVM 23.1.1 Windows package is missing clang-cl: ${bootstrap_stage3_llvm_clang_cl_requested}" >&2
+                return 1
+            }
+            [ -x "$bootstrap_stage3_llvm_clang_cl" ] || {
+                echo "llvm authority: LLVM 23.1.1 clang-cl is not executable: ${bootstrap_stage3_llvm_clang_cl}" >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_clang_cl_output=$(
+                bootstrap_stage3_native_metadata_probe llvm-clang-cl-version \
+                    "$bootstrap_stage3_llvm_clang_cl" --version
+            ) || return 1
+            bootstrap_stage3_llvm_clang_cl_version=$(
+                printf '%s\n' "$bootstrap_stage3_llvm_clang_cl_output" |
+                    sed -n 's/.*clang version \([0-9][0-9.]*\).*/\1/p' |
+                    sed -n '1p'
+            )
+            [ "$bootstrap_stage3_llvm_clang_cl_version" = 23.1.1 ] || {
+                echo "llvm authority: Windows bootstrap requires clang-cl 23.1.1, found ${bootstrap_stage3_llvm_clang_cl_version:-unknown}" >&2
+                return 1
+            }
+            printf 'llvm-build-status=enabled\nllvm-version=%s\nllvm-major=%s\n' \
+                "$bootstrap_stage3_llvm_version" \
+                "$bootstrap_stage3_llvm_major"
+            printf 'llvm-prefix=%s\nllvm-link-kind=dynamic-c-api\n' \
+                "$bootstrap_stage3_llvm_prefix"
+            printf 'llvm-config-path=%s\nllvm-config-sha256=%s\n' \
+                "$bootstrap_stage3_llvm_config_canonical" \
+                "$bootstrap_stage3_llvm_config_sha256"
+            printf 'llvm-c-import-lib-path=%s\nllvm-c-import-lib-sha256=%s\n' \
+                "$bootstrap_stage3_llvm_c_import" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_llvm_c_import")"
+            printf 'llvm-c-runtime-dll-path=%s\nllvm-c-runtime-dll-sha256=%s\n' \
+                "$bootstrap_stage3_llvm_c_runtime" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_llvm_c_runtime")"
+            printf 'llvm-clang-cl-path=%s\nllvm-clang-cl-sha256=%s\nllvm-clang-cl-version=%s\n' \
+                "$bootstrap_stage3_llvm_clang_cl" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_llvm_clang_cl")" \
+                "$bootstrap_stage3_llvm_clang_cl_version"
+            return 0
+            ;;
+    esac
     bootstrap_stage3_llvm_libfiles=$(
         env -i PATH="$PATH" LC_ALL=C LANG=C \
             "$bootstrap_stage3_llvm_config" --link-static --libfiles
@@ -1619,14 +1734,13 @@ bootstrap_stage3_resolve_llvm_build_authority() (
         done
         return 1
     }
-    printf 'llvm-build-status=enabled\nllvm-major=%s\n' \
-        "$bootstrap_stage3_llvm_major"
+    printf 'llvm-build-status=enabled\nllvm-version=%s\nllvm-major=%s\n' \
+        "$bootstrap_stage3_llvm_version" "$bootstrap_stage3_llvm_major"
     printf 'llvm-prefix=%s\nllvm-libdir=%s\nllvm-config-path=%s\n' \
         "$bootstrap_stage3_llvm_prefix" "$bootstrap_stage3_llvm_libdir" \
         "$bootstrap_stage3_llvm_config_canonical"
     printf 'llvm-config-sha256=%s\n' \
-        "$(bootstrap_stage3_hash_file \
-            "$bootstrap_stage3_llvm_config_canonical")"
+        "$bootstrap_stage3_llvm_config_sha256"
     printf 'llvm-sdkroot=%s\nllvm-sdk-version=%s\n' \
         "$bootstrap_stage3_llvm_sdkroot" "$bootstrap_stage3_llvm_sdk_version"
     printf 'llvm-homebrew-prefix=%s\nllvm-library-path=%s\n' \
@@ -4359,31 +4473,63 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 >>"$bootstrap_stage3_seed_records" || exit 1
         fi
         bootstrap_stage3_seed_trace native-cc-recorded
+        bootstrap_stage3_seed_llvm_status=$(printf '%s\n' \
+            "$bootstrap_stage3_seed_llvm_authority" |
+            sed -n 's/^llvm-build-status=//p') || exit 1
+        case "$bootstrap_stage3_seed_llvm_status" in
+            enabled|disabled) ;;
+            *) exit 1 ;;
+        esac
         if command -v llvm-config >/dev/null 2>&1; then
             bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||
                 exit 1
             bootstrap_stage3_seed_trace native-llvm-selected
             bootstrap_stage3_seed_llvm_config_canonical=$(
-                perl -MCwd=abs_path -e \
-                    'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                bootstrap_stage3_canonical_native_command \
                     "$bootstrap_stage3_seed_llvm_config"
             ) || exit 1
             bootstrap_stage3_seed_trace native-llvm-canonicalized
+            if [ "$bootstrap_stage3_seed_llvm_status" = enabled ]; then
+                bootstrap_stage3_seed_llvm_authority_config=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-config-path=//p') || exit 1
+                bootstrap_stage3_seed_llvm_authority_hash=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-config-sha256=//p') || exit 1
+                bootstrap_stage3_seed_llvm_version=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-version=//p') || exit 1
+                bootstrap_stage3_seed_llvm_prefix=$(printf '%s\n' \
+                    "$bootstrap_stage3_seed_llvm_authority" |
+                    sed -n 's/^llvm-prefix=//p') || exit 1
+                [ "$bootstrap_stage3_seed_llvm_authority_config" = \
+                    "$bootstrap_stage3_seed_llvm_config_canonical" ] || exit 1
+                [ "$bootstrap_stage3_seed_llvm_authority_hash" = \
+                    "$(bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_seed_llvm_config_canonical")" ] ||
+                    exit 1
+                [ -n "$bootstrap_stage3_seed_llvm_version" ] || exit 1
+                [ -n "$bootstrap_stage3_seed_llvm_prefix" ] || exit 1
+            else
+                bootstrap_stage3_seed_llvm_authority_hash=$(
+                    bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_seed_llvm_config_canonical"
+                ) || exit 1
+                bootstrap_stage3_seed_llvm_version=$(
+                    bootstrap_stage3_native_metadata_probe llvm-config-version \
+                        "$bootstrap_stage3_seed_llvm_config_canonical" --version
+                ) || exit 1
+                bootstrap_stage3_seed_llvm_prefix=$(
+                    bootstrap_stage3_native_metadata_probe llvm-config-prefix \
+                        "$bootstrap_stage3_seed_llvm_config_canonical" --prefix
+                ) || exit 1
+            fi
             printf 'llvm-config-path=%s\nllvm-config-sha256=%s\n' \
                 "$bootstrap_stage3_seed_llvm_config_canonical" \
-                "$(bootstrap_stage3_hash_file \
-                    "$bootstrap_stage3_seed_llvm_config_canonical")" \
+                "$bootstrap_stage3_seed_llvm_authority_hash" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
             bootstrap_stage3_seed_trace native-llvm-identity-recorded
-            bootstrap_stage3_seed_llvm_version=$(
-                bootstrap_stage3_native_metadata_probe llvm-config-version \
-                    "$bootstrap_stage3_seed_llvm_config" --version
-            ) || exit 1
             bootstrap_stage3_seed_trace native-llvm-version-returned
-            bootstrap_stage3_seed_llvm_prefix=$(
-                bootstrap_stage3_native_metadata_probe llvm-config-prefix \
-                    "$bootstrap_stage3_seed_llvm_config" --prefix
-            ) || exit 1
             bootstrap_stage3_seed_trace native-llvm-prefix-returned
             printf 'llvm-config-version=%s\n' \
                 "$bootstrap_stage3_seed_llvm_version" \
@@ -4391,6 +4537,8 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             printf 'llvm-config-prefix=%s\n' \
                 "$bootstrap_stage3_seed_llvm_prefix" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
+        elif [ "$bootstrap_stage3_seed_llvm_status" = enabled ]; then
+            exit 1
         else
             echo "llvm-config=absent" >>"$bootstrap_stage3_seed_records" ||
                 exit 1

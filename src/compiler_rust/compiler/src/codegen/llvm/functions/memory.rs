@@ -78,7 +78,7 @@ impl LlvmBackend {
             // `@volatile` / `@no_reorder` fn: never elided, merged or widened.
             if let Some(inst) = loaded.as_instruction_value() {
                 inst.set_volatile(true)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("load_volatile", e))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("load_volatile", &e))?;
             }
         }
         vreg_map.insert(dest, loaded);
@@ -117,7 +117,7 @@ impl LlvmBackend {
         if self.mem_access_is_volatile() {
             store
                 .set_volatile(true)
-                .map_err(|e| crate::error::factory::llvm_build_failed("store_volatile", e))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store_volatile", &e))?;
         }
         self.emit_no_reorder_fence(builder)?;
         Ok(())

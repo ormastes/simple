@@ -38,7 +38,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_new", &e))?;
         let collection = call_site
             .try_as_basic_value()
-            .left()
+            .basic()
             .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
         // Push each element via rt_array_push(array, element)
@@ -83,7 +83,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_tuple_new", &e))?;
         let collection = call_site
             .try_as_basic_value()
-            .left()
+            .basic()
             .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
         // Set each element via rt_tuple_set(tuple, index, value)
@@ -137,7 +137,7 @@ impl LlvmBackend {
             .build_call(dict_new, &[capacity.into()], "dict")
             .map_err(|e| crate::error::factory::llvm_build_failed("dict_new call", &e))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_OPERATION)
@@ -188,7 +188,7 @@ impl LlvmBackend {
             .build_call(rt_func, &[coll_i64.into(), idx_i64.into()], "idx_get")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_index_get", &e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             vreg_map.insert(dest, ret_val);
         } else {
             vreg_map.insert(dest, i64_type.const_int(0, false).into());
@@ -287,7 +287,7 @@ impl LlvmBackend {
             )
             .map_err(|e| crate::error::factory::llvm_build_failed("slice call", &e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             vreg_map.insert(dest, ret_val);
         } else {
             let default_val = self.runtime_int_type().const_int(0, false);

@@ -39,6 +39,75 @@ pins the absolute executable, SHA-256, generation, provenance, admission, test
 inventory, selected bootstrap jobs, and detected CPU count. Missing or stale
 rows fail before launch; Phase 1/2 results are never release evidence.
 
+### Phase compiler inventory rows
+
+`bootstrap-phase-verification.shs --strategy=full` runs each
+`test/01_unit/compiler/**/*_spec.spl` row, including loader specs, through the
+phase-owned standalone test runner and full CLI. Exit code zero is insufficient.
+Each row uses `--assert-ran` and isolated caches, emits exactly one complete
+terminal JSON object, and must report outer and spec success, zero failures,
+canonical bounded counters, and at least one executed example. Malformed,
+truncated, duplicate-field, zero-execution, and failed JSON remain terminal
+failures in the inventory and summary. A nonzero runner status is preserved.
+
+`scripts/bootstrap/validate-test-runner-json.pl` owns the strict JSON boundary;
+the shell runner records only its admitted passed/failed/skipped counters.
+
+The phase-owned full CLI and standalone test runner also run the compiler
+bootstrap suite, the complete `compiler/interpreter` subtree, and
+`compiler/loader/module_loader_segment_transaction_spec.spl` in explicit
+interpreter and compile modes. Every focused row uses `--assert-ran`, isolated
+cache/database/session state, strict terminal JSON, nonzero executed counts,
+and the frozen command-owner receipt. The receipt binds the compiler snapshot
+and hosted runtime identity as well as the produced CLI and test runner. The Stage 2
+bootstrap executable remains compiler-only; these test commands belong to the
+same-generation full CLI built by that admitted compiler. Missing either owner
+artifact records all six rows as unsupported and cannot produce an overall
+PASS.
+
+Each task summary retains `elapsed_seconds` and `max_rss_kib` when GNU time
+rusage is available; inventory TSV rows retain their own RSS and the suite row
+retains the maximum. `timing_scope=post-admission-excludes-git-lfs-checkout`
+separates repository checkout/LFS materialization from compiler and test time.
+Git-for-Windows hosts retain sampled process-group RSS from MSYS `/proc`
+(`max_rss_measurement=proc-group-rss-kib`). Its RSS units are 4 KiB; `getconf
+PAGESIZE` reports allocation granularity on this host and is not the RSS unit.
+The sampler selects the timeout wrapper's unique direct-child session leader,
+deduplicates PIDs, checks group membership, and validates wrapper/leader
+identities before and after each sample. It excludes the watchdog, ambient
+groups and processes that create a separate session outside the timeout group.
+The Windows sampler runs external `ps` plus `awk` every 50 ms. Those sampler
+processes are outside the reported process-tree RSS, while their scheduling
+cost remains in `elapsed_seconds`. Summaries record
+`max_rss_sample_interval_ms=50` and a separate
+`max_rss_sampling_overhead_scope` value so the measurement does not imply zero
+overhead.
+This is a sampled peak of summed resident sets, including shared pages in each
+member, not private memory or an exact kernel high-water mark. Short-lived
+groups can produce `max_rss_kib=unavailable`; invalid identities cannot produce
+a numeric zero. BSD and macOS hosts without GNU rusage also report unavailable.
+
+The canonical sampler regression owner is
+`test/01_unit/scripts/bootstrap_windows_rss_contract_test.shs`. Its fixtures
+cover the 64 KiB/4 KiB mismatch, process names with parentheses, duplicate PIDs,
+unrelated/nested groups, stale membership, ambiguous leaders and zombie or
+invalid process authority. The portable loader guard is owned by
+`test/01_unit/scripts/bootstrap_phase2_portable_loader_contract_test.shs`.
+
+### Phase 2 post-admission runtime
+
+The retained task rows make the long tail attributable. After admission the
+verifier builds four native products (full CLI, test runner, MCP, and LSP),
+runs source checks, executes bootstrap, interpreter, and loader inventories in
+two modes, and
+under `--strategy=full` starts one contained test-runner process for every
+discovered compiler spec. That per-spec containment preserves later evidence
+after a crash or timeout, but process startup and repeated compiler loading can
+dominate the full inventory. Compare the four build rows, focused suite rows,
+and `compiler_unit_tests` elapsed/RSS values before changing concurrency or
+cache policy. Git checkout and LFS materialization occur before this verifier
+and are outside these measurements.
+
 ## Why an umbrella exists
 
 Before this, the gates were scattered across three regimes: some invoked from

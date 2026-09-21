@@ -318,6 +318,10 @@ public static class MaterializerApi {
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, byte[] data, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool WriteFile(SafeFileHandle h, IntPtr data, uint count, out uint written, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool FlushFileBuffers(SafeFileHandle h);
+    [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out TagInfo info, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] input, int inputSize,
@@ -334,7 +338,10 @@ public static class MaterializerApi {
     [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle h, uint access,
         ref ObjectAttributes attrs, out IoStatus status, IntPtr size, uint attributes,
         uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
-    static SafeFileHandle CreateDirectoryHeld(string path) {
+    [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle h,
+        out IoStatus status, byte[] information, uint length, int informationClass);
+    [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
+    static SafeFileHandle CreateDirectoryHeld(string path, bool writeAccess = false) {
         string native = @"\??\" + Path.GetFullPath(path);
         IntPtr buffer = Marshal.StringToHGlobalUni(native), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
         try {
@@ -342,13 +349,54 @@ public static class MaterializerApi {
             Marshal.StructureToPtr(u, name, false);
             var a = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Name = name, Attributes = 0x40 };
             SafeFileHandle h; IoStatus io;
-            int status = NtCreateFile(out h, 0x40100080, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
+            // Parent authority needs only attributes and synchronization:
+            // GENERIC_WRITE conflicts with receipt rename into a new parent.
+            // Junction creation separately needs write access to set its tag.
+            uint access = writeAccess ? 0x40100080u : 0x00100080u;
+            int status = NtCreateFile(out h, access, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
             if (status < 0) { if (h != null) h.Dispose(); throw new IOException("directory.create-exclusive:ntstatus=" + status); }
             return h;
         } finally { Marshal.FreeHGlobal(name); Marshal.FreeHGlobal(buffer); }
     }
     static Exception Error(string predicate) {
         return new IOException(predicate + ":win32=" + Marshal.GetLastWin32Error());
+    }
+    static void WriteAndFlush(SafeFileHandle h, byte[] bytes) {
+        if ((ulong)bytes.Length > UInt32.MaxValue) throw new IOException("receipt.write:byte-count-overflow");
+        var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try {
+            int offset = 0;
+            while (offset < bytes.Length) {
+                uint written;
+                uint remaining = (uint)(bytes.Length - offset);
+                IntPtr buffer = IntPtr.Add(pinned.AddrOfPinnedObject(), offset);
+                if (!WriteFile(h, buffer, remaining, out written, IntPtr.Zero)) throw Error("receipt.write");
+                if (written == 0) throw new IOException("receipt.write:zero-progress");
+                if (written > remaining) throw new IOException("receipt.write:invalid-progress");
+                offset += checked((int)written);
+            }
+        } finally { pinned.Free(); }
+        if (!FlushFileBuffers(h)) throw Error("receipt.flush");
+    }
+    static bool RenameNoReplace(SafeFileHandle h, byte[] rename, out int error) {
+        IoStatus io;
+        int status = NtSetInformationFile(h, out io, rename, (uint)rename.Length, 10);
+        if (status >= 0) {
+            error = 0;
+            return true;
+        }
+        error = unchecked((int)RtlNtStatusToDosError(status));
+        return false;
+    }
+    static bool IsTransientRenameError(int error) { return error == 32 || error == 33; }
+    static void RequireAbsent(string path, string predicate) {
+        uint attrs = GetFileAttributesW(path);
+        int error = Marshal.GetLastWin32Error();
+        if (attrs != 0xFFFFFFFFu) throw new IOException(predicate + ".exists");
+        if (error != 2 && error != 3) throw new IOException(predicate + ".probe:win32=" + error);
+    }
+    static void RequirePendingAbsent(List<string> pending) {
+        foreach (string absent in pending) RequireAbsent(absent, "pending");
     }
     static SafeFileHandle Open(string p, bool raw, uint access) {
         var h = CreateFileW(p, access, 1, IntPtr.Zero, 3,
@@ -368,11 +416,12 @@ public static class MaterializerApi {
     }
     // Retain handles without write/delete sharing through the protected action.
     // Starting at the volume/share root prevents ancestor rename/reparse swaps.
-    static void Parents(string path, bool create, List<SafeFileHandle> held) {
+    static SafeFileHandle Parents(string path, bool create, List<SafeFileHandle> held) {
         string full = Path.GetFullPath(path), root = Path.GetPathRoot(full);
         string parent = Path.GetDirectoryName(full);
         if (String.IsNullOrEmpty(parent)) parent = root;
         string current = root;
+        SafeFileHandle directParent = null;
         var parts = parent.Substring(root.Length).Split(new char[] {'\\'}, StringSplitOptions.RemoveEmptyEntries);
         // Phase 1 is read-only: hold every existing prefix before any creation.
         int n;
@@ -385,12 +434,13 @@ public static class MaterializerApi {
             if (h.IsInvalid) {
                 int error = Marshal.GetLastWin32Error(); h.Dispose();
                 if (n >= 0 && error == 2) {
-                    if (!create) return;
+                    if (!create) return directParent;
                     break;
                 }
                 throw new IOException("api.open-parent:" + candidate + ":win32=" + error);
             }
             held.Add(h);
+            directParent = h;
             var t = Tag(h);
             if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + candidate);
             if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + candidate);
@@ -402,11 +452,13 @@ public static class MaterializerApi {
         for (; n < parts.Length; n++) {
             current = Path.Combine(current, parts[n]);
             var h = CreateDirectoryHeld(current); held.Add(h);
+            directParent = h;
             var t = Tag(h);
             if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + current);
             if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + current);
             Identity(h);
         }
+        return directParent;
     }
     public static void ProbeTarget(string path) {
         var held = new List<SafeFileHandle>();
@@ -487,7 +539,7 @@ public static class MaterializerApi {
         Buffer.BlockCopy(BitConverter.GetBytes((ushort)print.Length), 0, data, 14, 2);
         Buffer.BlockCopy(substitute, 0, data, 16, substitute.Length);
         Buffer.BlockCopy(print, 0, data, 18 + substitute.Length, print.Length);
-        using (var h = CreateDirectoryHeld(link)) {
+        using (var h = CreateDirectoryHeld(link, true)) {
             int returned;
             if (!DeviceIoControl(h, 0x000900A4, data, data.Length, null, 0, out returned, IntPtr.Zero))
                 throw Error("api.set-junction-tag");
@@ -649,7 +701,9 @@ public static class MaterializerApi {
         var held = new List<SafeFileHandle>();
         FileStream policyStream = null;
         try {
-            Parents(destination, !checkOnly, held);
+            SafeFileHandle destinationParent = Parents(destination, !checkOnly, held);
+            if (destinationParent == null || destinationParent.IsInvalid)
+                throw new IOException("receipt.destination-parent");
             using (var existing = CreateFileW(destination, 0, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
                 if (!existing.IsInvalid) throw new IOException("receipt.destination-exists");
                 int e = Marshal.GetLastWin32Error();
@@ -761,38 +815,53 @@ public static class MaterializerApi {
             using (var h = CreateFileW(temp, 0x40010000, 0, IntPtr.Zero, 1, 0x80, IntPtr.Zero)) {
                 if (h.IsInvalid) throw Error("receipt.create-exclusive");
                 bool published = false;
-                // Keep the exclusive owned handle open through rename/cleanup.
-                using (var output = new FileStream(h, FileAccess.Write)) {
-                    try {
-                        output.Write(receiptBytes, 0, receiptBytes.Length);
-                        output.Flush(true);
-                        byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
-                        int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
-                        byte[] rename = new byte[lengthOffset + 4 + name.Length + 2];
-                        // ReplaceIfExists=FALSE, RootDirectory=NULL; native full path.
-                        Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, rename, lengthOffset, 4);
-                        Buffer.BlockCopy(name, 0, rename, lengthOffset + 4, name.Length);
-                        foreach (string absent in pending) {
-                            if (GetFileAttributesW(absent) != 0xFFFFFFFFu) {
-                                SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4);
-                                throw new IOException("pending.not-absent-after-publish");
-                            }
-                        }
+                bool renamed = false;
+                // Keep the exclusive owned handle open through write, rename,
+                // and cleanup.  FileStream can create a managed wrapper whose
+                // lifetime/flush behavior varies by the host CLR; direct
+                // Win32 I/O keeps publication on this one handle.
+                try {
+                    WriteAndFlush(h, receiptBytes);
+                    byte[] name = Encoding.Unicode.GetBytes(Path.GetFileName(destination));
+                    int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+                    byte[] rename = new byte[lengthOffset + 4 + name.Length + 2];
+                    // ReplaceIfExists=FALSE. Bind the relative destination to
+                    // the already-held parent: a full-path rename asks Windows
+                    // to reopen that directory and conflicts with our own
+                    // no-write/no-delete-sharing authority handle.
+                    int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+                    byte[] rootHandle = BitConverter.GetBytes(destinationParent.DangerousGetHandle().ToInt64());
+                    Buffer.BlockCopy(rootHandle, 0, rename, rootOffset, IntPtr.Size);
+                    Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, rename, lengthOffset, 4);
+                    Buffer.BlockCopy(name, 0, rename, lengthOffset + 4, name.Length);
+                    int renameError = 0;
+                    for (int attempt = 0; attempt < 5; attempt++) {
+                        // ERROR_SHARING_VIOLATION/ERROR_LOCK_VIOLATION can be
+                        // transient when antivirus/indexers briefly open the
+                        // private temporary file. Revalidate every invariant
+                        // before retrying; never replace an appearing target.
+                        RequireAbsent(Path.GetFullPath(destination), "receipt.destination");
+                        RequirePendingAbsent(pending);
                         if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("receipt.policy-identity");
-                        if (!SetFileInformationByHandle(h, 3, rename, (uint)rename.Length)) throw Error("receipt.rename-no-replace");
-                        // Absence cannot be locked. Invalidation is best effort;
-                        // every consumer MUST revalidate pending immediately at use.
-                        foreach (string absent in pending) {
-                            if (GetFileAttributesW(absent) != 0xFFFFFFFFu) {
-                                SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4);
-                                throw new IOException("pending.not-absent-after-publish");
-                            }
+                        if (RenameNoReplace(h, rename, out renameError)) {
+                            renamed = true;
+                            break;
                         }
-                        published = true;
-                    } finally {
-                        if (!published && !SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4))
-                            throw Error("receipt.cleanup-owned-handle");
+                        if (!IsTransientRenameError(renameError) || attempt == 4)
+                            throw new IOException("receipt.rename-no-replace:win32=" + renameError);
+                        System.Threading.Thread.Sleep(100);
                     }
+                    // Absence cannot be locked. Invalidation is best effort;
+                    // every consumer MUST revalidate pending immediately at use.
+                    RequirePendingAbsent(pending);
+                    // A rename is not a valid publication until the
+                    // post-rename invariant check above succeeds. If it
+                    // fails, the finally block deletes the renamed path via
+                    // this same handle instead of leaving a bad receipt.
+                    if (renamed) published = true;
+                } finally {
+                    if (!published && !SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4))
+                        throw Error("receipt.cleanup-owned-handle");
                 }
             }
         } finally { if (policyStream != null) policyStream.Dispose(); foreach (var h in held) h.Dispose(); }
@@ -852,7 +921,12 @@ start_native_batch() {
     export MATERIALIZER_TREE="$(to_win_path "$raw_links_list")" MATERIALIZER_APPROVE_CONVERSION="$approve_conversion"
     export MATERIALIZER_HEAD="$head_sha" MATERIALIZER_ROOT_POSIX_B64="$(printf '%s' "$repo_root" | base64 -w0)"
     export MATERIALIZER_PRODUCER_SHA256="$producer_sha256" MATERIALIZER_POLICY_SHA256="$policy_sha256"
-    coproc MATERIALIZER_BATCH { powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(to_win_path "$work_dir/api.ps1")"; }
+    # Add-Type needs a writable compiler temp directory. Native PowerShell can
+    # otherwise fall back to C:\Windows when the launcher has no usable
+    # TEMP/TMP, failing before the materializer API starts.
+    native_work_dir=$(to_win_path "$work_dir") || return 1
+    [ -n "$native_work_dir" ] || return 1
+    coproc MATERIALIZER_BATCH { TEMP="$native_work_dir" TMP="$native_work_dir" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(to_win_path "$work_dir/api.ps1")"; }
     batch_pid=$MATERIALIZER_BATCH_PID
     exec 8>&${MATERIALIZER_BATCH[1]} 9<&${MATERIALIZER_BATCH[0]}
     IFS= read -r -t 60 ready <&9 || return 1

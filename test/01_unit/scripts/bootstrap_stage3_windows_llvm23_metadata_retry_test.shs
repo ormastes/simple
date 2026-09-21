@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/llvm23-metadata-retry.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+prefix="$tmp/llvm23"
+mkdir -p "$prefix/bin" "$prefix/lib" "$tmp/tools"
+printf 'import library\n' >"$prefix/lib/LLVM-C.lib"
+printf 'runtime dll\n' >"$prefix/bin/LLVM-C.dll"
+
+cat >"$prefix/bin/llvm-config.exe" <<EOF
+#!/bin/sh
+set -eu
+case "\${1-}" in
+  --version) key=version; answer=23.1.1 ;;
+  --prefix) key=prefix; answer='$prefix' ;;
+  *) exit 2 ;;
+esac
+if [ -e '$tmp/fail-always' ]; then
+  echo 'persistent metadata failure' >&2
+  exit 74
+fi
+if [ -e '$tmp/mutate-binary' ]; then
+  printf '\n# changed during probe\n' >>"\$0"
+  echo 'metadata tool changed' >&2
+  exit 73
+fi
+state='$tmp'/\$key.seen
+if [ ! -e "\$state" ]; then
+  : >"\$state"
+  echo "transient \$key launch failure" >&2
+  exit 73
+fi
+printf '%s\n' "\$answer"
+EOF
+chmod 700 "$prefix/bin/llvm-config.exe"
+
+tool_path="$prefix/bin:/usr/bin:/bin"
+stderr="$tmp/resolver.stderr"
+authority=$(bootstrap_stage3_resolve_llvm_build_authority \
+    "$tool_path" '--features llvm' 2>"$stderr") || {
+  cat "$stderr" >&2
+  echo 'FAIL: LLVM metadata resolver did not recover one transient launch' >&2
+  exit 1
+}
+
+printf '%s\n' "$authority" | grep -q '^llvm-version=23.1.1$'
+printf '%s\n' "$authority" | grep -q '^llvm-link-kind=dynamic-c-api$'
+printf '%s\n' "$authority" | grep -q "^llvm-config-path=$prefix/bin/llvm-config.exe$"
+printf '%s\n' "$authority" | grep -q "^llvm-c-import-lib-path=$prefix/lib/LLVM-C.lib$"
+printf '%s\n' "$authority" | grep -q "^llvm-c-runtime-dll-path=$prefix/bin/LLVM-C.dll$"
+grep -q 'bootstrap-native-metadata-probe=llvm-config-version attempt=1 shell-status=73' "$stderr"
+grep -q 'bootstrap-native-metadata-probe=llvm-config-prefix attempt=1 shell-status=73' "$stderr"
+
+# A persistent failure remains fail closed after exactly two attempts.
+: >"$tmp/fail-always"
+persistent_stderr="$tmp/persistent.stderr"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$tool_path" '--features llvm' >/dev/null 2>"$persistent_stderr"; then
+  echo 'FAIL: persistent llvm-config failure was admitted' >&2
+  exit 1
+fi
+grep -q 'bootstrap-native-metadata-probe=llvm-config-version attempt=1 shell-status=74' "$persistent_stderr"
+grep -q 'bootstrap-native-metadata-probe=llvm-config-version attempt=2 shell-status=74' "$persistent_stderr"
+rm -f "$tmp/fail-always"
+
+# A replacement between the admitted version and prefix probes is rejected by
+# the resolver-wide executable hash binding, even though each individual
+# probe observes stable bytes during its own launch.
+eval "$(sed \
+    '1s/bootstrap_stage3_native_metadata_probe/bootstrap_stage3_native_metadata_probe_unwrapped/' \
+    <<EOF
+$(command -V bootstrap_stage3_native_metadata_probe | sed '1d')
+EOF
+)"
+bootstrap_stage3_native_metadata_probe() {
+    if [ "${1-}" = llvm-config-prefix ]; then
+        printf '\n# replaced between metadata probes\n' \
+            >>"$prefix/bin/llvm-config.exe"
+    fi
+    bootstrap_stage3_native_metadata_probe_unwrapped "$@"
+}
+rm -f "$tmp/version.seen" "$tmp/prefix.seen"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$tool_path" '--features llvm' >/dev/null 2>"$tmp/interval.stderr"; then
+  echo 'FAIL: llvm-config replacement between metadata probes was admitted' >&2
+  exit 1
+fi
+eval "$(sed \
+    '1s/bootstrap_stage3_native_metadata_probe_unwrapped/bootstrap_stage3_native_metadata_probe/' \
+    <<EOF
+$(command -V bootstrap_stage3_native_metadata_probe_unwrapped | sed '1d')
+EOF
+)"
+
+# A changed executable is rejected before any retry can admit new bytes.
+: >"$tmp/mutate-binary"
+mutation_stderr="$tmp/mutation.stderr"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$tool_path" '--features llvm' >/dev/null 2>"$mutation_stderr"; then
+  echo 'FAIL: mutated llvm-config executable was admitted' >&2
+  exit 1
+fi
+grep -q 'bootstrap-native-metadata-probe=llvm-config-version result=binary-changed' "$mutation_stderr"
+
+echo 'bootstrap_stage3_windows_llvm23_metadata_retry_test: PASS'

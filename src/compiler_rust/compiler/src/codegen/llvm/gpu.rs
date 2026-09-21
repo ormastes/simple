@@ -439,7 +439,7 @@ impl LlvmGpuBackend {
             .map_err(|e| crate::error::factory::intrinsic_call_failed(result_name, &e))?;
 
         call.try_as_basic_value()
-            .left()
+            .basic()
             .and_then(|v| v.into_int_value().into())
             .ok_or_else(|| crate::error::factory::intrinsic_unexpected_type(result_name))
     }

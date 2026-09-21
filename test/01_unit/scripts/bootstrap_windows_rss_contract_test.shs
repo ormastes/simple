@@ -1,0 +1,87 @@
+#!/bin/sh
+# Canonical fixture owner for the Windows /proc RSS sampler.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+source_root=$root
+runner=${RSS_RUNNER_UNDER_TEST:-$root/scripts/bootstrap/bootstrap-phase-verification.shs}
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-windows-rss.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+awk '/^proc_tree_rss_kib\(\)/ { copy=1 } copy { print } copy && /^}/ { exit }' "$runner" >"$tmp/sampler.sh"
+[ -s "$tmp/sampler.sh" ] || fail "missing production sampler"
+. "$tmp/sampler.sh"
+
+# These adapters also execute the pre-fix production sampler unchanged, so the
+# 64 KiB getconf regression has a reproducible red with this exact test.
+ps() { command cat "$tmp/ps"; }
+getconf() { printf '65536\n'; }
+cat() {
+  case "${1:-}" in
+    /proc/*/stat) command cat "$tmp/proc/${1#/proc/}" ;;
+    *) command cat "$@" ;;
+  esac
+}
+stat_record() {
+  pid=$1; parent=$2; group=$3; started=$4; pages=$5; state=${6:-S}
+  mkdir -p "$tmp/proc/$pid"
+  {
+    printf '%s (%s) %s %s %s' "$pid" "${7:-fixture}" "$state" "$parent" "$group"
+    field=6
+    while [ "$field" -le 21 ]; do printf ' 0'; field=$((field + 1)); done
+    printf ' %s 0 %s\n' "$started" "$pages"
+  } >"$tmp/proc/$pid/stat"
+}
+fixture() {
+  printf 'PID PPID PGID WINPID\n100 9 9 1000\n200 100 200 2000\n201 200 200 2010\n300 100 9 3000\n400 9 400 4000\n' >"$tmp/ps"
+  stat_record 100 9 9 100 10
+  stat_record 200 100 200 200 100
+  stat_record 201 200 200 201 25
+  stat_record 300 100 9 300 800
+  stat_record 400 9 400 400 1000000
+}
+expect_rss() {
+  expected=$1; label=$2
+  actual=$(proc_tree_rss_kib 100 "$tmp/proc") || fail "$label returned unavailable"
+  [ "$actual" = "$expected" ] || fail "$label expected $expected KiB, got $actual"
+}
+expect_unavailable() {
+  if proc_tree_rss_kib 100 "$tmp/proc" >"$tmp/result"; then fail "$1 accepted invalid authority"; fi
+  [ ! -s "$tmp/result" ] || fail "$1 emitted a partial RSS value"
+}
+
+fixture
+expect_rss 500 'MSYS 4 KiB RSS units, watchdog and ambient exclusion'
+stat_record 200 100 200 200 100 S 'fixture ) with spaces'
+expect_rss 500 'parentheses and spaces in process name'
+printf '201 200 200 2010\n' >>"$tmp/ps"
+expect_rss 500 'duplicate PID counted once'
+printf '202 200 202 2020\n' >>"$tmp/ps"
+stat_record 202 200 202 202 1000000
+expect_rss 500 'nested session cannot replace workload group'
+stat_record 201 200 400 201 25
+expect_rss 400 'stale ps membership rejected against proc group'
+fixture
+stat_record 200 99 200 200 100
+expect_unavailable 'leader parent identity'
+fixture
+printf '203 100 203 2030\n' >>"$tmp/ps"
+stat_record 203 100 203 203 7
+expect_unavailable 'ambiguous direct-child session leaders'
+fixture
+stat_record 100 9 9 100 10 Z
+expect_unavailable 'zombie wrapper'
+fixture
+stat_record 200 100 200 200 100 Z
+expect_unavailable 'zombie workload leader'
+fixture
+sed 's/^100 /999 /' "$tmp/proc/100/stat" >"$tmp/wrong-pid"
+command cp "$tmp/wrong-pid" "$tmp/proc/100/stat"
+expect_unavailable 'proc PID identity'
+fixture
+stat_record 200 100 200 200 invalid
+expect_unavailable 'invalid RSS units'
+fixture
+stat_record 200 100 200 200 0
+stat_record 201 200 200 201 0
+expect_unavailable 'empty sample'
+echo 'PASS: Windows RSS page units, group selection, deduplication, identity and zombie controls'
