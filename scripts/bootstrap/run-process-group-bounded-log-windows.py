@@ -189,7 +189,6 @@ def main():
             log_hash = hashlib.sha256()
             deadline = time.monotonic() + args.timeout_seconds
             read_handle = msvcrt.get_osfhandle(read_fd)
-            eof = False
 
             def active_processes():
                 accounting = Accounting()
@@ -197,11 +196,19 @@ def main():
                 return accounting.active
 
             while spawned:
+                if time.monotonic() >= deadline:
+                    reason, raw_status = "timeout", 124
+                    break
+                # Latch contained-process completion before sampling the pipe.
+                # A final write can otherwise arrive between an empty sample and
+                # observing the child exit.  Once the root is signaled and the
+                # no-breakaway job is empty, a subsequent empty sample has
+                # drained every byte a contained process can still produce.
+                job_done = not active_processes() and wait(process.process, 0) == 0
                 available = wt.DWORD()
                 if not peek(read_handle, None, 0, None, ct.byref(available), None):
                     if ct.get_last_error() != 109:  # ERROR_BROKEN_PIPE is EOF.
                         raise OSError(ct.get_last_error(), "peek output pipe")
-                    eof = True
                 if available.value:
                     chunk = os.read(read_fd, min(65536, available.value))
                     kept = chunk[:args.max_bytes - captured]
@@ -211,7 +218,10 @@ def main():
                     if len(kept) < len(chunk):
                         reason, raw_status = "overflow", 125
                         break
-                if eof and not active_processes():
+                if job_done and not available.value:
+                    # An external service may retain an inherited write handle
+                    # after the bounded job exits.  EOF is not a completion
+                    # predicate for the contained process group.
                     native = wt.DWORD()
                     require(exit_code(process.process, ct.byref(native)), "read child exit")
                     native_status = native.value
@@ -219,9 +229,6 @@ def main():
                     raw_status = native.value if native.value <= 255 else {
                         0xC0000005: 139, 0xC000001D: 132, 0xC0000094: 136, 0xC00000FD: 139
                     }.get(native.value, 125 if reason == "child-native-exception" else 1)
-                    break
-                if time.monotonic() >= deadline:
-                    reason, raw_status = "timeout", 124
                     break
                 if not available.value:
                     time.sleep(0.01)
