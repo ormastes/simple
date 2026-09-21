@@ -99,3 +99,24 @@ Fix the Phase 2 MIR blockers, run the fixture and matching baseline, then
 qualify a full jobs=8 cold admission and compiler build below 1,000,000,000
 bytes without a meaningful elapsed-time regression. TODO 319 remains open.
 The three-cycle cap was reached; no further compile attempts were made.
+
+## Executable cross-resource regressions, 2026-09-21
+
+Added `test/05_perf/scv/compile_source_inventory_resource_profile_spec.spl`
+and its native `test/fixtures/scv_inventory_memory/profile.spl` workload.
+They compare scoped/unscoped construction at 256/512 files and
+batch/sequential reduction at 512/1,024 entries, with complete facet/encoded
+digest equality, elapsed scaling, per-process peak RSS and growth comparisons,
+and strict <1 GB native compile/runtime caps. The supporting shell collector
+verifies the admitted producer/runtime hashes and fails closed on missing,
+failed, or timed-out native evidence.
+
+A new isolated-checkout diagnostic used admitted producer
+`e1c0f79a7f0bc9b42df99b1219293e9c3852742a24843e07f96e81d5dcbcd81a`.
+After an initial package-index admission refusal, explicit cold initialization
+reached HIR and monomorphization but crashed in MIR (exit 139), at 7.27 seconds
+and 883,605,504 bytes maximum RSS. It reported malformed HIR types and qualified
+name field-list collisions. The workload did not execute, and the producer
+does not provide `test`; these new executable regressions remain unqualified.
+See `doc/06_spec/05_perf/scv/compile_source_inventory_resource_profile_spec.md`
+for thresholds, commands, and limitations. No full bootstrap was attempted.

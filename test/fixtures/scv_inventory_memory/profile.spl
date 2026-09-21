@@ -1,0 +1,94 @@
+# Native workload for compile_source_inventory_resource_profile_spec.spl.
+# Each process executes only one algorithm and size, so peak RSS is comparable.
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceEventV1, CompileSourceInventoryV1, compile_source_inventory_git_event_v1, compile_source_inventory_initial_events_v1, compile_source_inventory_apply_event_v1, compile_source_inventory_encode_v1}
+use std.nogc_sync_mut.sffi.fs.{fs_read_text}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_time_now_unix_micros() -> i64
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    val scoped = args.contains("--scoped")
+    val baseline = args.contains("--baseline")
+    val batch = args.contains("--batch")
+    val sequential = args.contains("--sequential")
+    if not (scoped or baseline or batch or sequential):
+        return 21
+    val doubled = args.contains("--double")
+    val count = if scoped or baseline:
+        if doubled: 512 else: 256
+    else:
+        if doubled: 1024 else: 512
+    val fixture = "test/fixtures/scv_inventory_memory/main.spl"
+    val source = fs_read_text(fixture)
+    if source == nil or source!.len() == 0:
+        return 22
+    val expected = compile_source_inventory_git_event_v1("create", fixture, source!)
+    var events: [CompileSourceEventV1] = []
+    var elapsed: i64 = 0
+    if scoped or baseline:
+        val started = rt_time_now_unix_micros()
+        var index = 0
+        while index < count:
+            val event = if scoped:
+                compiler_inventory_file_event_v1("create", fixture, fixture)
+            else:
+                Some(compile_source_inventory_git_event_v1("create", fixture, fs_read_text(fixture) ?? ""))
+            if event == nil:
+                return 23
+            events = events.push(event!)
+            index = index + 1
+        elapsed = rt_time_now_unix_micros() - started
+        # Read every retained event after all scopes have ended. Compare every
+        # field, including facets that would otherwise hide promotion failures.
+        for event in events:
+            if event.source != expected.source or event.operation != expected.operation:
+                return 24
+            if event.source_identity != expected.source_identity or event.byte_count != expected.byte_count:
+                return 25
+            if event.content_digest != expected.content_digest or event.semantic_digest != expected.semantic_digest:
+                return 26
+            if event.export_digest != expected.export_digest or event.initializer_digest != expected.initializer_digest or event.provider_digest != expected.provider_digest:
+                return 27
+        print "digest={expected.content_digest}:{expected.semantic_digest}:{expected.export_digest}:{expected.initializer_digest}:{expected.provider_digest}"
+    else:
+        # Event creation is outside the measured reduction interval and identical
+        # for both algorithms. Reverse order requires real sorting work.
+        var index = count
+        while index > 0:
+            events = events.push(CompileSourceEventV1("git", "create", "src/source_{index}.spl",
+                expected.content_digest, expected.semantic_digest, expected.export_digest,
+                expected.initializer_digest, expected.provider_digest, expected.byte_count))
+            index = index - 1
+        val started = rt_time_now_unix_micros()
+        var inventory = CompileSourceInventoryV1(1, 0, [])
+        if batch:
+            val initial = compile_source_inventory_initial_events_v1(events)
+            if initial == nil:
+                return 28
+            inventory = initial!
+        else:
+            for event in events:
+                val changed = compile_source_inventory_apply_event_v1(inventory, event)
+                if not changed.valid or changed.inventory == nil:
+                    return 29
+                inventory = changed.inventory!
+        elapsed = rt_time_now_unix_micros() - started
+        if inventory.generation != count or inventory.entries.len() != count:
+            return 30
+        index = 1
+        while index < count:
+            if inventory.entries[index - 1].source_identity >= inventory.entries[index].source_identity:
+                return 31
+            index = index + 1
+        # Complete canonical encoding covers ordering, generation, and all entry
+        # fields. Cross-process equality is asserted by the executable SSpec.
+        print "digest={sha256_text(compile_source_inventory_encode_v1(inventory))}"
+    if elapsed <= 0:
+        return 32
+    print "count={count}"
+    print "elapsed_us={elapsed}"
+    print "SCV_PROFILE_DONE"
+    0
