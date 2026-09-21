@@ -70,3 +70,81 @@ The diagnostic protocol's exact-once condition was violated: the probe owner and
 ## Receipt-backed auxiliary changes
 
 The Stage 3 receipt-reuse shell syntax and focused contract passed once under `build/native_probe/stage3-receipt-reuse-review-20260816/`; do not rerun them merely for confirmation. Observer-v2 passed only its host-CC fake-runner contract under `build/mini_builds/bootstrap_diagnostic_resume_verification_20260816/observer_v2/status.receipt.env`; it is not real-sweep acceptance. No Stage 3 receipt-reuse documentation file had an attributable receipt, so no such doc is included in this handoff.
+
+## 2026-09-21 scheduler repair handoff
+
+<!-- codex-design -->
+
+The canonical Phase 4 matrix implementation currently diverges from its
+published contract. This is an admission blocker independent of the missing
+Stage 2/3 artifacts and the C2 protocol-root decision.
+
+### Red-before repair evidence
+
+The authoritative executable contract is
+`test/02_integration/bootstrap_stage4_tooling_matrix_test.shs`. It passes
+`--build-jobs=16` in every normal matrix invocation, then requires bounded
+dependency-ready execution, isolated per-task state, deterministic
+`scheduler/schedule.tsv`, jobs=1 parity, independent timeout continuation, and
+TERM cleanup. Before the scheduler repair, the implementation rejected the
+contract option before any matrix evidence could be produced:
+
+```sh
+sh scripts/bootstrap/stage4-tooling-matrix.shs --build-jobs=1
+# stage4-tooling-matrix: unknown option: --build-jobs=1
+# exit 2
+```
+
+`doc/07_guide/tooling/bootstrap_phase_verification.md` already defines the
+required behavior. Do not make the parser accept `--build-jobs` without the
+worker scheduler: that would hide the red contract while leaving its safety
+properties unimplemented.
+
+### Required implementation boundary
+
+**Owner:** bootstrap Phase 4 owner. **Merge owner:** repository bootstrap
+coordinator. **Final reviewer:** Astra. **Sidecar lanes:** N/A until the owner
+defines the shell helper boundaries below; parallel implementations must not
+write the matrix parent, summary, scheduler state, or receipts concurrently.
+
+The matrix parent owns the frozen DAG and all writes to `summary.env` and
+`scheduler/schedule.tsv`. A worker owns exactly one ready matrix row and its
+private HOME, TMPDIR, XDG paths, command log, pass marker, receipt draft, and
+native cache. The parent must reap the worker's exact PID/process group, commit
+its result in manifest order, and only then make dependents ready. The worker
+may report an envelope, but cannot publish a matrix-wide conclusion.
+The parent captures the frozen source and tooling identity immediately before
+dispatch and verifies it again after all workers stop; workers consume that
+admitted snapshot rather than performing concurrent full-tree identity scans.
+
+Define these helper boundaries before implementation so the existing fake
+artifact contract can exercise the real path:
+
+| Helper | Parent-owned responsibility |
+|---|---|
+| `stage4_scheduler_dispatch_ready` | Start at most `build_jobs` dependency-ready workers and record exact ownership. |
+| `stage4_scheduler_reap_one` | Reap one owned worker, preserve its terminal result, and release its slot. |
+| `stage4_scheduler_commit_ordered` | Write the schedule row, task receipt, and aggregate only in frozen matrix order. |
+| `stage4_scheduler_cancel_all` | Signal and wait for every recorded worker process group on TERM/INT/HUP, then remove only this invocation's scheduler run state. |
+
+`--build-jobs` must be a positive integer, be recorded in the immutable matrix
+config, cap worker count, and be forwarded as the exact `--threads` value to
+the native-build row. The link-only matrix with `build_jobs=1` must retain the
+same terminal rows, verdict, and aggregate counts as its parallel equivalent.
+One timed-out or failed row must not stop independent rows; dependents must
+receive a terminal fail-closed receipt.
+
+### Green acceptance evidence
+
+Run the pre-existing executable contract once after the repair:
+
+```sh
+sh test/02_integration/bootstrap_stage4_tooling_matrix_test.shs
+```
+
+It must pass without changing its red-before expectations. Retain its output
+and the generated fake-matrix receipts. Then perform the normal Phase 4 resume
+only after fresh Stage 2/3 admission. The final full matrix remains blocked
+until both `mcp_stdio_integration` and `lsp_stdio_integration` have an accepted
+protocol-root contract and executable passing receipts; never relabel either
+row as PASS from a static review.
