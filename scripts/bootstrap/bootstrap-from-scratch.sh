@@ -1987,6 +1987,7 @@ bootstrap_native_build_main() {
     --runtime-path "${bootstrap_runtime_authority_path}" \
     -o "${output}"
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode=new \
     --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \

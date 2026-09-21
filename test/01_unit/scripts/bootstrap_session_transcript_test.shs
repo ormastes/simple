@@ -8,9 +8,6 @@ ${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror \
     "$root/scripts/bootstrap/bootstrap-session-exec.c" -o "$work/session-exec"
 perl "$root/scripts/check/lib/portable-session-exec.pl" sh -eu -c '
     root=$1 work=$2
-    SIMPLE_BOOTSTRAP_SESSION_ID=$$
-    SIMPLE_BOOTSTRAP_SESSION_EXEC=$work/session-exec
-    export SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
     . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
     . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
     mkdir "$work/home" "$work/tmp"
@@ -53,5 +50,18 @@ perl "$root/scripts/check/lib/portable-session-exec.pl" sh -eu -c '
             exit 1
         fi
     done
+    # Canonical bootstrap must create its own session even when the ambient
+    # SID is numerically correct; an untrusted inherited helper is not authority.
+    ambient_row=$("$work/session-exec" --sid $$)
+    ambient_sid=${ambient_row#* }
+    if SIMPLE_BOOTSTRAP_SESSION_ID="$ambient_sid" SIMPLE_BOOTSTRAP_SESSION_EXEC=/usr/bin/true \
+        bootstrap_stage3_run_transcribed "$work/ambient.command" "$root" \
+            "$work/ambient.log" "$work/home" "$work/tmp" /usr/bin:/bin \
+            -- /usr/bin/touch "$work/ambient.payload"; then
+        echo "FAIL: ambient session spoof accepted" >&2
+        exit 1
+    fi
+    test ! -e "$work/ambient.payload"
+    grep -qx status=session-helper-install-failed "$work/ambient.log.rss.env"
     echo "PASS: hermetic launch preserves verified session contract and fixed transcript admission"
 ' sh "$root" "$work"
