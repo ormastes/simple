@@ -93,13 +93,18 @@ verification a silent no-op inside a real bootstrap run.
 job count as a bounded case-worker ceiling (normally capped at 16 by
 `bootstrap-build-jobs-policy.shs`). The parent schedules only dependency-ready
 matrix rows. Each worker owns a distinct HOME, TMPDIR, XDG cache/config/data
-root, log, receipt, and result path; the native-build row retains its distinct
-explicit cache. Workers never write the shared summary. The parent alone reaps
-exact worker PIDs/process groups and commits `scheduler/schedule.tsv` and
-`summary.env` in frozen manifest order. It captures and verifies the complete
-frozen source/tool identity immediately before dispatch and again after all
-workers stop; per-task receipt snapshots copy that admitted identity instead of
-launching concurrent repeated tree scans. TERM/INT/HUP cancels and waits for all
+root, log, draft receipt, and result path; the native-build row retains its distinct
+explicit cache. Workers never publish canonical task receipts or the shared summary.
+The parent alone reaps each supervisor, validates its exit status and the draft's
+schema, result, config, and source identity, then atomically commits the task receipt
+in frozen matrix order. Dependencies become ready only after this parent commit.
+The schedule is atomically published at `scheduler/schedule.tsv`.
+Supervisor PIDs and actual child session/group IDs are recorded separately.
+The parent captures and verifies the complete frozen source/tool identity before
+dispatch and after all workers stop. Workers currently capture current source
+snapshots before and after their task and compare them with the admitted config;
+the repeated tree scans remain a performance cost, not a completed optimization.
+TERM/INT/HUP cancels and waits for all
 active groups before removing that invocation's scheduler state. Every command
 inside a row remains covered by `--timeout-seconds`; one timeout or failure does
 not stop independent rows, while dependents terminalize fail-closed.
@@ -108,7 +113,10 @@ The focused fake-artifact contract is
 `test/02_integration/bootstrap_stage4_tooling_matrix_test.shs`. It checks the
 worker bound, jobs=1 parity, manifest ordering, failure continuation, isolated
 cache/tmp ownership, per-case timeout, receipt collision protection, and signal
-cleanup without building a compiler.
+cleanup without building a compiler. Its supervisor fault cases also reject a
+successful child followed by supervisor failure, duplicate receipt keys, wrong
+source hashes, and source drift. These controller fixtures do not admit a live
+bootstrap or resolve either C2 stdio protocol-root hold.
 
 ## Phase → gate map
 

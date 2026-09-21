@@ -3,7 +3,8 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage4-tooling-matrix-test.XXXXXX")
-trap 'rm -rf "$fixture"' EXIT INT TERM HUP
+trap '[ "${STAGE4_TEST_KEEP_FIXTURE:-0}" = 1 ] || rm -rf "$fixture"' EXIT INT TERM HUP
+printf 'FIXTURE=%s\n' "$fixture"
 fake_root="$fixture/repo"
 mkdir -p "$fake_root/scripts/bootstrap" "$fake_root/scripts/check/cert/redeploy_gate" \
   "$fake_root/scripts/smoke" "$fake_root/test/01_unit/lib/tooling" \
@@ -18,7 +19,7 @@ mkdir -p "$fake_root/scripts/bootstrap" "$fake_root/scripts/check/cert/redeploy_
   "$fake_root/build/authority" "$fake_root/build/journals" "$fake_root/build/objects"
 
 cp "$repo_root/scripts/bootstrap/stage4-tools-only.sh" "$fake_root/scripts/bootstrap/"
-cp "$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs" "$fake_root/scripts/bootstrap/"
+cp "${STAGE4_TEST_MATRIX_SOURCE:-$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs}" "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
 cp "$repo_root/scripts/bootstrap/run-process-group-timeout.shs" "$fake_root/scripts/bootstrap/"
 chmod +x "$fake_root/scripts/bootstrap/stage4-tools-only.sh" \
   "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs" \
@@ -325,6 +326,75 @@ printf 'fake caret suite spec\n' >"$fake_root/test/01_unit/app/llm_caret/fake_sp
 
 runner="$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
 common_args="--source-root=$fake_root --compiler-manifest=$manifest --cli-journal=$fake_root/build/journals/cli.env --mcp-journal=$fake_root/build/journals/mcp.env --lsp-journal=$fake_root/build/journals/lsp.env --linker=$fake_linker --timeout-seconds=30 --build-jobs=16"
+
+# Exercise the actual supervisor/worker boundary before the 49-row contract.
+# A successful child is only a draft until its supervisor has been reaped.
+mv "$fake_root/scripts/bootstrap/run-process-group-timeout.shs" \
+  "$fake_root/scripts/bootstrap/fixture-process-group-timeout.shs"
+cat >"$fake_root/scripts/bootstrap/run-process-group-timeout.shs" <<'SUPERVISOR'
+#!/bin/sh
+set -eu
+probe_task= probe_root= probe_matrix=
+for probe_arg in "$@"; do
+  case "$probe_arg" in
+    --worker-task=*) probe_task=${probe_arg#*=} ;;
+    --source-root=*) probe_root=${probe_arg#*=} ;;
+    --matrix-id=*) probe_matrix=${probe_arg#*=} ;;
+  esac
+done
+probe_work="$probe_root/build/mini_builds/stage4_tooling_$probe_matrix"
+if [ "$probe_task:${FAKE_SUPERVISOR_FAULT:-}" = link_cli:source-drift ]; then
+  echo changed >"$probe_root/src/compiler/worker-drift.spl"
+fi
+probe_status=0
+sh "$(dirname "$0")/fixture-process-group-timeout.shs" "$@" || probe_status=$?
+if [ "$probe_task" = link_cli ]; then
+  [ ! -f "$probe_work/state/link_cli.env" ] ||
+    echo visible >"$probe_work/canonical-before-reap"
+  probe_draft="${STAGE4_WORKER_DRAFT_DIR:-$probe_work/state}/link_cli.env"
+  case "${FAKE_SUPERVISOR_FAULT:-}" in
+    post-status) exit 124 ;;
+    duplicate-schema) echo schema=Stage4MatrixTaskReceiptV1 >>"$probe_draft" ;;
+    wrong-source) sed 's/^compiler_tree_hash=.*/compiler_tree_hash=WRONG/' "$probe_draft" >"$probe_draft.changed"; mv "$probe_draft.changed" "$probe_draft" ;;
+    source-drift) rm -f "$probe_root/src/compiler/worker-drift.spl" ;;
+  esac
+fi
+exit "$probe_status"
+SUPERVISOR
+chmod +x "$fake_root/scripts/bootstrap/run-process-group-timeout.shs"
+
+for boundary_fault in post-status duplicate-schema wrong-source source-drift; do
+  boundary_status=0
+  # shellcheck disable=SC2086
+  FAKE_SLEEP_TASK=none FAKE_SUPERVISOR_FAULT="$boundary_fault" "$runner" \
+    "--matrix-id=boundary-$boundary_fault" --scope=link-only $common_args \
+    --build-jobs=1 || boundary_status=$?
+  [ "$boundary_status" -eq 1 ] || fail "$boundary_fault supervisor boundary admitted success ($boundary_status)"
+  boundary_root="$fake_root/build/mini_builds/stage4_tooling_boundary-$boundary_fault"
+  [ ! -f "$boundary_root/canonical-before-reap" ] || fail "$boundary_fault worker published before parent reap"
+  ! grep -Fxq result=PASS "$boundary_root/state/link_cli.env" || fail "$boundary_fault retained a canonical PASS"
+  grep -Fxq terminal_count=3 "$boundary_root/summary.env" || fail "$boundary_fault stopped independent rows"
+  [ -f "$boundary_root/scheduler/schedule.tsv" ] || fail "$boundary_fault canonical schedule missing"
+done
+# The remaining contract exercises the unwrapped production supervisor,
+# including its exact TERM forwarding and process-group cleanup semantics.
+mv "$fake_root/scripts/bootstrap/fixture-process-group-timeout.shs" \
+  "$fake_root/scripts/bootstrap/run-process-group-timeout.shs"
+# An existing receipt alone must not release a dependency in the current run.
+sed -n '/^scheduler_task_dependencies_terminal() {$/,/^}$/p' "$runner" >"$fixture/dependency-owner.sh"
+(
+  . "$fixture/dependency-owner.sh"
+  state="$fixture/dependency-state"
+  scheduler_run_dir="$fixture/dependency-run"
+  matrix="$fixture/dependency-matrix.tsv"
+  mkdir -p "$state" "$scheduler_run_dir/committed"
+  printf 'upstream\trequired\t-\ndownstream\trequired\tupstream\n' >"$matrix"
+  printf 'result=PASS\n' >"$state/upstream.env"
+  ! scheduler_task_dependencies_terminal downstream || fail 'uncommitted receipt released a dependency'
+  : >"$scheduler_run_dir/committed/upstream"
+  scheduler_task_dependencies_terminal downstream || fail 'parent-committed dependency remained blocked'
+)
+[ "${1:-}" != --scheduler-boundaries ] || { echo 'PASS Stage4 supervisor/draft/identity boundaries'; exit 0; }
 
 # shellcheck disable=SC2086
 expected_full_status=1

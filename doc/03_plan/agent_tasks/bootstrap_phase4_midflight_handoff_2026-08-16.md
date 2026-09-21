@@ -148,3 +148,41 @@ only after fresh Stage 2/3 admission. The final full matrix remains blocked
 until both `mcp_stdio_integration` and `lsp_stdio_integration` have an accepted
 protocol-root contract and executable passing receipts; never relabel either
 row as PASS from a static review.
+
+### 2026-09-21 receipt ownership repair continuation
+
+Independent review of `77d7a31aeba93b9545f71edd45388ee54279a80e`
+found four P1 gaps: a child could publish PASS before a failing supervisor was
+reaped; worker identity accepted marker existence alone; the schedule used a
+per-run path instead of its canonical path; and matrix/task environment IDs
+were absent. The canonical fixture reproduced the supervisor gap with a real
+successful child followed by supervisor exit 124: the old parent returned 0.
+Retained reproduction: `build/review/phase4-boundary-red-exact.log` in the
+isolated `D:/wk-phase4-receipt-astra` worktree.
+
+The continuation gives workers private draft receipt paths and keeps canonical
+receipt publication in the parent. The parent checks supervisor completion and
+the exact receipt envelope before committing in matrix order, then marks the
+dependency committed for this run. Worker admission binds the parent config,
+matrix, and source snapshot hashes; current task-boundary source snapshots must
+match that config. The schedule uses an atomic rename to
+`scheduler/schedule.tsv`. Task environments carry both matrix and task IDs.
+
+The full 49-row canonical fixture retains its C2 holds and adds supervisor,
+malformed-receipt, source-identity, and parent-owned dependency regressions.
+Its final result and independent exact-head review must be attached before
+updating PR #1224. No live Phase 4 admission is claimed by these fake artifacts.
+
+Open performance follow-up: task-boundary source tree hashing is still repeated
+per worker. Remove redundant scans only with an admitted immutable snapshot or
+equivalent current-source validation, and verify startup/row latency and max RSS
+before claiming the snapshot-consumption optimization described in the earlier
+design. This repair removes the redundant immediate second scan at each worker
+boundary but does not eliminate the before/after captures themselves.
+
+**Continuation status: HOLD.** The final canonical attempt reached the expected
+49-row distribution, then failed because boundary scenarios shared the original
+fixture's exact-three link counter. No fourth run was started. The frozen repair,
+unapplied fixture-only proposal, unexecuted gates, and an additional static
+run-directory/PID-reuse risk are documented in
+`doc/09_report/phase4_scheduler_repair_hold_2026-09-21.md`.
