@@ -34,6 +34,19 @@ cp "$root/scripts/setup/materialize-symlinks-windows.shs" "$root/scripts/setup/w
 git -C "$repo" init -q
 git -C "$repo" config core.symlinks false
 git -C "$repo" config core.autocrlf false
+# A gitlink's pinned commit need not exist in the superproject object store.
+git -C "$tmp" init -q child-source
+git -C "$tmp/child-source" config core.autocrlf false
+printf 'pinned child\n' >"$tmp/child-source/child.txt"
+git -C "$tmp/child-source" add child.txt
+child_tree=$(git -C "$tmp/child-source" write-tree)
+child_head=$(printf 'pinned child\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$tmp/child-source" commit-tree "$child_tree")
+git -C "$tmp/child-source" update-ref HEAD "$child_head"
+# A nested gitlink is absent from the child's ordinary status inventory.
+git -C "$tmp/child-source" update-index --add --cacheinfo "160000,$child_head,grandchild"
+child_tree=$(git -C "$tmp/child-source" write-tree)
+child_head=$(printf 'child with nested gitlink\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$tmp/child-source" commit-tree "$child_tree" -p "$child_head")
+git -C "$tmp/child-source" update-ref HEAD "$child_head"
 printf 'tracked original\n' >"$repo/source.spl"
 printf 'file payload\n' >"$repo/target.txt"
 printf 'directory payload\n' >"$repo/target-dir/tracked.txt"
@@ -43,6 +56,7 @@ printf target-dir >"$repo/dir-link"
 printf target-dir/tracked.txt >"$repo/nested-target-link"
 printf ../tools/bb-cli/bin/bb >"$repo/bin/bb"
 git -C "$repo" add .
+git -C "$repo" update-index --add --cacheinfo "160000,$child_head,child-module"
 for link in file-link shared-file-link dir-link nested-target-link bin/bb; do
     blob=$(git -C "$repo" hash-object -w -- "$repo/$link")
     git -C "$repo" update-index --cacheinfo "120000,$blob,$link"
@@ -57,7 +71,11 @@ receipt="$tmp/good"
 
 accept() {
     case_name=$1
-    bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"
+    if ! bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then
+        printf 'unexpected rejection: %s\n' "$1" >&2
+        tail -c 2500 "$tmp/error" >&2
+        return 1
+    fi
     test ! -s "$tmp/stdout"
     grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/$1.state"
     grep -qx 'alias_collapse_count=1' "$tmp/$1.state"
@@ -75,6 +93,48 @@ reject() {
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
 accept positive-file-dir-pending
+git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
+git -C "$repo/child-module" config core.autocrlf false
+accept clean-initialized-gitlink
+mkdir -p "$repo/child-module/grandchild"
+accept empty-uninitialized-nested-gitlink
+printf hidden >"$repo/child-module/grandchild/hidden"
+reject nonempty-uninitialized-nested-gitlink
+rm "$repo/child-module/grandchild/hidden"
+git -C "$repo/child-module" update-index --assume-unchanged child.txt
+reject assume-unchanged-initialized-gitlink
+git -C "$repo/child-module" update-index --no-assume-unchanged child.txt
+git -C "$repo/child-module" update-index --skip-worktree child.txt
+reject skip-worktree-initialized-gitlink
+git -C "$repo/child-module" update-index --no-skip-worktree child.txt
+mkdir -p "$repo/.git/modules"
+mv "$repo/child-module/.git" "$repo/.git/modules/child-module"
+printf 'gitdir: ../.git/modules/child-module\n' >"$repo/child-module/.git"
+accept clean-git-pointer-file
+rm "$repo/child-module/.git"
+mv "$repo/.git/modules/child-module" "$repo/child-module/.git"
+printf changed >>"$repo/child-module/child.txt"
+reject dirty-initialized-gitlink
+git -C "$repo/child-module" checkout -q -- child.txt
+printf extra >"$repo/child-module/untracked.txt"
+reject untracked-initialized-gitlink
+git -C "$repo/child-module" config --local status.showUntrackedFiles no
+git -C "$repo" config --local submodule.child-module.ignore all
+reject ignored-untracked-initialized-gitlink
+git -C "$repo/child-module" config --unset status.showUntrackedFiles
+git -C "$repo" config --unset submodule.child-module.ignore
+rm "$repo/child-module/untracked.txt"
+printf changed >"$repo/child-module/child.txt"
+git -C "$repo/child-module" add child.txt
+other_tree=$(git -C "$repo/child-module" write-tree)
+other_head=$(printf 'other child\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$repo/child-module" commit-tree "$other_tree" -p "$child_head")
+git -C "$repo/child-module" update-ref HEAD "$other_head"
+reject wrong-initialized-gitlink-head
+git -C "$repo/child-module" reset -q --hard "$child_head"
+accept restored-initialized-gitlink
+mkdir -p "$repo/child-module/nested/.git"
+reject nested-repository-under-gitlink
+rmdir "$repo/child-module/nested/.git" "$repo/child-module/nested"
 # Independent canonical oracle: explicitly exclude only the known fixture dir.
 printf '\000\377raw\r\nbytes\000' >"$repo/target-dir/untracked.bin"
 accept untracked-bytes

@@ -3577,7 +3577,7 @@ public static class Stage3MaterializedConsumer {
         // The retained Stage3 line protocol cannot encode these names safely.
         if (path.IndexOfAny(new char[] {'\n','\r','\t','\\',':','*','?','[',']'}) >= 0) throw new IOException("path.unsupported");
     }
-    static Dictionary<string,string> HeadLinks(string root, string head) {
+    static Dictionary<string,string> HeadLinks(string root, string head, Dictionary<string,string> gitlinks) {
         var links = new Dictionary<string,string>(StringComparer.Ordinal);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var components = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -3594,7 +3594,9 @@ public static class Stage3MaterializedConsumer {
                 components[prefix] = prefix;
             }
             string[] f = row.Substring(0, tab).Split(' ');
-            if (f.Length != 3 || f[1] != "blob" || (f[0] != "100644" && f[0] != "100755" && f[0] != "120000")) throw new IOException("git.tree-kind");
+            if (f.Length != 3 || !((f[1] == "blob" && (f[0] == "100644" || f[0] == "100755" || f[0] == "120000")) ||
+                (f[1] == "commit" && f[0] == "160000"))) throw new IOException("git.tree-kind");
+            if (f[0] == "160000") gitlinks.Add(path, f[2]);
             if (f[0] == "120000") {
                 byte[] blob = Git(root, "cat-file", "blob", f[2]);
                 links.Add(path, Relative(Hex(blob), blob.Length.ToString(), true));
@@ -3603,7 +3605,38 @@ public static class Stage3MaterializedConsumer {
         }
         return links;
     }
-    static void AuditTree(string root, Dictionary<string,string> aliases, List<SafeFileHandle> held) {
+    static bool CheckGitlink(string root, string path, string expected, Dictionary<string,string> gitlinks,
+        bool discover, List<SafeFileHandle> held) {
+        bool metadata = false, content = false;
+        foreach (string child in Directory.EnumerateFileSystemEntries(path)) {
+            string name = Path.GetFileName(child);
+            if (name.Equals(".git", StringComparison.Ordinal)) {
+                var h = Open(child, true, 0); held.Add(h);
+                var tag = Tag(h);
+                if ((tag.Attributes & (0x400 | 0x40)) != 0) throw new IOException("path.gitlink-metadata");
+                metadata = true;
+            } else if (name.Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+            else content = true;
+        }
+        // Git ignores an uninitialized gitlink's contents in the parent tree.
+        if (!metadata) { if (content) throw new IOException("path.uninitialized-gitlink-content"); return false; }
+        string top = Text(Git(path, "rev-parse", "--show-toplevel")).TrimEnd('\n').Replace('/','\\').TrimEnd('\\');
+        if (!top.Equals(path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) throw new IOException("git.gitlink-root");
+        if (Text(Git(path, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != expected) throw new IOException("git.gitlink-head");
+        foreach (string entry in Nul(Git(path, "ls-files", "-v", "-z")))
+            if (entry.Length < 3 || entry[1] != ' ' || Char.IsLower(entry[0]) || entry[0] == 'S') throw new IOException("git.gitlink-index-flags");
+        if (Git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--ignored=matching").Length != 0)
+            throw new IOException("git.gitlink-dirty");
+        if (discover) {
+            var nested = new Dictionary<string,string>(StringComparer.Ordinal);
+            HeadLinks(path, expected, nested);
+            string prefix = path.Substring(root.Length + 1).Replace('\\','/');
+            foreach (var pair in nested) gitlinks.Add(prefix + "/" + pair.Key, pair.Value);
+        }
+        return true;
+    }
+    static void AuditTree(string root, Dictionary<string,string> aliases, Dictionary<string,string> gitlinks,
+        HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3617,13 +3650,23 @@ public static class Stage3MaterializedConsumer {
                 if (relative == ".git") continue;
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
-                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
+                    string parent = relative.Substring(0, relative.Length - 5);
+                    if (!gitlinks.ContainsKey(parent) || relative != parent + "/.git") throw new IOException("path.nested-repository");
+                    continue;
+                }
                 var raw = Open(item, true, 0); held.Add(raw);
                 {
                     var tag = Tag(raw);
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
                     if ((tag.Attributes & 0x400) != 0) throw new IOException("path.unreceipted-reparse");
                     if ((tag.Attributes & 0x40) != 0) throw new IOException("path.special");
+                    string oid;
+                    if (gitlinks.TryGetValue(relative, out oid)) {
+                        if ((tag.Attributes & 0x10) == 0) throw new IOException("path.gitlink-kind");
+                        if (CheckGitlink(root, item, oid, gitlinks, true, held)) initializedGitlinks.Add(relative);
+                        inspectedGitlinks.Add(relative);
+                    }
                     if ((tag.Attributes & 0x10) != 0) todo.Push(item);
                 }
             }
@@ -3693,7 +3736,8 @@ public static class Stage3MaterializedConsumer {
             string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\');
             if (!top.Equals(root, StringComparison.OrdinalIgnoreCase) && !top.Equals(posixRoot, StringComparison.Ordinal)) throw new IOException("root.git-mismatch");
             string producerHash = Hash(ReadHeld(Path.Combine(root, "scripts", "setup", "materialize-symlinks-windows.shs"), held, 1024 * 1024));
-            var headLinks = HeadLinks(root, head);
+            var gitlinks = new Dictionary<string,string>(StringComparer.Ordinal);
+            var headLinks = HeadLinks(root, head, gitlinks);
             var pending = new List<string>();
             byte[] receiptBytes = ReadHeld(source, held, 8 * 1024 * 1024);
             string receiptText = new UTF8Encoding(false,true).GetString(receiptBytes);
@@ -3828,12 +3872,28 @@ public static class Stage3MaterializedConsumer {
             // unambiguous because aliases themselves are unique and no target
             // may equal or descend from an alias path; do not reject equal or
             // nested canonical target paths here.
-            AuditTree(root, aliases, held);
+            var inspectedGitlinks = new HashSet<string>(StringComparer.Ordinal);
+            var initializedGitlinks = new HashSet<string>(StringComparer.Ordinal);
+            AuditTree(root, aliases, gitlinks, inspectedGitlinks, initializedGitlinks, held);
             // Held policy/placeholder bytes are authoritative until Git returns.
             // Absence itself cannot be locked: check at use and again at finish.
             CheckPending(pendingLinks, pending, policyRows, held);
             string result = Inventory(root, head, aliases);
             CheckPending(pendingLinks, pending, policyRows, held);
+            // The child status ran before descendant handles were acquired.
+            // Recheck every child after the full walk, including absent and
+            // uninitialized gitlinks whose empty directories cannot lock out
+            // new entries. No new path may appear after the audit.
+            foreach (var pair in gitlinks) {
+                string path = Path.Combine(root, pair.Key.Replace('/','\\'));
+                uint attr = GetFileAttributesW(path);
+                int error = Marshal.GetLastWin32Error();
+                bool present = attr != 0xFFFFFFFFu;
+                if (!present && error != 2 && error != 3) throw new IOException("path.gitlink-absence");
+                if (present != inspectedGitlinks.Contains(pair.Key)) throw new IOException("path.gitlink-appeared-or-vanished");
+                if (present && CheckGitlink(root, path, pair.Value, gitlinks, false, held) != initializedGitlinks.Contains(pair.Key))
+                    throw new IOException("path.gitlink-initialization-changed");
+            }
             if (Text(Git(root, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != head) throw new IOException("head.changed");
             if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("policy.changed");
             Tick();
