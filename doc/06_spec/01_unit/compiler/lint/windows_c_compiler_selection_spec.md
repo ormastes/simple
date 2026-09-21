@@ -43,3 +43,7 @@ The executable source is
   for this check.
 - The focused native shell contract passes all five executable selection cases.
 - Exact-head static review is pending for the scoped four-finding correction.
+- Final scoped review of source commit `6434d0fb0e2` is HOLD with P0=0/P1=2:
+  a queried symbol in throw text can bind an unrelated metadata predicate, and
+  regex concatenation can append an LLVM 18 alternative. The three-cycle cap
+  prohibits another source/test correction in this session.

@@ -63,6 +63,15 @@ keeps CMake escape decoding separate from raw PowerShell regex semantics. Its
 focused native shell contract again passes all five executable cases. A fourth
 fix cycle is prohibited; this candidate is frozen for final exact-head review.
 
+The final exact-source review of `6434d0fb0e2e204cf8075e57e735b3f95524abba`
+reports P0=0/P1=2. A predicate over unrelated metadata is still accepted when
+the queried output symbol appears only in the later throw message, and a
+canonical quoted regex operand can still be concatenated with an LLVM 18
+alternative. The source and executable fixtures are frozen under the three
+cycle cap. Complete admission remains HOLD. Final review receipt:
+`build/review/astra_llvm_authority_exact_head.md`, SHA-256
+`AAEA49F5F07A053D8D247DD48A41FCE2C1224DCBC64C9F696BE795B6689EF60C`.
+
 This follow-up is a fresh scoped continuation of the prior review and retains the three-cycle guard. An independent exact-head review is required before the draft PR can claim the P1 is clear.
 
 ## Pending executable verification
