@@ -1,0 +1,57 @@
+#!/bin/sh
+# Guard the Windows MSVC bootstrap contract without requiring a Windows host.
+# The runtime is C-only: clang-cl compiles C, CXX remains unset, and Cargo
+# invokes the native MSVC linker directly.
+
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+FIXTURE="${TMPDIR:-/tmp}/simple-msvc-toolchain-contract.$$"
+trap 'rm -rf "$FIXTURE"' EXIT HUP INT TERM
+mkdir -p "$FIXTURE/bin"
+
+for tool in clang.exe clang-cl.exe lld-link.exe; do
+    : > "$FIXTURE/bin/$tool"
+done
+
+OUTPUT="$(
+    env -i PATH="$PATH" \
+        SIMPLE_LLVM_WIN_ROOT_23="$FIXTURE" \
+        SIMPLE_LLVM_WIN_ROOT_21="${FIXTURE}/missing-21" \
+        SIMPLE_LLVM_WIN_ROOT_18="${FIXTURE}/missing-18" \
+        CXX=must-be-cleared \
+        sh -c '. "$1/scripts/setup/llvm-toolchain-env.shs"; printf "%s|%s|%s" "$CC" "${CXX+x}" "$LD"' sh "$ROOT"
+)"
+
+EXPECTED_BIN="$FIXTURE/bin"
+if command -v cygpath >/dev/null 2>&1; then
+    EXPECTED_BIN="$(cygpath -m "$EXPECTED_BIN")"
+fi
+EXPECTED="$EXPECTED_BIN/clang-cl.exe||$EXPECTED_BIN/lld-link.exe"
+[ "$OUTPUT" = "$EXPECTED" ] || {
+    echo "FAIL: Windows shell contract is '$OUTPUT', expected '$EXPECTED'" >&2
+    exit 1
+}
+
+CARGO_CONFIG="$ROOT/src/compiler_rust/.cargo/config.toml"
+MSVC_SECTION="$(sed -n '/^\[target\.x86_64-pc-windows-msvc\]/,/^\[/p' "$CARGO_CONFIG")"
+printf '%s\n' "$MSVC_SECTION" | grep -Fx 'linker = "link.exe"' >/dev/null || {
+    echo 'FAIL: Cargo MSVC target must use linker = "link.exe"' >&2
+    exit 1
+}
+printf '%s\n' "$MSVC_SECTION" | grep -Eq '^[[:space:]]*linker[[:space:]]*=[[:space:]]*"clang-cl' && {
+    echo 'FAIL: Cargo MSVC target must not bind Rust linking to clang-cl' >&2
+    exit 1
+}
+
+CMAKE_TOOLCHAIN="$ROOT/src/runtime/cmake/toolchains/windows-x86_64-clangcl.cmake"
+grep -Fx 'set(CMAKE_C_COMPILER clang-cl)' "$CMAKE_TOOLCHAIN" >/dev/null || {
+    echo 'FAIL: CMake MSVC toolchain must select clang-cl for C' >&2
+    exit 1
+}
+if grep -Eq 'CMAKE_CXX_COMPILER|CMAKE_CXX_COMPILER_TARGET|CMAKE_CXX_FLAGS' "$CMAKE_TOOLCHAIN"; then
+    echo 'FAIL: CMake MSVC toolchain must leave CXX unset for the C-only runtime' >&2
+    exit 1
+fi
+
+echo 'PASS: Windows MSVC C-only compiler and native Rust linker contract holds'
