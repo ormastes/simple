@@ -1,6 +1,6 @@
 # Windows C compiler authority review
 
-STATUS: HOLD for complete admission. The shell/native portion has focused passing evidence, but exact-head `1d744dd3016dc72d8b69ec5817d059120ba279fb` retains one lint P1; self-hosted verification also remains pending.
+STATUS: HOLD for complete admission. The shell/native portion has focused passing evidence, but exact-head `1d744dd3016dc72d8b69ec5817d059120ba279fb` retains four lint P1 findings; self-hosted verification also remains pending. The independent report SHA-256 is `517cb50dfbc00a4b7e3f4edbc6d5354a41efa4a7d140e820bfb6e0b3bd5f2234`.
 
 ## Current change
 
@@ -25,7 +25,14 @@ The lint provider's source-authority test now recognizes the official LLVM 23.1.
 
 The first exact-head follow-up review found that exported target-specific CC/CXX names bypassed assignment classification and that a valid-looking predicate could inspect unrelated text. The candidate repair recognizes exported and batch target-specific names and traces the queried compiler's captured output through one derived assignment before accepting the exact family expression, either directly or through the PR1216 clang-cl pattern mapping. Focused fixtures retain both failures as regressions, including an unused exact metadata pattern beside a weak predicate over the real output.
 
-The final permitted exact-head review found that shell query assignments record `_simple_win_version` while later shell references tokenize as `$_simple_win_version`, so the binding comparison cannot validate the canonical positive shell fixture. The same classification expansion now inspects `CC_x86_64_pc_windows_msvc="$CC"`, but the admitted-driver helper does not trace `$CC` back to the already validated `CC="$_simple_win_cc"`. A fresh scoped correction must canonicalize shell variable names before comparison, trace the canonical target CC alias to the validated driver, and retain positive tests for the production shell plus negative tests for forged metadata and forbidden target-specific CC/CXX. The production implementation is frozen at the three-cycle cap; no P0/P1-clear claim is made.
+The final permitted exact-head review found four P1 defects:
+
+- Canonical target alias denied: shell query assignments record `_simple_win_version` while references tokenize as `$_simple_win_version`, and `CC_x86_64_pc_windows_msvc="$CC"` is not traced through the validated `CC="$_simple_win_cc"` assignment.
+- Metadata or diagnostic-only predicate binding: the one-step symbol trace accepts derived diagnostic text containing the queried output as if it were the compiler output itself.
+- Quoted target GITHUB_ENV export bypass: a quoted `CC_x86_64_pc_windows_msvc=...` export is not classified like the generic quoted `CC=...` form.
+- Regex wildcard and missing-boundary acceptance: removing escapes before validation loses the distinction between a literal dot and wildcard, while `[0-9]` alone admits patterns without the required family token boundary.
+
+A fresh scoped correction must retain the production shell as a positive, then add negative regressions for a diagnostic/metadata derivative, quoted target GITHUB_ENV forbidden export, wildcard family pattern, and missing family boundary. It must also retain forbidden target-specific CC/CXX and forged unrelated metadata coverage. The production implementation is frozen at the three-cycle cap; no P0/P1-clear claim is made.
 
 This follow-up is a fresh scoped continuation of the prior review and retains the three-cycle guard. An independent exact-head review is required before the draft PR can claim the P1 is clear.
 

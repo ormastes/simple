@@ -39,5 +39,8 @@ The executable source is
   no self-hosted runner available.
 - No pass or fail result is claimed here. The Rust seed fallback is prohibited
   for this check.
-- Exact-head static review is HOLD: shell query/reference symbol forms and the
-  canonical target-specific `CC="$CC"` alias need a fresh scoped correction.
+- Exact-head static review is HOLD with P0=0/P1=4: canonical target alias
+  tracing, metadata/diagnostic-only predicate binding, quoted target
+  `GITHUB_ENV` export classification, and literal-dot/family-boundary regex
+  validation need a fresh scoped correction. Independent report SHA-256:
+  `517cb50dfbc00a4b7e3f4edbc6d5354a41efa4a7d140e820bfb6e0b3bd5f2234`.
