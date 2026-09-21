@@ -1,0 +1,30 @@
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+
+describe "array write_span native and SoSIX ABI contract":
+    it "keeps the five-word runtime signature identical across providers":
+        step("Read every provider and compiler declaration of rt_array_write_span")
+        val header = file_read("src/runtime/runtime.h")
+        val native = file_read("src/runtime/runtime_native.c")
+        val rust_runtime = file_read("src/compiler_rust/runtime/src/value/collections.rs")
+        val rust_abi = file_read("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val symbol_inventory = file_read("src/compiler_rust/common/src/runtime_symbols.rs")
+        val simple_llvm = file_read("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
+
+        step("C, Rust, and pure-Simple agree on two handles, three i64 offsets/count, and i64 result")
+        expect(header).to_contain("int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,")
+        expect(header).to_contain("int64_t src_off, int64_t count);")
+        expect(native).to_contain("int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,")
+        expect(rust_runtime).to_contain("pub extern \"C\" fn rt_array_write_span(")
+        expect(rust_runtime).to_contain("dst: RuntimeValue,\n    src: RuntimeValue,\n    dst_off: i64,\n    src_off: i64,\n    count: i64,\n) -> RuntimeValue")
+        expect(rust_abi).to_contain("RuntimeFuncSpec::new(\"rt_array_write_span\", &[I64, I64, I64, I64, I64], &[I64])")
+        expect(symbol_inventory).to_contain("\"rt_array_write_span\",")
+        expect(simple_llvm).to_contain("declare i64 @rt_array_write_span(ptr, ptr, i64, i64, i64)")
+
+    it "keeps write_span below the SoSIX capability boundary":
+        step("The bootstrap change maps an existing runtime symbol and adds no SoSIX operation")
+        val llvm_seed = file_read("src/compiler_rust/compiler/src/codegen/llvm/functions.rs")
+        val sosix_ops = file_read("src/lib/common/contracts/sosix/operation_v1.spl")
+        expect(llvm_seed).to_contain("\"write_span\" => Some(\"rt_array_write_span\")")
+        expect(sosix_ops.contains("rt_array_write_span")).to_equal(false)

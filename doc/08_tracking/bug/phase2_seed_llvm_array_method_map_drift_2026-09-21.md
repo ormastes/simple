@@ -2,8 +2,8 @@
 
 ## Status
 
-Open. Bootstrap seed synchronization is required; the pure-Simple compiler
-counterpart already has the correct `write_span` lowering.
+Fixed by synchronizing the bootstrap seed LLVM method table; the pure-Simple
+compiler counterpart already had the correct `write_span` lowering.
 
 ## Reproduction
 
@@ -45,7 +45,7 @@ The pure-Simple compiler is already synchronized:
 
 ## Required fix
 
-Synchronize only the bootstrap seed LLVM method table by adding
+The fix synchronizes only the bootstrap seed LLVM method table by adding
 `"write_span" => Some("rt_array_write_span")`, with a focused LLVM backend
 regression that constructs an `Array.write_span` static method call and asserts
 the emitted IR calls `rt_array_write_span`.
@@ -54,3 +54,26 @@ Do not replace product calls with direct extern calls. Interpreter correctness
 depends on the mutating-method channel to write the updated array back through
 nested `mut` parameters. A direct extern route compiles natively but changes
 interpreter behavior.
+
+## Verification and resource evidence
+
+- The focused LLVM Rust regression passes: one test passed with 4,092 filtered
+  out. It proves `Array.write_span` emits a call to `rt_array_write_span` and
+  does not leak an unresolved method name into IR.
+- `test/fixtures/compiler/phase2_array_write_span_method_probe.spl` compiled
+  with the admitted pure-Simple LLVM compiler in 35.39 seconds at 340,951,040
+  bytes maximum RSS and ran successfully in 0.39 seconds at 9,994,240 bytes
+  maximum RSS.
+- The focused incremental Rust LLVM test/link took 34.58 seconds and macOS
+  reported 2,991,013,888 bytes maximum RSS. This exceeds the desired 1 GiB
+  compile ceiling in the existing monolithic Rust lib-test target. The mapping
+  adds one static match arm and no allocation, loop, or runtime hot-path work.
+
+## SoSIX and native ABI audit
+
+The contract remains the existing five-word runtime call: destination handle,
+source handle, destination offset, source offset, and count, returning one
+word. The C header/provider, Rust provider, Rust SFFI declaration, common
+symbol inventory, and pure-Simple LLVM declaration agree. The symbol is an
+internal collection runtime helper and is absent from the SoSIX operation
+contract, so this synchronization adds no host capability or interface.
