@@ -1,0 +1,102 @@
+"""
+Regression owner for OPEN P2 `any_slot_holds_untagged_scalar_2026-08-05`.
+
+The interpreter examples define the value oracle. The MIR examples pin the
+compiled representation boundary that previously compared tagged Any words
+with raw scalars. Native behavioral admission remains required before the bug
+row can close.
+"""
+# @cover src/compiler/50.mir/_MirLowering/function_lowering.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# Regression: doc/08_tracking/bug/any_slot_holds_untagged_scalar_2026-08-05.md
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_any_mir(source: text, name: text) -> text:
+    val filename = "any_runtime_value_" + name + ".spl"
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    serialize_mir_module(mir_lowering.lower_module(hir))
+
+fn occurrences(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+fn any_identity(value: Any) -> Any:
+    value
+
+describe "Any RuntimeValue consumer semantics", tag: ["only-compiled"]:
+    it "keeps local parameter and return values equal to their scalar oracle":
+        val local_bool: Any = true
+        val local_int: Any = 42
+        val local_float: Any = 10.0
+        val local_text: Any = "hello"
+
+        expect(local_bool == true).to_equal(true)
+        expect(local_int == 42).to_equal(true)
+        expect(local_float == 10.0).to_equal(true)
+        expect(local_text == "hello").to_equal(true)
+        expect(any_identity(true) == true).to_equal(true)
+        expect(any_identity(42) == 42).to_equal(true)
+        expect(any_identity(10.0) == 10.0).to_equal(true)
+        expect(any_identity("hello") == "hello").to_equal(true)
+        expect(42 == local_int).to_equal(true)
+        expect(true == local_bool).to_equal(true)
+        expect(10.0 == local_float).to_equal(true)
+        expect("hello" == local_text).to_equal(true)
+        expect(local_int != 41).to_equal(true)
+        expect(any_identity("hello") == local_text).to_equal(true)
+
+    it "renders each tagged local through RuntimeValue decoding":
+        val local_bool: Any = true
+        val local_int: Any = 42
+        val local_float: Any = 10.0
+        val local_text: Any = "hello"
+
+        expect(local_bool.to_text()).to_equal("true")
+        expect(local_int.to_text()).to_equal("42")
+        expect(local_float.to_text()).to_equal("10.0")
+        expect(local_text.to_text()).to_equal("hello")
+
+    it "boxes both sides of local scalar equality in MIR":
+        val int_mir = lower_any_mir("fn probe() -> bool:\n    val value: Any = 42\n    value == 42\n", "local_int")
+        val bool_mir = lower_any_mir("fn probe() -> bool:\n    val value: Any = true\n    value == true\n", "local_bool")
+        val float_mir = lower_any_mir("fn probe() -> bool:\n    val value: Any = 10.0\n    value == 10.0\n", "local_float")
+
+        expect(occurrences(int_mir, "rt_value_int_wide")).to_equal(2)
+        expect(int_mir).to_contain("rt_native_eq")
+        expect(occurrences(bool_mir, "\"value\":-8")).to_equal(2)
+        expect(occurrences(bool_mir, "\"value\":19")).to_equal(2)
+        expect(occurrences(float_mir, "rt_value_float")).to_equal(2)
+        expect(float_mir).to_contain("rt_native_eq")
+        expect(float_mir.contains("\"value\":false,\"type\":\"Bool\"")).to_equal(false)
+
+    it "preserves tagged Any parameters and boxes their scalar peers":
+        val int_mir = lower_any_mir("fn probe(value: Any) -> bool:\n    value == 42\n", "param_int")
+        val bool_mir = lower_any_mir("fn probe(value: Any) -> bool:\n    value == true\n", "param_bool")
+        val float_mir = lower_any_mir("fn probe(value: Any) -> bool:\n    value == 10.0\n", "param_float")
+
+        expect(occurrences(int_mir, "rt_value_int_wide")).to_equal(1)
+        expect(occurrences(bool_mir, "\"value\":-8")).to_equal(1)
+        expect(occurrences(bool_mir, "\"value\":19")).to_equal(1)
+        expect(occurrences(float_mir, "rt_value_float")).to_equal(1)
+
+    it "boxes implicit and explicit Any returns before caller equality":
+        val implicit_mir = lower_any_mir("fn make() -> Any:\n    42\n\nfn probe() -> bool:\n    make() == 42\n", "implicit_return")
+        val explicit_mir = lower_any_mir("fn make() -> Any:\n    return 42\n\nfn probe() -> bool:\n    make() == 42\n", "explicit_return")
+
+        expect(occurrences(implicit_mir, "rt_value_int_wide")).to_equal(2)
+        expect(occurrences(explicit_mir, "rt_value_int_wide")).to_equal(2)
+
+    it "routes Any text conversion through the tagged renderer":
+        val mir = lower_any_mir("fn probe(value: Any) -> text:\n    value.to_text()\n", "to_text")
+
+        expect(mir).to_contain("rt_value_to_string")

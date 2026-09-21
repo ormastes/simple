@@ -1771,6 +1771,10 @@ impl MirLowering:
                     if optional_payload_name != "":
                         if not self.struct_value_syms.contains(local.id):
                             self.struct_value_syms[local.id] = optional_payload_name
+                case HirTypeKind.Any:
+                    # The callee's return boundary guarantees a tagged word;
+                    # retain that fact after Any erases to MIR i64.
+                    self.mark_runtime_value_local(local.id)
                 case _:
                     ()
 
@@ -1874,6 +1878,10 @@ impl MirLowering:
                 match found_return.kind:
                     case HirTypeKind.Optional(_):
                         result = self.ensure_option_handle(result, found_return)
+                    case HirTypeKind.Any:
+                        # Explicit and implicit returns share the same tagged
+                        # Any ABI. Never hand a raw scalar to an Any caller.
+                        result = self.box_runtime_value(result)
                     case _:
                         ()
             br = self.builder
@@ -3150,6 +3158,54 @@ impl MirLowering:
                         val bool_local = b_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(raw_bool_val), mir_operand_const_int(1), MirType.bool())
                         self.builder = b_narrow
                         return bool_local
+
+                # Any values use the tagged RuntimeValue ABI. Once either
+                # operand carries that provenance, normalize its peer and use
+                # tag-aware equality; raw word equality is incorrect for
+                # separately boxed floats, strings, arrays, and dictionaries.
+                var left_is_any_value = false
+                if val left_hir_type = self.find_local_hir_type(left_local.id):
+                    match left_hir_type.kind:
+                        case HirTypeKind.Any: left_is_any_value = true
+                        case _: ()
+                var right_is_any_value = false
+                if val right_hir_type = self.find_local_hir_type(right_local.id):
+                    match right_hir_type.kind:
+                        case HirTypeKind.Any: right_is_any_value = true
+                        case _: ()
+                var bin_is_runtime_value_eq = false
+                match op:
+                    case Eq | NotEq:
+                        bin_is_runtime_value_eq = left_is_any_value or right_is_any_value
+                    case _: ()
+                if bin_is_runtime_value_eq:
+                    var runtime_eq_left = left_local
+                    var runtime_eq_right = right_local
+                    val runtime_left_tagged = left_is_any_value or self.is_runtime_value_local(runtime_eq_left.id)
+                    val runtime_right_tagged = right_is_any_value or self.is_runtime_value_local(runtime_eq_right.id)
+                    if runtime_left_tagged and not runtime_right_tagged:
+                        runtime_eq_right = self.box_runtime_value(runtime_eq_right)
+                    elif runtime_right_tagged and not runtime_left_tagged:
+                        runtime_eq_left = self.box_runtime_value(runtime_eq_left)
+                    val runtime_eq_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_native_eq"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_runtime_eq = self.builder
+                    val runtime_eq_result = b_runtime_eq.emit_call(runtime_eq_func, [mir_operand_copy(runtime_eq_left), mir_operand_copy(runtime_eq_right)], MirType.i64())
+                    self.builder = b_runtime_eq
+                    if val runtime_eq_local = runtime_eq_result:
+                        val runtime_eq_raw_bool = match op:
+                            case NotEq:
+                                var b_runtime_neq = self.builder
+                                val inverted = b_runtime_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(runtime_eq_local), mir_operand_const_int(1), MirType.i64())
+                                self.builder = b_runtime_neq
+                                inverted
+                            case _: runtime_eq_local
+                        var b_runtime_narrow = self.builder
+                        val runtime_eq_bool = b_runtime_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(runtime_eq_raw_bool), mir_operand_const_int(1), MirType.bool())
+                        self.builder = b_runtime_narrow
+                        return runtime_eq_bool
 
                 var bin_is_str_order = false
                 match op:

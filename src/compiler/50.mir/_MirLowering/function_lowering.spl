@@ -500,6 +500,12 @@ impl MirLowering:
                                     self.array_element_struct_syms[local.id] = element.name
                             case _:
                                 ()
+                case HirTypeKind.Any:
+                    # An Any parameter arrives as a tagged RuntimeValue. Keep
+                    # that representation fact after its MIR type erases to
+                    # i64 so comparison and rendering consumers do not treat
+                    # the tag bits as a raw scalar.
+                    self.mark_runtime_value_local(local.id)
                 case Isolated(inner):
                     # WP-F0 (resource ownership unblock, 2026-08-06): an
                     # iso-wrapped struct param (`x: iso S`) has type
@@ -664,10 +670,19 @@ impl MirLowering:
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
                 val tail_local = result ?? LocalId(id: 0)
+                var returned_tail_local = tail_local
+                match fn_.return_type.kind:
+                    case HirTypeKind.Any:
+                        # `-> Any` is a tagged ABI boundary. A raw scalar tail
+                        # must be boxed before the caller records the result as
+                        # a RuntimeValue local.
+                        returned_tail_local = self.box_runtime_value(tail_local)
+                    case _:
+                        ()
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
-                self.emit_pending_resource_drops(Some(tail_local))
+                self.emit_pending_resource_drops(Some(returned_tail_local))
                 bldr2 = self.builder
                 # Bug iso_transfer_sites_missing_move_return_assign_field
                 # (2026-08-06), item #1: a function's tail-expression return
@@ -686,12 +701,12 @@ impl MirLowering:
                 # matters beyond the simple `val c = a; a` tail-return case,
                 # which the checker's terminator arm alone already covers
                 # via record_use).
-                var tail_operand = mir_operand_copy(tail_local)
-                if self.local_hir_type_isolation_state(tail_local.id) == 1:
+                var tail_operand = mir_operand_copy(returned_tail_local)
+                if self.local_hir_type_isolation_state(returned_tail_local.id) == 1:
                     var b_rmove = self.builder
-                    val rmove_ty = self.local_mir_type_of(tail_local) ?? MirType.i64()
+                    val rmove_ty = self.local_mir_type_of(returned_tail_local) ?? MirType.i64()
                     val rmove_local = b_rmove.new_temp(rmove_ty)
-                    b_rmove.emit_move(rmove_local, tail_local)
+                    b_rmove.emit_move(rmove_local, returned_tail_local)
                     self.builder = b_rmove
                     bldr2 = self.builder
                     tail_operand = mir_operand_copy(rmove_local)
@@ -1768,4 +1783,3 @@ fn _simd_req_backend_text(backend: OptimizationBackend) -> text:
         case Metal:    "metal"
         case OpenCL:   "opencl"
         case Gpu:      "gpu"
-
