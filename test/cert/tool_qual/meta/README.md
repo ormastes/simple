@@ -25,6 +25,9 @@ Every execution must exit successfully before its stdout can qualify. Missing
 executables, compiler failures, and crashes fail the gate even when they emit
 identical empty stdout. Successful programs with empty stdout remain valid.
 `SIMPLE_BIN` defaults to the checkout's `bin/simple` wrapper on every host.
+`META_K` must be a canonical decimal integer of at least two within the shell's
+integer range. Empty, signed, leading-zero, hexadecimal, and out-of-range values
+fail before qualification; an unset value defaults to five.
 
 This is a *per-mode run-to-run* property. It is intentionally narrow — see Scope below.
 
