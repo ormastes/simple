@@ -87,6 +87,21 @@ separately as `PRESENT`, never counted as executed. It still catches the
   deleted, renamed, or left syntactically broken, which would make that phase's
 verification a silent no-op inside a real bootstrap run.
 
+### Complete compiler test inventory
+
+`scripts/bootstrap/bootstrap-phase-verification.shs` discovers and sorts the
+compiler unit inventory before running any spec. If discovery emits some paths
+and then fails, the task records `result=FAIL|status=discovery-error` and executes
+none of that partial list. A failed sort similarly records `status=sort-error`.
+Both failures retain a terminal summary row and diagnostic log. A complete but
+empty inventory also fails. The repository-wide Phase 3 inventory applies the
+same discovery and sorting requirements.
+
+The focused regression is
+`test/01_unit/scripts/bootstrap_compiler_inventory_discovery_test.shs`. It invokes
+the production inventory function with a complete list, a partial discovery
+failure, and a sort failure; the failing cases must never launch a spec.
+
 ### Stage 4 tooling matrix scheduling contract
 
 `stage4-tooling-matrix.shs --build-jobs=<effective>` uses the admitted effective
