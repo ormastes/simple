@@ -1,0 +1,63 @@
+# Native cold-inventory lifetime and ordering regression. Uses the admitted
+# Phase 2's pure-Simple native-build entry; no Rust seed execution.
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
+use compiler.hir.hir_lowering.transient_ownership.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+use std.scv.compile_source_inventory_core.{CompileSourceEventV1, CompileSourceInventoryV1, compile_source_inventory_initial_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_apply_event_v1, compile_source_inventory_encode_v1}
+use std.nogc_sync_mut.sffi.fs.{fs_read_text}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn main() -> i64:
+    val fixture = "test/fixtures/scv_inventory_memory/main.spl"
+    val expected = compile_source_inventory_git_event_v1("create", fixture, fs_read_text(fixture) ?? "")
+    val baseline = rt_cli_get_args().contains("--baseline")
+    var retained: [CompileSourceEventV1] = []
+    var index = 0
+    while index < 256:
+        val event = if baseline:
+            Some(compile_source_inventory_git_event_v1("create", fixture, fs_read_text(fixture) ?? ""))
+        else:
+            compiler_inventory_file_event_v1("create", fixture, fixture)
+        if event == nil:
+            return 1
+        retained = retained.push(event!)
+        index = index + 1
+    for event in retained:
+        if event.content_digest != expected.content_digest or event.semantic_digest != expected.semantic_digest:
+            return 2
+        if event.export_digest != expected.export_digest or event.initializer_digest != expected.initializer_digest or event.provider_digest != expected.provider_digest:
+            return 3
+        if event.source_identity != fixture or event.byte_count != expected.byte_count:
+            return 4
+    if not transient_scope_begin():
+        return 5
+    val nested = compiler_inventory_file_event_v1("create", fixture, fixture)
+    if nested != nil or not transient_scope_pause() or not transient_scope_end():
+        return 6
+    var creates: [CompileSourceEventV1] = []
+    index = 2048
+    while index > 0:
+        val identity = "src/source_{index}.spl"
+        creates = creates.push(CompileSourceEventV1("git", "create", identity,
+            expected.content_digest, expected.semantic_digest, expected.export_digest,
+            expected.initializer_digest, expected.provider_digest, expected.byte_count))
+        index = index - 1
+    val initial = compile_source_inventory_initial_events_v1(creates)
+    if initial == nil or initial!.generation != 2048 or initial!.entries.len() != 2048:
+        return 7
+    index = 1
+    while index < initial!.entries.len():
+        if initial!.entries[index - 1].source_identity >= initial!.entries[index].source_identity:
+            return 8
+        index = index + 1
+    if compile_source_inventory_encode_v1(initial!) == "":
+        return 9
+    val duplicate = compile_source_inventory_initial_events_v1([expected, expected])
+    if duplicate != nil:
+        return 10
+    val first = compile_source_inventory_apply_event_v1(CompileSourceInventoryV1(1, 0, []), expected)
+    val unchanged = compile_source_inventory_apply_event_v1(first.inventory!, expected)
+    if not unchanged.valid or unchanged.inventory!.generation != 1 or unchanged.content_changed:
+        return 11
+    print "scv-inventory-memory: PASS retained=256 sorted=2048 duplicate-generation=1"
+    0
