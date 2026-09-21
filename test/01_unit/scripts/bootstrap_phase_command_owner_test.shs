@@ -7,7 +7,7 @@ trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
-  "$tmp/source/test/01_unit/compiler" "$tmp/source/test/02_integration/app" \
+  "$tmp/source/test/01_unit/compiler/loader" "$tmp/source/test/02_integration/app" \
   "$tmp/work" "$tmp/stage2-admitted" "$tmp/bin"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
   "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
@@ -27,6 +27,7 @@ chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
 : >"$tmp/executions"
 : >"$tmp/source/test/01_unit/compiler/fixture_spec.spl"
 : >"$tmp/source/test/01_unit/compiler/fixture_test.spl"
+: >"$tmp/source/test/01_unit/compiler/loader/module_loader_relocation_spec.spl"
 : >"$tmp/source/test/02_integration/app/mcp_stdio_integration_spec.spl"
 
 # Git-for-Windows reports NTFS paths as 755/644 even after chmod.  The
@@ -44,6 +45,10 @@ chmod +x "$tmp/bin/stat"
 cat >"$tmp/tool" <<'EOF'
 #!/bin/sh
 printf '%s\t%s\t%s\n' "$(basename "$0")" "${SIMPLE_BINARY:-}" "$*" >>"$PHASE_EXECUTIONS"
+case "${1:-}" in
+  test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_relocation_spec.spl)
+    [ "${SIMPLE_BIN:-}" = "${SIMPLE_BINARY:-}" ] || exit 24 ;;
+esac
 [ -z "${SIMPLE_MCP_TEST_BINARY:-}" ] ||
   printf 'mcp_test_binary\t%s\t%s\n' "$SIMPLE_MCP_TEST_BINARY" "$*" >>"$PHASE_EXECUTIONS"
 if [ "${PHASE_TAMPER_COMMAND_OWNER:-0}" = 1 ] && \
@@ -85,7 +90,10 @@ if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
 fi
 case " $* " in
   *' --json '*)
-    if [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
+    if [ "${PHASE_NO_FOCUSED_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/loader/module_loader_relocation_spec.spl ]; then
+      :
+    elif [ "${PHASE_FALSE_OUTER_SUCCESS:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
       echo '{"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     elif [ "${PHASE_FALSE_SPEC_SUCCESS:-0}" = 1 ] && \
@@ -166,10 +174,22 @@ grep -Fq -- '--entry src/app/test_runner_new/main.spl' "$tmp/invocations" ||
   fail "test runner was not built"
 grep -Eq -- "^simple_cli[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+check src/compiler$" "$tmp/executions" ||
   fail "check was not routed through the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "interpreter test was not bound to the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "compile test was not bound to the full CLI"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+  "$tmp/executions" || fail "loader interpreter oracle was not bound to the full CLI"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/loader/module_loader_relocation_spec.spl --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+  "$tmp/executions" || fail "loader compile oracle was not bound to the full CLI"
+grep -Fq 'timing_scope=post-admission-excludes-git-lfs-checkout' "$tmp/work/summary.env" ||
+  fail "post-admission timing scope was not retained"
+for measured_task in compiler_bootstrap_tests compiler_bootstrap_compile_tests \
+    loader_interpreter_tests loader_compile_tests; do
+  grep -E "^task=$measured_task\\|.*\\|elapsed_seconds=[0-9]+\\|max_rss_kib=[1-9][0-9]*([|]|$).*\\|executed=[1-9][0-9]*\\|passed=[1-9][0-9]*\\|failed=0\\|skipped=[0-9]+([|]|$)" \
+    "$tmp/work/summary.env" >/dev/null ||
+    fail "$measured_task lacks retained wall time and max RSS"
+done
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential$" \
   "$tmp/executions" || fail "compile integration test was not bound to the full CLI"
 if grep -Eq -- '^compiler.snapshot[[:space:]]+check' "$tmp/executions" ||
@@ -212,7 +232,7 @@ grep -F 'task=mcp_behavior_compile|' "$tmp/work/summary.env" |
   fail "MCP compile behavior was not command-owner checked"
 grep -Fq 'task=repository_full_tests|result=PASS|status=0' "$tmp/work/summary.env" ||
   fail "Phase 4 repository inventory did not pass"
-grep -Fq 'spec_count=3|passed_count=3|timeout_count=0|crash_count=0' \
+grep -Fq 'spec_count=4|passed_count=4|timeout_count=0|crash_count=0' \
   "$tmp/work/summary.env" || fail "Phase 4 repository inventory counts are not exact"
 grep -Fq 'task=mcp_behavior|result=PASS|status=0' "$tmp/work/summary.env" ||
   fail "Stage4 MCP behavior did not pass"
@@ -237,6 +257,23 @@ grep -F 'mcp_test_binary' "$tmp/executions" | \
   grep -F "$tmp/work/outputs/tool-builds/stage4" | \
   grep -Fq 'test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json' ||
   fail "full inventory MCP row did not receive the receipt-bound server path"
+
+# Exit zero plus an accepted --assert-ran argument is not test evidence. A
+# focused row must emit one strict terminal JSON result with nonzero execution.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_NO_FOCUSED_JSON=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/no-focused-json-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "zero-output focused runner was admitted"
+grep -E '^task=loader_interpreter_tests\|result=FAIL\|status=91\|.*\|executed=0\|passed=0\|failed=0\|skipped=0$' \
+  "$tmp/no-focused-json-work/summary.env" >/dev/null ||
+  fail "zero-output loader row did not fail with retained zero counts"
 
 # A retry of the same admitted lineage reuses the frozen receipt and distinct
 # shared build caches. It must not fail merely because evidence already exists.
@@ -268,7 +305,7 @@ PHASE_TOOL="$tmp/tool" sh "$root/scripts/bootstrap/bootstrap-phase-verification.
 [ "$status" -ne 0 ] || fail "unbound v1 hosted runtime was admitted"
 grep -Fq 'task=compiler_cli_build|result=UNSUPPORTED|status=host-gpu-hosted-runtime-authority-unavailable' \
   "$tmp/work/summary.env" || fail "v1 full CLI capability was not explicitly unsupported"
-grep -Fq 'task=compiler_unit_tests|result=UNSUPPORTED|status=test-runner-artifact-not-built' \
+grep -Fq 'task=compiler_unit_tests|result=UNSUPPORTED|status=full-cli-artifact-not-built' \
   "$tmp/work/summary.env" || fail "v1 unit tree did not terminalize as one unsupported row"
 if grep -Eq '(^| )check src/compiler($| )|(^| )test test/01_unit/compiler' "$tmp/invocations"; then
   fail "v1 admission was invoked as a full CLI despite missing authority"
