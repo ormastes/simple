@@ -1,0 +1,118 @@
+# Purpose and audience: executable regression evidence for compiler type inference maintainers.
+# @req REQ-COMPILER-OPTION-PATTERN-001
+# Bug: doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+
+use std.spec.step
+use std.spec.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+
+fn option_pattern_span() -> Span:
+    lex_span_empty()
+
+fn option_pattern_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: option_pattern_span())
+
+fn option_pattern_error_type() -> HirType:
+    option_pattern_type(HirTypeKind.Error)
+
+fn option_payload_binding(id: i64) -> HirPattern:
+    HirPattern(
+        kind: HirPatternKind.Binding(SymbolId(id: id), false),
+        has_type_: false,
+        type_: option_pattern_error_type(),
+        span: option_pattern_span()
+    )
+
+fn some_pattern(owner: HirType, binding_id: i64) -> HirPattern:
+    HirPattern(
+        kind: HirPatternKind.Enum(
+            owner,
+            "Some",
+            Some(HirPatternPayload.Tuple([option_payload_binding(binding_id)]))
+        ),
+        has_type_: false,
+        type_: option_pattern_error_type(),
+        span: option_pattern_span()
+    )
+
+fn none_pattern(owner: HirType) -> HirPattern:
+    HirPattern(
+        kind: HirPatternKind.Enum(owner, "None", nil),
+        has_type_: false,
+        type_: option_pattern_error_type(),
+        span: option_pattern_span()
+    )
+
+fn option_pattern_is_optional(ty: HirType) -> bool:
+    match ty.kind:
+        case Optional(_): true
+        case _: false
+
+fn option_pattern_is_i64(ty: HirType) -> bool:
+    match ty.kind:
+        case Int(64, true): true
+        case _: false
+
+
+describe "Option pattern scrutinee typing":
+    it "rejects Some payload patterns on a concrete non-Option scrutinee":
+        # @req REQ-COMPILER-OPTION-PATTERN-001
+        step("Reject Some(_) before interpreter or native pattern lowering")
+        var ctx = HmInferContext.new()
+        val inferred = ctx.infer_pattern(
+            some_pattern(option_pattern_error_type(), 700),
+            option_pattern_type(HirTypeKind.Int(64, true))
+        )
+        expect(inferred.is_err()).to_be(true)
+        expect(inferred.err.unwrap().message()).to_contain("requires an optional scrutinee")
+
+    it "rejects None patterns on a concrete non-Option scrutinee":
+        # @req REQ-COMPILER-OPTION-PATTERN-001
+        step("Reject None before interpreter or native pattern lowering")
+        var ctx = HmInferContext.new()
+        val inferred = ctx.infer_pattern(
+            none_pattern(option_pattern_error_type()),
+            option_pattern_type(HirTypeKind.Str)
+        )
+        expect(inferred.is_err()).to_be(true)
+        expect(inferred.err.unwrap().message()).to_contain("requires an optional scrutinee")
+
+    it "accepts a genuine Option and assigns its payload type to the binding":
+        # @req REQ-COMPILER-OPTION-PATTERN-001
+        step("Preserve Some(payload) on an Optional scrutinee")
+        var ctx = HmInferContext.new()
+        val i64_type = option_pattern_type(HirTypeKind.Int(64, true))
+        val inferred = ctx.infer_pattern(
+            some_pattern(option_pattern_error_type(), 701),
+            option_pattern_type(HirTypeKind.Optional(i64_type))
+        )
+        expect(inferred.is_ok()).to_be(true)
+        val payload_type = ctx.lookup("701", option_pattern_span())
+        expect(payload_type.is_ok()).to_be(true)
+        expect(option_pattern_is_i64(payload_type.unwrap())).to_be(true)
+
+    it "constrains an unresolved scrutinee to Option instead of rejecting it":
+        # @req REQ-COMPILER-OPTION-PATTERN-001
+        step("Retain inference for an Option pattern whose scrutinee is unresolved")
+        var ctx = HmInferContext.new()
+        val unresolved = ctx.fresh_var(option_pattern_span())
+        val inferred = ctx.infer_pattern(
+            some_pattern(option_pattern_error_type(), 702),
+            unresolved
+        )
+        expect(inferred.is_ok()).to_be(true)
+        expect(option_pattern_is_optional(ctx.resolve(unresolved))).to_be(true)
+
+    it "preserves a user enum whose variant is named Some":
+        # @req REQ-COMPILER-OPTION-PATTERN-001
+        step("Do not classify a named enum variant as the builtin Option pattern")
+        var ctx = HmInferContext.new()
+        val user_enum = option_pattern_type(HirTypeKind.Named(SymbolId(id: 800), []))
+        val inferred = ctx.infer_pattern(some_pattern(user_enum, 703), user_enum)
+        expect(inferred.is_ok()).to_be(true)

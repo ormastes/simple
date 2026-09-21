@@ -529,6 +529,45 @@ impl HmInferContext:
             case _:
                 Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
 
+    me infer_optional_pattern_payload(variant: text, payload: HirPatternPayload?, inner: HirType, span: Span) -> Result<(), TypeInferError>:
+        if variant == "Some":
+            if val present_payload = payload:
+                match present_payload:
+                    case Tuple(patterns) if patterns.len() == 1:
+                        self.infer_pattern(patterns[0], inner)
+                    case _:
+                        Err(TypeInferError.Other("Option pattern 'Some' requires exactly one payload pattern", span))
+            else:
+                Err(TypeInferError.Other("Option pattern 'Some' requires exactly one payload pattern", span))
+        else:
+            if val _ = payload:
+                Err(TypeInferError.Other("Option pattern 'None' cannot have a payload pattern", span))
+            else:
+                Ok(())
+
+    me infer_option_pattern(variant: text, payload: HirPatternPayload?, expected: HirType, span: Span) -> Result<(), TypeInferError>:
+        val resolved = self.resolve(expected)
+        match resolved.kind:
+            case Optional(inner):
+                self.infer_optional_pattern_payload(variant, payload, inner, span)
+            case Infer(_, _):
+                val inner = self.fresh_var(span)
+                val optional = HirType(kind: HirTypeKind.Optional(inner), span: span)
+                match self.unify(resolved, optional):
+                    case Err(e): Err(e)
+                    case _:
+                        self.infer_optional_pattern_payload(variant, payload, inner, span)
+            # Named scrutinees may be user enums whose variants happen to be
+            # named Some or None. HIR does not yet expose enum ownership to the
+            # inference context, so retain those until ownership is explicit.
+            case Named(_, _) | Any | Error:
+                Ok(())
+            case _:
+                Err(TypeInferError.Other(
+                    "Option pattern '{variant}' requires an optional scrutinee; found '{resolved.kind}'",
+                    span
+                ))
+
     me infer_pattern(pattern: HirPattern, expected: HirType) -> Result<(), TypeInferError>:
         """Infer types from pattern matching."""
         match pattern.kind:
@@ -555,6 +594,18 @@ impl HmInferContext:
                         Ok(())
                     case _:
                         Ok(())
+            case Enum(owner, variant, payload):
+                # Unqualified builtin Option patterns arrive with an Error
+                # owner because Optional is a type shape rather than a named
+                # user enum. Keep named owners untouched so a user enum may
+                # legitimately define Some/None variants.
+                val builtin_option_shape = match owner.kind:
+                    case Error | Optional(_): variant == "Some" or variant == "None"
+                    case _: false
+                if builtin_option_shape:
+                    self.infer_option_pattern(variant, payload, expected, pattern.span)
+                else:
+                    Ok(())
             case _:
                 Ok(())
 

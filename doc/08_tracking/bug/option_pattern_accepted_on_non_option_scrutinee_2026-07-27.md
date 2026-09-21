@@ -927,3 +927,51 @@ is unaffected by this re-measurement.
 for the adjacent dot-question/non-optional-return enforcement in the same HM
 checker. A pattern-side fix should land after it, or be written against its
 tree, rather than underneath it.
+
+## 2026-09-21 semantic-owner pattern slice — source green, row stays open
+
+Base: exact `origin/main` `e0dd873da1b7828389db4eb60e82972cc8245313`.
+PR #1077 is merged at this base, so its type-inference changes are already
+present. The selected owner is
+`src/compiler/30.types/type_infer/inference_control.spl::infer_pattern`, before
+interpreter, JIT, or native pattern lowering.
+
+Direct diagnostic probes with the checked-in Rust bootstrap seed
+(`bin/simple.exe`, 39,066,112 bytes, SHA-256
+`e2a42543d62f794a8df8389de70c4200ff95675b5c48b60f0103b1f47a77e78c`)
+reproduced the accepted bad programs on both execution modes:
+
+| probe | interpreter | JIT |
+|---|---|---|
+| `match 6: case Some(i)` | exit 0, `some=6` | exit 0, `some=<value:0x6>` |
+| `if val Some(k) = 6` | exit 0, `bound=6` | exit 0, `bound=<value:0x6>` |
+| `6.unwrap_or(-99)` | exit 0, `uo=6` | exit 0, `uo=<value:0x6>` |
+| genuine `val o: i64? = 42` | exit 0, `ok=42` | exit 0, `ok=42` |
+
+This seed evidence is diagnostic only. It is not admission or self-hosted
+compiler evidence.
+
+`bin/simple.exe check src/compiler` also failed closed with
+`no admitted cached self-hosted check worker artifact is available`; it was not
+retried and is not counted as a compiler-check pass.
+
+The focused pure-Simple owner spec is
+`test/01_unit/compiler/type_infer/option_pattern_scrutinee_spec.spl`. Before the
+source change it passed 1/5 examples: `Some` and `None` on concrete non-Option
+types were accepted, genuine Option payload bindings were not typed, and an
+unresolved scrutinee was not constrained. After the source change it passes
+5/5 through the seed diagnostic runner. Controls prove that a genuine
+`Optional<i64>` is accepted with an `i64` payload binding, an unresolved type is
+constrained to `Optional<T>`, and a named user enum may retain a variant called
+`Some`.
+
+The earlier subprocess class spec is not sufficient acceptance evidence: its
+negative cases discard process status and stderr and assert only that stdout
+lacks a success marker. A missing shell, bad binary path, or compiler crash can
+therefore make those negative cases pass.
+
+This slice does not close the bug row. `.unwrap_or` on non-Option receivers is
+unchanged, named HIR types cannot yet distinguish a user enum from a struct for
+exhaustive pattern-shape rejection, and no admitted Stage 2/3 artifact and
+receipt were available for native/interpreter proof. Keep `bug_db.sdn` at
+`P1, open` until those gaps and admitted cross-engine evidence are resolved.
