@@ -1,7 +1,7 @@
 # macOS compiler peak RSS exceeds the 1 GB budget
 
-Scope: native `aarch64-apple-darwin`. Status: OPEN; corrections implemented,
-final measurement pending. No other host is covered by this evidence.
+Scope: native `aarch64-apple-darwin`. Status: OPEN; corrections improved the
+broad rebuild but the final memory gate failed. No other host is covered.
 
 ## Requirement and baseline
 
@@ -47,7 +47,7 @@ output field slices. ASCII cannot match a UTF-8 continuation byte, so field
 boundaries remain valid. Empty/trailing fields are preserved; other separator
 paths keep their behavior.
 
-## Remaining gate
+## Final measurement
 
 Evidence: `build/native_probe/memory-diagnostic/sample.txt`, `rss.tsv`, and
 the empty `compiler.log`. The watchdog terminated the diagnostic after its
@@ -55,6 +55,13 @@ sample. New unit assertions cover UTF-8 fields, empty boundaries, multi-byte
 separators, delayed aliases, ambiguity cleanup, and nested-scope rejection;
 they are authored, not claimed as executed by compiler-only Stage 2.
 
-One final rebuilt Stage 2 jobs=8 fixture measurement and one canonical Stage 3
-attempt remain. Keep this bug OPEN if the final cycle exceeds the memory
-budget or materially regresses time; report the blocker without another retry.
+The final combined Stage 2 jobs=8 admission passed in 119.11 s with maximum
+RSS 1,320,648,704 bytes. The comparable earlier rebuild took 647.73 s and
+peaked at 3,470,360,576 bytes, so the ASCII split correction improved time
+5.4x and reduced peak RSS 62%, but still missed the 1 GB limit.
+
+The final fresh-cache fixture again exceeded the limit before emitting
+compiler output. It was stopped at 48.30 s; `/usr/bin/time -l` reported
+4,580,589,568 bytes maximum RSS and 835,533,027,401 instructions. No artifact
+was produced. The three-cycle cap is exhausted, so canonical Stage 3 was not
+started. The memory bug and TODO remain open as release blockers.
