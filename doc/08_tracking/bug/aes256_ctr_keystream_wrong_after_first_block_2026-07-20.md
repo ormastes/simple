@@ -3,10 +3,10 @@
 - **Date:** 2026-07-20
 - **Area:** AES-256 key schedule / CTR-mode implementation exercised via
   `test/unit/lib/crypto/aes_ctr_nist_spec.spl`
-- **Priority:** P1 at filing; no production cryptographic defect was found.
-- **Status:** RESOLVED 2026-09-21. The test fixture, rather than the AES
-  implementation, had incorrect expected bytes. The expected vector was
-  corrected against [NIST SP 800-38A, F.5.5/F.5.6](https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38a.pdf).
+- **Priority:** P1 at filing; the available Rust seed showed a fixture mismatch.
+- **Status:** FIX IMPLEMENTED, PURE-SIMPLE VERIFICATION PENDING (2026-09-21).
+  The expected vector was corrected against
+  [NIST SP 800-38A, F.5.5/F.5.6](https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38a.pdf).
 
 ## Original symptom
 
@@ -47,20 +47,27 @@ constant or Rcon table entry in this triage pass.
 
 ## Root cause and evidence
 
-The Linux aarch64 run on 2026-09-21 returned the exact NIST ciphertext:
+The available Linux aarch64 Rust seed run on 2026-09-21 returned the exact
+NIST ciphertext for this four-block vector:
 `601ec313775789a5b7a7f504bbf3d228 f443e3ca4d62b59aca84e990cacaf5c5
 2b0930daa23de94ce87017ba2d84988d dfc9c58db67aada613c2dd08457941a6`.
 The fixture instead expected `...cabf3622`, followed by two entirely different
-blocks. The first 29 matching bytes and later divergence came from the mistaken
-fixture, not AES-256 key expansion or counter handling. Production code was
-already correct and was not changed.
+blocks. The first 29 matching bytes and later divergence in this Rust seed run
+therefore came from the mistaken fixture. No production source was changed.
+This result does not establish correctness of the pure-Simple self-hosted
+runtime or all AES-256-CTR inputs.
 
 - Before correction: `SIMPLE_LIB=src SIMPLE_RUST_SEED_WARNING=0 timeout 120
   /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple test
   test/unit/lib/crypto/aes_ctr_nist_spec.spl --no-session-daemon` returned
   `4 examples, 2 failures`; the actual AES-256 bytes matched NIST F.5.5.
-- After correction: the same spec returned `4 examples, 0 failures`.
+  This pre-fix result was captured in the session terminal output, but no
+  durable pre-fix log file was saved.
+- After correction: the same spec returned `4 examples, 0 failures` on that
+  Rust seed. The post-fix session log is `/tmp/codex-linux-p1-aes256-ctr-post.log`.
 - Runtime SHA-256: `11a4cb54e47f29da3a39eda169c656af856221f1f965792a411a0ac95b05c6b3`.
+
+Pure-Simple self-hosted execution of this spec remains the closure gate.
 
 ## Affected specs
 
