@@ -9,6 +9,72 @@ trap 'rm -rf "$WORK"' EXIT
 . "$ROOT/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 
 mkdir -p "$WORK/tmp"
+check_refusal() {
+    expected=$1
+    target=$2
+    cwd=$3
+    shift 3
+    rm -f "$WORK/error.log" "$WORK/command.transcript"
+    if bootstrap_stage3_write_command_transcript "$target" "$cwd" \
+        "$WORK" "$WORK/tmp" /usr/bin:/bin "$@" 2>"$WORK/error.log"; then
+        echo "FAIL: accepted $expected"; exit 1
+    fi
+    grep -Fq "bootstrap-transcript-error: $expected" "$WORK/error.log" || {
+        echo "FAIL: missing $expected"; exit 1
+    }
+    [ ! -e "$WORK/command.transcript" ] || {
+        echo "FAIL: rejected $expected wrote transcript"; exit 1
+    }
+}
+
+check_refusal 'invalid command cwd' "$WORK/command.transcript" \
+    "$WORK/missing-cwd" -- /usr/bin/true
+check_refusal 'newline in explicit env argument 1' "$WORK/command.transcript" \
+    "$WORK" "BAD=$(printf 'one\ntwo')" -- /usr/bin/true
+check_refusal 'invalid explicit env name at argument 1' "$WORK/command.transcript" \
+    "$WORK" bad=1 -- /usr/bin/true
+check_refusal 'duplicate explicit env name at argument 2' "$WORK/command.transcript" \
+    "$WORK" DUP=1 DUP=2 -- /usr/bin/true
+check_refusal 'missing command separator' "$WORK/command.transcript" \
+    "$WORK" OK=1
+check_refusal 'missing command executable' "$WORK/command.transcript" \
+    "$WORK" --
+check_refusal 'newline in command executable' "$WORK/command.transcript" \
+    "$WORK" -- "$(printf 'bad\nname')"
+check_refusal 'newline in command argument 1' "$WORK/command.transcript" \
+    "$WORK" -- /usr/bin/true "$(printf 'bad\nargument')"
+check_refusal 'command transcript create or write failed' \
+    "$WORK/missing-parent/command.transcript" "$WORK" -- /usr/bin/true
+mv() { return 1; }
+check_refusal 'command transcript rename failed' \
+    "$WORK/command.transcript" "$WORK" -- /usr/bin/true
+unset -f mv
+
+uname() { printf '%s\n' MSYS_NT; }
+unset SystemRoot SYSTEMROOT WINDIR windir SystemDrive SYSTEMDRIVE \
+    ProgramData PROGRAMDATA
+check_refusal 'missing Windows variable SystemRoot' "$WORK/command.transcript" \
+    "$WORK" -- /usr/bin/true
+SystemRoot=C:/Windows
+export SystemRoot
+check_refusal 'missing Windows variable SystemDrive' "$WORK/command.transcript" \
+    "$WORK" -- /usr/bin/true
+SystemDrive=C:
+export SystemDrive
+check_refusal 'missing Windows variable ProgramData' "$WORK/command.transcript" \
+    "$WORK" -- /usr/bin/true
+SystemRoot=C:/Windows SystemDrive=C: ProgramData=C:/ProgramData
+export SystemRoot SystemDrive ProgramData
+bootstrap_stage3_write_command_transcript "$WORK/windows.transcript" "$WORK" \
+    "$WORK" "$WORK/tmp" /usr/bin:/bin OK=1 -- /usr/bin/true || exit 1
+bootstrap_stage3_verify_command_transcript "$WORK/windows.transcript" "$WORK" \
+    OK=1 -- /usr/bin/true || { echo 'FAIL: valid Windows transcript'; exit 1; }
+uname() { printf '%s\n' Linux; }
+bootstrap_stage3_write_command_transcript "$WORK/linux.transcript" "$WORK" \
+    "$WORK" "$WORK/tmp" /usr/bin:/bin OK=1 -- /usr/bin/true || exit 1
+bootstrap_stage3_verify_command_transcript "$WORK/linux.transcript" "$WORK" \
+    OK=1 -- /usr/bin/true || { echo 'FAIL: valid Linux transcript'; exit 1; }
+
 status=0
 bootstrap_stage3_run_transcribed \
     "$WORK/command.transcript" "$ROOT" "$WORK/run.log" \
