@@ -11,16 +11,12 @@
 Two Metal backend contracts are checkable without a GPU, and both were
 unenforced until now. Audience: Engine2D backend owners.
 
-1. **The per-frame font batch contract had no caller.**
-   `MetalFontBackendState.frame_batch_contract_met()`
-   (`src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl:162`) reads the
-   four real per-frame counters, but nothing repo-wide called it. The
-   1-dispatch / 1-commit / 1-wait rule was therefore only ever asserted against
-   literal integers in `metal_font_packed_parity_spec.spl`, never against
-   counters a frame actually produced: a submit that fanned out per glyph
-   reported success exactly like a correct one. It is now evaluated in
-   `MetalBackend.submit_batch()`, whose bool is consumed at
-   `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:2909,3212`.
+1. **Ordered font spans must each complete once.**
+   `MetalFontBackendState.frame_batch_contract_met()` reads frame totals and
+   completed packed spans. A text/primitive/text frame has two legitimate
+   spans, while uninterrupted text still uses one. `MetalBackend.submit_batch()`
+   consumes this verdict. Missing waits, unaccounted submissions and latched
+   completion failures must reject the frame.
 
 2. **`draw_rect_blend_mode()` dropped the caller's blend mode.** On the
    non-`gpu_only` lane it forwarded to `draw_rect_blend()`, which applies the
@@ -29,8 +25,8 @@ unenforced until now. Audience: Engine2D backend owners.
 
 ## Operator workflow
 
-Run
-`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_device_free_contract_spec.spl`.
+Run with the admitted self-hosted runtime:
+`bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_device_free_contract_spec.spl`.
 
 ## Compatibility and limitations
 
@@ -44,8 +40,9 @@ contract logic and its wiring are what is under test, not the device.
 
 - A frame that drew no text is unaffected: `submit_batch()` answers the flush
   verdict alone.
-- A frame that drew text and did NOT cost exactly one command buffer, one
-  commit and one wait must make `submit_batch()` answer false.
+- Each completed packed flush span must cost one command buffer, one commit
+  and one wait. Ordered primitive/readback/cap boundaries may split a frame.
+- A legacy immediate fallback keeps the original single-span contract.
 - `draw_rect_blend_mode()` on the CPU-mirror lane must produce the same pixels
   as `SoftwareBackend.draw_rect_blend_mode()` with the same mode, and must NOT
   produce the pixels of the default `draw_rect_blend()`.
@@ -99,6 +96,46 @@ describe "Metal 2D backend — per-frame font batch contract is actually evaluat
         b.font.frame_commit_count = 1
         b.font.frame_wait_count = 0
         expect(b.font.frame_batch_contract_met()).to_equal(false)  # oracle: a frame whose completion was never awaited has unknown results
+        expect(b.submit_batch()).to_equal(false)
+
+    it "accepts text then primitive then text only after both ordered spans complete":
+        # @req REQ-HOST-GPU-LANE-001
+        step("Record the text span flushed before a primitive")
+        var b = MetalBackend.create()
+        b.font.frame_text_count = 1
+        b.font.frame_command_count = 1
+        b.font.frame_commit_count = 1
+        b.font.frame_wait_count = 1
+        b.font.frame_completed_spans = 1
+        expect(b.submit_batch()).to_equal(true)
+        step("The next text span must finish before the whole frame qualifies")
+        b.font.frame_text_count = 2
+        b.font.frame_command_count = 2
+        b.font.frame_commit_count = 2
+        expect(b.submit_batch()).to_equal(false)
+        b.font.frame_wait_count = 2
+        b.font.frame_completed_spans = 2
+        expect(b.submit_batch()).to_equal(true)
+        step("An empty flush must not inflate the completed span count")
+        expect(b.font.flush()).to_equal(0)
+        expect(b.font.frame_completed_spans).to_equal(2)
+        expect(b.submit_batch()).to_equal(true)
+        step("Frame reset clears counters and span evidence together")
+        b.font.begin_frame()
+        expect(b.font.frame_completed_spans).to_equal(0)
+        expect(b.font.frame_command_count).to_equal(0)
+        expect(b.submit_batch()).to_equal(true)
+
+    it "rejects a latched completion failure even with balanced counters":
+        # @req REQ-HOST-GPU-LANE-001
+        step("A prior rejected command cannot be hidden by later balanced totals")
+        var b = MetalBackend.create()
+        b.font.frame_text_count = 2
+        b.font.frame_command_count = 2
+        b.font.frame_commit_count = 2
+        b.font.frame_wait_count = 2
+        b.font.frame_completed_spans = 2
+        b.font.completion_unknown = true
         expect(b.submit_batch()).to_equal(false)
 
 

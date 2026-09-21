@@ -5,6 +5,7 @@ use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_composite_metal_source, font_atlas_composite_metal_packed_source, font_atlas_subrect_pixels, font_destination_origin}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.gpu.metal_font_batch_contract.{metal_font_frame_batch_contract, metal_font_frame_span_contract}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
 use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_write_u32s_to_ptr}
 use std.gc_async_mut.io.metal_sffi.{
@@ -47,15 +48,6 @@ val METAL_FONT_PACKED_GLYPH_WORDS: i64 = 7
 val METAL_FONT_FRAME_GLYPH_CAP: i64 = 4096
 val METAL_FONT_PACKED_MAX_WORDS: i64 = METAL_FONT_PACKED_HEADER_WORDS + METAL_FONT_FRAME_GLYPH_CAP * METAL_FONT_PACKED_GLYPH_WORDS
 val METAL_FONT_PACKED_MAX_BYTES: i64 = METAL_FONT_PACKED_MAX_WORDS * 4
-
-fn metal_font_frame_batch_contract(text_count: i64, command_count: i64,
-                                   commit_count: i64, wait_count: i64) -> bool:
-    """Metal twin of `vulkan_font_frame_batch_contract`.
-
-    A frame that drew any text must have cost exactly one command buffer, one
-    commit and one completion wait, no matter how many text batches it held.
-    """
-    text_count > 0 and command_count == 1 and commit_count == 1 and wait_count == 1
 
 fn metal_font_dispatch_groups(pixel_count: i64) -> i64:
     if pixel_count <= 0 or pixel_count > 2147483647:
@@ -136,11 +128,12 @@ class MetalFontBackendState:
     pending_command: i64
     pending_encoder: i64
     pending_glyph_count: i64
-    # Per-frame submission counters, read by `metal_font_frame_batch_contract`.
+    # Frame totals include every ordered span, including primitive/cap flushes.
     frame_text_count: i64
     frame_command_count: i64
     frame_commit_count: i64
     frame_wait_count: i64
+    frame_completed_spans: i64
     completion_unknown: bool
 
     static fn create() -> MetalFontBackendState:
@@ -150,7 +143,7 @@ class MetalFontBackendState:
             staging_host: 0, staging_bytes: 0, word_count_host: 0,
             pending_command: 0, pending_encoder: 0, pending_glyph_count: 0,
             frame_text_count: 0, frame_command_count: 0, frame_commit_count: 0,
-            frame_wait_count: 0, completion_unknown: false)
+            frame_wait_count: 0, frame_completed_spans: 0, completion_unknown: false)
 
     me begin_frame():
         """Reset the per-frame submission counters. Never drops pending work."""
@@ -158,10 +151,19 @@ class MetalFontBackendState:
         self.frame_command_count = 0
         self.frame_commit_count = 0
         self.frame_wait_count = 0
+        self.frame_completed_spans = 0
 
     me frame_batch_contract_met() -> bool:
-        metal_font_frame_batch_contract(self.frame_text_count, self.frame_command_count,
-            self.frame_commit_count, self.frame_wait_count)
+        # The immediate fallback retains its original single-span contract.
+        # Only completed packed flushes admit additional ordered spans.
+        if self.completion_unknown:
+            return false
+        if metal_font_frame_batch_contract(self.frame_text_count, self.frame_command_count,
+            self.frame_commit_count, self.frame_wait_count):
+            return true
+        metal_font_frame_span_contract(
+            self.frame_text_count, self.frame_command_count,
+            self.frame_commit_count, self.frame_wait_count, self.frame_completed_spans)
 
     me _discard_pending(mark_unknown: bool):
         if self.pending_encoder != 0:
@@ -176,7 +178,7 @@ class MetalFontBackendState:
             self.completion_unknown = true
 
     me flush() -> i64:
-        """End, commit and wait the one command buffer holding this frame's text.
+        """End, commit and wait the one command buffer holding this text span.
 
         Returns 1 when the batch completed, 0 when there was nothing pending,
         and -1 when submission failed. A failure always tears the pending
@@ -196,6 +198,7 @@ class MetalFontBackendState:
             ok = metal_sffi_wait_completed(cmd)
             if ok:
                 self.frame_wait_count = self.frame_wait_count + 1
+                self.frame_completed_spans = self.frame_completed_spans + 1
         self._discard_pending(not ok)
         if ok: 1 else: -1
 
@@ -370,10 +373,10 @@ class MetalFontBackendState:
                     batch: FontRenderBatch, dst_count: i64) -> i64:
         """One dispatch for the whole batch, appended to this frame's command buffer.
 
-        This is the Vulkan shape: every glyph of the batch travels in one
-        packed word buffer, y of the dispatch grid selects the glyph, and no
-        commit happens here. The frame's single commit and wait belong to
-        `flush()`, which the backend calls before any host-visible read.
+        Every glyph of the batch travels in one packed word buffer, y of the
+        dispatch grid selects the glyph, and no commit happens here. Each
+        span's commit and wait belong to `flush()`, called before an ordered
+        primitive/readback boundary or when the pending glyph cap is reached.
         """
         val glyph_count = batch.quads.len()
         if glyph_count > METAL_FONT_FRAME_GLYPH_CAP:
