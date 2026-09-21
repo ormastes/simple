@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+runner="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+oracle="$root/test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase2-loader-contract.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+portable_oracle() {
+  candidate=$1
+  grep -Fq 'SmfWriter.create()' "$candidate" &&
+    grep -Fq 'ModuleLoader.with_defaults()' "$candidate" &&
+    grep -Fq 'loader.load(path)' "$candidate" &&
+    grep -Fq 'RelocationType.Abs64' "$candidate" &&
+    grep -Fq 'native_mmap_read_bytes' "$candidate" &&
+    ! grep -Eq '/bin/sh|(^|[^[:alnum:]_])cc([[:space:]]|$)|Target\.x86_64_unknown_linux_gnu|rt_process_run|process_run\(' "$candidate"
+}
+
+portable_oracle "$oracle" || fail "selected loader oracle is host-specific or does not exercise the live loader"
+
+cp "$oracle" "$tmp/mutated.spl"
+printf '\nval platform_shell = "/bin/sh"\n' >>"$tmp/mutated.spl"
+if portable_oracle "$tmp/mutated.spl"; then
+  fail "portability guard accepted a Linux-only loader dependency"
+fi
+
+for mode in interpreter compile; do
+  grep -Fq "test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl --mode=$mode --unstable" "$runner" ||
+    fail "phase runner lacks the portable loader $mode row"
+done
+[ "$(grep -Fc 'test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl --mode=' "$runner")" -eq 2 ] ||
+  fail "portable loader oracle must have exactly interpreter and compile rows"
+[ "$(grep -Fc -- '--assert-ran --no-cache --no-db --no-session-daemon --sequential --json' "$runner")" -ge 4 ] ||
+  fail "executable phase rows do not retain assert-ran JSON evidence"
+
+echo "PASS: Phase2 loader oracle is portable and executable in interpreter and compile modes"
