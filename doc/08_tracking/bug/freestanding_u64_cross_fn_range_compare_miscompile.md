@@ -9,6 +9,28 @@ evidence found in the body. This is bookkeeping, not verification.
 **Component:** compiler / freestanding native-build (`clang --target=x86_64-unknown-elf` path)
 **Found:** 2026-07-08, SimpleOS x86_64 ring-3 FS-exec loader (M2 argv-frame work)
 
+## 2026-09-21 bounded MIR conversion correction
+
+The unresolved primitive conversion path lowered `to_u64()` to a U64 cast
+followed immediately by an I64 cast. That second cast erased the unsigned
+metadata used by LLVM lowering for comparisons, division, and right shift.
+The path now returns the U64 local directly; narrow integer conversions keep
+their existing truncate-then-widen behavior.
+
+`test/01_unit/compiler/mir/unsigned_conversion_result_spec.spl` checks the
+result type for `(-1).to_u64()` and the existing I64 slot for `to_u8()`.
+This is a correction in the conversion family, not evidence that the original
+cross-function/freestanding reproduction is resolved. The P1 row remains open.
+
+Execution is blocked on the available admitted pure-Simple Stage 2 CLI:
+its `test` command exits 1 with `error: unknown command 'test'`; help exposes
+only `compile` and `native-build`. The binary hash matches the adjacent
+pure-Simple provenance receipt:
+`e1c0f79a7f0bc9b42df99b1219293e9c3852742a24843e07f96e81d5dcbcd81a`.
+No seed fallback or full bootstrap was used. A compiler-capable test runner
+must execute the focused MIR spec and the original native reproduction before
+this bug is closed.
+
 ## Symptom
 
 A small `u64 -> u64` helper called from another function returned `0` for an
@@ -79,4 +101,3 @@ ring-3 argv frame (M2) but does not fix the underlying codegen bug.
 Any freestanding/baremetal Simple code that factors u64 range math into a helper
 can get silently-wrong results. This is a correctness landmine for the OS,
 drivers, and firmware layers that run under freestanding native-build.
-
