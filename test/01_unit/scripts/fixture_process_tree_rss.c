@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     pid_t child = fork();
     if (child < 0) return 71;
     if (!child) {
-        if (strcmp(argv[2], "normal")) setsid();
+        if (!strcmp(argv[2], "escape")) setsid();
         fprintf(pids, "%ld\n", (long)getpid()); fflush(pids);
         // Stay observable before any escape/fork, then allocate across children.
         usleep(250000);

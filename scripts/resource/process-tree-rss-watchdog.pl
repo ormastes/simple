@@ -1,26 +1,32 @@
 #!/usr/bin/perl
-# Host protection only. The ordinary compile acceptance target remains <1 GiB.
+# Sampled protection only. Ordinary compile acceptance remains <1,000,000,000 bytes.
 # ps reports KiB on macOS and Linux. Keep one supervisor alive at 100 ms;
 # do not fork a shell/awk/sleep pipeline for every sample.
 use strict;
 use warnings;
-use POSIX qw(setsid WNOHANG);
+use POSIX qw(setsid setpgid WNOHANG);
 use Time::HiRes qw(time sleep alarm);
+use Cwd qw(abs_path);
+use File::Basename qw(dirname);
+use File::Temp qw(tempdir);
+use Fcntl qw(O_RDONLY O_NOFOLLOW);
+use Digest::SHA;
 
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
-            'timeout-seconds' => 0, 'term-grace-seconds' => 1 );
+            'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new' );
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode)=(.+)$/
         or die "rss-guard: invalid option\n";
     $opt{$1} = $2;
 }
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
+$opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
-$opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= 6291456
-    or die "rss-guard: cap must be between 1 and 6291456 KiB\n";
+$opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= 5859375
+    or die "rss-guard: cap must be between 1 and 5859375 KiB (6000000000 bytes)\n";
 $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
     or die "rss-guard: sample interval must be between 1 and 100 ms\n";
 my $leader = 0;
@@ -33,8 +39,151 @@ my $started = time;
 my $last = {};
 my $ps_pid = 0;
 my ($previous_sample, $sample_gap_max_ms) = (0, 0);
+my ($session_helper, $helper_sha, $helper_source_sha, $helper_fd);
+my ($session_id, $session_checks, $helper_failed, $helper_installed) = (0, 0, 0, 0);
+my $session_root_confirmed = 0;
+my ($session_admission, $parent_admission_sha) = ('', '');
+my %unexpected_sid;
+my $sample_started_at;
+
+sub hash_handle {
+    my ($fh) = @_;
+    seek($fh, 0, 0) or die "cannot seek session helper";
+    return Digest::SHA->new(256)->addfile($fh)->hexdigest;
+}
+
+sub verify_session_helper {
+    my @path = lstat($session_helper);
+    my @pinned = stat($helper_fd);
+    if (!@path || !@pinned || -l $session_helper || $path[0] != $pinned[0] ||
+        $path[1] != $pinned[1] || hash_handle($helper_fd) ne $helper_sha) {
+        $helper_failed = 1;
+        die "session helper identity/hash changed";
+    }
+}
+
+sub observe_sessions {
+    my ($budget, @pids) = @_;
+    verify_session_helper();
+    return {} unless @pids;
+    $budget > 0 or die "session observation exceeded sample budget";
+    my %expected = map { $_ => 1 } @pids;
+    my %result;
+    my $observer = open(my $fh, '-|', $session_helper, '--sid', @pids);
+    defined($observer) or die "cannot start session observer";
+    local $SIG{ALRM} = sub { kill 'KILL', $observer; die "session observation timed out" };
+    alarm($budget);
+    while (my $line = <$fh>) {
+        $line =~ /\A([0-9]+) ([0-9]+)\n\z/ or die "malformed session observation";
+        my ($pid, $sid) = ($1, $2);
+        delete($expected{$pid}) or die "unexpected/repeated session PID";
+        $result{$pid} = $sid;
+        ++$session_checks;
+    }
+    close($fh) or die "session observer failed";
+    alarm 0;
+    !%expected or die "incomplete session observation";
+    verify_session_helper();
+    return \%result;
+}
+
+sub install_session_helper {
+    my $has_id = exists($ENV{SIMPLE_BOOTSTRAP_SESSION_ID});
+    my $has_exec = exists($ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC});
+    if ($opt{'session-mode'} eq 'new') {
+        !$has_id && !$has_exec or die "new session refuses inherited session contract";
+    } else {
+        $has_id && $has_exec or die "incomplete inherited session contract";
+    }
+    my $source = abs_path(dirname(__FILE__) . '/../bootstrap/bootstrap-session-exec.c');
+    defined($source) or die "missing session helper source";
+    open(my $source_fh, '<', $source) or die "cannot read session helper source";
+    $helper_source_sha = hash_handle($source_fh);
+    my $directory = defined($opt{receipt}) ?
+        tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($opt{receipt}), CLEANUP => 0) :
+        tempdir('simple-rss-session-XXXXXXXX', TMPDIR => 1, CLEANUP => 0);
+    $directory = abs_path($directory);
+    $session_helper = "$directory/bootstrap-session-exec";
+    my $compiler = $ENV{CC} || 'cc';
+    my $builder = fork();
+    defined($builder) or die "cannot fork helper compiler";
+    if (!$builder) {
+        setpgid(0, 0) == 0 or POSIX::_exit(89);
+        exec {$compiler} $compiler, '-O2', $source, '-o', $session_helper or POSIX::_exit(127);
+    }
+    my $deadline = time + 30;
+    while (1) {
+        my $done = waitpid($builder, WNOHANG);
+        if ($done == $builder) { $? == 0 or die "session helper compilation failed"; last }
+        if (time >= $deadline) {
+            # The direct compiler child is still unreaped and anchors its group.
+            kill 'KILL', -$builder;
+            kill 'KILL', $builder;
+            waitpid($builder, 0);
+            die "session helper compilation timed out";
+        }
+        sleep 0.02;
+    }
+    hash_handle($source_fh) eq $helper_source_sha or die "session helper source changed during compilation";
+    close($source_fh);
+    chmod(0500, $session_helper) == 1 or die "cannot protect session helper";
+    sysopen($helper_fd, $session_helper, O_RDONLY | O_NOFOLLOW) or die "cannot pin session helper";
+    -f $helper_fd or die "session helper is not a regular file";
+    $helper_sha = hash_handle($helper_fd);
+    # Warm Darwin executable admission before the workload's 100 ms deadline.
+    my $own_sid = observe_sessions(2, $$)->{$$};
+    $own_sid > 0 or die "cannot determine supervisor session";
+    if ($opt{'session-mode'} eq 'inherit') {
+        $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} =~ /\A[1-9][0-9]*\z/ &&
+            $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} == $own_sid &&
+            $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} =~ m{\A/} &&
+            -f $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} or die "invalid inherited session contract";
+        my $parent_helper = $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC};
+        sysopen(my $admission, "$parent_helper.admission.env", O_RDONLY | O_NOFOLLOW)
+            or die "missing inherited session admission";
+        my @admission_stat = stat($admission);
+        -f $admission && $admission_stat[4] == $< && ($admission_stat[2] & 0777) == 0400
+            or die "unsafe inherited session admission";
+        $parent_admission_sha = hash_handle($admission);
+        seek($admission, 0, 0) or die "cannot read inherited session admission";
+        my %admitted;
+        while (my $line = <$admission>) {
+            $line =~ /\A([a-z_]+)=([^\n]*)\n\z/ or die "malformed inherited session admission";
+            !exists($admitted{$1}) or die "duplicate inherited session admission field";
+            $admitted{$1} = $2;
+        }
+        ($admitted{schema} || '') eq 'simple-bootstrap-session-v1' &&
+            ($admitted{status} || '') eq 'active' &&
+            ($admitted{session_id} || '') eq "$own_sid" &&
+            ($admitted{session_helper} || '') eq $parent_helper &&
+            ($admitted{session_helper_source_sha} || '') eq $helper_source_sha &&
+            ($admitted{root_pid} || '') =~ /\A[1-9][0-9]*\z/
+            or die "inherited session admission mismatch";
+        sysopen(my $parent_binary, $parent_helper, O_RDONLY | O_NOFOLLOW)
+            or die "cannot pin inherited session helper";
+        -f $parent_binary && hash_handle($parent_binary) eq ($admitted{session_helper_sha} || '')
+            or die "inherited session helper hash mismatch";
+        my $parent_sid = observe_sessions(2, $admitted{root_pid})->{$admitted{root_pid}};
+        $parent_sid == $own_sid or die "inherited root is absent or escaped";
+        hash_handle($admission) eq $parent_admission_sha or die "inherited admission changed";
+        $session_id = $own_sid;
+    }
+    $helper_installed = 1;
+}
+
+sub publish_session_admission {
+    $session_admission = "$session_helper.admission.env";
+    my $temporary = "$session_admission.tmp.$$";
+    open(my $fh, '>', $temporary) or die "cannot create session admission";
+    print $fh "schema=simple-bootstrap-session-v1\nstatus=active\nroot_pid=$leader\n" .
+        "session_id=$session_id\nsession_helper=$session_helper\n" .
+        "session_helper_sha=$helper_sha\nsession_helper_source_sha=$helper_source_sha\n";
+    close($fh) && chmod(0400, $temporary) && rename($temporary, $session_admission)
+        or die "cannot publish session admission";
+}
 
 sub snapshot {
+    $sample_started_at = time;
     local $ENV{LC_ALL} = 'C';
     # List form bypasses shell pipelines, so a failing ps cannot be hidden by awk.
     $ps_pid = open(my $ps, '-|', 'ps', '-axo', 'pid=,ppid=,pgid=,rss=,stat=,lstart=');
@@ -53,6 +202,16 @@ sub snapshot {
     alarm 0;
     %all or die "empty ps output";
     ++$samples;
+    if ($leader && defined($session_helper) && !$helper_failed &&
+        ($session_root_confirmed || (exists($all{$leader}) && $all{$leader}{group} == $leader))) {
+        my @live = members(\%all);
+        my $remaining = $opt{'interval-ms'} / 1000 - (time - $sample_started_at);
+        my $sids = observe_sessions($remaining, @live);
+        $session_root_confirmed = 1 if ($sids->{$leader} || 0) == $session_id;
+        for my $id (keys %$sids) {
+            $unexpected_sid{$id} = $sids->{$id} if $sids->{$id} && $sids->{$id} != $session_id;
+        }
+    }
     return \%all;
 }
 
@@ -154,8 +313,17 @@ sub receipt {
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "containment_scope=observed-descendants-and-process-groups\n" .
-        "hard_memory_limit=0\nquiescent=$quiet\n";
-    print STDERR $body if $code == 88 || $code == 89;
+        "hard_memory_limit=0\nquiescent=$quiet\n" .
+        "session_id=$session_id\nsession_checks=$session_checks\n" .
+        "session_mode=$opt{'session-mode'}\nsession_admission=$session_admission\n" .
+        "parent_session_admission_sha256=$parent_admission_sha\n" .
+        "ordinary_compile_rss_target_bytes=1000000000\n" .
+        "session_helper=" . ($session_helper // '') . "\n" .
+        "session_helper_sha256=" . ($helper_sha // '') . "\n" .
+        "session_helper_source_sha256=" . ($helper_source_sha // '') . "\n" .
+        "session_helper_integrity=" . ($helper_failed ? 'failed' : $helper_installed ? 'verified' : 'unverified') . "\n" .
+        "unexpected_session_pids=" . join(',', sort {$a <=> $b} keys %unexpected_sid) . "\n";
+    print STDERR $body if $code == 88 || $code == 89 || $code == 90;
     if (defined $opt{receipt}) {
         my $tmp = "$opt{receipt}.tmp.$$";
         open(my $fh, '>', $tmp) or die "rss-guard: cannot write receipt\n";
@@ -164,18 +332,30 @@ sub receipt {
     }
 }
 
+# Workload startup boundary (identity unit tests exercise functions above it).
+if (!eval { install_session_helper(); 1 }) {
+    alarm 0;
+    warn "rss-guard: session installation failed: $@\n";
+    receipt('session-helper-install-failed', 89, 1);
+    exit 89;
+}
+$started = time;
 pipe(my $gate_read, my $gate_write) or die "rss-guard: pipe failed\n";
 $leader = fork();
 defined($leader) or die "rss-guard: fork failed\n";
 if ($leader == 0) {
     close $gate_write;
-    defined(setsid()) && getpgrp() == $$ or POSIX::_exit(89);
+    if ($session_id) { setpgid(0, 0) == 0 or POSIX::_exit(89) }
+    else { defined(setsid()) && getpgrp() == $$ or POSIX::_exit(89) }
+    $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = $session_id || $$;
+    $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} = $session_helper;
     my $go;
     sysread($gate_read, $go, 1) == 1 && $go eq 'G' or POSIX::_exit(89);
     close $gate_read;
     exec { $ARGV[0] } @ARGV or POSIX::_exit(127);
 }
 close $gate_read;
+$session_id ||= $leader;
 $SIG{TERM} = sub { $interrupted = 143 };
 $SIG{INT} = sub { $interrupted = 130 };
 $SIG{HUP} = sub { $interrupted = 129 };
@@ -191,9 +371,10 @@ while (1) {
     if (!$all) {
         alarm 0;
         warn "rss-guard: measurement failed: $@\n";
-        ($status, $code) = ('rss-measurement-failed', 89); last;
+        ($status, $code) = ($helper_failed ? 'session-helper-invalid' : 'rss-measurement-failed', 89); last;
     }
     $last = $all;
+    if (%unexpected_sid) { ($status, $code) = ('bootstrap-session-escaped', 90); last }
     my @live = members($all);
     my $rss = 0; $rss += $all->{$_}{rss} for @live;
     $peak = $rss if $rss > $peak;
@@ -203,7 +384,10 @@ while (1) {
     if (!$released) {
         # Both successful sampling and confirmed session isolation are required
         # before releasing exec. A child failure cannot launch unguarded work.
-        if (exists($all->{$leader}) && $all->{$leader}{group} == $leader) {
+        if (exists($all->{$leader}) && $all->{$leader}{group} == $leader && $session_root_confirmed) {
+            if (!eval { publish_session_admission(); 1 }) {
+                ($status, $code) = ('session-admission-failed', 89); last;
+            }
             syswrite($gate_write, 'G', 1) == 1 or do {
                 ($status, $code) = ('rss-startup-failed', 89); last;
             };

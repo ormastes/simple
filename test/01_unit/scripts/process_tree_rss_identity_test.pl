@@ -10,7 +10,7 @@ BEGIN {
 open my $fh, '<', "$FindBin::Bin/../../../scripts/resource/process-tree-rss-watchdog.pl" or die $!;
 local $/;
 my $source = <$fh>;
-$source =~ s/\npipe\(my \$gate_read,.*\z//s or die 'guard startup boundary missing';
+$source =~ s/\n# Workload startup boundary.*\z//s or die 'guard startup boundary missing';
 local @ARGV = ('--', 'unused');
 my $probe = <<'PROBE';
 $leader = 100;
