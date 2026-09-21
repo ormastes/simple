@@ -2537,6 +2537,57 @@ impl MirLowering:
 
     me lower_binary_expr(expr_value: HirExpr, op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId:
 
+        # A qualified enum variant on the RHS of `is` names a PATTERN, not a
+        # value to construct.  Lowering `E.A` through the ordinary Field path
+        # allocates a fresh enum object, after which the generic `Is` fallback
+        # compares the wrong representation (and currently maps the otherwise
+        # unsupported operator to MirBinOp.Add).  Resolve the declaration and
+        # variant before lowering the RHS, then perform the same typed runtime
+        # identity + discriminant test used by qualified enum matches.
+        if op == HirBinOp.Is:
+            var is_enum_symbol = SymbolId(id: -1)
+            var is_enum_name = ""
+            var is_variant_name = ""
+            match right.kind:
+                case HirExprKind.Field(is_base, is_field_name, _):
+                    match is_base.kind:
+                        case HirExprKind.Var(is_symbol):
+                            is_enum_symbol = is_symbol
+                            is_enum_name = self.symbols.symbol_name_scalar_raw(is_symbol.id)
+                        case HirExprKind.NamedVar(is_symbol, is_named):
+                            is_enum_symbol = is_symbol
+                            is_enum_name = if is_named != "": is_named else: self.symbols.symbol_name_scalar_raw(is_symbol.id)
+                        case _:
+                            ()
+                    is_variant_name = is_field_name
+                case _:
+                    ()
+            if is_enum_symbol.id >= 0 and is_enum_name != "" and is_variant_name != "":
+                val is_qualified = self.enum_qualified_key(is_enum_symbol)
+                val is_enum_key = if is_qualified != "" and self.enum_variant_index_q.has(is_qualified): is_qualified else: is_enum_name
+                if self.enum_has_variants(is_enum_key):
+                    val is_variant_disc = self.enum_variant_discriminant(is_enum_key, is_variant_name)
+                    if is_variant_disc >= 0:
+                        val is_left_local = self.lower_expr(left)
+                        val is_enum_id = self.enum_runtime_id(is_enum_key)
+                        var b_is = self.builder
+                        val is_enum_id_local = b_is.emit_const_int(is_enum_id)
+                        val is_variant_local = b_is.emit_const_int(is_variant_disc)
+                        val is_check = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_enum_check_variant"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                            )))
+                        ))
+                        val is_result = b_is.emit_call(
+                            is_check,
+                            [mir_operand_copy(is_left_local), mir_operand_copy(is_enum_id_local), mir_operand_copy(is_variant_local)],
+                            MirType.bool()
+                        )
+                        self.builder = b_is
+                        if val is_result_local = is_result:
+                            return is_result_local
+
         match op:
             case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:
                 val special_result = self.lower_binop_special(op, left, right)
