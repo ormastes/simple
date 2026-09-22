@@ -773,6 +773,114 @@ bootstrap_stage3_verify_rust_llvm_pin() {
     }
 }
 
+# rustc strips build-script executables using its bundled rust-objcopy. Some
+# macOS Rust distributions put libLLVM in sysroot/lib but give that helper only
+# an @loader_path/../lib runpath. Bind both files before supplying a private
+# library search directory; never repair the shared rustup installation.
+bootstrap_stage3_rust_macos_helper_authority() (
+    [ "$(uname -s)" = Darwin ] || return 0
+    [ "$#" -eq 1 ] || return 1
+    helper_sysroot=$(dirname -- "$(dirname -- "$1")")
+    helper_version=$(env -i PATH="$PATH" "$1" -vV) || return 1
+    helper_host=$(printf '%s\n' "$helper_version" | sed -n 's/^host: //p')
+    helper_llvm_version=$(printf '%s\n' "$helper_version" | sed -n 's/^LLVM version: //p')
+    case "$helper_llvm_version" in ''|*[!0-9.]*) return 1 ;; esac
+    case "$helper_host" in
+        aarch64-apple-darwin|x86_64-apple-darwin) ;;
+        *) return 1 ;;
+    esac
+    helper_objcopy="$helper_sysroot/lib/rustlib/$helper_host/bin/rust-objcopy"
+    helper_llvm="$helper_sysroot/lib/libLLVM.dylib"
+    [ -x "$helper_objcopy" ] || return 1
+    [ "$(bootstrap_stage3_canonical_file "$helper_objcopy")" = "$helper_objcopy" ] || return 1
+    helper_dependencies=$(/usr/bin/otool -L "$helper_objcopy") || return 1
+    helper_mode=absent
+    if printf '%s\n' "$helper_dependencies" | awk '$1 == "@rpath/libLLVM.dylib" { found=1 } END { exit !found }'; then
+        helper_mode=private-dylib
+        [ "$(bootstrap_stage3_canonical_file "$helper_llvm")" = "$helper_llvm" ] || return 1
+    elif printf '%s\n' "$helper_dependencies" | awk 'NR > 1 && $1 ~ /libLLVM/ { found=1 } END { exit !found }'; then
+        echo 'bootstrap: unsupported Rust helper LLVM dependency' >&2
+        return 1
+    fi
+    printf 'rust-objcopy-path=%s\nrust-objcopy-sha256=%s\n' \
+        "$helper_objcopy" "$(bootstrap_stage3_hash_file "$helper_objcopy")"
+    printf 'rust-helper-library-mode=%s\n' "$helper_mode"
+    if [ "$helper_mode" = private-dylib ]; then
+        printf 'rust-llvm-dylib-path=%s\nrust-llvm-dylib-sha256=%s\n' \
+            "$helper_llvm" "$(bootstrap_stage3_hash_file "$helper_llvm")"
+    fi
+    printf 'rust-helper-llvm-version=%s\n' "$helper_llvm_version"
+)
+
+# The caller's authority text is already included in the seed/tool snapshots.
+# Revalidate its helper identities at every Cargo boundary, including retries.
+bootstrap_stage3_rust_macos_helper_validate() (
+    [ "$#" -eq 2 ] || return 1
+    helper_authority=$1
+    helper_capsule=$2
+    helper_mode=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-helper-library-mode=//p')
+    case "$helper_mode" in
+        private-dylib) helper_roles='rust-objcopy rust-llvm-dylib' ;;
+        absent)
+            [ ! -e "$helper_capsule" ] && [ ! -L "$helper_capsule" ] || return 1
+            if printf '%s\n' "$helper_authority" | grep -q '^rust-llvm-dylib-'; then return 1; fi
+            helper_roles=rust-objcopy
+            ;;
+        *) return 1 ;;
+    esac
+    for helper_role in $helper_roles; do
+        helper_path=$(printf '%s\n' "$helper_authority" | sed -n "s/^$helper_role-path=//p")
+        helper_sha=$(printf '%s\n' "$helper_authority" | sed -n "s/^$helper_role-sha256=//p")
+        [ -n "$helper_path" ] && [ -n "$helper_sha" ] || return 1
+        [ "$(bootstrap_stage3_canonical_file "$helper_path")" = "$helper_path" ] || return 1
+        [ "$(bootstrap_stage3_hash_file "$helper_path")" = "$helper_sha" ] || return 1
+    done
+    helper_objcopy=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-objcopy-path=//p')
+    helper_expected=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-helper-llvm-version=//p')
+    if [ "$helper_mode" = private-dylib ]; then
+        [ -d "$helper_capsule" ] && [ ! -L "$helper_capsule" ] || return 1
+        [ "$(stat -f %Lp "$helper_capsule")" = 555 ] || return 1
+        for helper_entry in "$helper_capsule"/* "$helper_capsule"/.[!.]* "$helper_capsule"/..?*; do
+            [ -e "$helper_entry" ] || [ -L "$helper_entry" ] || continue
+            [ "$helper_entry" = "$helper_capsule/libLLVM.dylib" ] || return 1
+        done
+        [ "$(stat -f %Lp "$helper_capsule/libLLVM.dylib")" = 444 ] || return 1
+        [ "$(bootstrap_stage3_canonical_file "$helper_capsule/libLLVM.dylib")" = \
+            "$helper_capsule/libLLVM.dylib" ] || return 1
+        [ "$(bootstrap_stage3_hash_file "$helper_capsule/libLLVM.dylib")" = "$helper_sha" ] || return 1
+        helper_version=$(env -i PATH="$PATH" DYLD_LIBRARY_PATH="$helper_capsule" \
+            "$helper_objcopy" --version) || return 1
+    else
+        helper_version=$(env -i PATH="$PATH" "$helper_objcopy" --version) || return 1
+    fi
+    helper_actual=$(printf '%s\n' "$helper_version" | sed -n 's/^  LLVM version \([0-9.]*\).*/\1/p')
+    [ -n "$helper_expected" ] && [ "$helper_actual" = "$helper_expected" ]
+)
+
+bootstrap_stage3_rust_macos_helper_prepare() (
+    [ "$#" -eq 2 ] || return 1
+    helper_authority=$1
+    helper_capsule=$2
+    case "$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-helper-library-mode=//p')" in
+        absent) bootstrap_stage3_rust_macos_helper_validate "$helper_authority" "$helper_capsule"; return $? ;;
+        private-dylib) ;;
+        *) return 1 ;;
+    esac
+    if [ ! -e "$helper_capsule" ] && [ ! -L "$helper_capsule" ]; then
+        helper_llvm=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-llvm-dylib-path=//p')
+        [ -n "$helper_llvm" ] || return 1
+        helper_staging=$(mktemp -d "$helper_capsule.tmp.XXXXXX") || return 1
+        # cp streams the bytes; validate before atomic publication. An interrupted
+        # copy leaves only an unadmitted staging directory, never a partial cache.
+        cp "$helper_llvm" "$helper_staging/libLLVM.dylib" || return 1
+        chmod 444 "$helper_staging/libLLVM.dylib" || return 1
+        chmod 555 "$helper_staging" || return 1
+        bootstrap_stage3_rust_macos_helper_validate "$helper_authority" "$helper_staging" || return 1
+        mv "$helper_staging" "$helper_capsule" || return 1
+    fi
+    bootstrap_stage3_rust_macos_helper_validate "$helper_authority" "$helper_capsule" || return 1
+)
+
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
@@ -1438,6 +1546,7 @@ bootstrap_stage3_resolve_rust_toolchain() (
         bootstrap_stage3_rust_selected=$(printf '%s\n' "$bootstrap_stage3_rust_installed" |
             sed -n 's/^rustc-path=//p') || return 1
         bootstrap_stage3_verify_rust_llvm_pin "$bootstrap_stage3_rust_selected" || return 1
+        bootstrap_stage3_rust_macos_helper_authority "$bootstrap_stage3_rust_selected" || return 1
         printf '%s\n' "$bootstrap_stage3_rust_installed"
         return 0
     else
@@ -1474,6 +1583,7 @@ bootstrap_stage3_resolve_rust_toolchain() (
         "$(bootstrap_stage3_hash_file "$bootstrap_stage3_rust_policy")" \
         "$bootstrap_stage3_rust_channel"
     bootstrap_stage3_verify_rust_llvm_pin "$bootstrap_stage3_rustc" || return 1
+    bootstrap_stage3_rust_macos_helper_authority "$bootstrap_stage3_rustc" || return 1
     printf 'rust-sysroot=%s\nrustc-path=%s\ncargo-path=%s\n' \
         "$bootstrap_stage3_rust_sysroot" "$bootstrap_stage3_rustc" \
         "$bootstrap_stage3_cargo"
