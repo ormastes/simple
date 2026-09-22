@@ -11,6 +11,11 @@ use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
 use Fcntl qw(O_RDONLY O_NOFOLLOW);
 use Digest::SHA;
+use IPC::Open2 qw(open2);
+
+# EPIPE must be a caught observation failure even during pre-workload admission.
+my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
+$SIG{PIPE} = 'IGNORE';
 
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
@@ -54,6 +59,141 @@ $observation_budget_ms =~ /^\d+$/ && $observation_budget_ms >= 1000 &&
     $observation_budget_ms <= 5000
     or die "rss-guard: observation budget must be between 1000 and 5000 ms\n";
 my ($sample_duration_max_ms, $sample_overruns) = (0, 0);
+my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
+my ($observer_read, $observer_write, $observer_pid);
+my $observer_buffer = '';
+my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
+my $observer_backend = $^O eq 'darwin' ? 'darwin-sysctl-libproc' : 'ps';
+
+sub verify_observer {
+    my @path = lstat($observer_path);
+    my @pinned = stat($observer_fd);
+    @path && @pinned && !-l $observer_path && $path[0] == $pinned[0] &&
+        $path[1] == $pinned[1] && hash_handle($observer_fd) eq $observer_sha
+        or die "process observer identity/hash changed";
+}
+
+sub stop_observer {
+    if ($observer_pid) {
+        kill 'KILL', $observer_pid;
+        waitpid($observer_pid, 0);
+        $observer_pid = 0;
+    }
+    close($observer_read) if $observer_read;
+    close($observer_write) if $observer_write;
+    undef $observer_read; undef $observer_write;
+    $observer_buffer = '';
+}
+
+sub observer_line {
+    while (1) {
+        my $newline = index($observer_buffer, "\n");
+        if ($newline >= 0) {
+            $newline <= 128 or die "oversized process observer row";
+            return substr($observer_buffer, 0, $newline + 1, '');
+        }
+        length($observer_buffer) <= 128 or die "oversized process observer row";
+        my $bytes = sysread($observer_read, my $chunk, 4096);
+        defined($bytes) or die "process observer read failed";
+        return undef unless $bytes;
+        $observer_buffer .= $chunk;
+    }
+}
+
+sub start_observer {
+    verify_observer();
+    $observer_pid = open2($observer_read, $observer_write, $observer_path);
+    $observer_last_pid = $observer_pid;
+    ++$observer_starts;
+}
+
+sub install_observer {
+    return unless $^O eq 'darwin';
+    my $source = abs_path(dirname(__FILE__) . '/macos-process-observer.c');
+    open(my $fh, '<', $source) or die "cannot read process observer source";
+    $observer_source_sha = hash_handle($fh);
+    $observer_path = dirname($session_helper) . '/macos-process-observer';
+    my $compiler = $ENV{CC} || 'cc';
+    my $builder = fork();
+    defined($builder) or die "cannot fork observer compiler";
+    if (!$builder) {
+        setpgid(0, 0) == 0 or POSIX::_exit(89);
+        exec {$compiler} $compiler, '-O2', $source, '-o', $observer_path or POSIX::_exit(127);
+    }
+    my $deadline = time + 30;
+    while (1) {
+        my $done = waitpid($builder, WNOHANG);
+        if ($done == $builder) { $? == 0 or die "process observer compilation failed"; last }
+        if (time >= $deadline) {
+            kill 'KILL', -$builder; kill 'KILL', $builder; waitpid($builder, 0);
+            die "process observer compilation timed out";
+        }
+        sleep 0.02;
+    }
+    hash_handle($fh) eq $observer_source_sha or die "process observer source changed during compilation";
+    close($fh);
+    chmod(0500, $observer_path) == 1 or die "cannot protect process observer";
+    sysopen($observer_fd, $observer_path, O_RDONLY | O_NOFOLLOW) or die "cannot pin process observer";
+    -f $observer_fd or die "process observer is not a regular file";
+    $observer_sha = hash_handle($observer_fd);
+    start_observer();
+    # Admit the executable while no workload exists. Subsequent exchanges use
+    # the normal observation budget and never exec a new observer to continue.
+    local $SIG{ALRM} = sub { die "process observer admission timed out" };
+    alarm 5;
+    print {$observer_write} "M\n" or die "process observer admission write failed";
+    my ($count, $complete) = (0, 0);
+    while (my $line = observer_line()) {
+        if ($line eq "E\n") { $complete = 1; last }
+        $line =~ /\AM [1-9][0-9]* [0-9]+ [0-9]+ [01] [0-9]+:[0-9]+\n\z/
+            or die "malformed process observer admission";
+        ++$count;
+        $count <= 131072 or die "oversized process observer table";
+    }
+    alarm 0;
+    $count && $complete or die "process observer admission failed";
+    verify_observer();
+}
+
+sub native_snapshot {
+    verify_session_helper() unless $helper_failed;
+    verify_observer();
+    start_observer() unless $observer_pid; # Cleanup only after an observation failure.
+    local $SIG{ALRM} = sub { die "process observation timed out" };
+    alarm($observation_budget_ms / 1000);
+    print {$observer_write} "M\n" or die "process observer write failed";
+    my (%all, $complete);
+    my $rows = 0;
+    while (my $line = observer_line()) {
+        if ($line eq "E\n") { $complete = 1; last }
+        $line =~ /\AM ([1-9][0-9]*) ([0-9]+) ([0-9]+) ([01]) ([0-9]+:[0-9]+)\n\z/
+            or die "malformed process metadata";
+        my ($pid, $parent, $group, $zombie, $identity) = ($1, $2, $3, $4, $5);
+        ++$rows <= 131072 && $pid <= 2147483647 && $parent <= 2147483647 && $group <= 2147483647
+            or die "oversized process observer table or PID";
+        !exists($all{$pid}) or die "duplicate process metadata";
+        $all{$pid} = {parent => 0+$parent, group => 0+$group, zombie => 0+$zombie,
+                      identity => $identity, rss => 0};
+    }
+    $complete && %all or die "incomplete process metadata";
+    for my $pid (members(\%all)) {
+        print {$observer_write} "R $pid $all{$pid}{identity}\n" or die "process observer write failed";
+        my $line = observer_line();
+        defined($line) or die "incomplete process detail";
+        if ($line eq "R $pid gone\n") { $all{$pid}{zombie} = 1; next }
+        $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
+        $all{$pid}{rss} = 0+$1;
+        my $sid = 0+$2;
+        ++$session_checks;
+        $session_root_confirmed = 1 if $pid == $leader && $sid == $session_id;
+        $unexpected_sid{$pid} = $sid if $sid != $session_id &&
+            ($session_root_confirmed || $all{$leader}{group} == $leader);
+    }
+    verify_observer();
+    verify_session_helper() unless $helper_failed;
+    alarm 0;
+    return \%all;
+}
 
 sub hash_handle {
     my ($fh) = @_;
@@ -195,6 +335,22 @@ sub publish_session_admission {
 
 sub snapshot {
     $sample_started_at = time;
+    if ($^O eq 'darwin') {
+        my $all = eval { native_snapshot() };
+        if (!$all) {
+            my $failure = $@;
+            alarm 0;
+            ++$observer_errors;
+            stop_observer();
+            die $failure;
+        }
+        ++$samples;
+        my $duration_ms = (time - $sample_started_at) * 1000;
+        $duration_ms <= $observation_budget_ms or die "process observation exceeded observation budget";
+        $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
+        ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
+        return $all;
+    }
     local $ENV{LC_ALL} = 'C';
     # List form bypasses shell pipelines, so a failing ps cannot be hidden by awk.
     $ps_pid = open(my $ps, '-|', 'ps', '-axo', 'pid=,ppid=,pgid=,rss=,stat=,lstart=');
@@ -329,6 +485,12 @@ sub receipt {
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
+        "observer_backend=$observer_backend\nobserver_path=" . ($observer_path // '') . "\n" .
+        "observer_sha256=" . ($observer_sha // '') . "\n" .
+        "observer_source_sha256=" . ($observer_source_sha // '') . "\n" .
+        "observer_starts=$observer_starts\nobserver_errors=$observer_errors\n" .
+        "observer_restarts=" . ($observer_starts ? $observer_starts - 1 : 0) . "\n" .
+        "observer_last_pid=$observer_last_pid\n" .
         "containment_scope=observed-descendants-and-process-groups\n" .
         "hard_memory_limit=0\nquiescent=$quiet\n" .
         "rss_cap_mode=$opt{'rss-cap-mode'}\nrss_cap_enforced=" .
@@ -353,8 +515,9 @@ sub receipt {
 }
 
 # Workload startup boundary (identity unit tests exercise functions above it).
-if (!eval { install_session_helper(); 1 }) {
+if (!eval { install_session_helper(); install_observer(); 1 }) {
     alarm 0;
+    stop_observer();
     warn "rss-guard: session installation failed: $@\n";
     receipt('session-helper-install-failed', 89, 1);
     exit 89;
@@ -364,6 +527,9 @@ pipe(my $gate_read, my $gate_write) or die "rss-guard: pipe failed\n";
 $leader = fork();
 defined($leader) or die "rss-guard: fork failed\n";
 if ($leader == 0) {
+    $SIG{PIPE} = $workload_sigpipe;
+    close($observer_read) if $observer_read;
+    close($observer_write) if $observer_write;
     close $gate_write;
     if ($session_id) { setpgid(0, 0) == 0 or POSIX::_exit(89) }
     else { defined(setsid()) && getpgrp() == $$ or POSIX::_exit(89) }
@@ -448,6 +614,7 @@ if ($code == 124 || $interrupted) {
     }
 }
 my $quiet = quiesce();
+stop_observer();
 for (1..100) { reap(); last if defined $child_status; sleep 0.02 }
 if ($status eq 'complete' && defined $child_status) {
     $code = ($child_status & 127) ? 128 + ($child_status & 127) : $child_status >> 8;
