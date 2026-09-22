@@ -1,6 +1,24 @@
 # SimpleOS Simple Web `decode_string` Fault Storm
 ## Open 2026-09-16 — needs owner triage
 
+## 2026-09-22 — allocation-free text-owner cleanup (offline)
+
+The earlier live decode fault fix remains recorded below. The theme-package
+parser still used interpolation around `line.trim()` and `value.trim()` to
+force primitive text dispatch after array element type erasure. Those copies
+were replaced with typed text helpers, which keep the receiver's method owner
+explicit without allocating a second string. The reciprocal source count is
+eight removed interpolation copies and eight typed helper calls; runtime heap
+and latency profiling remains pending the guest gate. A compiled fixture exercises
+split elements and trimmed text beside a custom `Path.starts_with` method;
+its executable verdict is the offline regression. In this isolated checkout,
+three bounded native attempts did not reach compilation: SCV reported missing
+compile-event or filesystem-event inventory, including when cold-init and
+freeze-fallback were requested. The regression remains unverified here.
+This change does not close
+the bug: the canonical SimpleOS guest zero-exception/three-content-frame gate
+has not been run in this session.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
@@ -160,4 +178,3 @@ compiler/source incompatibility: committed `src/lib/common/encoding/sfnt_glyf.sp
 fails to parse with the current stage3 binary (`expected Comma, found Plus`).
 The decode fix itself is verified GREEN (0 decode-string-bad, 0 exception frames)
 from the last clean build (diag7).
-
