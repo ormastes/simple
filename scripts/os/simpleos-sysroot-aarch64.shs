@@ -24,8 +24,37 @@ cd "$REPO_ROOT"
 
 SYSROOT="${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}"
 LIBC_DIR="src/os/libc"
-CC="${CLANG:-clang}"
-AR="${AR:-ar}"
+# Keep the compiler, archiver, and linker in one provider by default.  An
+# explicit caller selection still wins for each tool.
+LLVM_23_1_PREFIX="${LLVM_23_1_PREFIX:-$REPO_ROOT/build/toolchains/llvm-23.1.0-rc2}"
+DEFAULT_LLVM_PROVIDER=0
+if [ -z "${CLANG:-}" ] && [ -z "${AR:-}" ]; then
+  DEFAULT_LLVM_PROVIDER=1
+fi
+CC="${CLANG:-$LLVM_23_1_PREFIX/bin/clang}"
+AR="${AR:-$LLVM_23_1_PREFIX/bin/llvm-ar}"
+if [ "${1:-}" = --print-toolchain ]; then
+  printf 'CLANG=%s\nAR=%s\nLLVM_23_1_PREFIX=%s\n' "$CC" "$AR" "$LLVM_23_1_PREFIX"
+  exit 0
+fi
+if [ "$DEFAULT_LLVM_PROVIDER" -eq 1 ]; then
+  . "$REPO_ROOT/scripts/check/lib/clang-23-1-toolchain.shs"
+  clang_23_1_require_full_provider_prefix "$LLVM_23_1_PREFIX" || {
+    echo "[sysroot-aarch64] install the signed LLVM 23.1 provider with scripts/setup/build-llvm-23-1-provider.shs, or set CLANG and AR explicitly" >&2
+    exit 1
+  }
+fi
+CC_PATH="$(command -v "$CC" 2>/dev/null)" || { echo "[sysroot-aarch64] missing clang: $CC" >&2; exit 1; }
+AR_PATH="$(command -v "$AR" 2>/dev/null)" || { echo "[sysroot-aarch64] missing archiver: $AR" >&2; exit 1; }
+[ -x "$CC_PATH" ] || { echo "[sysroot-aarch64] missing clang: $CC_PATH" >&2; exit 1; }
+[ -x "$AR_PATH" ] || { echo "[sysroot-aarch64] missing archiver: $AR_PATH" >&2; exit 1; }
+CC="$CC_PATH"
+AR="$AR_PATH"
+export PATH="$LLVM_23_1_PREFIX/bin:$PATH"
+if [ "${1:-}" = --check-toolchain ]; then
+  printf 'CLANG=%s\nAR=%s\n' "$CC" "$AR"
+  exit 0
+fi
 TRIPLE="aarch64-unknown-none-elf"
 OBJ_DIR="$SYSROOT/obj"
 
@@ -148,7 +177,9 @@ for a in "\$@"; do
         exit 0
     fi
 done
-exec clang "\$@"
+PATH="$LLVM_23_1_PREFIX/bin:\$PATH"
+export PATH
+exec "$CC_PATH" -target aarch64-unknown-none-elf "\$@"
 CCEOF
 chmod +x "$SYSROOT/lib/cc-aarch64-simpleos"
 
