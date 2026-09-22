@@ -1,4 +1,35 @@
 # SimpleOS: the two `default_axes == "static"` faces are rejected by selected-asset validation -- 2026-08-09
+
+## Status 2026-09-22: ARM64 default-face readiness follow-up fixed
+
+The ARM64 desktop entry now mirrors the established x86_64 readiness contract:
+it retains the one selected-font catalog sweep and its completeness receipt,
+but reports default-face readiness from
+`simpleos_desktop_default_font_registered()`. Optional corpus-face failures
+therefore remain visible without misreporting the registered default monospace
+face as unavailable. This predicate feeds evidence and diagnostics here; this
+change does not claim to select the renderer's vector/bitmap path.
+
+Focused regression:
+`test/01_unit/os/desktop/arm64_font_readiness_contract_spec.spl` failed before
+the entry change and passes afterward (1 example, 0 failures). It also pins the
+registered/total/failure diagnostic fields and forbids restoring the catalog
+aggregate as `font_loaded`.
+
+Startup/performance review: the font catalog is still swept exactly once. The
+new work is three scalar O(1) reads, one read/copy of the already-produced
+failure-summary text, and one startup-only interpolated serial receipt. Its
+additional startup work/storage is bounded by O(summary length); it adds
+nothing to render or request loops. Target startup latency and RSS were not
+measured. The focused post-fix test completed in 718 ms. A target `check`
+attempt stopped because this worktree has no admitted cached self-hosted check
+worker; the failed preflight took 0.75 s and peaked at 134100 KiB. Those host
+preflight numbers are tooling diagnostics, not target startup/runtime/RSS
+evidence. No full bootstrap was run.
+
+This closes only the missing ARM64 mirror described at the end of this report.
+The earlier static-axis validator hypothesis remains falsified as documented
+below; this change does not relax validation or alter the pinned font catalog.
 ## Closed 2026-09-16 — ...egistration and unrelated to this. ## Fix recipe 1. **Make the receipt name the reason fir
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
@@ -239,4 +270,3 @@ and verify by diffing **both directions** -- origin's version may be ahead on
 some axes and behind on others, so overwriting either way can revert real work.
 Read both the `-` and `+` sides of `diff -u <origin> <local>` before choosing,
 then apply the readiness/diagnostic change on top of the reconciled file.
-
