@@ -448,8 +448,10 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let val_val = ctx.get_vreg(&args[1])?;
             let wrapped_key = wrap_value(ctx, builder, args[0], key_val);
             let wrapped_val = wrap_value(ctx, builder, args[1], val_val);
-            let result_i8 = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
-            Some(super::helpers::safe_extend_to_i64(builder, result_i8))
+            let _ = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
+            // rt_dict_set returns a success byte. Dict.set is fluent and
+            // returns the mutated receiver, matching the interpreter.
+            Some(receiver_val)
         }
         ("Dict", "len") | ("dict", "len") | ("Dict", "length") | ("dict", "length") => {
             Some(call_len_method(ctx, builder, "rt_dict_len", receiver_val))
