@@ -36,6 +36,31 @@ SoSIX/host provider interface was not changed or exercised: parsing failed
 before font production or backend dispatch. Keep this bug open until the
 native producer, cache, and device-readback requirements pass.
 
+### Prepared caller-coverage regression (not executed)
+
+The existing SFNT native probe compared codepoint and glyph-index buffers but
+trusted the producer's positive-alpha receipt. Identically empty caller
+buffers could therefore pass that comparison. The probe now independently
+counts actual nonzero caller bytes and requires equality with `meta[9]`.
+A three-byte destination additionally checks refusal clears completion/alpha
+receipts and leaves every sentinel byte intact. Both checks exercise the
+existing host-independent SFNT boundary; they introduce no SoSIX calls.
+
+Native verification remains pending an admitted compiler. For a meaningful
+negative control, suppress only the coverage-buffer assignment in an isolated
+source copy while keeping producer alpha accounting: the new oracle must
+exit 25 (`fail-caller-coverage`); restoring the assignment must pass. Neither
+outcome is claimed here. Profile the same native fixture under an externally
+monitored 6 GiB RSS limit, recording wall time and peak RSS.
+
+The matching historical TODO audit
+`doc/08_tracking/todo/blocked_p1_audit_2026-07-28.md` item 11 identifies the
+producer transport failure as reproducible on Linux too. Mac-only ownership
+of the DB row describes the final Vulkan attestation gate, not evidence that
+the generic SFNT producer defect is exclusive to macOS. No exact fixture entry
+was found in the test database during this audit; no passing DB receipt was
+added.
+
 ## Scope
 
 The manifest-attested macOS Vulkan 2D binary built successfully at pushed
