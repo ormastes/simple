@@ -1,0 +1,61 @@
+#!/bin/sh
+# Small hermetic Cargo contract probe: no Cargo compilation or cache writes.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-cargo-pins.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cat > "$tmp/clang" <<'TOOL'
+#!/bin/sh
+printf '%s\n' 'clang version 23.1.1'
+TOOL
+chmod +x "$tmp/clang"
+CC="$tmp/clang"
+export CC
+[ "$(bootstrap_stage3_target_c_compiler aarch64-apple-darwin)" = "$CC" ]
+ln -s "$CC" "$tmp/gcc"
+if CC="$tmp/gcc" bootstrap_stage3_target_c_compiler aarch64-apple-darwin > /dev/null 2>&1; then
+    echo 'FAIL: macOS accepted gcc' >&2
+    exit 1
+fi
+if CXX=/usr/bin/g++ bootstrap_stage3_target_c_compiler aarch64-apple-darwin > /dev/null 2>&1; then
+    echo 'FAIL: macOS accepted g++' >&2
+    exit 1
+fi
+sed -n '/^run_rust_authority_cargo() {/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/cargo-function.sh"
+. "$tmp/cargo-function.sh"
+cat > "$tmp/cargo" <<'CARGO'
+#!/bin/sh
+set -eu
+[ "$CXX" = '/pin/clang++' ]
+[ "$AR" = '/pin/llvm-ar' ]
+[ "$LD" = '/pin/ld64.lld' ]
+[ "$LLVM_CONFIG" = '/pin/llvm-config' ]
+[ "$CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS" = '-C link-arg=--ld-path=/pin/ld64.lld' ]
+[ "$CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER" = "$CC" ]
+[ "${UNRELATED_SECRET-unset}" = unset ]
+CARGO
+chmod +x "$tmp/cargo"
+prepare_rust_authority_workspace() { :; }
+absolute_path() { printf '%s\n' "$1"; }
+run_logged() { shift; "$@"; }
+os=macos progress_log= rust_authority_home="$tmp" rust_authority_cargo_home="$tmp"
+rust_authority_target="$tmp" rust_authority_tmp="$tmp" rustc_abs=/pin/rustc
+cc_abs="$CC" simple_abi_cflags= jobs=1 mingw_linker= mingw_cc= mingw_ar=
+mingw_cflags= mingw_rustflags=
+windows_include= windows_lib= windows_libpath= windows_system_root=
+windows_system_drive= windows_program_data= windows_temp=
+rust_llvm_major=23 rust_llvm_prefix=/pin rust_llvm_homebrew_prefix=/pin
+rust_llvm_library_path=/pin rust_llvm_sdkroot=/pin cargo_abs="$tmp/cargo"
+CXX=/pin/clang++ AR=/pin/llvm-ar LD=/pin/ld64.lld LLVM_CONFIG=/pin/llvm-config
+RUSTFLAGS='-C link-arg=--ld-path=/pin/ld64.lld'
+UNRELATED_SECRET=must-not-leak
+export UNRELATED_SECRET
+unset CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER
+for rust_llvm_status in enabled disabled; do
+    for lto in on off; do
+        run_rust_authority_cargo pin-probe "$lto"
+    done
+done
+printf '%s\n' 'PASS: explicit Clang selected, gcc rejected, all four Cargo branches retain pins and scrub unrelated environment'
