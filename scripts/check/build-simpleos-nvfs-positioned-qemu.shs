@@ -6,9 +6,23 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 runtime=${SIMPLE_RUNTIME_PATH:-}
 provenance=${SIMPLE_STAGE4_PROVENANCE:-}
 receipt=${SIMPLE_RUNTIME_RECEIPT:-}
-kernel=${SIMPLEOS_NVFS_POSITIONED_KERNEL:-$root/build/os/simpleos_x86_64_nvfs_positioned.elf}
-image=${SIMPLEOS_NVFS_ROOT_IMAGE:-$root/build/os/simpleos_nvfs_root.img}
-entry=examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl
+mode=nvfs-positioned
+case ${1:-} in
+    --harden-probe) mode=harden-probe; shift ;;
+    '') ;;
+    *) printf '%s\n' "build-simpleos-nvfs-positioned-qemu: unsupported option: $1" >&2; exit 1 ;;
+esac
+if [ "$mode" = harden-probe ]; then
+    kernel=${SIMPLEOS_HARDEN_PROBE_KERNEL:-$root/build/os/simpleos_x86_64_harden_probe.elf}
+    image=${SIMPLEOS_HARDEN_PROBE_IMAGE:-$root/build/os/fat32-x86_64-harden.img}
+    entry=examples/09_embedded/simple_os/arch/x86_64/harden_probe_entry.spl
+    build_timeout=120
+else
+    kernel=${SIMPLEOS_NVFS_POSITIONED_KERNEL:-$root/build/os/simpleos_x86_64_nvfs_positioned.elf}
+    image=${SIMPLEOS_NVFS_ROOT_IMAGE:-$root/build/os/simpleos_nvfs_root.img}
+    entry=examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl
+    build_timeout=240
+fi
 target=x86_64-unknown-none
 
 fail() { printf '%s\n' "build-simpleos-nvfs-positioned-qemu: $*" >&2; exit 1; }
@@ -40,7 +54,7 @@ mkdir -p build/os build/os/generated "$(dirname -- "$kernel")" "$(dirname -- "$i
     --source build/os/generated --source src/os --source src/lib \
     --source examples/09_embedded/simple_os \
     --backend cranelift --cpu x86-64-v1 --opt-level=aggressive \
-    --log off --timeout 240 --entry-closure --entry "$entry" \
+    --log off --timeout "$build_timeout" --entry-closure --entry "$entry" \
     --target "$target" --output "$kernel" \
     --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
 [ -s "$kernel" ] || fail kernel-build-missing
@@ -56,11 +70,39 @@ source_revision=$(git rev-parse HEAD)
     printf 'source_revision=%s\n' "$source_revision"
 } >"${kernel}.build_stamp"
 
-SIMPLE_RUNTIME_PATH="$runtime_path" SIMPLE_RUNTIME_RECEIPT="$receipt" \
-    sh scripts/os/mkfs-nvfs.shs "$image" 65536
+if [ "$mode" = harden-probe ]; then
+    # The nonce contract requires a FAT32 source image containing the actual
+    # QEMUNONC and FSEXEC nonce slots. NVFS media cannot satisfy it, so do not
+    # relabel an NVFS image as a harden probe artifact.
+    harden_payload=build/os/harden/fsexec_nonce_probe.elf
+    harden_manifest=build/os/harden/fsexec_nonce_probe.manifest
+    sh scripts/os/build_simpleos_fs_exec_probe.shs x86_64 "$harden_payload" "$harden_manifest"
+    SIMPLEOS_FSEXEC_BINARY="$harden_payload" \
+        sh scripts/os/make_os_disk.shs 64 "$image" "$kernel" x86_64 fs-exec
+    nonce_slots=$(LC_ALL=C grep -aFo 'SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
+    payload_slots=$(LC_ALL=C grep -aFo '__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
+    [ "$nonce_slots" -eq 1 ] || fail "harden-nonce-slot-count=$nonce_slots"
+    [ "$payload_slots" -eq 1 ] || fail "harden-fsexec-nonce-slot-count=$payload_slots"
+    sh scripts/os/build-simpleos-x86-64-efi-esp.shs \
+        --kernel "$kernel" --out-dir build/os/harden/firmware \
+        --title 'SimpleOS x86_64 hardening probe' \
+        --boot-echo '[grub-uefi] hardening probe loading /boot/kernel.elf ...'
+else
+    SIMPLE_RUNTIME_PATH="$runtime_path" SIMPLE_RUNTIME_RECEIPT="$receipt" \
+        sh scripts/os/mkfs-nvfs.shs "$image" 65536
+fi
 
-printf 'simpleos_nvfs_positioned_kernel=%s\n' "$kernel_real"
-printf 'simpleos_nvfs_positioned_kernel_receipt=%s\n' "$(readlink -f -- "${kernel}.build_stamp")"
-printf 'simpleos_nvfs_positioned_image=%s\n' "$(readlink -f -- "$image")"
-printf 'simpleos_nvfs_positioned_image_manifest=%s\n' "$(readlink -f -- "${image}.manifest.env")"
-printf '%s\n' simpleos_nvfs_positioned_build=pass
+if [ "$mode" = harden-probe ]; then
+    printf 'simpleos_harden_probe_kernel=%s\n' "$kernel_real"
+    printf 'simpleos_harden_probe_image=%s\n' "$(readlink -f -- "$image")"
+    printf 'simpleos_harden_probe_payload=%s\n' "$(readlink -f -- "$harden_payload")"
+    printf 'simpleos_harden_probe_payload_manifest=%s\n' "$(readlink -f -- "$harden_manifest")"
+    printf '%s\n' simpleos_harden_probe_artifact_build=pass
+    printf '%s\n' simpleos_harden_probe_live_acceptance=pending
+else
+    printf 'simpleos_nvfs_positioned_kernel=%s\n' "$kernel_real"
+    printf 'simpleos_nvfs_positioned_kernel_receipt=%s\n' "$(readlink -f -- "${kernel}.build_stamp")"
+    printf 'simpleos_nvfs_positioned_image=%s\n' "$(readlink -f -- "$image")"
+    printf 'simpleos_nvfs_positioned_image_manifest=%s\n' "$(readlink -f -- "${image}.manifest.env")"
+    printf '%s\n' simpleos_nvfs_positioned_build=pass
+fi

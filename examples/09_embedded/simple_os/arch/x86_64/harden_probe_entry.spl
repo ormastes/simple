@@ -1,0 +1,80 @@
+# Real-firmware x86_64 hardening probe entry.
+#
+# This entry reports only evidence it actually performs. The live capability
+# execution path, allocator traps, and link-time hardening remain fail-closed
+# until their respective owners add executable probes.
+
+extern fn serial_println(msg: text)
+extern fn rt_x86_64_nvfs_probe() -> i64
+extern fn rt_qemu_nonce_echo() -> i64
+extern fn rt_x86_tss_init() -> i64
+extern fn _get_kernel_start() -> u64
+extern fn _get_kernel_end() -> u64
+
+use os.kernel.arch.x86_64.arch_init.{arch_x86_64_direct_boot_init}
+use os.kernel.arch_adapt.x86_64_hardening_probe.{
+    x86_64_hardening_boot_canary_marker,
+    x86_64_hardening_probe_full
+}
+use os.kernel.boot.cpu.{halt_loop}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
+use os.kernel.memory.pmm.{pmm_init_identity_range, g_pmm}
+use os.kernel.memory.vmm.{vmm_init}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+fn harden_probe_fail(reason: text):
+    serial_println("[harden-probe] fail: {reason}")
+    halt_loop()
+
+fn harden_probe_capability_predicate() -> bool:
+    # The capability predicate is unit-testable but is not a live executable
+    # handoff. Keep its evidence distinct from the unavailable AC-1 gate.
+    val denied = exec_cap_check_caps(CapabilitySet.empty(), "/SYS/APPS/HARDEN.SMF")
+    if denied != -13:
+        serial_println("[exec] capability predicate FAILED rc={denied}")
+        return false
+    serial_println("[exec] capability predicate: DENIED")
+    serial_println("[exec] live capability enforcement UNAVAILABLE")
+    true
+
+fn harden_probe_hardware_report():
+    val report = x86_64_hardening_probe_full()
+    val nx = if report.nx: 1 else: 0
+    val smep = if report.smep: 1 else: 0
+    val smap = if report.smap: 1 else: 0
+    val wp = if report.wp: 1 else: 0
+    serial_println(x86_64_hardening_boot_canary_marker())
+    serial_println(
+        "[harden-probe] hardware nx={nx} smep={smep} smap={smap} wp={wp}")
+    serial_println("[hmalloc] guard-page trap UNAVAILABLE owner=A09")
+    serial_println("[hmalloc] double-free trap UNAVAILABLE owner=A09")
+    serial_println("[hardening] link-time PIE/RELRO/SSP UNVERIFIED")
+
+fn spl_start():
+    serial_println("=== SimpleOS x86_64 hardening probe ===")
+    if rt_x86_64_nvfs_probe() != 1:
+        harden_probe_fail("NVMe/FAT nonce media unavailable")
+        return
+    # rt_qemu_nonce_echo reads /QEMUNONC.TXT and writes its exact observed
+    # SIMPLEOS_QEMU_NONCE=<value> line to serial. The host classifier binds it.
+    if rt_qemu_nonce_echo() != 1:
+        harden_probe_fail("QEMU nonce media unavailable")
+        return
+    arch_x86_64_direct_boot_init()
+    if rt_x86_tss_init() != 0:
+        harden_probe_fail("TSS initialization")
+        return
+    # This static 512 MiB ceiling matches the harden QEMU descriptor; it is not
+    # firmware memory-map discovery. It prevents this fixed-profile target from
+    # registering the old 2 GiB synthetic range and fails if its own bounds do
+    # not fit the configured ceiling.
+    if not pmm_init_identity_range(0x20000000, _get_kernel_start(), _get_kernel_end()):
+        harden_probe_fail("memory initialization")
+        return
+    vmm_init(g_pmm, 0)
+    if not harden_probe_capability_predicate():
+        halt_loop()
+        return
+    harden_probe_hardware_report()
+    serial_println("[harden-probe] predicate complete; live criteria blocked")
+    halt_loop()

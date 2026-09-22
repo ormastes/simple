@@ -478,25 +478,84 @@ pub fn harden_kernel_path() -> text:
 pub fn harden_image_path() -> text:
     "build/os/fat32-x86_64-harden.img"
 
+pub fn harden_firmware_vars_path() -> text:
+    "build/os/harden/firmware/OVMF_VARS_4M.fd"
+
+pub fn harden_firmware_esp_path() -> text:
+    "build/os/harden/firmware/esp"
+
 pub fn harden_qemu_bin() -> text:
     "qemu-system-x86_64"
 
 pub fn harden_qemu_args() -> [text]:
+    harden_qemu_args_with_media(
+        harden_image_path(), harden_firmware_vars_path(), harden_firmware_esp_path())
+
+pub fn harden_qemu_args_with_media(
+    image_path: text, firmware_vars_path: text, firmware_esp_path: text
+) -> [text]:
     ["-machine", "q35",
      "-cpu", "qemu64",
      "-m", "512M",
      "-nographic",
      "-no-reboot",
-     "-kernel", "build/os/simpleos_x86_64_harden_probe.elf",
-     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+     "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
+     "-drive", "if=pflash,format=raw,file={firmware_vars_path}",
+     "-drive", "file=fat:rw:{firmware_esp_path},format=raw,id=hardenesp,if=none",
+     "-device", "virtio-blk-pci,drive=hardenesp,bootindex=0",
      "-device", "nvme,id=harden,serial=x86-64-harden",
-     "-drive", "file=build/os/fat32-x86_64-harden.img,if=none,id=hardennsd,format=raw",
+     "-drive", "file={image_path},if=none,id=hardennsd,format=raw",
      "-device", "nvme-ns,drive=hardennsd,bus=harden,nsid=1"]
 
 pub fn harden_timeout_ms() -> i64:
     default_qemu_timeout_ms()
 
+pub fn harden_media_first_missing_path(
+    kernel_path: text, kernel_exists: bool,
+    image_path: text, image_exists: bool,
+    firmware_vars_path: text, firmware_vars_exists: bool,
+    firmware_esp_boot_path: text, firmware_esp_boot_exists: bool
+) -> text:
+    if not kernel_exists: return SYSTEST_PREFIX_MISSING_MEDIA + kernel_path
+    if not image_exists: return SYSTEST_PREFIX_MISSING_MEDIA + image_path
+    if not firmware_vars_exists: return SYSTEST_PREFIX_MISSING_MEDIA + firmware_vars_path
+    if not firmware_esp_boot_exists: return SYSTEST_PREFIX_MISSING_MEDIA + firmware_esp_boot_path
+    ""
+
+pub fn run_harden_qemu_systest_with_media(
+    arch: text,
+    kernel_path: text,
+    image_path: text,
+    firmware_vars_path: text,
+    firmware_esp_path: text,
+    markers: [text]
+) -> text:
+    """Fail closed unless every UEFI harden-probe artifact exists before QEMU.
+
+    The generic runner only knows a kernel and a data image. This wrapper owns
+    the additional UEFI NVRAM and ESP media required by the harden descriptor.
+    """
+    val firmware_esp_boot_path = firmware_esp_path + "/EFI/BOOT/BOOTX64.EFI"
+    val missing = harden_media_first_missing_path(
+        kernel_path, rt_file_exists(kernel_path), image_path, rt_file_exists(image_path),
+        firmware_vars_path, rt_file_exists(firmware_vars_path), firmware_esp_boot_path,
+        rt_file_exists(firmware_esp_boot_path))
+    if missing.len() != 0:
+        return missing
+    run_qemu_systest(
+        arch, kernel_path, image_path, harden_qemu_bin(),
+        harden_qemu_args_with_media(image_path, firmware_vars_path, firmware_esp_path),
+        markers, harden_timeout_ms())
+
+pub fn run_harden_qemu_systest(arch: text, markers: [text]) -> text:
+    run_harden_qemu_systest_with_media(
+        arch, harden_kernel_path(), harden_image_path(), harden_firmware_vars_path(),
+        harden_firmware_esp_path(), markers)
+
 pub fn harden_cap_exec_markers() -> [text]:
+    # AC-1 must stay RED until the guest emits evidence from an actual
+    # capability-gated executable handoff. Predicate evidence is diagnostic
+    # only and must never satisfy this marker set.
     ["[exec] capability gate: ENFORCED",
      "[exec] uncapable exec REJECTED"]
 

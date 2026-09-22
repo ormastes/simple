@@ -5,28 +5,68 @@ QEMU System Test — Harden Capability-Gate Exec (AC-1).
 **Feature IDs:** #SIMPLEOS-HARDEN-AC1
 **Category:** OS system test
 
-Boots the SimpleOS x86_64 harden probe under QEMU and validates that the
-capability gate blocks uncapable exec attempts.
+Boots the SimpleOS x86_64 harden probe under QEMU and validates the media and
+nonce-bound predicate evidence. Live capability-exec acceptance remains open.
 Kernel: build/os/simpleos_x86_64_harden_probe.elf
 Image:  build/os/fat32-x86_64-harden.img
 
 A missing kernel is a diagnosed RED failure. Never uses skip().
 """
 use std.spec.*
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.qemu_systest_contract.{
-    run_qemu_systest,
+    run_harden_qemu_systest,
+    run_harden_qemu_systest_with_media,
     harden_kernel_path,
     harden_image_path,
-    harden_qemu_bin,
     harden_qemu_args,
+    harden_qemu_args_with_media,
     harden_cap_exec_markers,
-    harden_timeout_ms,
     SYSTEST_PASS
 }
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 
 describe "qemu system test — harden capability-gate exec (AC-1)":
+
+    it "uses real firmware media and rejects a missing probe artifact":
+        step("reproduce reported failure")
+        expect(run_harden_qemu_systest_with_media(
+            "harden_missing_probe", "build/os/does-not-exist-harden-probe.elf",
+            "unused-image.img", "unused-vars.fd", "unused-esp", harden_cap_exec_markers()
+        )).to_equal("missing-media:build/os/does-not-exist-harden-probe.elf")
+
+        step("exercise corrected behavior")
+        expect(harden_qemu_args().contains("-kernel")).to_equal(false)
+        expect(harden_qemu_args().contains("isa-debug-exit,iobase=0xf4,iosize=0x04")).to_equal(false)
+        expect(harden_qemu_args().contains(
+            "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd")).to_equal(true)
+        val fixture_args = harden_qemu_args_with_media("fixture.img", "fixture-vars.fd", "fixture-esp")
+        expect(fixture_args.contains("file=fixture.img,if=none,id=hardennsd,format=raw")).to_equal(true)
+        expect(fixture_args.contains("file=fat:rw:fixture-esp,format=raw,id=hardenesp,if=none")).to_equal(true)
+
+        step("reject missing firmware media before QEMU")
+        val fixture_root = "build/os/systest/harden-media-refusal"
+        val fixture_kernel = fixture_root + "/kernel.elf"
+        val fixture_image = fixture_root + "/image.img"
+        val fixture_esp = fixture_root + "/esp"
+        expect(rt_dir_create_all(fixture_esp + "/EFI/BOOT")).to_equal(true)
+        expect(rt_file_write_text(fixture_kernel, "fixture-kernel")).to_equal(true)
+        expect(rt_file_write_text(fixture_image, "fixture-image")).to_equal(true)
+        expect(rt_file_write_text(fixture_esp + "/EFI/BOOT/BOOTX64.EFI", "fixture-efi")).to_equal(true)
+        expect(run_harden_qemu_systest_with_media(
+            "harden_missing_firmware", fixture_kernel, fixture_image,
+            fixture_root + "/missing-vars.fd", fixture_esp, harden_cap_exec_markers()
+        )).to_equal("missing-media:" + fixture_root + "/missing-vars.fd")
+
+    it "records predicate denial only as a diagnostic, never AC-1 success":
+        step("report the known live-exec gap")
+        expect(exec_cap_check_caps(CapabilitySet.empty(), "/SYS/APPS/HARDEN.SMF")).to_equal(-13)
+        expect(harden_cap_exec_markers().contains("[exec] capability predicate: DENIED")).to_equal(false)
+        expect(harden_cap_exec_markers().contains("[exec] live capability enforcement UNAVAILABLE")).to_equal(false)
 
     it "harden kernel and image are present (media check)":
         val kernel_present = rt_file_exists(harden_kernel_path())
@@ -38,16 +78,8 @@ describe "qemu system test — harden capability-gate exec (AC-1)":
             print "[harden_cap_exec] MISSING IMAGE: " + harden_image_path()
         expect(image_present).to_equal(true)
 
-    it "harden probe boots and capability-gate exec markers appear in serial":
-        val classification = run_qemu_systest(
-            "harden_cap_exec",
-            harden_kernel_path(),
-            harden_image_path(),
-            harden_qemu_bin(),
-            harden_qemu_args(),
-            harden_cap_exec_markers(),
-            harden_timeout_ms()
-        )
+    it "harden probe must emit live capability-gate markers for AC-1":
+        val classification = run_harden_qemu_systest("harden_cap_exec", harden_cap_exec_markers())
         if classification != SYSTEST_PASS:
             print "[harden_cap_exec] FAILED: " + classification
         expect(classification).to_equal(SYSTEST_PASS)
