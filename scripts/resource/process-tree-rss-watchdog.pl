@@ -13,15 +13,17 @@ use Fcntl qw(O_RDONLY O_NOFOLLOW);
 use Digest::SHA;
 
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
-            'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new' );
+            'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
+            'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce') );
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode)=(.+)$/
         or die "rss-guard: invalid option\n";
     $opt{$1} = $2;
 }
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
+$opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS cap mode\n";
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
@@ -326,6 +328,9 @@ sub receipt {
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
         "containment_scope=observed-descendants-and-process-groups\n" .
         "hard_memory_limit=0\nquiescent=$quiet\n" .
+        "rss_cap_mode=$opt{'rss-cap-mode'}\nrss_cap_enforced=" .
+        ($opt{'rss-cap-mode'} eq 'enforce' ? 1 : 0) . "\n" .
+        "rss_limit_kib=" . ($opt{'rss-cap-mode'} eq 'enforce' ? $opt{'max-rss-kib'} : 'unlimited') . "\n" .
         "session_id=$session_id\nsession_checks=$session_checks\n" .
         "session_mode=$opt{'session-mode'}\nsession_admission=$session_admission\n" .
         "parent_session_admission_sha256=$parent_admission_sha\n" .
@@ -359,6 +364,7 @@ if ($leader == 0) {
     close $gate_write;
     if ($session_id) { setpgid(0, 0) == 0 or POSIX::_exit(89) }
     else { defined(setsid()) && getpgrp() == $$ or POSIX::_exit(89) }
+    $ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} = $opt{'rss-cap-mode'};
     $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = $session_id || $$;
     $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} = $session_helper;
     my $go;
@@ -390,7 +396,7 @@ while (1) {
     my @live = members($all);
     my $rss = 0; $rss += $all->{$_}{rss} for @live;
     $peak = $rss if $rss > $peak;
-    if ($rss >= $opt{'max-rss-kib'}) {
+    if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) {
         ($status, $code) = ('rss-cap-exceeded', 88); last;
     }
     if (!$released) {
@@ -434,7 +440,7 @@ if ($code == 124 || $interrupted) {
         last unless @live;
         my $rss = 0; $rss += $all->{$_}{rss} for @live;
         $peak = $rss if $rss > $peak;
-        if ($rss >= $opt{'max-rss-kib'}) { ($status, $code) = ('rss-cap-exceeded', 88); last }
+        if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) { ($status, $code) = ('rss-cap-exceeded', 88); last }
         sleep 0.02;
     }
 }
