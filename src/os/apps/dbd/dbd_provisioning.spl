@@ -80,8 +80,15 @@ pub class DbdProvisioningOwnerV1:
         principal: text, credential: [u8], cert_chain: [[u8]],
         private_key: [u8], signature_scheme: u16
     ) -> bool:
+        # Admission owns the mutable credential from entry, including every
+        # validation failure.  Taking it only after validation leaves the
+        # caller's rejected secret live on the principal/length early returns.
         if self.state == DbdProvisioningStateV1.Admitted:
+            val replacement_wipe = secure_zero_u8_slots(credential)
+            if not replacement_wipe.verified():
+                self.close()
             return false
+        self.credential = credential
         if principal.len() <= 0 or principal.len() > DBD_MAX_PRINCIPAL_BYTES:
             return self.quarantine("dbd-principal-invalid")
         if credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
@@ -102,7 +109,6 @@ pub class DbdProvisioningOwnerV1:
             signature_scheme == 0u16:
             return self.quarantine("dbd-private-key-boundary-invalid")
         self.principal = principal
-        self.credential = credential
         self.cert_chain = cert_chain
         self.private_key = private_key
         self.signature_scheme = signature_scheme

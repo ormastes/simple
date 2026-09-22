@@ -37,6 +37,23 @@ overwrite verification fails; later readiness denial alone would leave the
 provider configured. The required ARM64 signed receipt is absent, so this
 record remains open.
 
+The executable reproducer at
+`test/fixtures/simpleos_dbd_credential_zeroization/main.spl` additionally pins
+the admission paths that previously returned before the provisioning owner
+took the mutable credential: invalid principal, short credential, invalid
+certificate material, successful admission, and rejected replacement. Each
+path reads the caller-visible buffer back as all zero. Request authentication
+now uses `sha256_u8_hex_zeroizing` too, so the per-request credential-derived
+schedule cannot bypass the provisioning-time workspace contract.
+
+Focused native evidence used the admitted pure-Simple Stage-2 compiler
+`dd3a14c926ae9a38b10935e88aae1d542ba697dfb852d5533fd716c7b12bb595`
+with `--threads 12`. The reproducer built and exited 0. Its 10,000 real digest
+authentication requests, including candidate volatile wipe/readback, completed
+in 0.33 seconds (about 33 microseconds/request) with 54,780 KiB maximum RSS and
+no application output. This is host evidence only; it does not replace the
+required fresh ARM64 target receipt and retained-artifact scan.
+
 ## Problem
 
 The host disk builder wipes the transient buffer used to read the bounded

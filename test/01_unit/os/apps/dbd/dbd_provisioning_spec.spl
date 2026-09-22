@@ -23,6 +23,12 @@ fn _bytes(value: u8, count: i64) -> [u8]:
         i = i + 1
     out
 
+fn _all_zero(bytes: [u8]) -> bool:
+    for byte in bytes:
+        if byte != 0u8:
+            return false
+    true
+
 describe "DBD provisioning acceptance":
     it "admits bounded credentials and TLS material without retaining AUTH bytes":
         var owner = DbdProvisioningOwnerV1.new()
@@ -43,14 +49,16 @@ describe "DBD provisioning acceptance":
     it "volatile-wipes the provisioning-owned credential after digest admission":
         step("reproduce reported failure")
         var owner = DbdProvisioningOwnerV1.new()
+        var credential = _bytes(31u8, 32)
         val admitted = owner.admit(
-            "operator", _bytes(31u8, 32), [[48u8, 1u8]],
+            "operator", credential, [[48u8, 1u8]],
             [48u8, 2u8], 0x0807u16)
 
         step("exercise corrected behavior")
         expect(admitted).to_be(true)
         expect(owner.credential_wiped).to_be(true)
         expect(owner.credential.len()).to_equal(0u64)
+        expect(_all_zero(credential)).to_be(true)
         expect(owner.provider.configured).to_be(true)
 
         # Supply a separate wire candidate after the owner's raw buffer was
@@ -65,15 +73,46 @@ describe "DBD provisioning acceptance":
     it "fails closed and clears the owned credential when digest admission is rejected":
         step("reject adjacent invalid input")
         var owner = DbdProvisioningOwnerV1.new()
+        var credential = _bytes(31u8, 32)
         val rejected = owner.admit(
-            " ", _bytes(31u8, 32), [[48u8, 1u8]],
+            " ", credential, [[48u8, 1u8]],
             [48u8, 2u8], 0x0807u16)
 
         expect(rejected).to_be(false)
         expect(owner.state).to_equal(DbdProvisioningStateV1.Quarantined)
         expect(owner.credential_wiped).to_be(true)
         expect(owner.credential.len()).to_equal(0u64)
+        expect(_all_zero(credential)).to_be(true)
         expect(owner.provider.configured).to_be(false)
+
+    it "wipes credentials on every validation and replacement early return":
+        step("reproduce reported failure")
+        var short_owner = DbdProvisioningOwnerV1.new()
+        var short_credential = _bytes(41u8, 31)
+        expect(short_owner.admit(
+            "operator", short_credential, [[1u8]], [2u8], 0x0807u16
+        )).to_be(false)
+        expect(_all_zero(short_credential)).to_be(true)
+
+        var certificate_owner = DbdProvisioningOwnerV1.new()
+        var certificate_credential = _bytes(42u8, 32)
+        expect(certificate_owner.admit(
+            "operator", certificate_credential, [], [2u8], 0x0807u16
+        )).to_be(false)
+        expect(_all_zero(certificate_credential)).to_be(true)
+
+        step("reject replacement without weakening the admitted owner")
+        var admitted_owner = DbdProvisioningOwnerV1.new()
+        expect(admitted_owner.admit(
+            "operator", _bytes(43u8, 32), [[1u8]], [2u8], 0x0807u16
+        )).to_be(true)
+        var replacement_credential = _bytes(44u8, 32)
+        expect(admitted_owner.admit(
+            "replacement", replacement_credential, [[3u8]], [4u8], 0x0807u16
+        )).to_be(false)
+        expect(_all_zero(replacement_credential)).to_be(true)
+        expect(admitted_owner.ready()).to_be(true)
+        expect(admitted_owner.provider.principal).to_equal("operator")
 
     it "fails closed when any bounded secret or certificate boundary is invalid":
         var short_secret = DbdProvisioningOwnerV1.new()
