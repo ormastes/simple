@@ -756,8 +756,28 @@ bootstrap_stage3_target_c_compiler() {
             "$bootstrap_stage3_gnu_tool_path" \
                 --target=x86_64-w64-windows-gnu --version >/dev/null 2>&1
             ;;
+        *-apple-darwin)
+            # Honor the same explicit Clang selection for cc-rs and C builds.
+            case "${CXX:-clang++}" in
+                g++|g++-*|gcc|gcc-*|*/gcc|*/gcc-*|*/g++|*/g++-*)
+                    echo 'bootstrap: GCC/G++ is forbidden for the macOS C++ toolchain' >&2
+                    return 1 ;;
+            esac
+            bootstrap_stage3_mac_cc=$(command -v "${CC:-clang}") || return 1
+            case "$bootstrap_stage3_mac_cc" in
+                */gcc|*/gcc-*|*/g++|*/g++-*)
+                    echo 'bootstrap: GCC/G++ is forbidden for the macOS C toolchain' >&2
+                    return 1 ;;
+            esac
+            "$bootstrap_stage3_mac_cc" --version 2>/dev/null |
+                grep -qi 'clang version' || {
+                    echo 'bootstrap: macOS C compiler must be Clang' >&2
+                    return 1
+                }
+            printf '%s\n' "$bootstrap_stage3_mac_cc"
+            ;;
         *)
-            command -v cc 2>/dev/null
+            command -v "${CC:-cc}" 2>/dev/null
             ;;
     esac
 }
@@ -1461,7 +1481,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     esac
     PATH=$bootstrap_stage3_llvm_path
     export PATH
-    bootstrap_stage3_llvm_config=$(command -v llvm-config) || return 1
+    bootstrap_stage3_llvm_config=$(command -v "${LLVM_CONFIG:-llvm-config}") || return 1
     bootstrap_stage3_llvm_config_canonical=$(
         perl -MCwd=abs_path -e \
             'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
@@ -1963,7 +1983,7 @@ bootstrap_stage3_tool_authority_snapshot() (
                 >>"$bootstrap_stage3_tool_tmp" || return 1
         fi
     done
-    if command -v llvm-config >/dev/null 2>&1; then
+    if command -v "${LLVM_CONFIG:-llvm-config}" >/dev/null 2>&1; then
         bootstrap_stage3_tool_llvm_requested=$(command -v llvm-config) ||
             return 1
         bootstrap_stage3_tool_llvm_canonical=$(
@@ -4359,8 +4379,14 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 >>"$bootstrap_stage3_seed_records" || exit 1
         fi
         bootstrap_stage3_seed_trace native-cc-recorded
-        if command -v llvm-config >/dev/null 2>&1; then
-            bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||
+        # Forwarded Cargo settings distinguish cached seed authorities.
+        printf 'cxx=%s\nar=%s\nld=%s\nllvm-config=%s\nrustflags=%s\nmac-linker=%s\n' \
+            "${CXX:-clang++}" "${AR:-ar}" "${LD:-ld}" \
+            "${LLVM_CONFIG:-llvm-config}" "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
+            "${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$bootstrap_stage3_seed_cc}" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        if command -v "${LLVM_CONFIG:-llvm-config}" >/dev/null 2>&1; then
+            bootstrap_stage3_seed_llvm_config=$(command -v "${LLVM_CONFIG:-llvm-config}") ||
                 exit 1
             bootstrap_stage3_seed_trace native-llvm-selected
             bootstrap_stage3_seed_llvm_config_canonical=$(
