@@ -1,7 +1,7 @@
 # SimpleOS Simple Web `decode_string` Fault Storm
 ## Open 2026-09-16 — needs owner triage
 
-## 2026-09-22 — allocation-free text-owner cleanup (offline)
+## 2026-09-22 — text-owner interpolation cleanup (offline)
 
 The earlier live decode fault fix remains recorded below. The theme-package
 parser still used interpolation around `line.trim()` and `value.trim()` to
