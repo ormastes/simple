@@ -109,6 +109,9 @@ fn build_vreg_types(
                 MirInst::ConstInt { dest, .. } => {
                     types_map.insert(*dest, TypeId::I64);
                 }
+                MirInst::ConstString { dest, .. } => {
+                    types_map.insert(*dest, TypeId::STRING);
+                }
                 MirInst::ConstFloat { dest, .. } => {
                     types_map.insert(*dest, TypeId::F64);
                 }
@@ -170,8 +173,19 @@ fn build_vreg_types(
                 MirInst::MethodCallStatic {
                     dest: Some(dest),
                     func_name,
-                    ..
+                    receiver,
+                    args,
                 } => {
+                    // char_at returns a one-character text value. Preserve this
+                    // proof for the following bare ord() without treating an
+                    // unknown receiver as text.
+                    let dotted = func_name.replace("_dot_", ".");
+                    if args.len() == 1
+                        && (matches!(dotted.as_str(), "str.char_at" | "text.char_at" | "String.char_at" | "string.char_at")
+                            || (dotted == "char_at" && types_map.get(receiver) == Some(&TypeId::STRING)))
+                    {
+                        types_map.insert(*dest, TypeId::STRING);
+                    }
                     if let Some(ty) = function_return_types.get(func_name.as_str()) {
                         if matches!(ty, &TypeId::F64 | &TypeId::F32) {
                             types_map.insert(*dest, *ty);
@@ -2763,7 +2777,7 @@ impl LlvmBackend {
                 if matches!(method, "ord" | "codepoint" | "code_point") && args.is_empty()
                     && (matches!(func_name.replace("_dot_", ".").split('.').next(), Some("str" | "text" | "String" | "string"))
                         || (func_name == method
-                            && matches!(vreg_types.get(receiver).copied(), None | Some(crate::hir::TypeId::STRING))))
+                            && matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::STRING))))
                 {
                     let recv = self.get_vreg(receiver, vreg_map)?;
                     let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
@@ -2773,7 +2787,7 @@ impl LlvmBackend {
                     let result = builder.build_call(code_at, &[recv.into(), i64_type.const_zero().into()], "ord")
                         .map_err(|e| crate::error::factory::llvm_build_failed("ord call", &e))?;
                     if let Some(d) = dest {
-                        if let Some(value) = result.try_as_basic_value().basic() {
+                        if let Some(value) = result.try_as_basic_value().left() {
                             vreg_map.insert(*d, value);
                         }
                     }
@@ -2800,7 +2814,7 @@ impl LlvmBackend {
                     let call = builder.build_call(intrinsic, &[recv.into()], "float_method")
                         .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
                     if let Some(d) = dest {
-                        if let Some(value) = call.try_as_basic_value().basic() {
+                        if let Some(value) = call.try_as_basic_value().left() {
                             vreg_map.insert(*d, value);
                         }
                     }
@@ -2944,7 +2958,6 @@ impl LlvmBackend {
                     // dedicated mutating-method channel.
                     "write_span" => Some("rt_array_write_span"),
                     "clear" => Some("rt_array_clear"),
-                    "write_span" => Some("rt_array_write_span"),
                     "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
                     // "strip"/"trimmed" synonyms for "trim" (this table's own
@@ -3976,6 +3989,48 @@ mod tests {
         assert!(ir.contains("call i64 @rt_string_char_at("), "{ir}");
         assert!(ir.contains("call i64 @rt_string_char_code_at("), "{ir}");
         assert!(!ir.contains("@ord("), "bare ord must not become an unresolved extern: {ir}");
+        for (text, expected) in [("", 0), ("A", 65), ("é", 233), ("😀", 0x1f600)] {
+            let value = simple_runtime::value::rt_string_new(text.as_ptr(), text.len() as u64);
+            assert_eq!(simple_runtime::value::rt_string_char_code_at(value, 0), expected);
+        }
+    }
+
+    #[test]
+    fn bare_ord_on_unknown_user_receiver_keeps_user_resolution() {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("user_ord").unwrap();
+        let mut f = MirFunction::new("caller".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public);
+        f.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 0 });
+        f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "User.make".to_string(), args: vec![],
+        });
+        f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(2)), receiver: VReg(1), func_name: "ord".to_string(), args: vec![],
+        });
+        f.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+        let error = backend.compile_function(&f).unwrap_err().to_string();
+        assert!(error.contains("cannot resolve method call `ord`"), "{error}");
+        assert!(!backend.get_ir().unwrap().contains("@rt_string_char_code_at("));
+    }
+
+    #[test]
+    fn scalar_f32_rounding_preserves_width() {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("f32_rounding").unwrap();
+        for method in ["floor", "ceil", "round"] {
+            let mut f = MirFunction::new(format!("f32_{method}"), crate::hir::TypeId::F32,
+                simple_parser::ast::Visibility::Public);
+            f.params.push(MirLocal { name: "value".to_string(), ty: crate::hir::TypeId::F32,
+                kind: LocalKind::Parameter, is_ghost: false });
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: format!("f32.{method}"), args: vec![],
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&f).unwrap();
+            assert!(backend.get_ir().unwrap().contains(&format!("@llvm.{method}.f32(")));
+        }
+        backend.verify().unwrap();
     }
 
     #[test]
