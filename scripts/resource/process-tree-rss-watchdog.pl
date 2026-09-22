@@ -156,7 +156,8 @@ sub install_observer {
 }
 
 sub native_snapshot {
-    verify_session_helper() unless $helper_failed;
+    my ($metadata_only) = @_;
+    verify_session_helper() unless $helper_failed || $metadata_only;
     verify_observer();
     start_observer() unless $observer_pid; # Cleanup only after an observation failure.
     local $SIG{ALRM} = sub { die "process observation timed out" };
@@ -176,7 +177,7 @@ sub native_snapshot {
                       identity => $identity, rss => 0};
     }
     $complete && %all or die "incomplete process metadata";
-    for my $pid (members(\%all)) {
+    for my $pid ($metadata_only ? () : members(\%all)) {
         print {$observer_write} "R $pid $all{$pid}{identity}\n" or die "process observer write failed";
         my $line = observer_line();
         defined($line) or die "incomplete process detail for PID $pid identity=$all{$pid}{identity}";
@@ -190,7 +191,7 @@ sub native_snapshot {
             ($session_root_confirmed || $all{$leader}{group} == $leader);
     }
     verify_observer();
-    verify_session_helper() unless $helper_failed;
+    verify_session_helper() unless $helper_failed || $metadata_only;
     alarm 0;
     return \%all;
 }
@@ -334,9 +335,10 @@ sub publish_session_admission {
 }
 
 sub snapshot {
+    my ($metadata_only) = @_;
     $sample_started_at = time;
     if ($^O eq 'darwin') {
-        my $all = eval { native_snapshot() };
+        my $all = eval { native_snapshot($metadata_only) };
         if (!$all) {
             my $failure = $@;
             alarm 0;
@@ -448,7 +450,9 @@ sub signal_verified {
 sub quiesce {
     my $empty = 0;
     for (1..100) {
-        my $all = eval { snapshot() };
+        # Darwin sysctl birth identities suffice for cleanup. A denied RSS or
+        # getsid detail must not prevent fresh validation of retained groups.
+        my $all = eval { snapshot(1) };
         if (!$all) {
             alarm 0;
             # The direct child is not reaped until all signaling is finished,
@@ -462,7 +466,7 @@ sub quiesce {
         if (@live) {
             # Discover children forked just before STOP while their parents
             # remain alive/frozen, before KILL can reparent them.
-            my $frozen = eval { snapshot() };
+            my $frozen = eval { snapshot(1) };
             if (!$frozen) {
                 alarm 0;
                 kill 'KILL', -$leader;

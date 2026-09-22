@@ -60,6 +60,14 @@ root group and reports unverified quiescence. SIGPIPE is ignored before helper
 admission so early pipe closure produces a caught exit 89 with a receipt; the
 workload receives its original SIGPIPE disposition.
 
+A denied libproc/session detail query now receives one independent
+`sysctl(KERN_PROC_PID)` check. It is omitted only when that successful query
+proves the PID absent, or returns the exact expected PID/birth identity in
+zombie state. A live process, reused PID, short metadata reply, or denied
+metadata check still fails closed with exit 89. Denial diagnostics retain the
+original operation/errno and record the proof outcome. This does not make a
+live protected process measurable or authorize ignoring denied RSS.
+
 Sampling failure, malformed output, or a sample exceeding its one-second
 observation budget causes exit 89. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler
@@ -98,9 +106,13 @@ Receipts explicitly include `containment_scope=observed-descendants-and-process-
 and `hard_memory_limit=0`. The direct child remains unreaped until signaling
 ends, anchoring the root process group against PID reuse. Escaped group signals
 require a fresh, matching leader identity; other observed descendants are
-signaled individually after validation. If sampling remains broken, cleanup
-kills only the anchored root group because cached escaped identities cannot
-be validated; it returns 89 and records
+signaled individually after validation. On Darwin, cleanup takes fresh sysctl
+metadata snapshots without RSS or session-detail queries, so a persistent
+detail permission failure still permits validated STOP/KILL of retained groups
+and their descendants, including after the root dies. The failed measurement
+still returns 89; successful cleanup may record `quiescent=1`. If metadata
+itself remains unavailable, cleanup kills only the anchored root group because
+cached escaped identities cannot be validated; it returns 89 and records
 `quiescent=0`. A configured threshold also permits growth between samples.
 Strict host protection needs an independently admitted OS containment mechanism
 (for example, a kernel-enforced aggregate limit), not this receipt alone.

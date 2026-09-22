@@ -82,3 +82,41 @@ reproducing the integration failure. Logs and receipts are retained under
 The diagnostic work ran no bootstrap. Another independently authorized native
 attempt must capture the failing operation before any behavioral fix is claimed.
 Invocation overhead remains OPEN as documented above.
+
+## Attributed denial and retained-group cleanup
+
+The next independently authorized attempt, `stage2-serialized-20260922`,
+identified the operation: `bsd-before pid=98646 bytes=0 errno=1` (EPERM),
+repeated after the observer restarted. Requested birth identity was
+`1790077276:422699`. Exit 89 recorded peak 5,392,656 KiB below the 5,859,375
+KiB sampled cap, but quiescent=0. Root/time PGID 92425 was killed; retained
+bootstrap PGID 92426 survived reparented to PID 1 with further descendants.
+The bootstrap owner manually validated and terminated that exact group and
+confirmed removal. Thus this failure was neither a deadline nor an RSS breach.
+
+Two fixes preserve fail-closed policy:
+
+- Permission-denied detail reads receive independent `KERN_PROC_PID` proof.
+  Only a successful empty PID result or the exact expected PID/birth identity
+  in zombie state becomes `gone`. Live, reused, incomplete, or denied metadata
+  remains an error. The original attempt did not record this proof, so its
+  PID's actual live/zombie state remains unknown; no blanket EPERM exemption
+  or successful bootstrap claim is made.
+- Darwin cleanup requests fresh metadata without RSS/session detail calls.
+  It can STOP retained groups and descendants using current birth identities,
+  rediscover children while frozen, and KILL them even when detail permission
+  remains denied. Metadata failure still cannot justify stale PID/group signals;
+  that exceptional root-only fallback reports quiescent=0.
+
+Evidence is under `build/evidence/macos-observer-denial-cleanup-20260922`.
+The injected detail matrix checks denial at each syscall against live, gone,
+zombie, reused, wrong-PID, short and denied kernel metadata. A real child
+live/zombie/reaped lifecycle checks the actual sysctl proof under injected
+libproc denial, including rejection of a mismatched birth identity. A real
+macOS sandbox `process-info-pidinfo` denial demonstrates that actual EPERM for
+a live process is still rejected. Tests compile with `-Wall -Wextra -Werror`.
+The cleanup fixture creates a real separate child group and grandchild, denies
+detail persistently, kills the direct root, and requires exit 89 with
+quiescent=1 and no live survivors. PID/group reuse and metadata failure remain
+covered by the identity regression. No bootstrap was run for these fixes.
+Invocation overhead and source-matched bootstrap qualification remain OPEN.
