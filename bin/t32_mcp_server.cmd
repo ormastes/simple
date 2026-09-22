@@ -25,7 +25,7 @@ if not exist "%SIMPLE_RUNTIME%" (
     exit /b 127
 )
 set "TOOLS=%~dp0..\examples\10_tooling\trace32_tools"
-set "SIMPLE_LIB=%TOOLS%"
+set "SIMPLE_LIB=%~dp0..\src"
 if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
 rem The seed wall-clock-kills any entry under examples\ after 10s

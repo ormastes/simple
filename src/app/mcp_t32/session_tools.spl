@@ -6,8 +6,8 @@
 use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
 use app.mcp_t32.session_state.{McpT32Session, McpT32HistoryItem, MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, MCP_T32_HISTORY, MCP_T32_AREA_READY, MCP_T32_AREA_NAME}
 use app.mcp_t32.ctypes_bridge.{t32_ctypes_load, t32_ctypes_available, t32_ctypes_init, t32_ctypes_eval, t32_ctypes_get_message, t32_ctypes_get_practice_state, t32_ctypes_run_remote, t32_ctypes_set_api_lib_path}
-use std.io_runtime.{read_file, env_get}
-use app.io.mod.{process_run_timeout, thread_sleep}
+use std.io_runtime.{read_file}
+use app.io.minimal_runtime_ops.{process_run, env_get, file_exists}
 use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_js, t32_jp, t32_jo2, t32_extract_field, t32_make_tool_result, t32_make_tool_error}
 
 # --- Backend detection (t32rem primary, python t32-rcl fallback) ---
@@ -27,15 +27,15 @@ fn t32_find_python_rcl_bridge() -> text:
     var py_stdout = ""
     var py_stderr = ""
     var py_rc: i64 = 0
-    (py_stdout, py_stderr, py_rc) = rt_process_run("/bin/sh", ["-c", python_bin + " -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
+    (py_stdout, py_stderr, py_rc) = process_run("/bin/sh", ["-c", python_bin + " -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
     if py_rc != 0:
         return ""
     # Check T32_PYTHON_BRIDGE_PATH module global (set from SDN config)
-    if T32_PYTHON_BRIDGE_PATH != "" and rt_file_exists(T32_PYTHON_BRIDGE_PATH):
+    if T32_PYTHON_BRIDGE_PATH != "" and file_exists(T32_PYTHON_BRIDGE_PATH):
         return "sh " + T32_PYTHON_BRIDGE_PATH
     # Check T32_PYTHON_BRIDGE env var
-    val bridge_env = rt_env_get("T32_PYTHON_BRIDGE") ?? ""
-    if bridge_env != "" and rt_file_exists(bridge_env):
+    val bridge_env = env_get("T32_PYTHON_BRIDGE")
+    if bridge_env != "" and file_exists(bridge_env):
         return "sh " + bridge_env
     # Search common paths for bridge script
     val candidates = [
@@ -44,13 +44,13 @@ fn t32_find_python_rcl_bridge() -> text:
         "/opt/t32/python/t32_python_bridge.shs"
     ]
     for path in candidates:
-        if rt_file_exists(path):
+        if file_exists(path):
             return "sh " + path
     # Try PATH
     var which_stdout = ""
     var which_stderr = ""
     var which_rc: i64 = 0
-    (which_stdout, which_stderr, which_rc) = rt_process_run("/bin/sh", ["-c", "which t32_python_bridge.shs 2>/dev/null"])
+    (which_stdout, which_stderr, which_rc) = process_run("/bin/sh", ["-c", "which t32_python_bridge.shs 2>/dev/null"])
     if which_rc == 0 and which_stdout.trim() != "":
         return "sh " + which_stdout.trim()
     ""
@@ -76,17 +76,17 @@ fn t32_find_backend() -> text:
             return python_bridge
     # --- Primary: t32rem binary ---
     # Check T32REM env var first
-    val env_path = rt_env_get("T32REM") ?? ""
+    val env_path = env_get("T32REM")
     if env_path != "":
         MCP_T32_BACKEND_TYPE = "t32rem"
         MCP_T32_BACKEND_CMD = env_path
         return env_path
     # Check common paths
-    if rt_file_exists("/opt/t32/bin/pc_linux64/t32rem"):
+    if file_exists("/opt/t32/bin/pc_linux64/t32rem"):
         MCP_T32_BACKEND_TYPE = "t32rem"
         MCP_T32_BACKEND_CMD = "/opt/t32/bin/pc_linux64/t32rem"
         return MCP_T32_BACKEND_CMD
-    if rt_file_exists("/opt/t32/bin/t32rem"):
+    if file_exists("/opt/t32/bin/t32rem"):
         MCP_T32_BACKEND_TYPE = "t32rem"
         MCP_T32_BACKEND_CMD = "/opt/t32/bin/t32rem"
         return MCP_T32_BACKEND_CMD
@@ -94,7 +94,7 @@ fn t32_find_backend() -> text:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
+    (stdout, stderr, rc) = process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
     if rc == 0 and stdout.trim() != "":
         MCP_T32_BACKEND_TYPE = "t32rem"
         MCP_T32_BACKEND_CMD = stdout.trim()
@@ -344,7 +344,7 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
+    (stdout, stderr, rc) = process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
     MCP_T32_LAST_STDERR = stderr.trim()
     if rc != 0 and stderr != "":
         val backend_label = MCP_T32_BACKEND_TYPE
@@ -526,7 +526,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         port = T32_DEFAULT_PORT
     else:
         var pi = 0
-        for _i in range(0, 10):
+        for _i in 0..10:
             if pi >= port_str.len():
                 break
             val ch = port_str.substring(pi, pi + 1)
@@ -573,7 +573,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
             var sleep_stdout = ""
             var sleep_stderr = ""
             var sleep_rc: i64 = 0
-            (sleep_stdout, sleep_stderr, sleep_rc) = rt_process_run("/bin/sh", ["-c", "sleep " + str(delay_secs)])
+            (sleep_stdout, sleep_stderr, sleep_rc) = process_run("/bin/sh", ["-c", "sleep " + str(delay_secs)])
     val backend_attempts = attempt + 1
     if not connected:
         # All attempts failed — return error without creating a duplicate session
@@ -869,7 +869,7 @@ fn t32_poll_practice_state(session: McpT32Session, timeout_ms: i64) -> text:
         var sleep_stdout = ""
         var sleep_stderr = ""
         var sleep_rc: i64 = 0
-        (sleep_stdout, sleep_stderr, sleep_rc) = rt_process_run("/bin/sh", ["-c", "sleep 0.5"])
+        (sleep_stdout, sleep_stderr, sleep_rc) = process_run("/bin/sh", ["-c", "sleep 0.5"])
         polls = polls + 1
     "timeout"
 
