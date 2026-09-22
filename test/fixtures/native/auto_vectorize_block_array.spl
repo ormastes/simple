@@ -1,0 +1,60 @@
+# Native bootstrap regression: empty-first conditional arrays must retain
+# MirBlock pointers. Exercise the real pass with SIMD enabled and disabled.
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirTerminator, BlockId, SymbolId}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.mir_opt.mir_opt.auto_vectorize.{run_auto_vectorize}
+use std.io_runtime.{env_get_nullable, exit}
+
+fn require_equal(actual: text, expected: text, label: text) -> ():
+    if actual != expected:
+        print "FAIL {label}: expected '{expected}', got '{actual}'"
+        exit(1)
+
+fn check_pass(disabled: bool) -> ():
+    val first = MirBlock(id: BlockId(id: 41), label: Some("first"),
+        instructions: [], terminator: MirTerminator.Goto(BlockId(id: 73)))
+    val second = MirBlock(id: BlockId(id: 73), label: Some("second"),
+        instructions: [], terminator: MirTerminator.Ret(nil))
+    val blocks: [MirBlock] = [first, second]
+    val selected: [MirBlock] = if disabled: [] else: blocks
+    val expected_count: i64 = if disabled: 0 else: 2
+    require_equal("{selected.len()}", "{expected_count}", "selected count")
+    var id_sum: i64 = 0
+    for block in selected:
+        id_sum = id_sum + block.id.id
+    val expected_sum: i64 = if disabled: 0 else: 114
+    require_equal("{id_sum}", "{expected_sum}", "selected block ids")
+
+    val func = MirFunction(
+        symbol: SymbolId(id: 17), name: "block_array_probe",
+        signature: MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Unit), is_variadic: false),
+        locals: [], blocks: blocks, entry_block: BlockId(id: 41),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver,
+            driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false, simd_disabled: disabled)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[func.symbol] = func
+    val result = run_auto_vectorize(MirModule(name: "block_array_probe",
+        functions: functions, statics: {}, constants: {}, types: {}))
+    val retained: MirFunction = result.functions[func.symbol]
+    require_equal(retained.name, "block_array_probe", "function name")
+    require_equal("{retained.blocks.len()}", "2", "retained count")
+    require_equal("{retained.blocks[0].id.id}", "41", "first id")
+    require_equal("{retained.blocks[1].id.id}", "73", "second id")
+    require_equal(retained.blocks[0].label ?? "", "first", "first label")
+    require_equal(retained.blocks[1].label ?? "", "second", "second label")
+    require_equal("{retained.simd_disabled}", "{disabled}", "SIMD refusal")
+
+fn main() -> i32:
+    check_pass(true)
+    if (env_get_nullable("SIMPLE_VECTOR_PROBE_DISABLED_ONLY") ?? "") != "1":
+        check_pass(false)
+    print "auto-vectorize-block-array-pass"
+    0
