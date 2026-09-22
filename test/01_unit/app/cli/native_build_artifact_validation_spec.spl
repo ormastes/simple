@@ -1,0 +1,54 @@
+# Regression coverage for native-build false success when the worker exits 0
+# without creating a usable artifact.
+
+use std.spec.{describe, it, expect}
+use app.cli.native_build_main.{
+    native_build_artifact_valid, native_build_worker_success_receipt}
+
+describe "native-build artifact validation":
+
+    it "accepts a present nonempty artifact":
+        expect(native_build_artifact_valid(true, 1, true)).to_equal(true)
+
+    it "rejects a missing artifact even when a size value is supplied":
+        expect(native_build_artifact_valid(false, 1, true)).to_equal(false)
+
+    it "rejects an empty artifact":
+        expect(native_build_artifact_valid(true, 0, true)).to_equal(false)
+
+    it "accepts unchanged content when the worker proves it rebuilt successfully":
+        expect(native_build_artifact_valid(true, 42, true)).to_equal(true)
+
+    it "rejects stale existing output when the worker did no work":
+        expect(native_build_artifact_valid(true, 42, false)).to_equal(false)
+
+    it "recognizes the real worker success receipt":
+        expect(native_build_worker_success_receipt(
+            "build/native/app", "", "[native-build] Artifact published: build/native/app"
+        )).to_equal(true)
+
+    it "accepts a non-verbose published artifact receipt on stderr":
+        val stderr = "[native-build] Artifact published: build/native/app"
+        expect(native_build_artifact_valid(true, 42, native_build_worker_success_receipt(
+            "build/native/app", "", stderr
+        ))).to_equal(true)
+
+    it "accepts an exact receipt on stdout with CRLF line endings":
+        expect(native_build_worker_success_receipt(
+            "build/native/app", "progress\r\n[native-build] Artifact published: build/native/app\r\n", ""
+        )).to_equal(true)
+
+    it "accepts an exact receipt on stderr with CRLF line endings":
+        expect(native_build_worker_success_receipt(
+            "build/native/app", "", "progress\r\n[native-build] Artifact published: build/native/app\r\n"
+        )).to_equal(true)
+
+    it "rejects a receipt bound to a different output path":
+        expect(native_build_worker_success_receipt(
+            "build/native/app", "", "[native-build] Artifact published: build/native/other"
+        )).to_equal(false)
+
+    it "rejects a prefix collision in the requested output path":
+        expect(native_build_worker_success_receipt(
+            "build/native/app", "", "[native-build] Artifact published: build/native/app-other"
+        )).to_equal(false)
