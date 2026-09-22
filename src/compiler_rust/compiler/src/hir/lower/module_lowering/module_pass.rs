@@ -1384,7 +1384,10 @@ impl Lowerer {
         }
     }
 
-    /// M12 3b: record each free function's parameter default-value expressions
+    /// Record callable parameter defaults under the spelling used at each HIR
+    /// call site.  Impl methods must be qualified: a bare method name collides
+    /// across owners and would make an omitted argument select another type's
+    /// default.
     /// so omitted trailing arguments can be filled at call sites (`lower_call`).
     /// Captured here (from the AST) because the HIR function *type* carries only
     /// parameter TypeIds, not the default exprs.
@@ -1394,6 +1397,52 @@ impl Lowerer {
                 if f.params.iter().any(|p| p.default.is_some()) {
                     self.fn_param_defaults
                         .insert(f.name.clone(), f.params.iter().map(|p| p.default.clone()).collect());
+                }
+            }
+            if let Node::Impl(impl_block) = item {
+                let owner = match &impl_block.target_type {
+                    simple_parser::ast::Type::Simple(name) => Some(name),
+                    simple_parser::ast::Type::Generic { name, .. } => Some(name),
+                    _ => None,
+                };
+                if let Some(owner) = owner {
+                    for method in &impl_block.methods {
+                        let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                            &method.params[1..]
+                        } else { &method.params[..] };
+                        if user_params.iter().any(|p| p.default.is_some()) {
+                            self.fn_param_defaults.insert(
+                                format!("{}.{}", owner, method.name),
+                                user_params.iter().map(|p| p.default.clone()).collect(),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Node::Class(class) = item {
+                for method in &class.methods {
+                    let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                        &method.params[1..]
+                    } else { &method.params[..] };
+                    if user_params.iter().any(|p| p.default.is_some()) {
+                        self.fn_param_defaults.insert(
+                            format!("{}.{}", class.name, method.name),
+                            user_params.iter().map(|p| p.default.clone()).collect(),
+                        );
+                    }
+                }
+            }
+            if let Node::Struct(struct_) = item {
+                for method in &struct_.methods {
+                    let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                        &method.params[1..]
+                    } else { &method.params[..] };
+                    if user_params.iter().any(|p| p.default.is_some()) {
+                        self.fn_param_defaults.insert(
+                            format!("{}.{}", struct_.name, method.name),
+                            user_params.iter().map(|p| p.default.clone()).collect(),
+                        );
+                    }
                 }
             }
         }
