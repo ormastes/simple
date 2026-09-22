@@ -1,3 +1,30 @@
+wm_native_build_with_progress() {
+    wm_build_log=$1
+    shift
+    "$@" >"$wm_build_log" 2>&1 &
+    BUILD_PID=$!
+    wm_elapsed=0
+    wm_poll_seconds=${SIMPLEOS_WM_PROGRESS_POLL_SECONDS:-5}
+    while kill -0 "$BUILD_PID" 2>/dev/null; do
+        sleep "$wm_poll_seconds" &
+        BUILD_POLL_PID=$!
+        wait "$BUILD_POLL_PID" || true
+        BUILD_POLL_PID=""
+        kill -0 "$BUILD_PID" 2>/dev/null || break
+        wm_elapsed=$((wm_elapsed + wm_poll_seconds))
+        if [ "$wm_elapsed" -ge "${SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS:-60}" ]; then
+            printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
+                "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
+                "$(wc -c <"$wm_build_log")" >&2
+            wm_elapsed=0
+        fi
+    done
+    wait "$BUILD_PID"
+    wm_result=$?
+    BUILD_PID=""
+    return "$wm_result"
+}
+
 # Build the kernel (same flow as os.qemu_runner.build_os for the
 # wm-simple-web check target) unless a fresh artifact already exists.
 kernel_stale=false
@@ -82,6 +109,7 @@ SPL
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
     SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1 \
     PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        wm_native_build_with_progress "$BUILD_DIR/native-build.out" \
         "$TIMEOUT_BIN" --kill-after=10s "${NATIVE_BUILD_TIMEOUT_SECONDS}s" \
         "$SIMPLE_BIN" native-build \
         --source build/os/generated --source "$ENTRY" \
@@ -90,25 +118,8 @@ SPL
         --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_CANDIDATE" \
-        --linker-script "$LINKER_SCRIPT" \
-        >"$BUILD_DIR/native-build.out" 2>&1 &
-    build_pid=$!
-    # The compiler's stdout can be fully buffered under redirect. Keep the
-    # parent harness visibly alive even when no phase line reaches this log.
-    (
-        while kill -0 "$build_pid" 2>/dev/null; do
-            sleep 60
-            kill -0 "$build_pid" 2>/dev/null || break
-            printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
-                "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
-                "$(wc -c <"$BUILD_DIR/native-build.out")" >&2
-        done
-    ) &
-    heartbeat_pid=$!
-    wait "$build_pid"
+        --linker-script "$LINKER_SCRIPT"
     build_code=$?
-    kill "$heartbeat_pid" 2>/dev/null || true
-    wait "$heartbeat_pid" 2>/dev/null || true
     set -e
     if [ "$build_code" -eq 124 ] || [ "$build_code" -eq 137 ]; then
         rm -f "$KERNEL_CANDIDATE"

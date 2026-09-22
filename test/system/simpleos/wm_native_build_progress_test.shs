@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+sed -n '/^wm_native_build_with_progress() {/,/^}/p' "$root/scripts/check/lib/simpleos-wm-fullscreen/build.shs" >"$tmp/function.sh"
+
+cat >"$tmp/runner.sh" <<'SH'
+#!/bin/sh
+set -u
+. "$TEST_TMP/function.sh"
+BUILD_PID=""
+BUILD_POLL_PID=""
+KERNEL_BUILD_ATTEMPTS=1
+cleanup() {
+    if [ -n "$BUILD_POLL_PID" ]; then kill "$BUILD_POLL_PID" 2>/dev/null || true; wait "$BUILD_POLL_PID" 2>/dev/null || true; fi
+    if [ -n "$BUILD_PID" ]; then kill "$BUILD_PID" 2>/dev/null || true; wait "$BUILD_PID" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+SIMPLEOS_WM_PROGRESS_POLL_SECONDS=1
+SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS=1
+export SIMPLEOS_WM_PROGRESS_POLL_SECONDS SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS
+wm_native_build_with_progress "$TEST_TMP/$1.log" sh -c 'echo $$ > "$TEST_TMP/worker.pid"; exec sleep "$1"' sh "$2"
+SH
+chmod +x "$tmp/runner.sh"
+export TEST_TMP="$tmp"
+
+"$tmp/runner.sh" complete 2 >"$tmp/complete.out" 2>&1
+grep -q 'native-build active attempt=1 log_bytes=' "$tmp/complete.out"
+! kill -0 "$(cat "$tmp/worker.pid")" 2>/dev/null
+
+set +e
+"$tmp/runner.sh" failure invalid >"$tmp/failure.out" 2>&1
+failure_code=$?
+set -e
+[ "$failure_code" -ne 0 ]
+! kill -0 "$(cat "$tmp/worker.pid")" 2>/dev/null
+
+rm -f "$tmp/worker.pid"
+"$tmp/runner.sh" signal 30 >"$tmp/signal.out" 2>&1 &
+runner_pid=$!
+while [ ! -s "$tmp/worker.pid" ]; do sleep 0.1; done
+worker_pid=$(cat "$tmp/worker.pid")
+kill -TERM "$runner_pid"
+wait "$runner_pid" 2>/dev/null || true
+! kill -0 "$worker_pid" 2>/dev/null
+printf 'PASS: WM native-build progress completion, failure, and signal cleanup\n'
