@@ -108,3 +108,22 @@ cause tracked in the sibling record
 unit-level crash/recovery spec is now green but the QEMU power-cut/reboot
 closure bar is unmet). Needs QEMU boot evidence to close, outside this
 lane's scope. Left OPEN (P2), no code change attempted.
+
+## Device-boundary correction 2026-09-22
+
+The ARM64 VirtIO-BLK owner now treats a submitted descriptor chain as
+device-owned until the used ring advances exactly once and returns the expected
+head descriptor. A timeout, skipped used index, or mismatched head marks the
+device failed and permanently quarantines the queue; the driver does not return
+the descriptor chain or its DMA region to reusable storage. Single-sector
+writes also reject payloads whose length is not exactly the negotiated sector
+size.
+
+`VirtioBlkDriver` now implements `BlockDeviceDurabilityPortV1`. Its ordered
+flush succeeds only after negotiated `VIRTIO_BLK_T_FLUSH` completes with an OK
+device status; timeout is reported as indeterminate and FUA remains explicitly
+unsupported. Focused source-contract coverage and the existing interrupted
+FAT32 replace/recovery fixture pass. The available `bin/simple` identified
+itself as a Rust bootstrap seed, and no live ARM64 QEMU writable-disk reboot was
+run in this lane, so the bug remains OPEN pending admitted self-hosted compile
+and fresh-process hardware/QEMU persistence proof.

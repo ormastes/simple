@@ -12,6 +12,7 @@ use os.drivers.virtio._VirtioBlk.driver_class.*
 use os.drivers.virtio.virtio_common.{Virtqueue}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_read64}
 use os.services.block_device.{BlockDevice}
+use std.fs_driver.block_device.{BlockDeviceDurabilityPortV1}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 
@@ -35,10 +36,16 @@ impl BlockDevice for VirtioBlkDriver:
             return Result.Err("device not initialized")
         if lba >= self.capacity_sectors:
             return Result.Err("write beyond disk capacity")
+        if data.len() != self.sector_size.to_i32():
+            return Result.Err("virtio-blk write requires exactly one sector")
+        val admission = _virtio_blk_request_begin()
+        if admission.is_err():
+            return Err(admission.unwrap_err())
         val data_len = self.sector_size.to_u64()
         val dma_total = 16 + data_len + 1
         val dma_result = _virtio_blk_alloc_dma(dma_total)
         if dma_result.is_err():
+            _virtio_blk_request_completed()
             return Result.Err("virtio-blk write DMA allocation failed")
         val dma = dma_result.unwrap()
         val header_addr = dma.virt_addr
@@ -51,6 +58,7 @@ impl BlockDevice for VirtioBlkDriver:
         val desc2 = _virtq_alloc_desc()
         if desc0 < 0 or desc1 < 0 or desc2 < 0:
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
+            _virtio_blk_request_completed()
             return Result.Err("no free descriptors")
 
         # Header: VIRTIO_BLK_T_OUT (write)
@@ -116,14 +124,8 @@ impl BlockDevice for VirtioBlkDriver:
         _virtq_push_avail(w_avail_u16.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
-        if not self.wait_completion(1000000):
-            val wfd0 = desc0.to_u16()
-            val wfd1 = desc1.to_u16()
-            val wfd2 = desc2.to_u16()
-            _virtq_free_desc(wfd0.to_u32())
-            _virtq_free_desc(wfd1.to_u32())
-            _virtq_free_desc(wfd2.to_u32())
-            val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
+        if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):
+            _virtio_blk_request_indeterminate()
             return Result.Err("virtio-blk write timeout")
 
         _virtio_blk_sync_for_cpu(status_addr, 1)
@@ -136,6 +138,7 @@ impl BlockDevice for VirtioBlkDriver:
             _virtq_free_desc(wfd1.to_u32())
             _virtq_free_desc(wfd2.to_u32())
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
+            _virtio_blk_request_completed()
             return Result.Err("virtio-blk write error (status={status})")
 
         val wfd0 = desc0.to_u16()
@@ -145,6 +148,7 @@ impl BlockDevice for VirtioBlkDriver:
         _virtq_free_desc(wfd1.to_u32())
         _virtq_free_desc(wfd2.to_u32())
         val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
+        _virtio_blk_request_completed()
         Result.Ok(true)
 
     fn sector_size() -> u32:
@@ -156,8 +160,12 @@ impl BlockDevice for VirtioBlkDriver:
             return Err("device not initialized")
         if not self.flush_supported:
             return Err("virtio-blk FLUSH feature was not negotiated")
+        val admission = _virtio_blk_request_begin()
+        if admission.is_err():
+            return Err(admission.unwrap_err())
         val dma_result = _virtio_blk_alloc_dma(17)
         if dma_result.is_err():
+            _virtio_blk_request_completed()
             return Err("virtio-blk flush DMA allocation failed")
         val dma = dma_result.unwrap()
         val header_addr = dma.virt_addr
@@ -170,6 +178,7 @@ impl BlockDevice for VirtioBlkDriver:
             if desc1 >= 0:
                 _virtq_free_desc(desc1.to_u32())
             val _freed = _virtio_blk_free_dma(dma.virt_addr, 17)
+            _virtio_blk_request_completed()
             return Err("no free descriptors")
         mmio_write32(header_addr, VIRTIO_BLK_T_FLUSH)
         mmio_write32(header_addr + 4, 0)
@@ -189,14 +198,23 @@ impl BlockDevice for VirtioBlkDriver:
         _virtio_blk_sync_for_device(dma.virt_addr, 17)
         _virtq_push_avail(desc0.to_u32())
         _virtio_blk_reg_write32(80, 0)
-        val completed = self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS)
+        val completed = self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS)
+        if not completed:
+            _virtio_blk_request_indeterminate()
+            return Err("virtio-blk flush timeout; durability indeterminate")
         _virtio_blk_sync_for_cpu(status_addr, 1)
         val status = mmio_read8(status_addr)
         _virtq_free_desc(desc0.to_u32())
         _virtq_free_desc(desc1.to_u32())
         val _freed = _virtio_blk_free_dma(dma.virt_addr, 17)
-        if not completed:
-            return Err("virtio-blk flush timeout")
+        _virtio_blk_request_completed()
         if status != VIRTIO_BLK_S_OK:
             return Err("virtio-blk flush error (status={status})")
         Ok(true)
+
+impl BlockDeviceDurabilityPortV1 for VirtioBlkDriver:
+    me flush_ordered() -> Result<bool, text>:
+        self.flush()
+
+    me fua_ordered() -> Result<bool, text>:
+        Err("virtio-blk FUA is not negotiated; use acknowledged FLUSH")

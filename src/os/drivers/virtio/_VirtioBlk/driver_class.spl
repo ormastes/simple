@@ -100,6 +100,8 @@ var g_virtio_blk_desc_addr: u64 = 0
 var g_virtio_blk_avail_addr: u64 = 0
 var g_virtio_blk_used_addr: u64 = 0
 var g_virtio_blk_last_read_bytes: [u8] = []
+var g_virtio_blk_request_busy: bool = false
+var g_virtio_blk_queue_quarantined: bool = false
 
 pub fn virtio_blk_set_active_mmio_base(base: u64):
     g_virtio_blk_mmio_base = base
@@ -205,6 +207,8 @@ fn _virtq_setup(base: u64):
     g_virtio_blk_desc_addr = base
     g_virtio_blk_avail_addr = base + 2048
     g_virtio_blk_used_addr = base + 4096
+    g_virtio_blk_request_busy = false
+    g_virtio_blk_queue_quarantined = false
     _virtio_blk_zero(addr: base, size: 8192)
 
     var i: u32 = 0
@@ -219,6 +223,8 @@ fn _virtq_setup(base: u64):
     _virtio_blk_sync_for_device(base, 8192)
 
 fn _virtq_alloc_desc() -> i32:
+    if g_virtio_blk_queue_quarantined:
+        return -1
     if g_virtio_blk_free_head >= 128:
         return -1
     val idx = g_virtio_blk_free_head
@@ -228,6 +234,25 @@ fn _virtq_alloc_desc() -> i32:
 fn _virtq_free_desc(idx: u32):
     mmio_write16(_virtq_desc_addr(idx) + 14, g_virtio_blk_free_head.to_u16())
     g_virtio_blk_free_head = idx
+
+fn _virtio_blk_request_begin() -> Result<bool, text>:
+    if g_virtio_blk_queue_quarantined:
+        return Err("virtio-blk queue quarantined after indeterminate completion")
+    if g_virtio_blk_request_busy:
+        return Err("virtio-blk queue already owns an in-flight request")
+    g_virtio_blk_request_busy = true
+    Ok(true)
+
+fn _virtio_blk_request_completed():
+    g_virtio_blk_request_busy = false
+
+fn _virtio_blk_request_indeterminate():
+    # A timed-out descriptor chain remains device-owned. Fail the device and
+    # permanently quarantine the queue rather than recycling descriptors or
+    # DMA that the device may still access.
+    g_virtio_blk_queue_quarantined = true
+    g_virtio_blk_request_busy = true
+    _virtio_blk_reg_write32(VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED)
 
 fn _virtq_push_avail(desc_idx: u32):
     # Descriptor rows are driver-owned until this publication boundary.
@@ -240,12 +265,19 @@ fn _virtq_push_avail(desc_idx: u32):
     _virtio_blk_sync_for_device(g_virtio_blk_avail_addr, 512)
     rt_memory_barrier()
 
-fn _virtq_wait_completion(timeout_polls: u32) -> bool:
+fn _virtq_wait_completion(expected_head: u32, timeout_polls: u32) -> bool:
     var i: u32 = 0
     while i < timeout_polls:
         _virtio_blk_sync_for_cpu(g_virtio_blk_used_addr, 64)
         val used_idx = mmio_read16(g_virtio_blk_used_addr + 2)
         if used_idx.to_u32() != g_virtio_blk_last_used_idx:
+            val expected_used_idx = (g_virtio_blk_last_used_idx + 1) & 0xFFFF
+            if used_idx.to_u32() != expected_used_idx:
+                return false
+            val used_slot = g_virtio_blk_last_used_idx.to_u64() % g_virtio_blk_queue_size.to_u64()
+            val used_head = mmio_read32(g_virtio_blk_used_addr + 4 + used_slot * 8)
+            if used_head != expected_head:
+                return false
             g_virtio_blk_last_used_idx = used_idx.to_u32()
             return true
         i = i + 1

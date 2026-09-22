@@ -1,0 +1,31 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{read_file}
+
+describe "ARM64 VirtIO-BLK durability boundary":
+    it "quarantines device-owned write descriptors after an indeterminate completion":
+        step("inspect the write timeout ownership transition")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/block_device_impl.spl")
+        val timeout_start = source.index_of("if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):")
+        val timeout_end = source.index_of("return Result.Err(\"virtio-blk write timeout\")")
+        val timeout_path = source.slice(timeout_start, timeout_end)
+
+        expect(timeout_path.contains("_virtio_blk_request_indeterminate()" )).to_equal(true)
+        expect(timeout_path.contains("_virtq_free_desc")).to_equal(false)
+        expect(timeout_path.contains("_virtio_blk_free_dma")).to_equal(false)
+
+    it "publishes durability only through a completed negotiated FLUSH":
+        step("inspect the durability-provider implementation")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/block_device_impl.spl")
+
+        expect(source.contains("impl BlockDeviceDurabilityPortV1 for VirtioBlkDriver:")).to_equal(true)
+        expect(source.contains("self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS)")).to_equal(true)
+        expect(source.contains("virtio-blk flush timeout; durability indeterminate")).to_equal(true)
+        expect(source.contains("Err(\"virtio-blk FUA is not negotiated; use acknowledged FLUSH\")")).to_equal(true)
+
+    it "checks the exact used-ring head before reclaiming descriptor ownership":
+        step("inspect the used-ring completion check")
+        val source = read_file("src/os/drivers/virtio/_VirtioBlk/driver_class.spl")
+
+        expect(source.contains("if used_head != expected_head:")).to_equal(true)
+        expect(source.contains("queue quarantined after indeterminate completion")).to_equal(true)
+        expect(source.contains("VIRTIO_STATUS_FAILED")).to_equal(true)

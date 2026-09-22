@@ -195,7 +195,7 @@ impl VirtioBlkDriver:
             return Result.Ok(true)
         Result.Err("virtio init failed")
 
-    me wait_completion(timeout_polls: u32) -> bool:
+    me wait_completion(expected_head: u32, timeout_polls: u32) -> bool:
         """Wait for a virtqueue completion using interrupt-driven notification.
 
         Quick-polls the used ring first; if not ready, blocks on the IRQ
@@ -205,7 +205,7 @@ impl VirtioBlkDriver:
 
         Falls back to spin-only if notif_id was not allocated (notif_id == 0).
         """
-        _virtq_wait_completion(timeout_polls)
+        _virtq_wait_completion(expected_head, timeout_polls)
 
     me read_sector_bytes(lba: u64) -> [u8]:
         """Read one sector and return its bytes for early ARM filesystem boot."""
@@ -380,13 +380,8 @@ impl VirtioBlkDriver:
         _virtq_push_avail(d0_u16.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
-        if not self.wait_completion(1000000):
-            val fd0 = desc0.to_u16()
-            val fd1 = desc1.to_u16()
-            val fd2 = desc2.to_u16()
-            _virtq_free_desc(fd0.to_u32())
-            _virtq_free_desc(fd1.to_u32())
-            _virtq_free_desc(fd2.to_u32())
+        if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):
+            _virtio_blk_request_indeterminate()
             return Result.Err("virtio-blk read timeout")
 
         _virtio_blk_sync_for_cpu(dma.virt_addr, required_total)
@@ -484,13 +479,8 @@ impl VirtioBlkDriver:
         _virtq_push_avail(d0_u16.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
-        if not self.wait_completion(1000000):
-            val fd0 = desc0.to_u16()
-            val fd1 = desc1.to_u16()
-            val fd2 = desc2.to_u16()
-            _virtq_free_desc(fd0.to_u32())
-            _virtq_free_desc(fd1.to_u32())
-            _virtq_free_desc(fd2.to_u32())
+        if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):
+            _virtio_blk_request_indeterminate()
             return Result.Err("virtio-blk write timeout")
 
         _virtio_blk_sync_for_cpu(
@@ -589,11 +579,8 @@ impl VirtioBlkDriver:
         _virtq_push_avail(desc0.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
-        if not self.wait_completion(1000000):
-            _virtq_free_desc(desc0.to_u32())
-            _virtq_free_desc(desc1.to_u32())
-            _virtq_free_desc(desc2.to_u32())
-            val _ = _virtio_blk_free_dma(scratch.virt_addr, scratch_len)
+        if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):
+            _virtio_blk_request_indeterminate()
             return Result.Err("virtio-blk read timeout")
 
         _virtio_blk_sync_for_cpu(scratch.virt_addr, scratch_len)
@@ -672,11 +659,8 @@ impl VirtioBlkDriver:
         _virtq_push_avail(desc0.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
-        if not self.wait_completion(1000000):
-            _virtq_free_desc(desc0.to_u32())
-            _virtq_free_desc(desc1.to_u32())
-            _virtq_free_desc(desc2.to_u32())
-            val _ = _virtio_blk_free_dma(scratch.virt_addr, scratch_len)
+        if not self.wait_completion(desc0.to_u32(), BLK_COMPLETION_TIMEOUT_POLLS):
+            _virtio_blk_request_indeterminate()
             return Result.Err("virtio-blk write timeout")
 
         _virtio_blk_sync_for_cpu(status_addr, 1)
