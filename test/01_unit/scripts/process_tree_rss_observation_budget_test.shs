@@ -32,6 +32,21 @@ awk -F= '
     END { exit !(gap >= 150 && duration >= 150 && duration < 1000 && overruns > 0 && checks > 1) }
 ' "$tmp/slow.env" || fail 'slow sampling evidence concealed timing or SID observations'
 
+# Darwin's host-wide ps can exceed one second under compiler load. A bounded,
+# explicit override permits that known host cost without changing RSS cadence.
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000 RSS_TEST_PS_DELAY=1.2 \
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/darwin-slow.env" -- sleep 1.5
+grep -Fxq 'status=complete' "$tmp/darwin-slow.env" || fail 'bounded override failed'
+grep -Fxq 'observation_budget_ms=5000' "$tmp/darwin-slow.env" || fail 'override absent from receipt'
+
+for invalid_budget in 999 5001 invalid; do
+    status=0
+    SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=$invalid_budget perl "$guard" \
+        -- /bin/sh -c 'touch "$1"' sh "$tmp/invalid-budget" >/dev/null 2>&1 || status=$?
+    [ "$status" -ne 0 ] && [ ! -e "$tmp/invalid-budget" ] || \
+        fail "invalid observation budget accepted: $invalid_budget"
+done
+
 # A hung observer still refuses startup and terminates within a bounded time.
 RSS_TEST_PS_DELAY=10
 begin=$(date +%s)
