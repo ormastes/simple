@@ -66,12 +66,6 @@ git_repo update-ref HEAD "$head"
 case_name=synthetic-producer
 /usr/bin/sh "$repo/scripts/setup/materialize-symlinks-windows.shs" --strict-missing --receipt "$tmp/good" "$repo" >"$tmp/error" 2>&1
 receipt="$tmp/good"
-if [ "$test_case" = bounded ]; then
-    long_dir="$repo/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789"
-    mkdir -p "$long_dir"
-    printf 'long ordinary untracked payload\n' >"$long_dir/untracked.txt"
-    test "$(cygpath -aw "$long_dir/untracked.txt" | wc -c)" -gt 260
-fi
 
 accept() {
     case_name=$1
@@ -97,6 +91,21 @@ reject_reason() {
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
 accept positive-file-dir-pending
+if [ "$test_case" = bounded ]; then
+    # Keep the long ordinary-file case independent from the canonical
+    # target-dir oracle below, which intentionally has one untracked path.
+    long_dir="$repo/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789"
+    long_file="$long_dir/untracked.txt"
+    mkdir -p "$long_dir"
+    printf 'long ordinary untracked payload A\n' >"$long_file"
+    test "$(cygpath -aw "$long_file" | wc -c)" -gt 260
+    accept long-path-untracked-a
+    printf 'long ordinary untracked payload B\n' >"$long_file"
+    accept long-path-untracked-b
+    test "$(fingerprint "$tmp/long-path-untracked-a.state")" != "$(fingerprint "$tmp/long-path-untracked-b.state")"
+    rm -rf -- "$repo/long-path-component-0123456789"
+    test ! -e "$long_file"
+fi
 # Independent canonical oracle: explicitly exclude only the known fixture dir.
 printf '\000\377raw\r\nbytes\000' >"$repo/target-dir/untracked.bin"
 accept untracked-bytes
@@ -132,14 +141,37 @@ if [ "$test_case" = bounded ]; then
     # control for the checkout mode, never an alias-consumer prerequisite.
     native_link="$tmp/native-symlink-control"
     if NATIVE_LINK="$(cygpath -aw "$native_link")" NATIVE_TARGET="$(cygpath -aw "$repo/target.txt")" powershell -NoProfile -NonInteractive -Command '
-        New-Item -ItemType SymbolicLink -Path $env:NATIVE_LINK -Target $env:NATIVE_TARGET | Out-Null' >"$tmp/error" 2>&1; then
+        $ErrorActionPreference="Stop"
+        try {
+          New-Item -ItemType SymbolicLink -Path $env:NATIVE_LINK -Target $env:NATIVE_TARGET | Out-Null
+          exit 0
+        } catch {
+          $code=$_.Exception.HResult -band 0xffff
+          if ($_.Exception -is [NotSupportedException] -or $code -eq 50) {
+            [Console]::Error.WriteLine("native-symlink-control: skip reason=unsupported code="+$code)
+            exit 77
+          }
+          if ($_.Exception -is [UnauthorizedAccessException] -or $code -in 5,1314) {
+            [Console]::Error.WriteLine("native-symlink-control: skip reason=privilege code="+$code)
+            exit 77
+          }
+          [Console]::Error.WriteLine("native-symlink-control: fail "+$_.Exception.GetType().FullName+" code="+$code)
+          exit 1
+        }' >"$tmp/error" 2>&1; then
         test -L "$native_link"
         rm -f -- "$native_link"
         printf 'native_symlink_control=pass\n'
     else
-        # Developer Mode / SeCreateSymbolicLinkPrivilege is optional. Keep a
-        # typed skip rather than weakening the materialized-alias assertions.
-        printf 'native_symlink_control=skip-privilege\n'
+        native_rc=$?
+        if [ "$native_rc" -eq 77 ]; then
+            # Developer Mode / SeCreateSymbolicLinkPrivilege is optional.
+            # Keep a typed skip rather than weakening alias assertions.
+            grep -Eq '^native-symlink-control: skip reason=(unsupported|privilege) code=[0-9]+$' "$tmp/error"
+            printf 'native_symlink_control=skip-privilege-or-filesystem\n'
+        else
+            cat "$tmp/error" >&2
+            exit "$native_rc"
+        fi
     fi
     printf 'bootstrap_stage3_git_state_materialized_bounded=true\n'
     exit 0
