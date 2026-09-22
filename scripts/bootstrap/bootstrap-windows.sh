@@ -24,6 +24,17 @@ case "${abi}" in
   *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; exit 1 ;;
 esac
 
+# Populate the recorded SPipe gitlink before materializing symlinks.  Several
+# tracked documentation links resolve inside it, so the strict materializer
+# must see the checked-out target rather than classify it as an unexpected
+# pending link.  `git submodule update` uses the superproject's recorded
+# commit; it does not follow a remote branch and leaves a dirty initialized
+# checkout alone when Git refuses an unsafe update.
+git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
+  echo "error: cannot initialize recorded .spipe/spipe gitlink" >&2
+  exit 1
+}
+
 # Materialize git symlinks as NTFS junctions/hardlinks before anything else
 # reads the tree. A checkout done by a Windows session that lacks a
 # fresh-logon SeCreateSymbolicLinkPrivilege token (see
