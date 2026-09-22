@@ -61,9 +61,14 @@ described above: its version check admitted any nonempty output, it preferred
 `src/compiler_rust/target/*` candidates, and its LLVM contract probe passed an
 invalid target while expecting an invalid mode diagnostic. The focused source
 fix rejects seed banners, selects only admitted release candidates, and passes
-the mode argument matching its expected diagnostic. It fails at the tooling
-phase when none qualifies. A unit spec covers seed and self-hosted version
-outputs. The deployment/guest verification described above remains open.
+an executable `native-build --backend llvm` canary through the requested
+backend, then executes the emitted program and requires byte-exact output `5`.
+It fails at the tooling phase when none qualifies. Focused specs cover seed
+rejection, proof that the LLVM argument reaches the compiler shim, backend
+failure, wrong canary output, and empty candidate selection. This replaces the
+earlier invalid-mode probe, which stopped in generic argument parsing and could
+not prove LLVM support. The deployment/guest verification described above
+remains open.
 
 ## Two smaller findings from the same investigation
 
