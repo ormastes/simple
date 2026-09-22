@@ -37,20 +37,20 @@ int64_t rt_vulkan_last_present_copy_rects(void) { return 1; }
 int64_t rt_vulkan_destroy_swapchain(void) { return 1; }
 int64_t rt_vulkan_accepted_compute_submit_count(void) { return 100; }
 int64_t rt_vulkan_begin_compute(void) { return 101; }
-int64_t rt_vulkan_bind_buffer(int64_t a0, int64_t a1, int64_t a2) { return a0 == 41 && a1 == -17 && a2 == 123456 ? 102 : -777; }
-int64_t rt_vulkan_bind_descriptors(int64_t a0, int64_t a1) { return a0 == 41 && a1 == -17 ? 103 : -777; }
-int64_t rt_vulkan_bind_pipeline(int64_t a0, int64_t a1) { return a0 == 41 && a1 == -17 ? 104 : -777; }
+int64_t rt_vulkan_bind_buffer(int64_t a0, int64_t a1, int64_t a2) { return a0 == 41 && a1 == -17 && a2 == 123456 ? 1 : 0; }
+int64_t rt_vulkan_bind_descriptors(int64_t a0, int64_t a1) { return a0 == 41 && a1 == -17 ? 1 : 0; }
+int64_t rt_vulkan_bind_pipeline(int64_t a0, int64_t a1) { return a0 == 41 && a1 == -17 ? 1 : 0; }
 int64_t rt_vulkan_create_descriptor_set(int64_t a0) { return a0 == 41 ? 105 : -777; }
-int64_t rt_vulkan_destroy_descriptor_set(int64_t a0) { return a0 == 41 ? 106 : -777; }
-int64_t rt_vulkan_destroy_fence(int64_t a0) { return a0 == 41 ? 107 : -777; }
-int64_t rt_vulkan_destroy_pipeline(int64_t a0) { return a0 == 41 ? 108 : -777; }
-int64_t rt_vulkan_destroy_shader(int64_t a0) { return a0 == 41 ? 109 : -777; }
-int64_t rt_vulkan_discard_command(int64_t a0) { return a0 == 41 ? 110 : -777; }
-int64_t rt_vulkan_dispatch(int64_t a0, int64_t a1, int64_t a2, int64_t a3) { return a0 == 41 && a1 == -17 && a2 == 123456 && a3 == 7 ? 111 : -777; }
-int64_t rt_vulkan_end_compute(int64_t a0) { return a0 == 41 ? 112 : -777; }
+int64_t rt_vulkan_destroy_descriptor_set(int64_t a0) { return a0 == 41 ? 1 : 0; }
+int64_t rt_vulkan_destroy_fence(int64_t a0) { return a0 == 41 ? 1 : 0; }
+int64_t rt_vulkan_destroy_pipeline(int64_t a0) { return a0 == 41 ? 1 : 0; }
+int64_t rt_vulkan_destroy_shader(int64_t a0) { return a0 == 41 ? 1 : 0; }
+int64_t rt_vulkan_discard_command(int64_t a0) { return a0 == 41 ? 1 : 0; }
+int64_t rt_vulkan_dispatch(int64_t a0, int64_t a1, int64_t a2, int64_t a3) { return a0 == 41 && a1 == -17 && a2 == 123456 && a3 == 7 ? 1 : 0; }
+int64_t rt_vulkan_end_compute(int64_t a0) { return a0 == 41 ? 1 : 0; }
 int64_t rt_vulkan_fence_submission_supported(void) { return 113; }
-int64_t rt_vulkan_free_buffer(int64_t a0) { return a0 == 41 ? 114 : -777; }
-int64_t rt_vulkan_select_device(int64_t a0) { return a0 == 41 ? 115 : -777; }
+int64_t rt_vulkan_free_buffer(int64_t a0) { return a0 == 41 ? 1 : 0; }
+int64_t rt_vulkan_select_device(int64_t a0) { return a0 == 41 ? 1 : 0; }
 int64_t rt_vulkan_selected_device_driver_identity_hash(void) { return 116; }
 static char text_values[6][4096];
 static atomic_int phase2_gpu_vulkan_scalar_getter_entered;
@@ -60,16 +60,16 @@ int64_t phase2_gpu_vulkan_scalar_getter_active(void) {
 int64_t rt_vulkan_shutdown(void) {
     if (atomic_load(&phase2_gpu_vulkan_scalar_getter_entered))
         strcpy(text_values[1], "shutdown-invalidated");
-    return 117;
+    return 1;
 }
 #ifndef PHASE2_SCALAR_OMIT_OPTIONAL
-int64_t rt_vulkan_submit_and_wait(int64_t a0) { return a0 == 41 ? 118 : -777; }
+int64_t rt_vulkan_submit_and_wait(int64_t a0) { return a0 == 41 ? 1 : 0; }
 #endif
 int64_t rt_vulkan_submit_and_wait_fence(int64_t a0) { return a0 == 41 ? 119 : -777; }
 int64_t rt_vulkan_submit_no_wait(int64_t a0) { return a0 == 41 ? 120 : -777; }
-int64_t rt_vulkan_wait_fence(int64_t a0, int64_t a1) { return a0 == 41 && a1 == -17 ? 121 : -777; }
+int64_t rt_vulkan_wait_fence(int64_t a0, int64_t a1) { return a0 == 41 && a1 == -17 ? 1 : 0; }
 #ifndef PHASE2_SCALAR_OMIT_REQUIRED
-int64_t rt_vulkan_wait_idle(void) { return 122; }
+int64_t rt_vulkan_wait_idle(void) { return 1; }
 #endif
 static char unterminated[4096];
 __attribute__((constructor)) static void phase2_gpu_vulkan_scalar_text_init(void) {
@@ -196,7 +196,7 @@ static int phase2_gpu_vulkan_scalar_race(const char *path) {
     int ticks = 0;
     while (!active() && ++ticks < 2000) nanosleep(&delay, NULL);
     assert(active());
-    assert(rt_vulkan_shutdown() == 117);
+    assert(rt_vulkan_shutdown() == 1);
     assert(pthread_join(worker, NULL) == 0);
     assert(rt_gpu_provider_unload(2) == 1);
     assert(dlclose(provider) == 0);
@@ -218,44 +218,44 @@ int main(int argc, char **argv) {
     if (strcmp(argv[2], "race") == 0) return phase2_gpu_vulkan_scalar_race(argv[1]);
     assert(rt_vulkan_accepted_compute_submit_count() == (good ? 100 : 0));
     assert(rt_vulkan_begin_compute() == (good ? 101 : 0));
-    assert(rt_vulkan_bind_buffer(41, -17, 123456) == (good ? 102 : 0));
-    assert(rt_vulkan_bind_buffer(42, -17, 123456) == (good ? -777 : 0));
-    assert(rt_vulkan_bind_descriptors(41, -17) == (good ? 103 : 0));
-    assert(rt_vulkan_bind_descriptors(42, -17) == (good ? -777 : 0));
-    assert(rt_vulkan_bind_pipeline(41, -17) == (good ? 104 : 0));
-    assert(rt_vulkan_bind_pipeline(42, -17) == (good ? -777 : 0));
+    assert(rt_vulkan_bind_buffer(41, -17, 123456) == (good ? 1 : 0));
+    assert(rt_vulkan_bind_buffer(42, -17, 123456) == 0);
+    assert(rt_vulkan_bind_descriptors(41, -17) == (good ? 1 : 0));
+    assert(rt_vulkan_bind_descriptors(42, -17) == 0);
+    assert(rt_vulkan_bind_pipeline(41, -17) == (good ? 1 : 0));
+    assert(rt_vulkan_bind_pipeline(42, -17) == 0);
     assert(rt_vulkan_create_descriptor_set(41) == (good ? 105 : 0));
     assert(rt_vulkan_create_descriptor_set(42) == (good ? -777 : 0));
-    assert(rt_vulkan_destroy_descriptor_set(41) == (good ? 106 : 0));
-    assert(rt_vulkan_destroy_descriptor_set(42) == (good ? -777 : 0));
-    assert(rt_vulkan_destroy_fence(41) == (good ? 107 : 0));
-    assert(rt_vulkan_destroy_fence(42) == (good ? -777 : 0));
-    assert(rt_vulkan_destroy_pipeline(41) == (good ? 108 : 0));
-    assert(rt_vulkan_destroy_pipeline(42) == (good ? -777 : 0));
-    assert(rt_vulkan_destroy_shader(41) == (good ? 109 : 0));
-    assert(rt_vulkan_destroy_shader(42) == (good ? -777 : 0));
-    assert(rt_vulkan_discard_command(41) == (good ? 110 : 0));
-    assert(rt_vulkan_discard_command(42) == (good ? -777 : 0));
-    assert(rt_vulkan_dispatch(41, -17, 123456, 7) == (good ? 111 : 0));
-    assert(rt_vulkan_dispatch(42, -17, 123456, 7) == (good ? -777 : 0));
-    assert(rt_vulkan_end_compute(41) == (good ? 112 : 0));
-    assert(rt_vulkan_end_compute(42) == (good ? -777 : 0));
+    assert(rt_vulkan_destroy_descriptor_set(41) == (good ? 1 : 0));
+    assert(rt_vulkan_destroy_descriptor_set(42) == 0);
+    assert(rt_vulkan_destroy_fence(41) == (good ? 1 : 0));
+    assert(rt_vulkan_destroy_fence(42) == 0);
+    assert(rt_vulkan_destroy_pipeline(41) == (good ? 1 : 0));
+    assert(rt_vulkan_destroy_pipeline(42) == 0);
+    assert(rt_vulkan_destroy_shader(41) == (good ? 1 : 0));
+    assert(rt_vulkan_destroy_shader(42) == 0);
+    assert(rt_vulkan_discard_command(41) == (good ? 1 : 0));
+    assert(rt_vulkan_discard_command(42) == 0);
+    assert(rt_vulkan_dispatch(41, -17, 123456, 7) == (good ? 1 : 0));
+    assert(rt_vulkan_dispatch(42, -17, 123456, 7) == 0);
+    assert(rt_vulkan_end_compute(41) == (good ? 1 : 0));
+    assert(rt_vulkan_end_compute(42) == 0);
     assert(rt_vulkan_fence_submission_supported() == (good ? 113 : 0));
-    assert(rt_vulkan_free_buffer(41) == (good ? 114 : 0));
-    assert(rt_vulkan_free_buffer(42) == (good ? -777 : 0));
-    assert(rt_vulkan_select_device(41) == (good ? 115 : 0));
-    assert(rt_vulkan_select_device(42) == (good ? -777 : 0));
+    assert(rt_vulkan_free_buffer(41) == (good ? 1 : 0));
+    assert(rt_vulkan_free_buffer(42) == 0);
+    assert(rt_vulkan_select_device(41) == (good ? 1 : 0));
+    assert(rt_vulkan_select_device(42) == 0);
     assert(rt_vulkan_selected_device_driver_identity_hash() == (good ? 116 : 0));
-    assert(rt_vulkan_shutdown() == (good ? 117 : 0));
-    assert(rt_vulkan_submit_and_wait(41) == (good && !optional ? 118 : 0));
-    assert(rt_vulkan_submit_and_wait(42) == (good && !optional ? -777 : 0));
+    assert(rt_vulkan_shutdown() == (good ? 1 : 0));
+    assert(rt_vulkan_submit_and_wait(41) == (good && !optional ? 1 : 0));
+    assert(rt_vulkan_submit_and_wait(42) == 0);
     assert(rt_vulkan_submit_and_wait_fence(41) == (good ? 119 : 0));
     assert(rt_vulkan_submit_and_wait_fence(42) == (good ? -777 : 0));
     assert(rt_vulkan_submit_no_wait(41) == (good ? 120 : 0));
     assert(rt_vulkan_submit_no_wait(42) == (good ? -777 : 0));
-    assert(rt_vulkan_wait_fence(41, -17) == (good ? 121 : 0));
-    assert(rt_vulkan_wait_fence(42, -17) == (good ? -777 : 0));
-    assert(rt_vulkan_wait_idle() == (good ? 122 : 0));
+    assert(rt_vulkan_wait_fence(41, -17) == (good ? 1 : 0));
+    assert(rt_vulkan_wait_fence(42, -17) == 0);
+    assert(rt_vulkan_wait_idle() == (good ? 1 : 0));
     const char *saved0 = rt_vulkan_device_driver_identity(41);
     assert(strcmp(saved0, good ? "device_driver_identity" : "") == 0);
     assert(strcmp(rt_vulkan_device_driver_identity(-2), "") == 0);
@@ -277,7 +277,7 @@ int main(int argc, char **argv) {
     assert(rt_gpu_provider_loaded(2) == good);
     if (good) {
         uint64_t start = phase2_gpu_vulkan_scalar_nanos();
-        for (int i=0; i<100000; ++i) assert(rt_vulkan_bind_buffer(41, -17, 123456) == 102);
+        for (int i=0; i<100000; ++i) assert(rt_vulkan_bind_buffer(41, -17, 123456) == 1);
         printf("scalar_calls=100000 elapsed_ns=%llu\n", (unsigned long long)(phase2_gpu_vulkan_scalar_nanos()-start));
         assert(phase2_gpu_vulkan_scalar_retire() == 1);
         assert(strcmp(saved0, "device_driver_identity") == 0);
