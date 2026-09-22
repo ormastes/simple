@@ -30,7 +30,7 @@ use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profi
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
 use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, compile_simpleos_arm64, simpleos_spl_start_symbol}
-use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source}
+use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
@@ -117,11 +117,48 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
             case Ok(path): path
             case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
 
+        # The SimpleOS userspace CRT calls this symbol through a weak reference
+        # after the heap is available.  The legacy freestanding branch below
+        # already supplies a concrete caller, but this canonical userspace
+        # branch returned before doing so.  That left every heap-backed module
+        # global (including `[text]` literals) at raw zero under --gc-sections:
+        # no `__module_init_*` body was retained or called.  Discover the
+        # emitted initializer symbols from the user's objects and compile the
+        # same aggregator used by the legacy x86 and RV64 paths.
+        val module_init_names = simpleos_module_init_symbols(user_objects)
+        var init_o = ""
+        # Avoid a compiler subprocess and temporary object for the common
+        # scalar-only case.  The CRT's weak reference is intentionally absent
+        # there; when a module initializer exists, the concrete caller below
+        # keeps it live through --gc-sections.
+        if module_init_names.len() > 0:
+            if not dir_create_all("build/os"):
+                file_delete(entry_object)
+                return Err("SimpleOS x86_64 userspace module-init staging directory creation failed")
+            val init_c = "build/os/simpleos_x86_64_user_module_init_{getpid()}.c"
+            init_o = "build/os/simpleos_x86_64_user_module_init_{getpid()}.o"
+            # The compatibility runtime archive exports an empty strong
+            # __simple_call_module_inits stub. --wrap redirects the CRT's
+            # reference to this generated implementation without admitting a
+            # second strong definition from the archive.
+            file_write(init_c, simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits"))
+            match compile_simpleos_x86_64_c(init_c, init_o, opt_level):
+                case Err(e):
+                    file_delete(init_c)
+                    file_delete(init_o)
+                    file_delete(entry_object)
+                    return Err("SimpleOS x86_64 userspace module-init caller compilation failed: {e}")
+                case Ok(_): pass
+            file_delete(init_c)
+
         val support0 = support[0]
         var user_args: [text] = [
             "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
             "-o", output, support0, entry_object
         ]
+        if init_o != "":
+            user_args.push("--wrap=__simple_call_module_inits")
+            user_args.push(init_o)
         for obj in user_objects:
             user_args.push(obj)
         user_args.push("--start-group")
@@ -131,6 +168,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
         val (_user_out, user_err, user_code) = process_run(linker, user_args)
         file_delete(entry_object)
+        file_delete(init_o)
         if user_code != 0:
             return Err("SimpleOS x86_64 user executable link failed: {user_err}")
         if verbose:

@@ -1,0 +1,97 @@
+"""Regression for `simpleos_freestanding_nil_array_init_optimizer_guard_fold`.
+
+The canonical `x86_64-unknown-simpleos` userspace link must retain a concrete
+module-initializer caller.  The test lowers the real module-array path, then
+checks the actual generated caller source used by the linker.
+"""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.simpleos_native_guards.{simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn setup_host_bug_a08(source: text):
+    val path = "host_bug_a08_freestanding_array_initializer.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    (mir, lowering.errors.len())
+
+describe "host bug A08 freestanding array initializer":
+    it "lowers one runtime initializer for a module-level text array":
+        step("reproduce reported failure")
+        val result = setup_host_bug_a08(
+            "var WORDS: [text] = [\"simple\", \"os\"]\n" +
+            "fn main() -> i64:\n    WORDS.len()\n")
+        val mir = result.0
+        var initializer_count = 0
+        var words_store_count = 0
+        var words_static_count = 0
+        for static_ in mir.statics.values():
+            if static_.name.ends_with("__WORDS"):
+                words_static_count = words_static_count + 1
+        for function_ in mir.functions.values():
+            if function_.name.starts_with("__module_init_"):
+                initializer_count = initializer_count + 1
+                for block in function_.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case MirInstKind.StoreGlobal(symbol, _):
+                                if mir.statics.has(symbol) and mir.statics[symbol].name.ends_with("__WORDS"):
+                                    words_store_count = words_store_count + 1
+                            case _:
+                                ()
+
+        step("exercise corrected behavior")
+        expect(result.1).to_equal(0)
+        expect(words_static_count).to_equal(1)
+        expect(initializer_count).to_equal(1)
+        expect(words_store_count).to_equal(1)
+
+    it "retains exactly one caller edge for each discovered initializer":
+        val caller = simpleos_module_init_caller_source([
+            "__module_init_host_bug_a08_dynamic"
+        ])
+        expect(caller).to_contain(
+            "extern void __attribute__((weak)) __module_init_host_bug_a08_dynamic(void);")
+        expect(caller).to_contain(
+            "if (__module_init_host_bug_a08_dynamic) __module_init_host_bug_a08_dynamic();")
+        val wrapped_caller = simpleos_module_init_caller_source_for_symbol([
+            "__module_init_host_bug_a08_dynamic"
+        ], "__wrap___simple_call_module_inits")
+        expect(wrapped_caller).to_contain("void __wrap___simple_call_module_inits(void)")
+
+        val linker = rt_file_read_text(
+            "src/compiler/70.backend/backend/simpleos_native_linkers.spl") ?? ""
+        val userspace = linker.split(
+            "fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:")[1]
+            .split("# Legacy `*-unknown-none[-elf]`")[0]
+        expect(userspace).to_contain("simpleos_module_init_symbols(user_objects)")
+        expect(userspace).to_contain("dir_create_all(\"build/os\")")
+        expect(userspace).to_contain("simpleos_module_init_caller_source_for_symbol(module_init_names, \"__wrap___simple_call_module_inits\")")
+        expect(userspace).to_contain("file_delete(init_o)")
+        expect(userspace).to_contain("user_args.push(\"--wrap=__simple_call_module_inits\")")
+        expect(userspace).to_contain("if init_o != \"\":")
+        expect(userspace).to_contain("user_args.push(init_o)")
+
+    it "uses Clang with the SimpleOS target for generated C":
+        val symbols = rt_file_read_text(
+            "src/compiler/70.backend/backend/simpleos_native_symbols.spl") ?? ""
+        expect(symbols).to_contain("val cc = if configured_cc != \"\": configured_cc else: \"clang\"")
+        expect(symbols).to_contain("if not cc.contains(\"clang\"):")
+        expect(symbols).to_contain("\"--target=x86_64-unknown-none-elf\"")
+
+    it "keeps ordinary dynamic arrays usable":
+        step("reject adjacent invalid input")
+        val dynamic_words: [text] = ["dynamic", "array"]
+        expect(dynamic_words.len()).to_equal(2)
+        expect(dynamic_words.join("-")).to_equal("dynamic-array")
