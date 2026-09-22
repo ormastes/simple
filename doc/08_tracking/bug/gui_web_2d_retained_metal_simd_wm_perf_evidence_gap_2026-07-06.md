@@ -65,6 +65,28 @@ gate that shows the Metal/SIMD path is fast enough and not falling back.
 4. Fail honestly when Metal resolves to software or when the evidence is
    headless/cache-only instead of retained live-frame rendering.
 
+## 2026-09-22 schema admission progress
+
+`scripts/check/check-wm-production-fullscreen-evidence.shs
+--validate-retained-perf-receipt RECEIPT.env` now checks a candidate row's
+platform/backend, actual backend and fallback, filesystem WM client workload,
+presented-buffer readback for CPU lanes or device readback for Metal, source
+and executable identity, viewport, warmup and
+sample count, p50/p95 and absolute frame budget, RSS and absolute memory budget.
+It requires before/after captures, an executable, and a launch log whose
+SHA-256 digests match the receipt, and a backend/viewport/sample marker in that
+log. The baseline must use the same platform, backend, and viewport; p95 may
+grow at most 10% and RSS at most 5%. The command reports
+`wm_retained_web2d_perf_schema_status=pass` only for schema admission. The
+`--self-test-retained-perf-receipt` option checks fallback, cache readback,
+artifact digest, incomparable baseline, latency regression, and memory
+regression rejection with synthetic fixtures.
+
+No fresh live hosted Metal/CPU SIMD or SimpleOS WM performance receipt was
+captured here. The bug remains **open**. A schema-admitted row alone does not
+establish that its timing samples came from live retained frames; the producing
+WM and guest run still need review and the live campaign still needs to run.
+
 ## Sidecar Status
 
 Multiple `gpt-5.3-codex-spark` sidecar launches were attempted for Metal,
