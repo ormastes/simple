@@ -72,3 +72,17 @@ sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs
 sh scripts/check/check-macos-vulkan-web-live-evidence.shs
 ```
 
+## 2026-09-22 — post-spawn rejection cleanup
+
+Source review found a separate child-lifecycle bug: after successful spawn,
+process-group validation or `bindRoot()` rejection could return without
+terminating and reaping the owned child. The candidate now retains explicit
+ownership until reap, terminates only the unreaped child/its anchored group
+on rejection, and makes cleanup idempotent after normal wait. Real-process
+Swift self-tests cover pre-root failure, actual process-group mismatch,
+sibling survival, reaping, and the successful-wait path. A missing-scope-cleanup
+mutation is rejected by the new test. See
+`doc/09_report/macos_es_negative_admission_2026-09-22.md` for the bounded run
+and resource evidence. Independent review and the committed-source admission
+contract remain pending at this entry. This source fix does not supply the
+missing Apple identity/entitlement; the canonical bug remains open.

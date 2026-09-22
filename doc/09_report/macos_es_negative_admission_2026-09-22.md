@@ -78,3 +78,35 @@ unassigned signing identity/team, and no collector artifact exists in this
 restored checkout. The tracked XML requests the ES entitlement; it is not
 evidence of Apple approval. No signed candidate, prepared/admitted policy,
 or live history was produced. The canonical P3 bug stays open.
+
+## Post-spawn rejection cleanup
+
+Further review found a source-level lifecycle gap: `collect()` spawned its
+root before `bindRoot()`, which can reject previously detected ES sequence
+gaps or pre-root overflow. That exception left the spawned child unreaped
+and potentially running. Post-spawn process-group validation had the same
+cleanup gap. No live ES entitlement is needed to exercise either boundary.
+
+The collector now owns the successful `posix_spawn` result in `SpawnedRoot`
+until a successful wait reaps it. Error cleanup sends SIGKILL to the owned
+group only when the unreaped child is its group leader, also signals the
+exact child, and reaps it. Successful waits disable cleanup; ECHILD relinquishes
+ownership to avoid signaling a potentially reused PID. The scope owner also
+cleans up when `bindRoot()` throws. The unavailable policy's source hash is
+updated without changing its admission status.
+
+New real-process self-tests verify pre-root rejection with a spawned sleep
+process, actual getpgid rejection for a child sharing the collector's group,
+reaping, sibling survival, and idempotent cleanup after a successful wait.
+The first compiled self-test passed in 4.05 seconds with maximum child RSS
+175,685,632 bytes and sampled tree peak 209,312 KiB. A fixture with scope
+cleanup disabled failed as expected (exit 1) in 5.43 seconds and still
+terminated quiescently; it peaked at 203,712 KiB across the sampled tree.
+This confirms the new regression detects the missing cleanup. These times
+include Swift compilation and are not a live collector performance benchmark.
+
+Both runs used the reviewed external watchdog with enforced sampled cap
+5,859,375 KiB, 100 ms target interval, 180-second timeout and 5000 ms observation
+budget. Logs, test binaries, mutant source and receipts are retained under
+`build/evidence/macos-es-child-cleanup-20260922/` in this worktree. Neither run
+establishes hard memory containment (`hard_memory_limit=0`) or live ES admission.

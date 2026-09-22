@@ -641,7 +641,52 @@ private func withCStringArray<R>(_ strings: [String],
     }
 }
 
-private func spawnProcessGroup(executable: String, argv: [String]) throws -> pid_t {
+// The collector exclusively owns this direct child until waitpid reaps it.
+// An unreaped child pins its PID, so failure cleanup cannot target a reused PID.
+private final class SpawnedRoot {
+    let pid: pid_t
+    private var reaped = false
+
+    init(pid: pid_t) { self.pid = pid }
+
+    deinit { terminateAndReap() }
+
+    func terminateAndReap() {
+        guard !reaped else { return }
+        if getpgid(pid) == pid { _ = Darwin.kill(-pid, SIGKILL) }
+        _ = Darwin.kill(pid, SIGKILL)
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+        reaped = true
+    }
+
+    func wait() throws -> Bool {
+        guard !reaped else { throw CollectorError.launchFailure }
+        var status: Int32 = 0
+        while true {
+            let result = waitpid(pid, &status, 0)
+            if result == pid {
+                reaped = true
+                return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0
+            }
+            if result < 0 && errno == EINTR { continue }
+            // If ownership was lost, never signal a possibly reused PID.
+            if result < 0 && errno == ECHILD { reaped = true }
+            throw CollectorError.launchFailure
+        }
+    }
+}
+
+private func admitSpawnedRoot(_ child: pid_t) throws -> SpawnedRoot {
+    let root = SpawnedRoot(pid: child)
+    guard getpgid(child) == child else {
+        root.terminateAndReap()
+        throw CollectorError.launchFailure
+    }
+    return root
+}
+
+private func spawnProcessGroup(executable: String, argv: [String]) throws -> SpawnedRoot {
     var attributes: posix_spawnattr_t?
     guard posix_spawnattr_init(&attributes) == 0 else {
         throw CollectorError.launchFailure
@@ -665,10 +710,10 @@ private func spawnProcessGroup(executable: String, argv: [String]) throws -> pid
             }
         }
     }
-    guard result == 0, child > 0, getpgid(child) == child else {
+    guard result == 0, child > 0 else {
         throw CollectorError.launchFailure
     }
-    return child
+    return try admitSpawnedRoot(child)
 }
 
 private final class SignalForwarder {
@@ -696,17 +741,6 @@ private final class SignalForwarder {
         for source in sources { source.cancel() }
         for number in forwardedSignals { Darwin.signal(number, SIG_DFL) }
     }
-}
-
-private func waitForRoot(_ child: pid_t) throws -> Bool {
-    var status: Int32 = 0
-    while true {
-        let result = waitpid(child, &status, 0)
-        if result == child { break }
-        if result < 0 && errno == EINTR { continue }
-        throw CollectorError.launchFailure
-    }
-    return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0
 }
 
 private func collect(_ invocation: Invocation) throws {
@@ -788,11 +822,12 @@ private func collect(_ invocation: Invocation) throws {
     let child = try spawnProcessGroup(
         executable: snapshot.executedPath,
         argv: [invocation.driver] + invocation.arguments)
-    try tracker.bindRoot(pid: child, path: snapshot.executedPath,
+    defer { child.terminateAndReap() }
+    try tracker.bindRoot(pid: child.pid, path: snapshot.executedPath,
                          collectorPID: Int32(getpid()))
-    let signalForwarder = SignalForwarder(processGroup: child)
+    let signalForwarder = SignalForwarder(processGroup: child.pid)
     _ = signalForwarder
-    let rootExitedNormally = try waitForRoot(child)
+    let rootExitedNormally = try child.wait()
     try tracker.waitForFinalization(timeout: finalizationTimeout)
 
     let finalOriginal = try pathIdentity(invocation.driver)
@@ -817,7 +852,7 @@ private func collect(_ invocation: Invocation) throws {
         "coverage=root-and-descendants-through-exit-gap-checked",
         "finalized=complete",
         "status=pass",
-        "root_pid=\(child)",
+        "root_pid=\(child.pid)",
         "root_executable_path=\(invocation.driver)",
         "root_executable_sha256=\(snapshot.originalIdentity.sha256)",
         "root_executable_device=\(snapshot.originalIdentity.device)",
@@ -870,7 +905,60 @@ private func selfTestExpectFailure(_ body: () throws -> Void) throws {
     }
 }
 
+private func selfTestExpectReaped(_ pid: pid_t) throws {
+    guard pid > 0 else { throw CollectorError.outputFailure }
+    var status: Int32 = 0
+    let result = waitpid(pid, &status, WNOHANG)
+    if result == -1 && errno == ECHILD { return }
+    // Keep a regressed test from leaking its own fixture process.
+    if result == 0 { SpawnedRoot(pid: pid).terminateAndReap() }
+    throw CollectorError.outputFailure
+}
+
+private func selfTestSpawnCleanup() throws {
+    let sibling = try spawnProcessGroup(executable: "/bin/sleep",
+                                       argv: ["/bin/sleep", "60"])
+    defer { sibling.terminateAndReap() }
+
+    let failedTracker = HistoryTracker(preRootLimit: 0)
+    failedTracker.accept(selfTestEvent(.exec, 20, 20, "/bin/true", 1, 1))
+    var rejectedPID: pid_t = 0
+    try selfTestExpectFailure {
+        let root = try spawnProcessGroup(executable: "/bin/sleep",
+                                        argv: ["/bin/sleep", "60"])
+        rejectedPID = root.pid
+        try failedTracker.bindRoot(pid: root.pid, path: "/bin/sleep",
+                                   collectorPID: getpid())
+    }
+    try selfTestExpectReaped(rejectedPID)
+
+    // Spawn without SETPGROUP to exercise actual getpgid rejection. This
+    // child's group is our group: cleanup must not signal that group.
+    var ungrouped: pid_t = 0
+    let spawnResult = withCStringArray(["/bin/sleep", "60"]) { argv in
+        withCStringArray([]) { environment in
+            posix_spawn(&ungrouped, "/bin/sleep", nil, nil, argv, environment)
+        }
+    }
+    guard spawnResult == 0, ungrouped > 0 else {
+        throw CollectorError.outputFailure
+    }
+    try selfTestExpectFailure { _ = try admitSpawnedRoot(ungrouped) }
+    try selfTestExpectReaped(ungrouped)
+
+    var status: Int32 = 0
+    guard waitpid(sibling.pid, &status, WNOHANG) == 0 else {
+        throw CollectorError.outputFailure
+    }
+    let success = try spawnProcessGroup(executable: "/usr/bin/true",
+                                       argv: ["/usr/bin/true"])
+    guard try success.wait() else { throw CollectorError.outputFailure }
+    success.terminateAndReap()
+    try selfTestExpectReaped(success.pid)
+}
+
 private func runSelfTests() throws {
+    try selfTestSpawnCleanup()
     try selfTestExpectFailure {
         let tracker = HistoryTracker()
         try tracker.bindRoot(pid: 100, path: "/private/root", collectorPID: 1)
