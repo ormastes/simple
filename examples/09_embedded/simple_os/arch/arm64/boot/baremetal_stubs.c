@@ -2729,6 +2729,8 @@ struct arm64_net_used {
     struct arm64_virtq_used_elem ring[ARM64_NET_QUEUE_SIZE];
 };
 
+#include "arm64_virtio_net_queue_state.h"
+
 static struct arm64_virtq_desc g_arm64_net_rx_desc[ARM64_NET_QUEUE_SIZE]
     __attribute__((aligned(4096)));
 static struct arm64_net_avail g_arm64_net_rx_avail __attribute__((aligned(4096)));
@@ -2870,13 +2872,24 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     if (!g_arm64_net_ready) return -19;
     if (!data_addr || len == 0ULL || len > 1514ULL) return -22;
     volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm64_net_base;
-    uint16_t slot = ARM64_NET_QUEUE_SIZE;
-    for (uint16_t i = 0; i < ARM64_NET_QUEUE_SIZE; ++i) {
-        if (!g_arm64_net_tx_posted[i]) {
-            slot = i;
-            break;
-        }
+    arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_used,
+                                  sizeof(g_arm64_net_tx_used));
+    uint64_t completions_before = g_arm64_net_tx_completions;
+    int reap = arm64_net_tx_reap_used(&g_arm64_net_tx_used,
+                                      &g_arm64_net_tx_last_used,
+                                      g_arm64_net_tx_posted,
+                                      &g_arm64_net_tx_completions,
+                                      ARM64_NET_QUEUE_SIZE);
+    if (reap < 0) {
+        mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED;
+        g_arm64_net_ready = 0U;
+        return -5;
     }
+    if (g_arm64_net_tx_completions != completions_before) {
+        uint32_t irq = mmio[VMMIO_INTERRUPT_STATUS / 4U];
+        if (irq) mmio[VMMIO_INTERRUPT_ACK / 4U] = irq;
+    }
+    uint16_t slot = arm64_net_tx_find_free(g_arm64_net_tx_posted);
     if (slot == ARM64_NET_QUEUE_SIZE) return -11; /* EAGAIN: queue owned */
     uint8_t *dst = g_arm64_net_tx_buf[slot];
     arm64_net_zero(dst, ARM64_NET_HEADER_SIZE);
@@ -2885,9 +2898,8 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     g_arm64_net_tx_desc[slot].addr = (uint64_t)(uintptr_t)dst;
     g_arm64_net_tx_desc[slot].len = (uint32_t)(ARM64_NET_HEADER_SIZE + len);
     g_arm64_net_tx_desc[slot].flags = 0U;
-    g_arm64_net_tx_avail.ring[slot] = slot;
-    g_arm64_net_tx_avail.idx++;
     g_arm64_net_tx_posted[slot] = 1U;
+    arm64_net_tx_publish(&g_arm64_net_tx_avail, slot);
     arm64_clean_dcache_range((uint64_t)(uintptr_t)dst, ARM64_NET_HEADER_SIZE + len);
     arm64_clean_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_desc[slot],
                              sizeof(g_arm64_net_tx_desc[slot]));
@@ -2898,26 +2910,21 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     while (polls++ < ARM64_NET_POLL_LIMIT) {
         arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_used,
                                       sizeof(g_arm64_net_tx_used));
-        while (g_arm64_net_tx_used.idx != g_arm64_net_tx_last_used) {
-            uint16_t used_slot =
-                (uint16_t)(g_arm64_net_tx_last_used % ARM64_NET_QUEUE_SIZE);
-            struct arm64_virtq_used_elem elem =
-                g_arm64_net_tx_used.ring[used_slot];
-            g_arm64_net_tx_last_used++;
-            if (elem.id >= ARM64_NET_QUEUE_SIZE ||
-                !g_arm64_net_tx_posted[elem.id]) {
-                /* A duplicate or unknown completion cannot release ownership:
-                 * fail closed instead of allowing DMA buffer reuse. */
-                mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED;
-                g_arm64_net_ready = 0U;
-                return -5;
-            }
-            g_arm64_net_tx_posted[elem.id] = 0U;
-            g_arm64_net_tx_completions++;
+        completions_before = g_arm64_net_tx_completions;
+        reap = arm64_net_tx_reap_used(&g_arm64_net_tx_used,
+                                      &g_arm64_net_tx_last_used,
+                                      g_arm64_net_tx_posted,
+                                      &g_arm64_net_tx_completions, slot);
+        if (reap < 0) {
+            mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED;
+            g_arm64_net_ready = 0U;
+            return -5;
+        }
+        if (g_arm64_net_tx_completions != completions_before) {
             uint32_t irq = mmio[VMMIO_INTERRUPT_STATUS / 4U];
             if (irq) mmio[VMMIO_INTERRUPT_ACK / 4U] = irq;
-            if (elem.id == slot) return (RuntimeValue)len;
         }
+        if (reap > 0) return (RuntimeValue)len;
     }
     return -110;
 }
