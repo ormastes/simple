@@ -2380,6 +2380,24 @@ prepare_rust_authority_workspace() {
   rust_authority_workspace_prepared=1
 }
 
+# Forward only explicitly selected tools; unset tools keep target-aware Cargo
+# defaults (notably clang-cl and llvm-lib on Windows MSVC).
+run_rust_authority_env() {
+  rust_env_log=$1
+  shift
+  if [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
+  if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
+  if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
+  if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
+  if [ "${os}" = macos ]; then
+    set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$cc_abs}" "$@"
+    if [ "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS+x}${RUSTFLAGS+x}" != '' ]; then
+      set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" "$@"
+    fi
+  fi
+  run_logged "$rust_env_log" env -i "$@"
+}
+
 run_rust_authority_cargo() {
   # Cargo outputs are shared across output roots on Windows. Acquire the
   # existing authority lock before even preparing the workspace, and retain
@@ -2402,16 +2420,12 @@ run_rust_authority_cargo() {
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
     if [ "${rust_authority_lto}" = off ]; then
-      run_logged "${rust_authority_log}" env -i \
+      run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
-        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2426,16 +2440,12 @@ run_rust_authority_cargo() {
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
         "${cargo_abs}" "$@"
     else
-      run_logged "${rust_authority_log}" env -i \
+      run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
-        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2451,16 +2461,12 @@ run_rust_authority_cargo() {
         "${cargo_abs}" "$@"
     fi
   elif [ "${rust_authority_lto}" = off ]; then
-    run_logged "${rust_authority_log}" env -i \
+    run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
-        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2471,16 +2477,12 @@ run_rust_authority_cargo() {
       TEMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
-    run_logged "${rust_authority_log}" env -i \
+    run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
-        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
-        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
-        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
