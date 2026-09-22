@@ -23,6 +23,43 @@ All seven commits applied without conflicts. The tracked count increased from
 LLVM detector, or setup toolchain files changed; LLVM18 seed binding remains.
 The separate native C frontend prerequisite remains LLVM23 clang-cl in C mode.
 
+## Alignment with the later Stage2 candidate
+
+After the initial preparation at `99400f03fa17c7681196761587343e217bbcaee5`,
+the following independently reviewed fixes from the frozen bootstrap lane were
+applied to this repository's local `main`, without conflicts:
+
+| Bootstrap-lane commit | Prepared-lane commit | Fix |
+| --- | --- | --- |
+| `8138fe3b2ac1410c82fbcfc855443f6c8d97c33f` | `b0dbeab1d536f1e13ba069e6a6113b1aff16509b` | Pinned gitlinks |
+| `76f69029547056c0c41339edae4255c80e51e58e` | `67d3506b314eed0a41aadbf4eeaa76871b96ca1b` | Literal bracket paths |
+| `418418aa13469faac3701bfe9040a0914d70b2d3` | `53222a70426ebfbcce04f3a8a04e522767a5280c` | Bounded current-tree inventory capacity |
+| `e791654e36a282fd614350035d63cb83a14c80cf` | `56bb573075c14c8c16a4f0337337d090f2eaa8a5` | Bound MSYS gitlink root spelling |
+| `e232e7657beac1d56611bb32cf3017861da988ae` | `f66110d6cff1d7c39bf50f7bbcfd468a60be1041` | Owner-bound generated native symlink |
+| `392a899c0b7269637ca70c46f239d623b3078799` | `76125ad93ec56d4d7091cd4079fd9c3df6e34ecc` | Frontend Job cleanup after root exit |
+
+Git-tree comparison against `392a899c0b7269637ca70c46f239d623b3078799`
+shows exact identity for all nine files touched by these six imports, including
+the complete authority helper, native collector, frontend admission helper,
+and their regressions. The only remaining differences from that candidate are
+the previously prepared Phase2 scripts, tests, and documentation. No Phase2
+implementation files were modified by the six imports. The tracked count grew
+from 137451 to 137455, matching four added files.
+
+Existing focused evidence for the identical imported code is reused; none of
+the passing suites was rerun. This is source-alignment evidence, not a new
+Stage2 admission or a claim that the Phase2 binary matrix has passed.
+
+Before execution, review the actual admission for the `392a899` candidate,
+its compiler SHA, runtime snapshot and current source snapshot. The prepared
+verifier locates helper programs beneath `--source-root`, so merely invoking
+this verifier with the untouched bootstrap checkout as source root does not
+supply the new capsule-binding helpers. A full, prepared source checkout or
+explicitly reviewed integration is required; this sparse repository alone is
+not a production execution root. Never relabel a rejected compiler or rewrite
+old receipts to claim the new helper/Git identity. The main agent owns that
+integration and all subsequent execution scheduling.
+
 The additional repair extracts only the compiler-inventory `find`/`sort`
 failure handling and its regression from
 `71c0002764af2069e6f4bd205dd43895a6b41e11`. It does not import that commit's
