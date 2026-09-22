@@ -13,6 +13,33 @@ Reviewed revision: `9cd238428b4ea0c1481c153cae66b8b017629994`
 
 `BLOCKED` for x86_64 and RISC-V.
 
+### 2026-09-22 source progress (still OPEN)
+
+An isolated source slice adds a bounded 64-byte stream-header codec and unit
+contract in `src/lib/common/gpu/simpleos_host_gpu_stream_protocol.spl` and
+`test/01_unit/lib/common/gpu/simpleos_host_gpu_stream_protocol_spec.spl`.
+The decoder rejects malformed fixed headers, reserved fields, unknown message
+types, invalid backend/kind fields, and body lengths above the existing
+payload/readback limits before a body can be allocated. A correlation helper
+requires exact request generation, run, frame, and backend identity. The
+checksum helper supports incremental body reads.
+
+The stream ABI symbols are explicitly exported and the focused interpreter
+spec now covers fixed ABI constants, encode/decode, malformed headers, bounded
+fields, type-specific request-kind/status/reason enums, HELLO/SUBMIT/ERROR correlation, cross-session rejection, and
+incremental checksum behavior. The ERROR response path preserves the exact
+pending request identity instead of being rejected unconditionally.
+
+This remains source-only progress. There is no socket endpoint, guest VirtIO console
+queue driver, WM session integration, or live x86_64/RISC-V QEMU evidence.
+The wrapper must continue reporting `virtio-serial-unimplemented`; the bug
+remains open. The isolated checkout has no admitted pure-Simple `bin/simple`;
+the focused 7-example interpreter spec passed with the available bootstrap-only
+runtime as bounded development evidence. Its final measured maximum RSS was 321,432
+KiB versus 340,404 KiB for the earlier 4-example run in the same lane. Codec
+cost is constant for a header; body checksum is linear in bytes and requires no
+body-sized scratch buffer.
+
 The current wrapper correctly reports `virtio-serial-unimplemented` when
 `ivshmem-plain` and the AArch64-only file-backed RAM tail are unavailable but
 QEMU exposes `virtio-serial-pci` or `virtio-serial-device`. Do not weaken that
@@ -263,4 +290,3 @@ BLOCKED  SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_hos
 The interpreter spec was not retried because this checkout has no admitted
 `bin/simple`, and this delegated lane forbids bootstrap. This environmental
 blocker does not change the transport finding.
-
