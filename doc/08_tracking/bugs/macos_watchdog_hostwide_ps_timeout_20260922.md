@@ -120,3 +120,33 @@ detail persistently, kills the direct root, and requires exit 89 with
 quiescent=1 and no live survivors. PID/group reuse and metadata failure remain
 covered by the identity regression. No bootstrap was run for these fixes.
 Invocation overhead and source-matched bootstrap qualification remain OPEN.
+
+## Live denied process: ownership attribution pending
+
+The independently authorized `stage2-reviewed-531ac33` attempt proves the next
+denial was live: PID 8004, state 2 (SRUN), expected/actual birth
+`1790077981:225476`, successful 648-byte kernel proof, and BSDINFO EPERM.
+Seed refresh completed in 44.32 seconds; failure occurred during Rust compiler
+backfill. The receipt reports peak 3,030,288 KiB, maximum sample 34.817 ms,
+zero overruns, exit 89 and quiescent=1. The prior retained-group cleanup fix
+worked; no manual kill was needed. PID 8004's command and ancestry were not
+recorded, and it was absent by the diagnostic follow-up.
+
+A provenance-only change adds target kernel command, PPID/PGID/SID, effective
+and real UID to denied-query diagnostics. Supervisor EOF evidence includes
+root/expected session, retained versus current group leader identity, and the
+selected metadata snapshot's ancestry bounded to 32 rows with cycle detection.
+The command name is bounded and whitespace/control sanitized. None of these
+fields changes process selection or permits ignoring live denial.
+
+Tests cover exact command/identity attribution, control-character sanitation,
+group-anchor evidence, ancestry order, cycle termination and the depth bound.
+Evidence: `build/evidence/macos-observer-live-denial-20260922`.
+
+The backfill log also records `rust-objcopy` PID 7959 aborting because its
+`@rpath/libLLVM.dylib` dependency could not load. One guarded minimal objcopy
+invocation reproduced that independent toolchain fault, but completed 42
+samples/quiescent cleanup without EPERM. No causal link between this crash and
+PID 8004 is established. A separate agent owns that toolchain fix/reproduction.
+This watchdog follow-up ran no Cargo/backfill or bootstrap. Ownership of the
+denied process, bootstrap qualification, and invocation overhead remain OPEN.

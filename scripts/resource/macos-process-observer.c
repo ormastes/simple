@@ -29,11 +29,23 @@ static int detail_failure(const char *operation, int pid, int bytes,
             (unsigned long long)proof.kp_proc.p_starttime.tv_sec == sec &&
             (unsigned long long)proof.kp_proc.p_starttime.tv_usec == usec &&
             proof.kp_proc.p_stat == SZOMB) return printf("R %d gone\n", pid) < 0;
-        if (!result && size == sizeof(proof))
+        if (!result && size == sizeof(proof)) {
             fprintf(stderr, "macos-process-observer: denial-state pid=%d observed_pid=%d state=%d expected=%llu:%llu actual=%llu:%llu\n",
                     pid, proof.kp_proc.p_pid, proof.kp_proc.p_stat, sec, usec,
                     (unsigned long long)proof.kp_proc.p_starttime.tv_sec,
                     (unsigned long long)proof.kp_proc.p_starttime.tv_usec);
+            char command[sizeof(proof.kp_proc.p_comm) + 1];
+            size_t i;
+            for (i = 0; i < sizeof(proof.kp_proc.p_comm) && proof.kp_proc.p_comm[i]; ++i) {
+                unsigned char c = (unsigned char)proof.kp_proc.p_comm[i];
+                command[i] = c > 32 && c < 127 ? (char)c : '_';
+            }
+            command[i] = 0;
+            pid_t sid = getsid(pid);
+            fprintf(stderr, "macos-process-observer: denial-owner pid=%d ppid=%d pgid=%d sid=%d uid=%u ruid=%u command=%s\n",
+                    pid, proof.kp_eproc.e_ppid, proof.kp_eproc.e_pgid, sid,
+                    proof.kp_eproc.e_ucred.cr_uid, proof.kp_eproc.e_pcred.p_ruid, command);
+        }
         fprintf(stderr, "macos-process-observer: denial-proof pid=%d result=%d bytes=%zu errno=%d\n",
                 pid, result, size, result ? errno : 0);
     }

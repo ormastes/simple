@@ -67,6 +67,12 @@ zombie state. A live process, reused PID, short metadata reply, or denied
 metadata check still fails closed with exit 89. Denial diagnostics retain the
 original operation/errno and record the proof outcome. This does not make a
 live protected process measurable or authorize ignoring denied RSS.
+Denial diagnostics also record bounded, whitespace-sanitized kernel command
+name, parent/group/session IDs and effective/real UID. On detail EOF the
+supervisor records its expected root/session, retained/current group anchor
+identities, and the selected snapshot's ancestry (cycle checked, at most 32
+rows). These are failure diagnostics, not a change to ownership selection or
+permission handling. A failed `getsid` in the diagnostic is recorded as -1.
 
 Sampling failure, malformed output, or a sample exceeding its one-second
 observation budget causes exit 89. Scheduling uses the remaining
