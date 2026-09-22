@@ -30,28 +30,10 @@ stage2_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-receiver.XXXXXX")
 trap 'rm -rf "$stage2_probe_dir"' EXIT HUP INT TERM
 
 stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard"
-# SIMPLE_NO_STUB_FALLBACK=1 is required on the MSVC/clang-cl lane: without it,
-# linker.rs's stub-fallback path adds a bare `/WHOLEARCHIVE` (no `:lib`
-# qualifier -- whole-archives every input archive) plus
-# `/FORCE:MULTIPLE,UNRESOLVED` to the clang-cl link line. That combination
-# lets the MSVC linker silently resolve the CRT startup call into `wmain`
-# to address 0 (image base) instead of erroring on the real duplicate/
-# unresolved symbol, producing a binary that segfaults (rc=139) at CRT
-# startup before any user code -- including a two-line hello world -- ever
-# runs. Confirmed by hand: this exact fixture, unchanged, exits 0 and
-# prints its expected output once this flag is set. The second probe below
-# (positional Stage-3 route) already carries this flag unconditionally for
-# the same reason; this one was simply missed.
-#
-# Scoped to the windows-msvc target only (not applied unconditionally like
-# the second probe) so this change is byte-for-byte inert on the
-# Linux/macOS lanes this same script also runs under -- provable rather
-# than merely assumed, since only the Windows lane could be verified here.
-# See doc/08_tracking/bug/stage2_windows_msvc_struct_receiver_probe_segv_2026-09-01.md.
-case "$stage2_target" in
-    *windows-msvc*) stage2_no_stub_fallback=1 ;;
-    *) stage2_no_stub_fallback= ;;
-esac
+# Both admission probes must reject unresolved-symbol stubs on every target.
+# A macOS fixture printed the expected output after linking seven generated
+# stubs when this gate cleared the caller's strict flag outside windows-msvc.
+# Correct stdout alone does not prove a complete receiver/runtime capability.
 # Derive the Windows ABI/linker flavor from the REQUESTED target rather than
 # trusting the caller's ambient environment. Target::linker_flavor() (Rust)
 # and _is_mingw()/_is_mingw_env() (self-hosted Simple) both fall back to an
@@ -76,7 +58,7 @@ case "$stage2_target" in
     *) stage2_windows_abi=; stage2_linker_flavor= ;;
 esac
 if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_NO_STUB_FALLBACK="$stage2_no_stub_fallback" \
+    SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
     SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
     "$stage2_compiler" native-build \
