@@ -22,6 +22,62 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+toolchain_self_test() (
+  fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-aarch64-tools.XXXXXX") || exit 1
+  trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+  mkdir -p "$fixture/bin" "$fixture/override"
+  for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+    case "$tool" in
+      clang|clang++) version='clang version 23.1.0' ;;
+      *) version='LLVM version 23.1.0' ;;
+    esac
+    printf '#!/bin/sh\necho "%s"\n' "$version" >"$fixture/bin/$tool"
+    chmod +x "$fixture/bin/$tool"
+  done
+  rm "$fixture/bin/clang++"
+  ln -s clang "$fixture/bin/clang++"
+
+  default=$(LLVM_23_1_PREFIX="$fixture" sh "$0" --print-toolchain)
+  printf '%s\n' "$default" | grep -qx "CLANG=$fixture/bin/clang"
+  printf '%s\n' "$default" | grep -qx "CXX=$fixture/bin/clang++"
+  printf '%s\n' "$default" | grep -qx "AR=$fixture/bin/llvm-ar"
+  overridden=$(LLVM_23_1_PREFIX="$fixture" CLANG=/custom/clang AR=/custom/ar sh "$0" --print-toolchain)
+  printf '%s\n' "$overridden" | grep -qx 'CLANG=/custom/clang'
+  printf '%s\n' "$overridden" | grep -qx 'AR=/custom/ar'
+  validated=$(LLVM_23_1_PREFIX="$fixture" sh "$0" --check-toolchain)
+  printf '%s\n' "$validated" | grep -qx "CLANG=$fixture/bin/clang"
+  printf '%s\n' "$validated" | grep -qx "CXX=$fixture/bin/clang++"
+  printf '%s\n' "$validated" | grep -qx "AR=$fixture/bin/llvm-ar"
+
+  printf '#!/bin/sh\necho "LLVM version 18.1.0"\n' >"$fixture/bin/llvm-ar"
+  if LLVM_23_1_PREFIX="$fixture" sh "$0" --check-toolchain >/dev/null 2>&1; then
+    echo 'FAIL: mixed default provider was accepted' >&2
+    exit 1
+  fi
+  printf '#!/bin/sh\necho "clang version 18.1.0"\n' >"$fixture/override/clang"
+  printf '#!/bin/sh\necho "clang version 18.1.0"\n' >"$fixture/override/clang++"
+  printf '#!/bin/sh\nexit 0\n' >"$fixture/override/ar"
+  chmod +x "$fixture/override/clang" "$fixture/override/clang++" "$fixture/override/ar"
+  bare=$(PATH="$fixture/override:$PATH" LLVM_23_1_PREFIX="$fixture" CLANG=clang AR=ar sh "$0" --check-toolchain)
+  printf '%s\n' "$bare" | grep -qx "CLANG=$fixture/override/clang"
+  printf '%s\n' "$bare" | grep -qx "CXX=$fixture/override/clang++"
+  printf '%s\n' "$bare" | grep -qx "AR=$fixture/override/ar"
+
+  printf '#!/bin/sh\necho "gcc version 13.0.0"\n' >"$fixture/override/gcc"
+  printf '#!/bin/sh\necho "g++ version 13.0.0"\n' >"$fixture/override/g++"
+  chmod +x "$fixture/override/gcc" "$fixture/override/g++"
+  if PATH="$fixture/override:$PATH" CLANG=gcc CXX=g++ AR=ar sh "$0" --check-toolchain >/dev/null 2>&1; then
+    echo 'FAIL: GCC override was accepted' >&2
+    exit 1
+  fi
+  printf 'PASS: AArch64 sysroot defaults to one LLVM 23.1 provider and preserves tool overrides\n'
+)
+
+if [ "${1:-}" = --toolchain-self-test ]; then
+  toolchain_self_test
+  exit 0
+fi
+
 SYSROOT="${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}"
 LIBC_DIR="src/os/libc"
 # Keep the compiler, archiver, and linker in one provider by default.  An

@@ -32,6 +32,7 @@ LLVM 23.1 is not yet available.
   --jobs N            parallel build jobs
   --verify-only       validate source tag and an existing installed provider
   --print-host-compilers  resolve Clang C/C++ host compilers without building
+  --toolchain-self-test   check host Clang selection without building
   --help              show this help
 
 The default target set is X86;AArch64;RISCV;WebAssembly. No download occurs
@@ -73,6 +74,7 @@ while [ "$#" -gt 0 ]; do
         --jobs) [ "$#" -ge 2 ] || die "--jobs requires a count"; JOBS=$2; shift 2 ;;
         --verify-only) VERIFY_ONLY=1; shift ;;
         --print-host-compilers) PRINT_HOST_COMPILERS=1; shift ;;
+        --toolchain-self-test) TOOLCHAIN_SELF_TEST=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -100,6 +102,37 @@ clangxx_companion() {
         *) printf '%s\n' "$clang_cpp" ;;
     esac
 }
+
+toolchain_self_test() (
+    fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-llvm-host-clang.XXXXXX") || exit 1
+    trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+    for tool in clang clang++ clang-18 clang++-18 other-clang gcc g++; do
+        case "$tool" in clang*|other-clang) name=clang ;; *) name=gcc ;; esac
+        printf '#!/bin/sh\necho "%s version 18.1.0"\n' "$name" >"$fixture/$tool"
+        chmod +x "$fixture/$tool"
+    done
+    selected=$(CC="$fixture/clang" CXX="$fixture/clang++" CLANG="$fixture/clang" sh "$0" --print-host-compilers)
+    printf '%s\n' "$selected" | grep -qx "CC=$fixture/clang"
+    printf '%s\n' "$selected" | grep -qx "CXX=$fixture/clang++"
+    printf '%s\n' "$selected" | grep -qx "CLANG=$fixture/clang"
+    versioned=$(CC="$fixture/clang-18" sh "$0" --print-host-compilers)
+    printf '%s\n' "$versioned" | grep -qx "CXX=$fixture/clang++-18"
+    if CC="$fixture/gcc" CXX="$fixture/g++" sh "$0" --print-host-compilers >/dev/null 2>&1; then
+        echo 'FAIL: GCC host compilers were accepted' >&2
+        exit 1
+    fi
+    if CC="$fixture/clang" CLANG="$fixture/other-clang" CXX="$fixture/clang++" \
+        sh "$0" --print-host-compilers >/dev/null 2>&1; then
+        echo 'FAIL: distinct Clang CC and CLANG were accepted' >&2
+        exit 1
+    fi
+    printf 'PASS: LLVM provider builder selects Clang and rejects GCC host compilers\n'
+)
+
+if [ "${TOOLCHAIN_SELF_TEST:-0}" -eq 1 ]; then
+    toolchain_self_test
+    exit 0
+fi
 
 if [ "$VERIFY_ONLY" -eq 0 ] || [ "$PRINT_HOST_COMPILERS" -eq 1 ]; then
     HOST_CC=$(resolve_clang_host_compiler "${CC:-${CLANG:-clang}}" C)
