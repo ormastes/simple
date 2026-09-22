@@ -465,6 +465,12 @@ fn handle_wrapper_gen_wrapper(_ctx: &CommandContext) -> i32 {
 }
 
 fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
+    // `run` owns its source-file position. Recognize help before passing argv
+    // to the compatibility handler, which otherwise opens it as a filename.
+    if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
+        eprintln!("Usage: simple run <file.spl> [args...]");
+        return 0;
+    }
     handle_run(args, gc_log, gc_off)
 }
 
