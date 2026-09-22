@@ -54,6 +54,10 @@ re-run `bin/simple os test --scenario=riscv64-smoke` (or any scenario) and
 confirm it gets past `phase=tooling` — that is the end-to-end confirmation the
 probe-timeout fix could not get today.
 
+TODO: perform that exact command during the post-Linux SimpleOS QEMU phase,
+retain the admitted compiler digest and executed canary receipt, and keep this
+bug open until the runner passes `phase=tooling` without selecting a seed.
+
 ## 2026-09-22 source follow-up
 
 The current `origin/main` runner had regressed from the seed-rejecting behavior
