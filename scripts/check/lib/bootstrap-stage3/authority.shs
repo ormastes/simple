@@ -2579,18 +2579,20 @@ bootstrap_stage3_copy_authority() {
 # native runtime archive, and compiler backfill archive, while detecting a
 # producer that changes any member during projection.
 bootstrap_stage3_copy_seed_tuple() {
-    [ "$#" -eq 5 ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 1" >&2; return 64; }
+    { [ "$#" -eq 5 ] || [ "$#" -eq 6 ]; } || { echo "bootstrap_stage3_copy_seed_tuple: failed check 1" >&2; return 64; }
     bootstrap_stage3_tuple_source=$1
     bootstrap_stage3_tuple_destination=$2
-    shift 2
+    bootstrap_stage3_tuple_target=${6:-}
+    set -- "$3" "$4" "$5"
     [ -d "$bootstrap_stage3_tuple_source" ] &&
         [ ! -L "$bootstrap_stage3_tuple_source" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 2" >&2; return 1; }
     [ ! -e "$bootstrap_stage3_tuple_destination" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 3" >&2; return 1; }
 
     # Stage4 consumes the non-LTO Rust static runtime directly from deps.
     # Do not infer authority from everything Cargo happened to leave in the
-    # profile directory (notably the cdylib: the native linker deliberately
-    # forces the Simple runtime static).  Derive the target spelling from the
+    # profile directory. macOS also requires the runtime dylib because it owns
+    # the Cocoa ABI; retain it in the same atomically hashed vector. Derive the
+    # static archive spelling from the
     # native-all archive selected by the platform owner.
     case "$2" in
         libsimple_native_all.a)
@@ -2602,6 +2604,9 @@ bootstrap_stage3_copy_seed_tuple() {
         *) return 1 ;;
     esac
     set -- "$@" "$bootstrap_stage3_tuple_runtime_name"
+    case "$bootstrap_stage3_tuple_target" in
+        *apple-darwin*) set -- "$@" libsimple_runtime.dylib ;;
+    esac
 
     # The hosted GPU/backend linker needs the Rust hosted-runtime rlib, but it
     # must never rediscover it from a mutable Cargo target after admission.
@@ -3242,7 +3247,7 @@ bootstrap_stage3_pin_private_authority() {
 # Prepare and publish immutable Rust authority generations. The current marker
 # is the commit record; a generation is never mutated after marker admission.
 bootstrap_stage3_prepare_seed_generation() {
-    [ "$#" -eq 7 ] || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
+    { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1
     bootstrap_stage3_generation_root=$2
     bootstrap_stage3_generation_inputs=$3
@@ -3250,6 +3255,7 @@ bootstrap_stage3_prepare_seed_generation() {
     bootstrap_stage3_generation_native_name=$5
     bootstrap_stage3_generation_backfill_name=$6
     bootstrap_stage3_generation_nonce=$7
+    bootstrap_stage3_generation_target=${8:-}
     bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_generation_inputs" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 2" >&2; return 1; }
     bootstrap_stage3_generation_staging=\
 "$bootstrap_stage3_generation_root/.staging.$bootstrap_stage3_generation_nonce"
@@ -3259,7 +3265,8 @@ bootstrap_stage3_prepare_seed_generation() {
         "$bootstrap_stage3_generation_staging" \
         "$bootstrap_stage3_generation_seed_name" \
         "$bootstrap_stage3_generation_native_name" \
-        "$bootstrap_stage3_generation_backfill_name" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 4" >&2; return 1; }
+        "$bootstrap_stage3_generation_backfill_name" \
+        "$bootstrap_stage3_generation_target" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 4" >&2; return 1; }
     # Carry the successful fingerprint sidecar into the immutable generation.
     # It is optional for legacy callers and is never accepted from a symlink.
     bootstrap_stage3_generation_details_source=${BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE:-}
