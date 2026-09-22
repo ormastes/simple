@@ -3048,6 +3048,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # mirroring stage3_timeout_args in resume-stage3-from-admitted.sh, whose
   # stage2 args-hash formula must stay word-for-word identical to this one.
   stage2_timeout_args=
+  bootstrap_stage2_darwin_env=
+  case "${PLATFORM}" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
   case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
     '') ;;
     *[!0-9]*)
@@ -3073,6 +3075,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
@@ -3198,6 +3206,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
