@@ -446,6 +446,8 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
+bootstrap_stage2_darwin_env=
+case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 stage2_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=$(stage2_env_value RUST_LOG)" \
   "LIBRARY_PATH=$stage2_library_path" \
@@ -462,6 +464,12 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
   "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
   "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  ${bootstrap_stage2_darwin_env:+"CC=$(stage2_env_value CC)"} \
+  ${bootstrap_stage2_darwin_env:+"CXX=$(stage2_env_value CXX)"} \
+  ${bootstrap_stage2_darwin_env:+"AR=$(stage2_env_value AR)"} \
+  ${bootstrap_stage2_darwin_env:+"LD=$(stage2_env_value LD)"} \
+  ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=$(stage2_env_value LLVM_CONFIG)"} \
+  ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=$(stage2_env_value SIMPLE_LLVM_REQUIRED_VERSION)"} \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \

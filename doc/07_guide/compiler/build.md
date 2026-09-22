@@ -143,6 +143,15 @@ The compiler supports multiple code generation backends:
 - **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
 - **Windows:** LLVM rarely available; typically falls back to Cranelift. Supports both MSVC and MinGW toolchains.
 
+For a pinned macOS bootstrap, Stage 2 forwards `CC`, `CXX`, `AR`, `LD`,
+`LLVM_CONFIG`, and `SIMPLE_LLVM_REQUIRED_VERSION` through its scrubbed child
+environment with either the Cranelift or LLVM backend. These exact values are
+also bound into the admission digest and reconstructed from the transcript by
+Stage 3 resume. Validate this boundary without compiling using
+`sh scripts/check/check-stage2-macos-toolchain-env.shs`; it exercises the real
+argument builder and checks execution/admission/replay agreement, including
+tool paths containing spaces and absence of macOS pins on Linux.
+
 ### SimpleOS Multi-Platform Binaries
 
 SimpleOS target metadata is centralized in `src/os/port/simpleos_multiplatform_build.spl`. The catalog lists the Simple entrypoint, linker script, QEMU binary, freestanding C flags, assembly flags, and boot support sources for each OS target.
