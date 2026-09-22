@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 0 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+tmp="$root/build/test/bootstrap-authority-native-link.$$"
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source/deps" "$tmp/control/generations"
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+printf '#!/bin/sh\nexit 0\n' >"$tmp/source/simple"
+chmod 755 "$tmp/source/simple"
+printf 'native\n' >"$tmp/source/libsimple_native_all.a"
+printf 'backfill\n' >"$tmp/source/libsimple_compiler_backfill.a"
+printf 'runtime\n' >"$tmp/source/deps/libsimple_runtime.a"
+printf 'hosted\n' >"$tmp/source/deps/libspl_hosted_runtime-test.rlib"
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+bootstrap_stage3_prepare_seed_generation "$tmp/source" "$tmp/control/generations" \
+    "$fingerprint" simple libsimple_native_all.a \
+    libsimple_compiler_backfill.a bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+MSYS=winsymlinks:copy bootstrap_stage3_publish_seed_generation \
+    "$BOOTSTRAP_STAGE3_PREPARED_STAGING" "$BOOTSTRAP_STAGE3_PREPARED_GENERATION" \
+    "$tmp/control/current.env" "$fingerprint" \
+    "$BOOTSTRAP_STAGE3_PREPARED_HASH" "$fingerprint" "$tmp/control/bootstrap"
+[ -L "$tmp/control/bootstrap" ]
+[ "$(readlink "$tmp/control/bootstrap")" = \
+    "generations/$(basename -- "$BOOTSTRAP_STAGE3_PREPARED_GENERATION")" ]
+grep -Fx "generation=$(basename -- "$BOOTSTRAP_STAGE3_PREPARED_GENERATION")" \
+    "$tmp/control/current.env" >/dev/null
+echo 'BOOTSTRAP_STAGE3_WINDOWS_NATIVE_COMPATIBILITY_PASS'
