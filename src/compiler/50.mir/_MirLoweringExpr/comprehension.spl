@@ -1,0 +1,243 @@
+# Fused list-comprehension lowering. No intermediate map/filter arrays.
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, LocalId, LocalKind, MirSignature}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+
+fn comprehension_integer_type(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64: true
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+        case _: false
+
+impl MirLowering:
+    me comprehension_error(code: text, message: text, span: Span) -> MirType:
+        # error_fatal is required: lenient bootstrap mode must not turn an
+        # unsupported generator into a successful empty/fabricated projection.
+        self.error_fatal("{code}: {message}", Some(span))
+        MirType.unit()
+
+    me lower_list_comprehension(kind: HirComprehensionKind, projection: HirExpr, clauses: [HirCompClause], span: Span) -> LocalId:
+        val saved_local_map = self.local_map
+        val saved_local_symbol_ids = self.local_symbol_ids
+        val saved_local_symbol_values = self.local_symbol_values
+        val saved_local_symbol_index_slots = self.local_symbol_index_slots
+        var valid = true
+        match kind:
+            case HirComprehensionKind.List: ()
+            case _:
+                self.comprehension_error("E-MIR-EXPR-ComprehensionKind", "only list comprehensions are supported", span)
+                valid = false
+        if clauses.len() == 0:
+            self.comprehension_error("E-MIR-EXPR-ComprehensionClause", "list comprehension requires a generator", span)
+            valid = false
+        else:
+            match clauses[0].kind:
+                case HirCompClauseKind.For(_, _): ()
+                case _:
+                    self.comprehension_error("E-MIR-EXPR-ComprehensionClause", "first clause must be a generator", span)
+                    valid = false
+        if not valid:
+            var failed = self.builder
+            val invalid_result = failed.new_temp(MirType.unit())
+            self.builder = failed
+            return invalid_result
+
+        # Same allocation/marking and append ABI as lower_array_map. The
+        # projection's actual MIR type refines the returned array below, even
+        # when the runtime executes zero iterations.
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        var allocation = self.builder
+        val capacity = allocation.emit_const_int(0)
+        val allocated = allocation.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: array_type, is_variadic: false)))
+        )), [mir_operand_copy(capacity)], array_type)
+        self.builder = allocation
+        if allocated == nil:
+            self.comprehension_error("E-MIR-EXPR-ComprehensionAllocation", "array allocation did not yield a value", span)
+            var failed = self.builder
+            val invalid_result = failed.new_temp(MirType.unit())
+            self.builder = failed
+            return invalid_result
+        val result = allocated.unwrap()
+        self.runtime_array_locals[result.id] = true
+        self.mark_runtime_value_local(result.id)
+        val errors_before_clauses = self.errors.len()
+        val element_type = self.lower_list_comprehension_clauses(projection, clauses, 0, result)
+        # A child can retain an apparently valid aggregate/bool type after
+        # recording a recoverable error (e.g. ArrayLit([Error])). Such values
+        # are never valid comprehension evidence in lenient bootstrap mode.
+        var error_index = errors_before_clauses
+        var has_nonfatal_child = false
+        while error_index < self.errors.len():
+            if not self.errors[error_index].fatal: has_nonfatal_child = true
+            error_index = error_index + 1
+        if has_nonfatal_child:
+            self.comprehension_error("E-MIR-EXPR-ComprehensionChild", "child expression lowering failed", span)
+        # Scope restoration also runs after a diagnostic from any nested clause.
+        self.local_map = saved_local_map
+        self.local_symbol_ids = saved_local_symbol_ids
+        self.local_symbol_values = saved_local_symbol_values
+        self.local_symbol_index_slots = saved_local_symbol_index_slots
+        var finish = self.builder
+        val typed_result = finish.new_temp(MirType(kind: MirTypeKind.Array(element_type, 0)))
+        finish.emit_copy(typed_result, result)
+        self.builder = finish
+        self.runtime_array_locals[typed_result.id] = true
+        self.mark_runtime_value_local(typed_result.id)
+        typed_result
+
+    me lower_list_comprehension_clauses(projection: HirExpr, clauses: [HirCompClause], index: i64, result: LocalId) -> MirType:
+        if index == clauses.len():
+            val errors_before_projection = self.errors.len()
+            val projected = self.lower_expr(projection)
+            if self.errors.len() != errors_before_projection:
+                return self.comprehension_error("E-MIR-EXPR-ComprehensionProjection", "projection lowering failed; no element was appended", projection.span)
+            val element_type = self.local_mir_type_of(projected)
+            if element_type == nil:
+                return self.comprehension_error("E-MIR-EXPR-ComprehensionProjection", "projection has no MIR type", projection.span)
+            val boxed = self.box_runtime_value(projected)
+            var append = self.builder
+            append.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result), mir_operand_copy(boxed)], MirType(kind: MirTypeKind.I8))
+            self.builder = append
+            return element_type.unwrap()
+
+        val clause = clauses[index]
+        match clause.kind:
+            case HirCompClauseKind.If(condition):
+                val accepted = self.lower_mcdc_decision(condition)
+                if val condition_type = self.local_mir_type_of(accepted):
+                    match condition_type.kind:
+                        case MirTypeKind.Bool: ()
+                        case _:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionFilter", "comprehension filter must be boolean", clause.span)
+                else:
+                    return self.comprehension_error("E-MIR-EXPR-ComprehensionFilter", "comprehension filter has no MIR type", clause.span)
+                var branch = self.builder
+                val accept_block = branch.new_block(Some("comprehension_accept"))
+                val merge_block = branch.new_block(Some("comprehension_filter_done"))
+                branch.terminate_if(mir_operand_copy(accepted), accept_block, merge_block)
+                branch.switch_to_block(accept_block)
+                self.builder = branch
+                val element_type = self.lower_list_comprehension_clauses(projection, clauses, index + 1, result)
+                var merge = self.builder
+                if not merge.current_block_has_explicit_terminator(): merge.terminate_goto(merge_block)
+                merge.switch_to_block(merge_block)
+                self.builder = merge
+                return element_type
+
+            case HirCompClauseKind.For(symbol, iterable):
+                if not symbol.is_valid():
+                    return self.comprehension_error("E-MIR-EXPR-ComprehensionBinding", "unresolved generator binding", clause.span)
+                var is_range = false
+                var inclusive = false
+                var start = LocalId(id: -1)
+                var limit = LocalId(id: -1)
+                var array = LocalId(id: -1)
+                var element_type = MirType.i64()
+                match iterable.kind:
+                    case HirExprKind.Range(range_start, range_end, range_inclusive, step):
+                        if step != nil:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionRangeStep", "list comprehension with an explicit range step", clause.span)
+                        if range_start == nil or range_end == nil:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionRange", "comprehension range requires both bounds", clause.span)
+                        is_range = true
+                        inclusive = range_inclusive
+                        start = self.lower_expr(range_start.unwrap())
+                        val start_type = self.local_mir_type_of(start)
+                        if start_type == nil:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionRange", "range start has no MIR type", clause.span)
+                        var capture_start = self.builder
+                        val saved_start = capture_start.new_temp(start_type.unwrap())
+                        capture_start.emit_copy(saved_start, start)
+                        self.builder = capture_start
+                        start = saved_start
+                        limit = self.lower_expr(range_end.unwrap())
+                        val end_type = self.local_mir_type_of(limit)
+                        if end_type == nil:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionRange", "range end has no MIR type", clause.span)
+                        if not comprehension_integer_type(start_type.unwrap()) or not comprehension_integer_type(end_type.unwrap()):
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionRange", "range bounds must be integers", clause.span)
+                        val first_type = start_type.unwrap()
+                        val last_type = end_type.unwrap()
+                        if first_type.kind != last_type.kind:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionRange", "range bounds must have matching integer types", clause.span)
+                        element_type = end_type.unwrap()
+                        var capture_end = self.builder
+                        val saved_end = capture_end.new_temp(element_type)
+                        capture_end.emit_copy(saved_end, limit)
+                        self.builder = capture_end
+                        limit = saved_end
+                    case _:
+                        # Once per entry into THIS generator. A dependent
+                        # generator is inside its parent's body, never hoisted.
+                        array = self.lower_expr(iterable)
+                        if val iterable_type = self.local_mir_type_of(array):
+                            match iterable_type.kind:
+                                case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
+                                    element_type = element
+                                case _:
+                                    return self.comprehension_error("E-MIR-EXPR-ComprehensionIterable", "expected array, slice or bounded integer range", clause.span)
+                        else:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionIterable", "iterable has no MIR type", clause.span)
+                        var bounds = self.builder
+                        val saved_array = bounds.new_temp(MirType(kind: MirTypeKind.Array(element_type, 0)))
+                        bounds.emit_copy(saved_array, array)
+                        array = saved_array
+                        start = bounds.emit_const_int(0)
+                        val length = bounds.emit_call(self.rt_array_len_operand(), [mir_operand_copy(array)], MirType.i64())
+                        self.builder = bounds
+                        if length == nil:
+                            return self.comprehension_error("E-MIR-EXPR-ComprehensionIterable", "array length did not yield a value", clause.span)
+                        limit = length.unwrap()
+
+                # Allocate locals only AFTER lower_expr updated the builder.
+                val counter_type = if is_range: element_type else: MirType.i64()
+                var b_loop = self.builder
+                val counter = b_loop.new_local(nil, counter_type, LocalKind.Var)
+                b_loop.emit_copy(counter, start)
+                val one = b_loop.new_temp(counter_type)
+                b_loop.emit_const(one, MirConstValue.Int(1), counter_type)
+                val cond_block = b_loop.new_block(Some("comprehension_cond"))
+                val body_block = b_loop.new_block(Some("comprehension_body"))
+                val inc_block = b_loop.new_block(Some("comprehension_inc"))
+                val exit_block = b_loop.new_block(Some("comprehension_exit"))
+                b_loop.terminate_goto(cond_block)
+                b_loop.switch_to_block(cond_block)
+                val comparison = if inclusive: MirBinOp.Le else: MirBinOp.Lt
+                val condition = b_loop.emit_binop(comparison, mir_operand_copy(counter), mir_operand_copy(limit), MirType.bool())
+                b_loop.terminate_if(mir_operand_copy(condition), body_block, exit_block)
+                b_loop.switch_to_block(body_block)
+                self.builder = b_loop
+                var element = counter
+                if not is_range:
+                    var fetch = self.builder
+                    val tagged = fetch.emit_call(self.rt_array_get_operand(), [mir_operand_copy(array), mir_operand_copy(counter)], MirType.i64())
+                    self.builder = fetch
+                    if tagged == nil:
+                        return self.comprehension_error("E-MIR-EXPR-ComprehensionIterable", "array access did not yield a value", clause.span)
+                    element = self.decode_runtime_value(tagged.unwrap(), element_type)
+                self.bind_local(symbol.id, element)
+                val projection_type = self.lower_list_comprehension_clauses(projection, clauses, index + 1, result)
+                var advance = self.builder
+                if not advance.current_block_has_explicit_terminator(): advance.terminate_goto(inc_block)
+                advance.switch_to_block(inc_block)
+                # Inclusive maximum bounds must exit before +1 can overflow.
+                if inclusive:
+                    val step_block = advance.new_block(Some("comprehension_step"))
+                    val last = advance.emit_binop(MirBinOp.Eq, mir_operand_copy(counter), mir_operand_copy(limit), MirType.bool())
+                    advance.terminate_if(mir_operand_copy(last), exit_block, step_block)
+                    advance.switch_to_block(step_block)
+                val incremented = advance.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), counter_type)
+                advance.emit_copy(counter, incremented)
+                advance.terminate_goto(cond_block)
+                advance.switch_to_block(exit_block)
+                self.builder = advance
+                return projection_type
+            case _:
+                self.comprehension_error("E-MIR-EXPR-ComprehensionClause", "unsupported comprehension clause", clause.span)

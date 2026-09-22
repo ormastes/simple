@@ -1,90 +1,272 @@
-"""REQ-001 production MIR instrumentation for comprehension filters."""
+"""List comprehension scopes, projection types, fused MIR and MC/DC filters."""
 
 use std.spec.*
 use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
+use compiler.mir.mir_lowering_expr.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer.*
 
-fn lower_comprehension_source(policy: text, source: text, target: text) -> (text, [text]):
+fn lower_comprehension_source(mode: i64, source: text, target: text) -> (text, [text]):
     val path = "src/mcdc_comprehension_fixture.spl"
     val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(path)
     val hir = hir_lowering.lower_module(parsed)
+    var diagnostics: [text] = []
+    for error in hir_lowering.errors: diagnostics = diagnostics.push(error.message)
     var mir_lowering = MirLowering.new(hir.symbols)
-    mir_lowering.mcdc_policy = policy
-    mir_lowering.mcdc_source_digest = 707
+    mir_lowering.configure_mcdc_mode(mode)
     val mir = mir_lowering.lower_module(hir)
+    for error in mir_lowering.errors: diagnostics = diagnostics.push(error.message)
     for function in mir.functions.values():
         if function.name == target or function.name.ends_with("." + target):
-            return (serialize_mir_function(function), mir_lowering.mcdc_manifest_semantic_ids)
-    ("", mir_lowering.mcdc_manifest_semantic_ids)
+            return (serialize_mir_function(function), diagnostics)
+    diagnostics = diagnostics.push("target function was not lowered")
+    ("", diagnostics)
 
-fn lower_comprehension(policy: text) -> (text, [text]):
-    lower_comprehension_source(policy,
-        "fn selected(values: [i64], a: bool, b: bool) -> [i64]:\n    [for value in values if a and b: value]\n",
-        "selected")
+fn comprehension_int(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), type_: nil, span: Span.empty())
 
-fn has_comprehension_id(ids: [text]) -> bool:
-    for id in ids:
-        if id.contains(":comprehension-filter:decision"): return true
-    false
+fn comprehension_for(symbol: i64, iterable: HirExpr) -> HirCompClause:
+    HirCompClause(kind: HirCompClauseKind.For(SymbolId(id: symbol), iterable), span: Span.empty())
+
+fn comprehension_hir(projection: HirExpr, clauses: [HirCompClause]) -> HirExpr:
+    HirExpr(kind: HirExprKind.Comprehension(HirComprehensionKind.List, projection, clauses), type_: nil, span: Span.empty())
+
+fn comprehension_array() -> HirExpr:
+    HirExpr(kind: HirExprKind.ArrayLit([comprehension_int(1), comprehension_int(2)], nil), type_: nil, span: Span.empty())
+
+fn comprehension_mir_context() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 900), "comprehension_contract",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering
 
 describe "MC/DC comprehension filter MIR lowering", tag: ["only-compiled"]:
-    it "erases all filter instrumentation in static-off mode":
-        val (mir, ids) = lower_comprehension("off")
-        expect(mir.contains("rt_mcdc_")).to_equal(false)
-        expect(has_comprehension_id(ids)).to_equal(false)
-        expect(mir).to_contain("comprehension_cond")
+    it "uses the current decision API and erases probes in static-off mode":
+        for mode in [0, 1, 2]:
+            val (mir, errors) = lower_comprehension_source(mode,
+                "fn selected(values: [i64], a: bool, b: bool) -> [i64]:\n    [for value in values if a and b: value]\n", "selected")
+            expect(errors.len()).to_equal(0)
+            expect(mir).to_contain("comprehension_cond")
+            expect(mir).to_contain("comprehension_accept")
+            expect(mir.contains("mcdc_static_probe_begin")).to_equal(mode == 1)
+            expect(mir.contains("mcdc_dynamic_probe_begin")).to_equal(mode == 2)
+            if mode > 0: expect(mir).to_contain("probe_condition")
+            expect(mir).to_contain("logic_rhs")
 
-    it "records one stable filter decision in static mode":
-        val (mir, ids) = lower_comprehension("static")
-        expect(mir).to_contain("rt_mcdc_record_compiled_vector_v1")
-        expect(has_comprehension_id(ids)).to_equal(true)
-        expect(mir).to_contain("logic_rhs")
-
-    it "uses the dormant patchpoint in dynamic mode":
-        val (mir, ids) = lower_comprehension("dynamic")
-        expect(mir).to_contain("rt_mcdc_dynamic_vector_patchpoint_v1")
-        expect(has_comprehension_id(ids)).to_equal(true)
-        expect(mir).to_contain("comprehension_accept")
-
-    it "allocates range counter state after lowering a non-constant bound":
-        val (mir, ids) = lower_comprehension_source("static",
-            "fn selected_range(limit: i64, enabled: bool) -> [i64]:\n    [for value in 0..limit if enabled: value]\n",
-            "selected_range")
+    it "lowers dependent ranges into one fused result allocation and append":
+        val (mir, errors) = lower_comprehension_source(0,
+            "fn selected_range(limit: i64) -> [i64]:\n    [for outer in 0..limit for inner in 0..outer if inner > 0: inner]\n", "selected_range")
+        expect(errors.len()).to_equal(0)
         expect(mir).to_contain("comprehension_cond")
         expect(mir).to_contain("comprehension_inc")
-        expect(mir).to_contain("rt_mcdc_record_compiled_vector_v1")
-        expect(has_comprehension_id(ids)).to_equal(true)
+        expect(mir.split("rt_array_new").len()).to_equal(2)
+        expect(mir.split("rt_array_push").len()).to_equal(2)
 
-    it "rejects the HIR-only explicit-step form instead of adding hot-loop dispatch":
-        val path = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
-        if not file_exists(path):
-            fail("comprehension lowering source not found")
-            return
-        val lowering = file_read(path)
-        expect(lowering).to_contain("E-MIR-EXPR-ComprehensionRangeStep")
-        expect(lowering).to_contain("list comprehension with an explicit range step")
-        expect(lowering.contains("comprehension_direction")).to_equal(false)
+    it "rejects an explicit range step with a fatal diagnostic":
+        var lowering = comprehension_mir_context()
+        val stepped = HirExpr(kind: HirExprKind.Range(comprehension_int(0), comprehension_int(4), false, comprehension_int(2)), type_: nil, span: Span.empty())
+        lowering.lower_expr(comprehension_hir(comprehension_int(1), [comprehension_for(10, stepped)]))
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("E-MIR-EXPR-ComprehensionRangeStep")
 
-    it "restores a shadowed outer local after lowering the comprehension":
-        val (mir, _) = lower_comprehension_source("off",
-            "fn shadow(values: [i64]) -> i64:\n    val value = 41\n    val selected = [for value in values if value > 0: value]\n    value\n",
-            "shadow")
-        expect(mir).to_contain("41")
-        val hir_path = "src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl"
-        val mir_path = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
-        if not file_exists(hir_path) or not file_exists(mir_path):
-            fail("comprehension scope owner source not found")
-            return
-        val hir_lowering = file_read(hir_path)
-        val mir_lowering = file_read(mir_path)
-        expect(hir_lowering).to_contain("self.symbols.push_scope(ScopeKind.Block)")
-        expect(hir_lowering).to_contain("val hir_iter = self.lower_hir_expr(iter)")
-        expect(hir_lowering).to_contain("self.symbols.pop_scope()")
-        expect(mir_lowering).to_contain("val saved_local_map = self.local_map")
-        expect(mir_lowering).to_contain("self.local_map = saved_local_map")
-        expect(mir_lowering).to_contain("self.local_symbol_ids = saved_local_symbol_ids")
-        expect(mir_lowering).to_contain("self.local_symbol_values = saved_local_symbol_values")
+    it "restores MIR bindings and their index after success and a nested diagnostic":
+        for invalid in [false, true]:
+            var lowering = comprehension_mir_context()
+            var builder = lowering.builder
+            val outer = builder.emit_const_int(41)
+            lowering.builder = builder
+            lowering.bind_local(10, outer)
+            val saved_ids = lowering.local_symbol_ids
+            val saved_index = lowering.local_symbol_index_slots
+            var clauses = [comprehension_for(10, comprehension_array())]
+            if invalid: clauses = clauses.push(comprehension_for(11, comprehension_int(3)))
+            val projection = HirExpr(kind: HirExprKind.Var(SymbolId(id: 10)), type_: nil, span: Span.empty())
+            lowering.lower_expr(comprehension_hir(projection, clauses))
+            expect(lowering.find_local(10).id).to_equal(outer.id)
+            expect(lowering.find_local(11).id).to_equal(-1)
+            expect(lowering.local_symbol_ids).to_equal(saved_ids)
+            expect(lowering.local_symbol_index_slots).to_equal(saved_index)
+            expect(lowering.errors.len()).to_equal(if invalid: 1 else: 0)
+            if invalid: expect(lowering.errors[0].fatal).to_equal(true)
+
+    it "rejects an invalid filter rather than fabricating an empty result":
+        var lowering = comprehension_mir_context()
+        val clauses = [comprehension_for(10, comprehension_array()),
+            HirCompClause(kind: HirCompClauseKind.If(comprehension_int(7)), span: Span.empty())]
+        lowering.lower_expr(comprehension_hir(comprehension_int(1), clauses))
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("E-MIR-EXPR-ComprehensionFilter")
+
+    it "makes an unsupported projection fatal before any append":
+        var lowering = comprehension_mir_context()
+        val projection = HirExpr(kind: HirExprKind.Error, type_: nil, span: Span.empty())
+        lowering.lower_expr(comprehension_hir(projection, [comprehension_for(10, comprehension_array())]))
+        var fatal_projection = false
+        for error in lowering.errors:
+            if error.fatal and error.message.contains("E-MIR-EXPR-ComprehensionProjection"):
+                fatal_projection = true
+        expect(fatal_projection).to_equal(true)
+
+    it "snapshots a mutable array handle and range bound before entering the loop":
+        for range_case in [false, true]:
+            var lowering = comprehension_mir_context()
+            val source = if range_case:
+                lowering.lower_expr(comprehension_int(3))
+            else:
+                lowering.lower_expr(comprehension_array())
+            lowering.bind_local(20, source)
+            val reference = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)), type_: nil, span: Span.empty())
+            val iterable = if range_case:
+                HirExpr(kind: HirExprKind.Range(comprehension_int(0), reference, false, nil), type_: nil, span: Span.empty())
+            else:
+                reference
+            lowering.lower_expr(comprehension_hir(comprehension_int(1), [comprehension_for(10, iterable)]))
+            expect(lowering.errors.len()).to_equal(0)
+            var builder = lowering.builder
+            val function = builder.end_function()
+            var snapshot_id = -1
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Copy(dest, original):
+                            if original.id == source.id: snapshot_id = dest.id
+                        case _: ()
+            expect(snapshot_id).to_be_greater_than(-1)
+            expect(snapshot_id == source.id).to_equal(false)
+            var loop_uses_snapshot = false
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.BinOp(_, MirBinOp.Lt, _, right):
+                            if range_case:
+                                match right.kind:
+                                    case MirOperandKind.Copy(local): loop_uses_snapshot = local.id == snapshot_id
+                                    case _: ()
+                        case MirInstKind.Call(_, callee, args):
+                            if not range_case:
+                                match callee.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str("rt_array_get"), _):
+                                        match args[0].kind:
+                                            case MirOperandKind.Copy(local): loop_uses_snapshot = local.id == snapshot_id
+                                            case _: ()
+                                    case _: ()
+                        case _: ()
+            expect(loop_uses_snapshot).to_equal(true)
+
+    it "makes an unsupported child inside an array iterable fatal":
+        var lowering = comprehension_mir_context()
+        val invalid = HirExpr(kind: HirExprKind.Error, type_: nil, span: Span.empty())
+        val iterable = HirExpr(kind: HirExprKind.ArrayLit([invalid], nil), type_: nil, span: Span.empty())
+        lowering.lower_expr(comprehension_hir(comprehension_int(1), [comprehension_for(10, iterable)]))
+        var fatal_child = false
+        for error in lowering.errors:
+            if error.fatal and error.message.contains("E-MIR-EXPR-ComprehensionChild"):
+                fatal_child = true
+        expect(fatal_child).to_equal(true)
+
+    it "preserves narrow literal and unsigned bound HIR metadata":
+        var lowering = HirLowering.with_filename("comprehension_type_contract")
+        val span = Span.empty()
+        val byte = HirExpr(kind: HirExprKind.IntLit(1, "u8"), type_: nil, span: span)
+        if val byte_type = lowering.comprehension_expr_type(byte):
+            expect(byte_type.kind).to_equal(HirTypeKind.Int(8, false))
+        else:
+            fail("narrow literal metadata lost")
+        val unsigned = HirType(kind: HirTypeKind.Int(64, false), span: span)
+        val bound = HirExpr(kind: HirExprKind.IntLit(3, "u64"), has_type_: true, type_: unsigned, span: span)
+        val range = HirExpr(kind: HirExprKind.Range(bound, bound, false, nil), type_: nil, span: span)
+        if val range_type = lowering.comprehension_expr_type(range):
+            match range_type.kind:
+                case HirTypeKind.Slice(element): expect(element.kind).to_equal(unsigned.kind)
+                case _: fail("range metadata lost its integer element type")
+        else:
+            fail("unsigned bound metadata lost")
+
+    it "resolves the iterable before shadowing and rejects forward generator references":
+        val (mir, errors) = lower_comprehension_source(0,
+            "fn shadow(values: [i64]) -> [i64]:\n    val selected = [for values in values: values]\n    values\n", "shadow")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_array_get")
+        val (_, invalid_errors) = lower_comprehension_source(0,
+            "fn invalid_scope(values: [i64]) -> [i64]:\n    [for first in later for later in values: first]\n", "invalid_scope")
+        expect(invalid_errors.len()).to_be_greater_than(0)
+        expect(invalid_errors.join("\n")).to_contain("unresolved name: later")
+
+    it "infers text projections independently even for empty input":
+        var context = HmInferContext.new()
+        val span = Span.empty()
+        val projection = HirExpr(kind: HirExprKind.StringLit("mapped", nil), type_: nil, span: span)
+        val empty = HirExpr(kind: HirExprKind.ArrayLit([], nil), type_: nil, span: span)
+        match context.synthesize_expr(comprehension_hir(projection, [comprehension_for(10, empty)])):
+            case Ok(type_):
+                match type_.kind:
+                    case HirTypeKind.Array(element, _): expect(element.kind).to_equal(HirTypeKind.Str)
+                    case _: fail("comprehension did not infer an array")
+            case Err(_): fail("empty generator rejected")
+
+    it "returns a typed runtime array when every element is rejected":
+        var lowering = comprehension_mir_context()
+        val span = Span.empty()
+        val projection = HirExpr(kind: HirExprKind.StringLit("mapped", nil), type_: nil, span: span)
+        val rejected = HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span)
+        val clauses = [comprehension_for(10, comprehension_array()),
+            HirCompClause(kind: HirCompClauseKind.If(rejected), span: span)]
+        val result = lowering.lower_expr(comprehension_hir(projection, clauses))
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.runtime_array_locals.contains(result.id)).to_equal(true)
+        if val type_ = lowering.local_mir_type_of(result):
+            match type_.kind:
+                case MirTypeKind.Array(element, _): expect(element.kind).to_equal(MirTypeKind.Opaque("str"))
+                case _: fail("result lost its array type")
+        else:
+            fail("result has no MIR type")
+
+    it "rejects a generator-free list and non-array iteration in inference":
+        var context = HmInferContext.new()
+        for clauses in [[], [comprehension_for(10, comprehension_int(3))]]:
+            match context.synthesize_expr(comprehension_hir(comprehension_int(1), clauses)):
+                case Err(_): ()
+                case _: fail("unsupported generator accepted")
+            expect(context.level).to_equal(0)
+
+    it "restores inference bindings after a projection error":
+        var context = HmInferContext.new()
+        context.bind_mono("10", HirType(kind: HirTypeKind.Str, span: Span.empty()))
+        val missing = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 11), "missing"), type_: nil, span: Span.empty())
+        match context.synthesize_expr(comprehension_hir(missing, [comprehension_for(10, comprehension_array())])):
+            case Err(_): ()
+            case _: fail("undefined projection name was accepted")
+        match context.lookup("10", Span.empty()):
+            case Ok(type_): expect(type_.kind).to_equal(HirTypeKind.Str)
+            case _: fail("outer inference binding was lost")
+        expect(context.level).to_equal(0)
+
+    it "infers nested arrays without leaking generator bindings":
+        var context = HmInferContext.new()
+        val first = HirExpr(kind: HirExprKind.Var(SymbolId(id: 10)), type_: nil, span: Span.empty())
+        val nested = comprehension_hir(first, [comprehension_for(11, comprehension_array())])
+        match context.synthesize_expr(comprehension_hir(nested, [comprehension_for(10, comprehension_array())])):
+            case Ok(type_):
+                match type_.kind:
+                    case HirTypeKind.Array(inner, _):
+                        match inner.kind:
+                            case HirTypeKind.Array(element, _): expect(element.kind).to_equal(HirTypeKind.Int(64, true))
+                            case _: fail("nested projection lost its array type")
+                    case _: fail("outer comprehension lost its array type")
+            case _: fail("nested comprehension inference failed")
+        match context.lookup("10", Span.empty()):
+            case Err(_): ()
+            case _: fail("generator binding leaked")

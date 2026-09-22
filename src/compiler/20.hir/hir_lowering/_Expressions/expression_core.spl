@@ -689,16 +689,39 @@ impl HirLowering:
                 HirExprKind.Range(rstart, rend, inclusive, rstep)
 
             case ExprKind.ListComprehension(expr, clauses):
+                self.symbols.push_scope(ScopeKind.Block)
                 var hir_clauses: [HirCompClause] = []
+                var has_generator = false
                 for clause in clauses:
                     val hir_kind = match clause.kind:
                         case For(var_, iter):
-                            val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, Visibility.Private, false, nil)
-                            HirCompClauseKind.For(symbol, self.lower_hir_expr(iter))
+                            # Resolve the iterable before introducing its binding:
+                            # `[for values in values: values]` reads the outer array.
+                            val hir_iter = self.lower_hir_expr(iter)
+                            var element_type: HirType? = nil
+                            if val iterable_type = self.comprehension_expr_type(hir_iter):
+                                match iterable_type.kind:
+                                    case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                                        element_type = element
+                                    case _:
+                                        self.error("E-HIR-ComprehensionIterable: expected array, slice or bounded integer range", clause.span)
+                            val symbol = self.symbols.define(var_, SymbolKind.Variable, element_type, clause.span, Visibility.Private, false, nil)
+                            has_generator = true
+                            HirCompClauseKind.For(symbol, hir_iter)
                         case If(cond):
+                            if not has_generator:
+                                self.error("E-HIR-ComprehensionClause: filter requires a preceding generator", clause.span)
                             HirCompClauseKind.If(self.lower_hir_expr(cond))
                     hir_clauses = hir_clauses.push(HirCompClause(kind: hir_kind, span: clause.span))
-                HirExprKind.Comprehension(HirComprehensionKind.List, self.lower_hir_expr(expr), hir_clauses)
+                if not has_generator:
+                    self.error("E-HIR-ComprehensionClause: list comprehension requires a generator", e.span)
+                val hir_projection = self.lower_hir_expr(expr)
+                val projection_type = self.comprehension_expr_type(hir_projection)
+                self.symbols.pop_scope()
+                if val element_type = projection_type:
+                    return HirExpr(kind: HirExprKind.Comprehension(HirComprehensionKind.List, hir_projection, hir_clauses),
+                        has_type_: true, type_: HirType(kind: HirTypeKind.Array(element_type, nil), span: e.span), span: e.span)
+                HirExprKind.Comprehension(HirComprehensionKind.List, hir_projection, hir_clauses)
 
             case ExprKind.StructLit(type_, fields):
                 var hir_fields: [(text, HirExpr)] = []
@@ -780,3 +803,45 @@ impl HirLowering:
                 HirExprKind.Error
 
         HirExpr(kind: kind, type_: nil, span: e.span)
+
+    fn comprehension_expr_type(expr: HirExpr) -> HirType?:
+        """Carry known generator types before HM inference; unknown calls stay unknown."""
+        if expr.has_type_ and expr.type_ != nil: return expr.type_
+        match expr.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if val definition = self.symbols.get_symbol_raw(symbol.id):
+                    return definition.type_
+            case HirExprKind.IntLit(_, suffix):
+                var bits = 64
+                var signed = true
+                if val width = suffix:
+                    bits = match width:
+                        case "i8" | "u8": 8
+                        case "i16" | "u16": 16
+                        case "i32" | "u32": 32
+                        case "i64" | "u64": 64
+                        case _: return nil
+                    signed = not width.starts_with("u")
+                return HirType(kind: HirTypeKind.Int(bits, signed), span: expr.span)
+            case HirExprKind.StringLit(_, _):
+                return HirType(kind: HirTypeKind.Str, span: expr.span)
+            case HirExprKind.BoolLit(_):
+                return HirType(kind: HirTypeKind.Bool, span: expr.span)
+            case HirExprKind.ArrayLit(elements, _):
+                if elements.len() > 0:
+                    if val element = self.comprehension_expr_type(elements[0]):
+                        return HirType(kind: HirTypeKind.Array(element, nil), span: expr.span)
+            case HirExprKind.Range(start, _, _, _):
+                if val bound = start:
+                    if val bound_type = self.comprehension_expr_type(bound):
+                        match bound_type.kind:
+                            case HirTypeKind.Int(_, _):
+                                return HirType(kind: HirTypeKind.Slice(bound_type), span: expr.span)
+                            case _: ()
+            case HirExprKind.Call(callee, _, _):
+                if val callable_type = self.comprehension_expr_type(callee):
+                    match callable_type.kind:
+                        case HirTypeKind.Function(_, result, _): return result
+                        case _: ()
+            case _: ()
+        nil

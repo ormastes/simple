@@ -428,7 +428,21 @@ impl HmInferContext:
 
             # Named variables: identical to Var, the name is already resolved
             case NamedVar(symbol, name):
-                self.lookup_with_narrowing(symbol.id, name, span)
+                val symbol_key = symbol.id.to_text()
+                if self.env[symbol_key].?:
+                    self.lookup_with_narrowing(symbol.id, symbol_key, span)
+                else:
+                    self.lookup_with_narrowing(symbol.id, name, span)
+
+            case Comprehension(kind, projection, clauses):
+                # The helper can return diagnostics at any clause; restore the
+                # lexical environment on both successful and failed inference.
+                val saved_env = self.env
+                self.enter_level()
+                val result = self.infer_list_comprehension(kind, projection, clauses, span)
+                self.exit_level()
+                self.env = saved_env
+                result
 
             # Array literals
             case ArrayLit(elements, _):
@@ -829,3 +843,56 @@ impl HmInferContext:
 
             case _:
                 Err(TypeInferError.Other(message: "unsupported expression kind: {expr.kind}", span: span))
+
+    me infer_list_comprehension(kind: HirComprehensionKind, projection: HirExpr, clauses: [HirCompClause], span: Span) -> Result<HirType, TypeInferError>:
+        match kind:
+            case HirComprehensionKind.List: ()
+            case _: return Err(TypeInferError.Other("unsupported comprehension kind", span))
+        var has_generator = false
+        for clause in clauses:
+            match clause.kind:
+                case HirCompClauseKind.For(symbol, iterable):
+                    var range_element: HirType? = nil
+                    # Bounds are checked separately: ordinary Range inference
+                    # historically reports Slice(i64) without validating them.
+                    match iterable.kind:
+                        case HirExprKind.Range(start, end, _, step):
+                            if start == nil or end == nil or step != nil:
+                                return Err(TypeInferError.Other("comprehension requires a bounded integer range without explicit step", clause.span))
+                            match self.synthesize_expr(start.unwrap()):
+                                case Err(error): return Err(error)
+                                case Ok(start_type):
+                                    val bound_type = self.resolve(start_type)
+                                    match bound_type.kind:
+                                        case HirTypeKind.Int(_, _): range_element = bound_type
+                                        case _: return Err(TypeInferError.Other("comprehension range bounds must be integers", clause.span))
+                            match self.check_expr(end.unwrap(), range_element.unwrap()):
+                                case Err(error): return Err(error)
+                                case _: ()
+                        case _: ()
+                    val inferred_iterable: Result<HirType, TypeInferError> = match range_element:
+                        case Some(element): Ok(HirType(kind: HirTypeKind.Slice(element), span: clause.span))
+                        case _: self.synthesize_expr(iterable)
+                    match inferred_iterable:
+                        case Err(error): return Err(error)
+                        case Ok(iterable_type):
+                            val resolved_iterable = self.resolve(iterable_type)
+                            match resolved_iterable.kind:
+                                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                                    if not symbol.is_valid():
+                                        return Err(TypeInferError.Other("unresolved comprehension binding", clause.span))
+                                    self.bind_mono(symbol.id.to_text(), element)
+                                case _:
+                                    return Err(TypeInferError.Other("comprehension iterable must be an array, slice or bounded integer range", clause.span))
+                    has_generator = true
+                case HirCompClauseKind.If(condition):
+                    if not has_generator:
+                        return Err(TypeInferError.Other("comprehension filter requires a preceding generator", clause.span))
+                    match self.check_expr(condition, HirType(kind: HirTypeKind.Bool, span: clause.span)):
+                        case Err(error): return Err(error)
+                        case _: ()
+        if not has_generator:
+            return Err(TypeInferError.Other("list comprehension requires a generator", span))
+        match self.synthesize_expr(projection):
+            case Ok(element): Ok(HirType(kind: HirTypeKind.Array(self.resolve(element), nil), span: span))
+            case Err(error): Err(error)
