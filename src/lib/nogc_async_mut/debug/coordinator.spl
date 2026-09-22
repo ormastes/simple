@@ -7,6 +7,20 @@ use std.nogc_async_mut.mcp.session.{SessionManager, TargetType, SessionState}
 use std.debug.formats.debug_types.{SourceLocation, DebugFunction, DebugVariable}
 use std.debug.formats.debug_provider.{DebugInfoProvider}
 
+# Pattern extraction currently erases the trait receiver's static type in the
+# native compiler. Keep dispatch inside typed helpers until MIR preserves it.
+fn _provider_addr_to_source(provider: DebugInfoProvider, addr: i64) -> SourceLocation?:
+    provider.addr_to_source(addr)
+
+fn _provider_source_to_addr(provider: DebugInfoProvider, file: String, line: Int) -> i64?:
+    provider.source_to_addr(file, line)
+
+fn _provider_function_at(provider: DebugInfoProvider, addr: i64) -> DebugFunction?:
+    provider.function_at(addr)
+
+fn _provider_locals_at(provider: DebugInfoProvider, addr: i64) -> [DebugVariable]:
+    provider.locals_at(addr)
+
 # DebugBackend trait - all backends implement this interface
 trait DebugBackend:
     fn name() -> String
@@ -62,6 +76,50 @@ class LocationInfo:
     static fn at(file: String, line: Int, function_name: String) -> LocationInfo:
         LocationInfo(file: file, line: line, column: 0, function_name: function_name)
 
+# Result extraction erases the backend receiver type in native MIR. Keep
+# dispatch in typed functions, as for DebugInfoProvider above.
+fn _backend_attach(backend: DebugBackend, program_path: String, args: [String]) -> Result<Nil, String>:
+    backend.attach(program_path, args)
+
+fn _backend_detach(backend: DebugBackend) -> Result<Nil, String>:
+    backend.detach()
+
+fn _backend_run(backend: DebugBackend) -> Result<Nil, String>:
+    backend.run()
+
+fn _backend_pause(backend: DebugBackend) -> Result<Nil, String>:
+    backend.pause()
+
+fn _backend_resume(backend: DebugBackend) -> Result<Nil, String>:
+    backend.resume()
+
+fn _backend_step_over(backend: DebugBackend) -> Result<Nil, String>:
+    backend.step_over()
+
+fn _backend_step_in(backend: DebugBackend) -> Result<Nil, String>:
+    backend.step_in()
+
+fn _backend_step_out(backend: DebugBackend) -> Result<Nil, String>:
+    backend.step_out()
+
+fn _backend_add_breakpoint(backend: DebugBackend, file: String, line: Int) -> Result<Int, String>:
+    backend.add_breakpoint(file, line)
+
+fn _backend_remove_breakpoint(backend: DebugBackend, file: String, line: Int) -> Result<Nil, String>:
+    backend.remove_breakpoint(file, line)
+
+fn _backend_stack_trace(backend: DebugBackend) -> Result<[FrameInfo], String>:
+    backend.stack_trace()
+
+fn _backend_locals(backend: DebugBackend) -> Result<[VarInfo], String>:
+    backend.locals()
+
+fn _backend_evaluate(backend: DebugBackend, expr: String) -> Result<String, String>:
+    backend.evaluate(expr)
+
+fn _backend_current_location(backend: DebugBackend) -> Result<LocationInfo, String>:
+    backend.current_location()
+
 # Debug Coordinator - routes commands to the correct backend
 class DebugCoordinator:
     session_manager: SessionManager
@@ -105,22 +163,22 @@ impl DebugCoordinator:
 
     fn resolve_source(addr: i64) -> SourceLocation?:
         match self.info_provider:
-            case Some(p): p.addr_to_source(addr)
+            case Some(p): _provider_addr_to_source(p, addr)
             case nil: nil
 
     fn resolve_addr(file: String, line: Int) -> i64?:
         match self.info_provider:
-            case Some(p): p.source_to_addr(file, line)
+            case Some(p): _provider_source_to_addr(p, file, line)
             case nil: nil
 
     fn resolve_function(addr: i64) -> DebugFunction?:
         match self.info_provider:
-            case Some(p): p.function_at(addr)
+            case Some(p): _provider_function_at(p, addr)
             case nil: nil
 
     fn resolve_locals(addr: i64) -> [DebugVariable]:
         match self.info_provider:
-            case Some(p): p.locals_at(addr)
+            case Some(p): _provider_locals_at(p, addr)
             case nil: []
 
     # Get the backend for a session
@@ -153,8 +211,8 @@ impl DebugCoordinator:
         val backend = self.get_backend(session_id)?
         match self.session_manager.get_session(session_id):
             case Some(session):
-                backend.attach(session.program_path, session.args)?
-                backend.run()?
+                _backend_attach(backend, session.program_path, session.args)?
+                _backend_run(backend)?
                 self.session_manager.set_state(session_id, SessionState.Running)
                 Ok(nil)
             case nil:
@@ -162,57 +220,57 @@ impl DebugCoordinator:
 
     me pause_session(session_id: String) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.pause()?
+        _backend_pause(backend)?
         self.session_manager.set_state(session_id, SessionState.Paused)
         Ok(nil)
 
     me resume_session(session_id: String) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.resume()?
+        _backend_resume(backend)?
         self.session_manager.set_state(session_id, SessionState.Running)
         Ok(nil)
 
     fn step_over_session(session_id: String) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.step_over()
+        _backend_step_over(backend)
 
     fn step_in_session(session_id: String) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.step_in()
+        _backend_step_in(backend)
 
     fn step_out_session(session_id: String) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.step_out()
+        _backend_step_out(backend)
 
     me add_breakpoint_session(session_id: String, file: String, line: Int) -> Result<Int, String>:
         val backend = self.get_backend(session_id)?
-        val bp_id = backend.add_breakpoint(file, line)?
+        val bp_id = _backend_add_breakpoint(backend, file, line)?
         self.session_manager.add_breakpoint(session_id, file, line)
         Ok(bp_id)
 
     fn remove_breakpoint_session(session_id: String, file: String, line: Int) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.remove_breakpoint(file, line)
+        _backend_remove_breakpoint(backend, file, line)
 
     fn stack_trace_session(session_id: String) -> Result<[FrameInfo], String>:
         val backend = self.get_backend(session_id)?
-        backend.stack_trace()
+        _backend_stack_trace(backend)
 
     fn locals_session(session_id: String) -> Result<[VarInfo], String>:
         val backend = self.get_backend(session_id)?
-        backend.locals()
+        _backend_locals(backend)
 
     fn evaluate_session(session_id: String, expr: String) -> Result<String, String>:
         val backend = self.get_backend(session_id)?
-        backend.evaluate(expr)
+        _backend_evaluate(backend, expr)
 
     fn location_session(session_id: String) -> Result<LocationInfo, String>:
         val backend = self.get_backend(session_id)?
-        backend.current_location()
+        _backend_current_location(backend)
 
     me terminate_session(session_id: String) -> Result<Nil, String>:
         val backend = self.get_backend(session_id)?
-        backend.detach()?
+        _backend_detach(backend)?
         self.session_manager.set_state(session_id, SessionState.Terminated)
         Ok(nil)
 
