@@ -8,10 +8,12 @@ bytes are released immediately, and close/rejection revokes every capability.
 """
 
 use std.spec
+use std.spec.step
 use os.apps.dbd.dbd_provisioning.{
     DbdProvisioningOwnerV1, DbdProvisioningStateV1,
     DBD_MAX_CERTIFICATE_BYTES, DBD_MAX_PRIVATE_KEY_BYTES
 }
+use os.apps.dbd.dbd_protocol.{DbdAuthSession}
 
 fn _bytes(value: u8, count: i64) -> [u8]:
     var out: [u8] = []
@@ -37,6 +39,41 @@ describe "DBD provisioning acceptance":
         val protocol = [0x64u8, 0x62u8, 0x64u8, 0x2Du8, 0x72u8, 0x65u8, 0x73u8, 0x70u8]
         expect(config.unwrap().alpn_protocols).to_equal([protocol])
         expect(config.unwrap().ready_alpn_protocols).to_equal([protocol])
+
+    it "volatile-wipes the provisioning-owned credential after digest admission":
+        step("reproduce reported failure")
+        var owner = DbdProvisioningOwnerV1.new()
+        val admitted = owner.admit(
+            "operator", _bytes(31u8, 32), [[48u8, 1u8]],
+            [48u8, 2u8], 0x0807u16)
+
+        step("exercise corrected behavior")
+        expect(admitted).to_be(true)
+        expect(owner.credential_wiped).to_be(true)
+        expect(owner.credential.len()).to_equal(0u64)
+        expect(owner.provider.configured).to_be(true)
+
+        # Supply a separate wire candidate after the owner's raw buffer was
+        # released. This proves the retained verifier is the digest, without
+        # assuming whether `admit` aliases or moves its input array.
+        var session = DbdAuthSession.new(1)
+        expect(session.authenticate(
+            owner.provider, "operator", _bytes(31u8, 32))).to_be(true)
+        expect(session.authenticated).to_be(true)
+        expect(session.identity).to_equal("operator")
+
+    it "fails closed and clears the owned credential when digest admission is rejected":
+        step("reject adjacent invalid input")
+        var owner = DbdProvisioningOwnerV1.new()
+        val rejected = owner.admit(
+            " ", _bytes(31u8, 32), [[48u8, 1u8]],
+            [48u8, 2u8], 0x0807u16)
+
+        expect(rejected).to_be(false)
+        expect(owner.state).to_equal(DbdProvisioningStateV1.Quarantined)
+        expect(owner.credential_wiped).to_be(true)
+        expect(owner.credential.len()).to_equal(0u64)
+        expect(owner.provider.configured).to_be(false)
 
     it "fails closed when any bounded secret or certificate boundary is invalid":
         var short_secret = DbdProvisioningOwnerV1.new()

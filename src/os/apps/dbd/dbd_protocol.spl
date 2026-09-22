@@ -15,7 +15,7 @@
 # verifiable with `simple run <spec>` without a network or a mounted disk.
 
 use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request}
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex, sha256_u8_hex_zeroizing}
 
 pub val DBD_MAX_JOURNAL_BYTES: i64 = 1024 * 1024
 pub val DBD_MAX_JOURNAL_RECORDS: i64 = 4096
@@ -226,9 +226,16 @@ pub class DbdCredentialProvider:
             credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
             credential.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
             return false
+        # The expanded SHA-256 schedule and final word projection are derived
+        # from credential bytes. Admit the verifier only if their volatile
+        # wipe/readback succeeds; a digest-only provider must not leave a
+        # compiler-elidable temporary secret workspace behind.
+        val credential_digest = sha256_u8_hex_zeroizing(credential)
+        if not credential_digest.?:
+            return false
         self.principal = principal
         self.principal_digest = sha256_text(principal)
-        self.credential_digest = sha256_u8_hex(credential)
+        self.credential_digest = credential_digest.unwrap()
         self.configured = true
         true
 

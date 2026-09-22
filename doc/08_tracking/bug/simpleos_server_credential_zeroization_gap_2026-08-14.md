@@ -1,16 +1,41 @@
 # SimpleOS server credential zeroization gap
-## Open 2026-09-16 — needs owner triage
+## 2026-09-16 ledger triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+At the 2026-09-16 bug-ledger normalization pass, the body held no resolution
+evidence. That historical classification was bookkeeping, not verification;
+the current status is below.
 
 ## Status
 
-IMPLEMENTED, awaiting fresh ARM64 QEMU evidence (2026-08-21): immutable secret
-copies are eliminated, the sole target-owned buffer is overwritten and read
-back through compiler-resistant volatile runtime operations, and retained
-artifacts are scanned. Still release-blocking until the live signed receipt is
-produced by a freshly built target payload.
+**OPEN — source path corrected; signed ARM64 guest evidence pending
+(2026-09-22).** Source changes route the caller buffer, the DBD provisioning
+owner buffer, and the credential-hash workspace through the secure-zero
+contract. Focused host test execution still requires an admitted self-hosted
+runtime. Closure requires a freshly built ARM64 payload, target readback,
+retained-artifact scan, and signed receipt.
+
+## 2026-09-22 source correction
+
+`CapabilityTable.register_authenticated_bytes` and the filesystem entrypoint
+do keep the initial credential out of immutable `text`, use digest-only
+registration, and invoke `secure_zero_u8_slots` for the caller-owned buffer.
+The facade performs volatile byte writes, a barrier, and volatile readback.
+
+The full live path has another credential owner:
+`servers_user/main.spl` passes the byte buffer to
+`DbdServer.provision_service`, which forwards it to
+`DbdProvisioningOwnerV1.admit`. That owner stores `self.credential` and later
+routes it through the `secure_zero_u8_slots` facade before releasing it.
+`DbdCredentialProvider.configure_bytes` now uses
+`sha256_u8_hex_zeroizing` and refuses admission if the credential-derived
+hash workspace cannot complete its volatile wipe/readback. This keeps the
+caller-owned buffer, provisioning-owned buffer, and registration workspace on
+the same wipe contract without retaining an additional secret copy.
+
+Admission also revokes the provider and quarantines the owner if volatile
+overwrite verification fails; later readiness denial alone would leave the
+provider configured. The required ARM64 signed receipt is absent, so this
+record remains open.
 
 ## Problem
 
@@ -129,4 +154,3 @@ The existing retained-artifact credential scan and destruction of every
 credential-bearing normal/crash image remain in force. This record is not
 closed until a freshly built ARM64 payload completes the QEMU gate and produces
 the signed target readback receipt.
-
