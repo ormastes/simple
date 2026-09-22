@@ -159,11 +159,17 @@ fn compile_source_inventory_apply_and_publish_v1(
         current.inventory!
     else:
         CompileSourceInventoryV1(COMPILE_SOURCE_INVENTORY_SCHEMA_V1, 0, [])
-    for event in events:
-        val changed = compile_source_inventory_apply_event_v1(inventory, event)
+    if inventory.entries.len() == 0:
+        val changed = compile_source_inventory_apply_cold_events_v1(inventory.generation, events)
         if not changed.valid:
             return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
         inventory = changed.inventory!
+    else:
+        for event in events:
+            val changed = compile_source_inventory_apply_event_v1(inventory, event)
+            if not changed.valid:
+                return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
+            inventory = changed.inventory!
     val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
         cache_root, inventory)
     if digest == "":
@@ -257,17 +263,96 @@ fn compile_source_inventory_cache_root_valid_v1(cache_root: text) -> bool:
 fn compile_source_inventory_sort_v1(
     values: [CompileSourceInventoryEntryV1]
 ) -> [CompileSourceInventoryEntryV1]:
+    # Stable bottom-up merge sort: bounded scratch, no recursion and no
+    # quadratic shifts for reverse-ordered source inventories.
+    var ordered = true
+    var cursor = 1
+    while cursor < values.len():
+        if values[cursor - 1].source_identity > values[cursor].source_identity:
+            ordered = false
+            break
+        cursor = cursor + 1
+    if ordered:
+        return values
     var sorted = values
-    var index = 1
-    while index < sorted.len():
-        val item = sorted[index]
-        var cursor = index
-        while cursor > 0 and item.source_identity < sorted[cursor - 1].source_identity:
-            sorted[cursor] = sorted[cursor - 1]
-            cursor = cursor - 1
-        sorted[cursor] = item
-        index = index + 1
+    var scratch: [CompileSourceInventoryEntryV1] = []
+    for entry in values:
+        scratch = scratch.push(entry)
+    var width = 1
+    while width < sorted.len():
+        var start = 0
+        while start < sorted.len():
+            val middle = if start + width < sorted.len(): start + width else: sorted.len()
+            val end = if middle + width < sorted.len(): middle + width else: sorted.len()
+            var left = start
+            var right = middle
+            var target = start
+            while target < end:
+                if left < middle and (right >= end or
+                        sorted[left].source_identity <= sorted[right].source_identity):
+                    scratch[target] = sorted[left]
+                    left = left + 1
+                else:
+                    scratch[target] = sorted[right]
+                    right = right + 1
+                target = target + 1
+            start = end
+        val previous = sorted
+        sorted = scratch
+        scratch = previous
+        width = width * 2
     sorted
+
+# Cold replay retains one slot per distinct identity rather than constructing
+# successively larger inventories for every event. Reuse the one-event authority
+# on at most ONE row so validation, no-ops, facets and generation stay identical.
+# Deleted slots are reused on recreation; churn cannot retain one row per event.
+fn compile_source_inventory_apply_cold_events_v1(
+    initial_generation: i64, events: [CompileSourceEventV1]
+) -> CompileSourceInventoryChangeV1:
+    if initial_generation < 0:
+        return CompileSourceInventoryChangeV1(false, "event-invalid", nil, false, false)
+    var positions: Dict<text, i64> = {}
+    var retained: [CompileSourceInventoryEntryV1] = []
+    var active: [bool] = []
+    var generation = initial_generation
+    var content_changed = false
+    var semantics_changed = false
+    for event in events:
+        var position = -1
+        var single: [CompileSourceInventoryEntryV1] = []
+        if positions.has(event.source_identity):
+            position = positions[event.source_identity]
+            if active[position]:
+                single = single.push(retained[position])
+        val changed = compile_source_inventory_apply_event_v1(
+            CompileSourceInventoryV1(1, generation, single), event)
+        if not changed.valid:
+            return changed
+        val next = changed.inventory!
+        generation = next.generation
+        content_changed = content_changed or changed.content_changed
+        semantics_changed = semantics_changed or changed.semantics_changed
+        if next.entries.len() == 0:
+            if position >= 0:
+                active[position] = false
+        else:
+            if position >= 0:
+                retained[position] = next.entries[0]
+                active[position] = true
+            else:
+                positions[event.source_identity] = retained.len()
+                retained = retained.push(next.entries[0])
+                active = active.push(true)
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var index = 0
+    while index < retained.len():
+        if active[index]:
+            entries = entries.push(retained[index])
+        index = index + 1
+    val inventory = CompileSourceInventoryV1(1, generation, compile_source_inventory_sort_v1(entries))
+    val reason = if generation == initial_generation: "ok-no-change" else: "ok"
+    CompileSourceInventoryChangeV1(true, reason, Some(inventory), content_changed, semantics_changed)
 
 fn compile_source_inventory_entry_valid_v1(
     entry: CompileSourceInventoryEntryV1

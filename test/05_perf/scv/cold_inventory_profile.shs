@@ -1,0 +1,25 @@
+#!/bin/sh
+# Supply an admitted self-hosted runtime. No implicit build or seed fallback.
+# The budget covers fixture preparation + cold replay + assertions + startup.
+set -eu
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 /absolute/path/to/self-hosted-simple" >&2
+    exit 2
+fi
+runtime=$1
+wall_seconds=${SCV_COLD_MAX_SECONDS:-90}
+rss_kib=${SCV_COLD_MAX_RSS_KIB:-524288}
+report=${SCV_COLD_REPORT_DIR:-build/scv-cold-profile}
+mkdir -p "$report"
+/usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M' -o "$report/resources.txt" \
+    timeout "$wall_seconds" "$runtime" run test/05_perf/scv/cold_inventory_workload.spl \
+    >"$report/workload.txt" 2>"$report/stderr.txt"
+grep -Fx 'cold_inventory entries=16384 generation=16384 byte_sum=134225920' "$report/workload.txt" >/dev/null
+actual_rss=$(sed -n 's/^max_rss_kib=//p' "$report/resources.txt")
+case "$actual_rss" in ''|*[!0-9]*) echo "missing RSS measurement" >&2; exit 1;; esac
+if [ "$actual_rss" -gt "$rss_kib" ]; then
+    echo "FAIL cold inventory RSS: $actual_rss KiB > $rss_kib KiB" >&2
+    exit 1
+fi
+cat "$report/workload.txt" "$report/resources.txt"
+printf 'PASS wall_budget_seconds=%s rss_budget_kib=%s\n' "$wall_seconds" "$rss_kib"
