@@ -135,6 +135,13 @@ does not resolve the invocation startup overhead report or establish bootstrap
 performance. The measurement covers the native syscall backend while protocol
 failure handling was being tightened; it is not an immutable release benchmark.
 
+An integration attempt subsequently encountered an unresolved native detail
+EOF before compiler work. The observer now logs syscall/short-read operation,
+PID, return size and errno, or expected/actual birth identity; the supervisor
+includes the requested PID/identity on EOF. This diagnostic-only change keeps
+the same fail-closed policy. Deterministic syscall/exit-transition tests pass,
+but the observed bootstrap EOF has not been reproduced or behaviorally fixed.
+
 ## Delivery state
 
 Focused native cap/escape/fork/orphan/stdin, PID identity, session admission and
