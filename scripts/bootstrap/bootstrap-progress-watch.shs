@@ -24,11 +24,13 @@ the observed process alone -- --pid is typically a wrapper shell that sleeps
 while its child builds. CPU is instantaneous (/proc utime+stime deltas between
 samples), never a lifetime average.
 
-status is `alive`, `alive-no-progress`, `exited`, or `stale`.
+status is `alive`, `alive-no-progress`, `unknown`, `exited`, or `stale`.
 `alive-no-progress` is REPORTED, never acted on: it means the tree burned
 <BOOTSTRAP_WATCH_STALL_CPU_PCT (default 3) percent CPU with no main-log growth
 and no build_progress change for BOOTSTRAP_WATCH_STALL_SAMPLES (default 4)
 consecutive samples. This watcher never kills anything.
+`unknown` means the watched PID was live but the process snapshot could not
+observe it. It is not evidence that the build is idle.
 EOF
 }
 
@@ -160,6 +162,13 @@ process_tree_metrics() {
           if (excluded[parent[pid]] && !excluded[pid]) { excluded[pid] = 1; changed = 1 }
         }
       }
+
+      # The caller checked kill -0 immediately before sampling. If its live
+      # root is absent from this snapshot, metrics are incomplete even when no
+      # individual /proc read happened to fail. Without this accounting a
+      # failed /proc enumeration yields nproc=0, cpu=0.0 and a fabricated
+      # alive-no-progress verdict for a still-running worker.
+      if (!(root in parent)) misses++
 
       prev_when = ""
       while ((getline line < state) > 0) {
@@ -373,7 +382,15 @@ while :; do
   prev_log_bytes=$log_bytes
   prev_progress_sig=$progress_sig
   status=alive
-  [ "$stall_streak" -lt "$stall_samples" ] || status=alive-no-progress
+  # A live watched PID with no observed process tree is a sampling failure,
+  # not an idle build. Keep the counters for diagnosis but do not advance to a
+  # stall verdict that invites somebody to kill healthy work.
+  if [ "$tree_processes" = "0" ]; then
+    status=unknown
+    stall_streak=0
+  elif [ "$stall_streak" -ge "$stall_samples" ]; then
+    status=alive-no-progress
+  fi
 
   printf 'event=sample timestamp=%s status=%s pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_rss_kb=%s tree_processes=%s top_pid=%s top_rss_kb=%s top_comm=%s tree_rss_pgroup_kb=%s tree_pgroup_processes=%s tree_scan_misses=%s stall_streak=%s milestone=%s main_log_bytes=%s phase=%s unit_kind=%s done=%s total=%s remaining=%s tasks_done=%s tasks_total=%s tasks_remaining=%s failed=%s cached=%s current=%s terminal=%s\n' \
     "$now" "$status" "$watch_pid" "$((now - started_at))" "$process_elapsed" \
