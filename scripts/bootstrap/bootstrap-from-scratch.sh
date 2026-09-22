@@ -2601,7 +2601,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
-    "${rust_generation_nonce}" || {
+    "${rust_generation_nonce}" "${PLATFORM}" || {
     echo "error: could not prepare immutable Rust authority generation" >&2
     exit 1
   }
@@ -2856,7 +2856,7 @@ else
       "${archive_prefix}simple_native_all${archive_suffix}" \
       "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
       "${legacy_generation_nonce}" "${rust_target_lock_handle}" \
-      "${legacy_observed_fingerprint}" || {
+      "${legacy_observed_fingerprint}" "${PLATFORM}" || {
       echo "error: complete legacy Rust authority migration failed" >&2
       exit 1
     }
@@ -2890,6 +2890,25 @@ else
   stage2_hosted_runtime_relative_path=\
 ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_hosted_runtime_sha256=${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
+  case "${PLATFORM}" in
+    *apple-darwin*)
+      # Cocoa has one dynamic owner. Audit the just-frozen native-all archive
+      # before spending a Stage 2 compile on duplicate static definitions.
+      # LLVM nm must match the pinned bitcode toolchain (Apple nm cannot read
+      # the Rust LLVM 23 archive members).
+      bootstrap_cocoa_tool_dir=$("${LLVM_CONFIG:-llvm-config}" --bindir) || exit 1
+      case "${bootstrap_cocoa_tool_dir}" in /*) ;; *) exit 1 ;; esac
+      [ -x "${bootstrap_cocoa_tool_dir}/llvm-nm" ] || {
+        echo "error: pinned LLVM nm is unavailable for Cocoa ownership audit" >&2
+        exit 1
+      }
+      run_logged macos-cocoa-owner sh "${repo_root}/scripts/bootstrap/run-process-group-timeout.shs" 60 2 \
+        env "NM=${bootstrap_cocoa_tool_dir}/llvm-nm" \
+        sh "${repo_root}/scripts/check/check-macos-cocoa-runtime-owner.shs" \
+        "${stage2_runtime_authority}/libsimple_runtime.dylib" \
+        "${stage2_runtime_authority}/libsimple_native_all.a"
+      ;;
+  esac
   bootstrap_stage3_compare_bind || {
     echo "error: could not bind canonical Stage 3 comparator" >&2
     exit 1
