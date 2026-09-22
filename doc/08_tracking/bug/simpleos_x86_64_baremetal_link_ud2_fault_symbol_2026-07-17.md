@@ -151,7 +151,14 @@ cannot trigger #PF/#DF by reading the following page.
 
 The focused contract now marks the extracted ISR as used and checks the emitted
 machine code, so its alignment/call assertions cannot pass merely because the
-compiler discarded the static function. It remains a link and code-generation
-contract, not QEMU fault-behavior evidence. On this host it passed in 0.15 s
-wall time with 57,092 KiB maximum RSS. The new instructions execute only on an
-exception path; no steady-state allocation or hot-path work was added.
+compiler discarded the static function. It also executes the exact extracted
+opcode-probe instruction sequence against a mapped page boundary followed by a
+`PROT_NONE` page. The boundary must classify fatal without reading across the
+page, an ordinary in-page opcode must classify recoverable, and an in-page
+`ud2` must classify fatal. The extracted x86_64 sequence runs under user-mode
+QEMU on this AArch64 host; deleting the branch around the two-byte load now
+faults the harness instead of leaving a vacuous source-token PASS. It remains a
+link and host code-generation contract, not QEMU guest-kernel evidence. The
+complete focused test passed in 0.11 s wall time with 59,624 KiB maximum RSS.
+The new production instructions execute only on an exception path; no
+steady-state allocation or hot-path work was added.
