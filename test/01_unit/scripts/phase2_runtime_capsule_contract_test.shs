@@ -2,7 +2,7 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-tool="$root/scripts/bootstrap/phase2-runtime-capsule.shs"
+tool=${PHASE2_CAPSULE_FIXTURE_TOOL:-$root/scripts/bootstrap/phase2-runtime-capsule.shs}
 tmp=$(mktemp -d)
 trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -161,4 +161,30 @@ if ! { [ "$r1" -eq 0 ] && [ "$r2" -ne 0 ]; } &&
   fail 'concurrent publication did not admit exactly one publisher'
 fi
 
-echo 'PASS: Phase2 runtime capsule is atomic, SHA-bound, complete, and fail-closed'
+make_authority "$tmp/macos"
+printf 'cocoa-provider\n' > "$tmp/macos/libsimple_runtime.dylib"
+macos_capsule=$($tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-output")
+[ -f "$macos_capsule/libsimple_runtime.dylib" ] || fail 'macOS dynamic runtime missing'
+cmp "$tmp/macos/libsimple_runtime.dylib" "$macos_capsule/libsimple_runtime.dylib" ||
+  fail 'macOS dynamic runtime copy differs'
+dynamic_sha=$(sha256sum "$tmp/macos/libsimple_runtime.dylib" | awk '{print $1}')
+[ "$(sed -n 's/^dynamic_runtime_sha256=//p' "$macos_capsule/phase2-runtime-capsule.env")" = "$dynamic_sha" ] ||
+  fail 'macOS dynamic runtime is not receipt-bound'
+$tool verify "$macos_capsule"
+chmod u+w "$macos_capsule/libsimple_runtime.dylib"
+printf tamper >> "$macos_capsule/libsimple_runtime.dylib"
+chmod 400 "$macos_capsule/libsimple_runtime.dylib"
+if $tool verify "$macos_capsule" >/dev/null 2>&1; then fail 'tampered dynamic runtime accepted'; fi
+
+missing_dynamic=$($tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-missing-output")
+chmod u+w "$missing_dynamic"
+rm "$missing_dynamic/libsimple_runtime.dylib"
+chmod 500 "$missing_dynamic"
+if $tool verify "$missing_dynamic" >/dev/null 2>&1; then fail 'missing bound dynamic runtime accepted'; fi
+mv "$tmp/macos/libsimple_runtime.dylib" "$tmp/macos/dylib.real"
+ln -s dylib.real "$tmp/macos/libsimple_runtime.dylib"
+if $tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-linked-output" >/dev/null 2>&1; then
+  fail 'symlink dynamic runtime accepted'
+fi
+
+echo 'PASS: Phase2 runtime capsule is atomic, SHA-bound, complete, and fail-closed, including macOS dylib'

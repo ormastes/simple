@@ -236,4 +236,29 @@ if bootstrap_stage3_copy_seed_tuple "$linkalias" "$test_tmp/linkalias-out" \
     fail "symlinked new-layout hosted rlib was accepted"
 fi
 
-echo "PASS: bootstrap Stage 3 projects only a stable seed tuple"
+# The macOS target explicitly admits the sole Cocoa provider with the tuple.
+macos="$test_tmp/macos"
+mkdir -p "$macos/deps"
+cp "$source_root/simple" "$source_root/libsimple_native_all.a" \
+    "$source_root/libsimple_compiler_backfill.a" "$macos/"
+cp "$source_root/deps/libsimple_runtime.a" \
+    "$source_root/deps/libspl_hosted_runtime-fixture.rlib" "$macos/deps/"
+if bootstrap_stage3_copy_seed_tuple "$macos" "$test_tmp/macos-missing" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin; then
+    fail "macOS authority accepted a missing dynamic runtime"
+fi
+printf 'macos-cocoa-provider\n' > "$macos/libsimple_runtime.dylib"
+bootstrap_stage3_copy_seed_tuple "$macos" "$test_tmp/macos-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin
+cmp "$macos/libsimple_runtime.dylib" "$test_tmp/macos-out/libsimple_runtime.dylib" ||
+    fail "macOS dynamic runtime was omitted or changed"
+[ "$(file_mode "$test_tmp/macos-out/libsimple_runtime.dylib")" = 400 ] ||
+    fail "macOS dynamic runtime was not frozen"
+mv "$macos/libsimple_runtime.dylib" "$macos/dylib.real"
+ln -s dylib.real "$macos/libsimple_runtime.dylib"
+if bootstrap_stage3_copy_seed_tuple "$macos" "$test_tmp/macos-symlink" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin; then
+    fail "macOS authority accepted a symlink dynamic runtime"
+fi
+
+echo "PASS: bootstrap Stage 3 projects only a stable seed tuple, including required macOS dylib"
