@@ -1,0 +1,35 @@
+#!/bin/sh
+# Focused ABI proof: production adapter extracted verbatim, typed fixture provider.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-cuda-signed-span-abi.shs NEW_DIR BASELINE_RUNTIME_SOURCE}
+baseline=${2:?baseline runtime_dynload.c containing faulty macro required}
+[ ! -e "$out" ] || exit 2
+mkdir -p "$out/red" "$out/green"
+out=$(CDPATH= cd -- "$out" && pwd)
+cc=${CC:-clang}
+source="$root/src/runtime/runtime_dynload.c"
+fixture="$root/test/02_integration/runtime/cuda_signed_span_abi.c"
+sed -n '/^#define GPU_CALL2(/,/^#define GPU_CALL3(/{ /^#define GPU_CALL3(/!p; }' \
+  "$baseline" > "$out/red/cuda_span_adapter.inc"
+grep '^GPU_CALL2(int64_t, rt_cuda_module_load_data,' "$baseline" >> "$out/red/cuda_span_adapter.inc"
+awk '/^int64_t rt_cuda_module_load_data\(/ { copy=1 } copy { print } copy && /^}/ { exit }' \
+  "$source" > "$out/green/cuda_span_adapter.inc"
+[ -s "$out/green/cuda_span_adapter.inc" ]
+shasum -a 256 "$source" "$baseline" "$fixture" "$out/red/cuda_span_adapter.inc" \
+  "$out/green/cuda_span_adapter.inc" > "$out/source-hashes.txt"
+for variant in red green; do
+  "$cc" -std=gnu11 -O1 -fsanitize=function -fno-sanitize-recover=function \
+    -I"$out/$variant" "$fixture" -o "$out/$variant/check"
+done
+status=0
+UBSAN_OPTIONS=print_stacktrace=0 /usr/bin/time -l "$out/red/check" > "$out/red/log" 2>&1 || status=$?
+printf 'exit_status=%s\n' "$status" > "$out/red/status.env"
+[ "$status" != 0 ]
+grep -q 'call to function.*through pointer to incorrect function type' "$out/red/log"
+status=0
+/usr/bin/time -l "$out/green/check" > "$out/green/log" 2>&1 || status=$?
+printf 'exit_status=%s\n' "$status" > "$out/green/status.env"
+[ "$status" = 0 ]
+grep -q 'span-cases=5 warmed_calls=10000.*leases_balanced=1' "$out/green/log"
+echo 'CUDA signed span ABI: red sanitizer rejection, green positive/negative PASS'
