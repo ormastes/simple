@@ -1483,6 +1483,11 @@ int main(int argc, char** argv) {
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
+        if is_msvc {
+            if let Ok(cl) = std::env::var("CL") {
+                super::linker_env::configure_msvc_link_cl(&mut cmd, &cl);
+            }
+        }
         if is_windows_gnu_target(cross_target) {
             cmd.arg("--target=x86_64-w64-windows-gnu");
         }
