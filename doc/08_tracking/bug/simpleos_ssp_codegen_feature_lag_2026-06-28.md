@@ -91,3 +91,10 @@ as the explicit deferred feature lag.
 - A spec under `test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`
   asserts canary presence for the desktop preset and absence for an opted-out
   embedded preset.
+
+## Deferred environment TODO — 2026-09-22
+
+TODO: after the Linux bootstrap publishes an admitted self-hosted compiler,
+run the SSP system spec above and `sh scripts/check/check-simpleos-bootstrap-qemu.shs --full`.
+Retain the linked kernel symbols, guest failure-handler receipt, and peak RSS;
+the focused Clang/source checks do not close this QEMU acceptance row.
