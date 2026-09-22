@@ -37,6 +37,8 @@
 #if !defined(_WIN32)
 #define RT_MEM_GUARD_AVAILABLE 1
 #include <sys/mman.h>
+#include <unistd.h>
+#include <stdatomic.h>
 #else
 /* No VirtualAlloc/VirtualProtect port yet -- sampling is a documented no-op
  * on Windows (rt_mem_guard_should_sample always returns 0), never a wrong
@@ -44,14 +46,13 @@
 #define RT_MEM_GUARD_AVAILABLE 0
 #endif
 
-#define RT_MEM_GUARD_PAGE_SIZE ((size_t)4096)
 #define RT_MEM_GUARD_FREE_RING_CAP 256
 #define RT_MEM_GUARD_MAX_SLOTS 4096
 
 typedef struct RtMemGuardSlot {
     uint8_t* user_ptr;   /* NULL = empty array slot, free for reuse */
     uint8_t* page_base;
-    size_t total_pages;
+    size_t map_len;      /* exact mapping length, also used for free/eviction */
     size_t size;         /* requested (unpadded) size, for realloc/reporting */
     int freed;
 } RtMemGuardSlot;
@@ -95,6 +96,34 @@ static int rt_mem_guard_should_sample(size_t size) {
 
 #if RT_MEM_GUARD_AVAILABLE
 
+/* Only sampled allocations query the OS. Cache failure too, without guessing
+ * an alignment that could silently defeat mprotect on a larger-page host.
+ * Relaxed atomics publish this independent immutable scalar; the allocator's
+ * existing slot-table synchronization policy is unchanged. */
+static _Atomic size_t rt_mem_guard_page_size_cached = 0;
+
+static size_t rt_mem_guard_page_size(void) {
+    size_t page = atomic_load_explicit(&rt_mem_guard_page_size_cached, memory_order_relaxed);
+    if (page == 0) {
+        long queried = sysconf(_SC_PAGESIZE);
+        page = queried > 0 ? (size_t)queried : SIZE_MAX;
+        atomic_store_explicit(&rt_mem_guard_page_size_cached, page, memory_order_relaxed);
+    }
+    return page == SIZE_MAX ? 0 : page;
+}
+
+/* Division-first rounding avoids size + page - 1 overflow. Bound the complete
+ * mapping (including both guards) before multiplication or pointer arithmetic.
+ * No power-of-two page-size assumption is needed. */
+static size_t rt_mem_guard_mapping_size(size_t size, size_t page) {
+    if (size == 0 || page == 0) return 0;
+    size_t max_pages = (size_t)PTRDIFF_MAX / page;
+    if (max_pages < 3) return 0;
+    size_t data_pages = (size - 1) / page + 1;
+    if (data_pages > max_pages - 2) return 0;
+    return (data_pages + 2) * page;
+}
+
 /* Allocate `size` bytes on their own guard-paged mmap slot. Right-aligns so
  * the allocation's last byte lands on the last byte of the last data page
  * (GWP-ASan default -- catches overflow). Returns NULL on mmap/mprotect
@@ -102,6 +131,9 @@ static int rt_mem_guard_should_sample(size_t size) {
  * allocator in either case. */
 static void* rt_mem_guard_alloc_sampled(size_t size) {
     if (size == 0) return NULL;
+    size_t page = rt_mem_guard_page_size();
+    size_t map_len = rt_mem_guard_mapping_size(size, page);
+    if (map_len == 0) return NULL;
 
     size_t idx = RT_MEM_GUARD_MAX_SLOTS;
     for (size_t i = 0; i < RT_MEM_GUARD_MAX_SLOTS; i++) {
@@ -109,20 +141,15 @@ static void* rt_mem_guard_alloc_sampled(size_t size) {
     }
     if (idx == RT_MEM_GUARD_MAX_SLOTS) return NULL;
 
-    size_t data_pages = (size + RT_MEM_GUARD_PAGE_SIZE - 1) / RT_MEM_GUARD_PAGE_SIZE;
-    if (data_pages == 0) data_pages = 1;
-    size_t total_pages = data_pages + 2; /* leading + trailing guard page */
-    size_t map_len = total_pages * RT_MEM_GUARD_PAGE_SIZE;
-
     void* base = mmap(NULL, map_len, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) return NULL;
 
     uint8_t* page_base = (uint8_t*)base;
-    uint8_t* trailing_page = page_base + RT_MEM_GUARD_PAGE_SIZE * (1 + data_pages);
+    uint8_t* trailing_page = page_base + map_len - page;
 
-    if (mprotect(page_base, RT_MEM_GUARD_PAGE_SIZE, PROT_NONE) != 0 ||
-        mprotect(trailing_page, RT_MEM_GUARD_PAGE_SIZE, PROT_NONE) != 0) {
+    if (mprotect(page_base, page, PROT_NONE) != 0 ||
+        mprotect(trailing_page, page, PROT_NONE) != 0) {
         munmap(base, map_len);
         return NULL;
     }
@@ -132,7 +159,7 @@ static void* rt_mem_guard_alloc_sampled(size_t size) {
 
     rt_mem_guard_slots[idx].user_ptr = user_ptr;
     rt_mem_guard_slots[idx].page_base = page_base;
-    rt_mem_guard_slots[idx].total_pages = total_pages;
+    rt_mem_guard_slots[idx].map_len = map_len;
     rt_mem_guard_slots[idx].size = size;
     rt_mem_guard_slots[idx].freed = 0;
     if (idx >= rt_mem_guard_slot_hwm) rt_mem_guard_slot_hwm = idx + 1;
@@ -164,7 +191,7 @@ static int rt_mem_guard_free_sampled(void* ptr) {
     if (slot == NULL) return 0;
     if (slot->freed) return 0; /* double free of a guard slot -- refuse */
     slot->freed = 1;
-    mprotect(slot->page_base, slot->total_pages * RT_MEM_GUARD_PAGE_SIZE, PROT_NONE);
+    mprotect(slot->page_base, slot->map_len, PROT_NONE);
 
     if (rt_mem_guard_free_ring_len == RT_MEM_GUARD_FREE_RING_CAP) {
         uintptr_t evict_ptr = rt_mem_guard_free_ring[rt_mem_guard_free_ring_head];
@@ -173,7 +200,7 @@ static int rt_mem_guard_free_sampled(void* ptr) {
         rt_mem_guard_free_ring_len--;
         RtMemGuardSlot* evicted = rt_mem_guard_find((void*)evict_ptr);
         if (evicted != NULL) {
-            munmap(evicted->page_base, evicted->total_pages * RT_MEM_GUARD_PAGE_SIZE);
+            munmap(evicted->page_base, evicted->map_len);
             evicted->user_ptr = NULL; /* free the array slot for reuse */
         }
     }
