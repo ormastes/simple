@@ -3521,7 +3521,12 @@ public static class Stage3MaterializedConsumer {
         // Git ignores an uninitialized gitlink's contents in the parent tree.
         if (!metadata) { if (content) throw new IOException("path.uninitialized-gitlink-content"); return false; }
         string top = Text(Git(path, "rev-parse", "--show-toplevel")).TrimEnd('\n').Replace('/','\\').TrimEnd('\\');
-        if (!top.Equals(path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) throw new IOException("git.gitlink-root");
+        // MSYS Git reports the same bound root as /d/... while native Git
+        // reports D:/...; preserve the top-level root check's exact mapping.
+        string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\').TrimEnd('\\');
+        string posixPath = posixRoot + path.Substring(root.Length).TrimEnd('\\');
+        if (!top.Equals(path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+            !top.Equals(posixPath, StringComparison.Ordinal)) throw new IOException("git.gitlink-root");
         if (Text(Git(path, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != expected) throw new IOException("git.gitlink-head");
         foreach (string entry in Nul(Git(path, "ls-files", "-v", "-z")))
             if (entry.Length < 3 || entry[1] != ' ' || Char.IsLower(entry[0]) || entry[0] == 'S') throw new IOException("git.gitlink-index-flags");
