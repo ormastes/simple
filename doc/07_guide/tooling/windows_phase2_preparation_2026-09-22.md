@@ -113,8 +113,11 @@ not resolve a production admission. The main agent subsequently authorized a
 full LFS-smudge-disabled checkout, initialization of the recorded SPipe gitlink,
 and current-HEAD materialization in this isolated repository. Available D:
 space before expansion was 69,522,481,152 bytes, above the 10 GiB build floor.
-The resulting receipt and canonical source snapshot are to be retained under
-`build/mini_builds/phase2-prepared-source/`, after committing this report so
+The canonical source snapshot and logs are to be retained under
+`build/mini_builds/phase2-prepared-source/`; the materialization receipt uses
+the required `build/bootstrap/phase2-prepared-source/materialized.env` path.
+An initial receipt-path preflight rejected the mini-builds destination before
+materialization. Preparation proceeds after committing this report so
 the materializer sees a fixed HEAD. Completion is established by those runtime
 evidence files, not this prospective description. No Phase2 build is authorized
 until the main agent reviews the real Stage2 admission and snapshot comparison.
