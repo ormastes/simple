@@ -54,6 +54,17 @@ re-run `bin/simple os test --scenario=riscv64-smoke` (or any scenario) and
 confirm it gets past `phase=tooling` — that is the end-to-end confirmation the
 probe-timeout fix could not get today.
 
+## 2026-09-22 source follow-up
+
+The current `origin/main` runner had regressed from the seed-rejecting behavior
+described above: its version check admitted any nonempty output, it preferred
+`src/compiler_rust/target/*` candidates, and its LLVM contract probe passed an
+invalid target while expecting an invalid mode diagnostic. The focused source
+fix rejects seed banners, selects only admitted release candidates, and passes
+the mode argument matching its expected diagnostic. It fails at the tooling
+phase when none qualifies. A unit spec covers seed and self-hosted version
+outputs. The deployment/guest verification described above remains open.
+
 ## Two smaller findings from the same investigation
 
 - The probe's exact-string match in `_simple_binary_has_native_build_contract`
@@ -90,4 +101,3 @@ the probe-timeout fix that surfaced it.
 
 - `doc/08_tracking/bug/os_build_scenario_runner_5s_compiler_probe_timeout_2026-08-06.md`
   — the probe-timeout bug fixed alongside this discovery.
-
