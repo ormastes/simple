@@ -2,6 +2,40 @@
 
 Status: open, live evidence blocked
 
+## 2026-09-22 main and PR audit: native validation still blocked
+
+Audited `origin/main` at `e0dd873da1b` in an isolated worktree. Merged
+[PR #655](https://github.com/ormastes/simple/pull/655) (`c3f701adc18`) already
+rejects empty and zero-area batches before backend dispatch. Its regression
+is `test/01_unit/lib/gpu/engine2d/font_empty_batch_fail_closed_spec.spl`.
+This fixes one acceptance seam; the PR explicitly leaves native verification
+pending. Do not implement that guard again or interpret it as producer proof.
+
+The selected-outline branch of `FontRenderer.get_glyph` now calls
+`sfnt_measure_glyph_into` and `sfnt_render_glyph_into` with caller-owned
+metadata and coverage arrays, then constructs `CachedGlyph` locally. Thus the
+historical pixel-bearing aggregate-return chain below is not the current
+selected-outline implementation. Its old failure receipts remain historical
+evidence, not a reproduction against current main.
+
+A single invocation of the installed canonical-path executable
+`bin/release/aarch64-apple-darwin/simple` against the existing
+`test/02_integration/rendering/sfnt_glyf_bungee_native_probe.spl` stopped before
+probe execution: `sfnt.spl` reported `expected LParen, found LBracket`.
+The executable also identified itself as a Rust-built bootstrap seed despite
+its release path. No further seed execution, bootstrap, or native build was
+performed. The failed invocation consumed 0.10 seconds wall time and
+20,709,376 bytes maximum RSS; these measure parser failure, not renderer
+performance. macOS rejected the attempted `ulimit -v` memory cap, so this
+invocation was not protected by that limit.
+
+No new producer defect has been isolated. Resume with an admitted self-hosted
+executable that supports current source syntax, then run the focused existing
+SFNT/Bungee native probe before the Engine2D and Vulkan acceptance gates. The
+SoSIX/host provider interface was not changed or exercised: parsing failed
+before font production or backend dispatch. Keep this bug open until the
+native producer, cache, and device-readback requirements pass.
+
 ## Scope
 
 The manifest-attested macOS Vulkan 2D binary built successfully at pushed
