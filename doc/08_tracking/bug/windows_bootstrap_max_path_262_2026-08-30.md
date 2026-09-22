@@ -1,8 +1,8 @@
 # Windows bootstrap silently exceeds MAX_PATH; `cl.exe` fails with exit 1 and no diagnostic
 
 - **Date:** 2026-08-30
-- **Status:** OPEN (worked around by shortening the output dir; the structural
-  cause is unfixed)
+- **Status:** RESOLVED (2026-09-10 structural fix; regression strengthened
+  2026-09-22)
 - **Host:** Windows 11, MSVC 14.44.35207, clang-cl/cl via cc-rs
 
 ## Symptom
@@ -72,6 +72,25 @@ nothing.
 
 ## Detection
 
-There is no guard for this. A check that asserts the longest `-Fo` path a lane
-will generate stays under 260 on Windows would have caught it before the build
-started, and would keep catching it as filenames grow. Worth adding.
+The Windows selector now keeps the Cargo target at
+`<repo>/build/c/<full-input-fingerprint>`, outside the deep authority receipt,
+HOME, and log tree. It preserves the complete 64-hex input identity and uses
+the existing authority lock; Unix still uses `<authority-root>/target`.
+
+Before Cargo starts, the selector converts the target to its native Windows
+spelling and rejects a prefix longer than 120 bytes. That reserves 120 bytes
+for Cargo, cc-rs, crate, and object nesting under a conservative 240-byte
+budget. A checkout that cannot meet the budget now fails with an actionable
+message instead of allowing MSVC to exit silently at its path limit.
+
+`test/01_unit/scripts/bootstrap_windows_cargo_path_budget_test.shs` verifies
+the original deep legacy layout crosses the limit for both the original
+`runtime_backend_plugin.o` shape and the `libmimalloc-sys` shape, while the
+new target paths stay within the budget. It also verifies unchanged-fingerprint
+reuse, changed-fingerprint isolation, the 120-byte boundary, fail-fast behavior
+one byte over, and preservation of the Unix target location.
+
+Focused Windows evidence on 2026-09-22: the regression reported legacy
+`runtime_backend_plugin.o` at 279 bytes and the Windows-safe target at 236;
+the current checkout measured 215. The lock-host policy regression also passed,
+showing that early shared authority ownership remains Windows-only.
