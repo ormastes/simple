@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+test_tmp=$(mktemp -d)
+trap 'rm -rf "$test_tmp"' EXIT
+. "$repo_root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+fixture="$test_tmp/authority"
+mkdir -p "$fixture/sub"
+newline_name=$(printf 'line\nbreak')
+printf 'newline content\n' >"$fixture/sub/$newline_name"
+printf 'previous snapshot\n' >"$test_tmp/snapshot"
+chmod 640 "$test_tmp/snapshot"
+bootstrap_stage3_directory_snapshot "$test_tmp/snapshot" "$fixture"
+[ "$(mode "$test_tmp/snapshot")" = 640 ] ||
+    fail "newline path lost existing output mode"
+(umask 027
+ bootstrap_stage3_directory_snapshot "$test_tmp/new-snapshot" "$fixture"
+)
+[ "$(mode "$test_tmp/new-snapshot")" = 640 ] ||
+    fail "newline path ignored output umask"
+cmp -s "$test_tmp/snapshot" "$test_tmp/new-snapshot" ||
+    fail "newline path changed output records"
+
+# Swap the scanned subtree before the hash phase. A newline-bearing leaf must
+# use the same bound worker admission as every other name.
+mkdir "$test_tmp/intercept"
+real_perl=$(command -v perl)
+printf '%s\n' '#!/bin/sh' \
+    '"$SNAPSHOT_TEST_REAL_PERL" "$@"' \
+    'status=$?' \
+    'if [ ! -e "$SNAPSHOT_TEST_MARKER" ]; then' \
+    '  mv "$SNAPSHOT_TEST_SUB" "$SNAPSHOT_TEST_MOVED" || exit 1' \
+    '  ln -s "$SNAPSHOT_TEST_MOVED" "$SNAPSHOT_TEST_SUB" || exit 1' \
+    '  : >"$SNAPSHOT_TEST_MARKER"' \
+    'fi' \
+    'exit "$status"' >"$test_tmp/intercept/perl"
+chmod 755 "$test_tmp/intercept/perl"
+if PATH="$test_tmp/intercept:$PATH" \
+    SNAPSHOT_TEST_REAL_PERL="$real_perl" \
+    SNAPSHOT_TEST_MARKER="$test_tmp/swap.marker" \
+    SNAPSHOT_TEST_SUB="$fixture/sub" \
+    SNAPSHOT_TEST_MOVED="$test_tmp/moved" \
+    bootstrap_stage3_directory_snapshot "$test_tmp/race-snapshot" "$fixture" \
+        >/dev/null 2>&1; then
+    fail "newline path accepted ancestor substitution"
+fi
+[ ! -e "$test_tmp/race-snapshot" ] || fail "race published a snapshot"
+
+printf '%s\0' "$test_tmp/moved/$newline_name" >"$test_tmp/paths"
+printf '00\t0\t0\t0\t0\n' >"$test_tmp/meta"
+if bootstrap_stage3_hash_bound_path_list "$test_tmp/paths" "$test_tmp/meta" \
+    "$test_tmp/hashes" 1 "$test_tmp" >/dev/null 2>&1; then
+    fail "mismatched identity was accepted"
+fi
+for worker_dir in "$test_tmp"/hashes.workers.*; do
+    [ ! -e "$worker_dir" ] || fail "failed worker leaked its directory"
+done
+echo "PASS: newline authority path modes, identity binding, and failure cleanup"
