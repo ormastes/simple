@@ -33,3 +33,11 @@ double sqrt(double x) {
 float sqrtf(float x) {
     return (float)sqrt((double)x);
 }
+
+/* Bit-preserving inverse of spl_f64_to_bits for the pure-Simple runtime.
+ * A union avoids a libc memcpy dependency in the freestanding archive. */
+double spl_bits_to_f64(long long bits) {
+    union { long long bits; double value; } cast;
+    cast.bits = bits;
+    return cast.value;
+}

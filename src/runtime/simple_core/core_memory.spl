@@ -61,6 +61,8 @@ extern fn string_transient_state(value: i64) -> i64
 extern fn string_promote_clear(ptr: i64) -> i64
 extern fn string_reclaim_transient(ptr: i64) -> i64
 extern fn rt_string_len(value: i64) -> i64
+extern fn float_is_valid(value: i64) -> i64
+extern fn float_reclaim_transient(ptr: i64)
 
 # ----------------------------------------------------------------------------
 # Struct-allocation registry (spec: runtime_native.c rt_struct_alloc_register /
@@ -121,10 +123,8 @@ var transient_scope_paused: i64 = 0
 # Objects registered while the scope was active AND unpaused.
 # Linear table, stride 24: ptr @0, kind @8, scope_id @16.
 # Kinds mirror the C RtCoreTransientNode kinds:
-#   1 = string, 2 = array, 3 = dict, 4 = enum, 6 = closure, 7 = raw.
-# (5 = heap float does not exist in this lane: floats are tag-2 packed
-# immediates, and UINT boxes are pre-existing unregistered leaves; both are
-# classified as immediates here — documented deviation.)
+#   1 = string, 2 = array, 3 = dict, 4 = enum, 5 = float, 6 = closure, 7 = raw.
+# UINT boxes remain pre-existing unregistered leaves and classify as immediates.
 var transient_objects_items: i64 = 0
 var transient_objects_len: i64 = 0
 var transient_objects_cap: i64 = 0
@@ -340,6 +340,10 @@ fn transient_classify(value: i64) -> i64:
         classify_ptr = ptr
         classify_bytes = 0
         return 4
+    if float_is_valid(value) > 0:
+        classify_ptr = ptr
+        classify_bytes = 0
+        return 5
     if closure_is_valid(value) > 0:
         classify_ptr = ptr
         classify_bytes = 0
@@ -406,6 +410,8 @@ fn transient_node_bytes(ptr: i64, kind: i64, raw_bytes: i64) -> i64:
         return 40 + spl_load_i64(ptr, 8) * 16
     if kind == 4:
         return 32
+    if kind == 5:
+        return 16
     if kind == 6:
         return 32 + spl_load_i64(ptr, 16) * 8
     if kind == 7:
@@ -552,6 +558,9 @@ fn transient_reclaim_objects(scope: i64):
             elif kind == 4:
                 if enum_is_valid(ptr | 1) > 0:
                     enum_reclaim_transient(ptr)
+            elif kind == 5:
+                if float_is_valid(ptr | 1) > 0:
+                    float_reclaim_transient(ptr)
             elif kind == 6:
                 if closure_is_valid(ptr | 1) > 0:
                     closure_reclaim_transient(ptr)

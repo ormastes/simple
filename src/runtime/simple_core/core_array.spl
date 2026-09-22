@@ -30,6 +30,8 @@ extern fn rt_string_chars(value: i64) -> i64
 extern fn rt_native_eq(left: i64, right: i64) -> i64
 @unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
+@unsafe(reason: "raw borrowed byte span to owned tagged-string ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_string_new(bytes: i64, len: i64) -> i64
 
 @always_inline
 fn _sffi_core_array_transient_note(ptr: i64, kind: i64) -> i64:
@@ -90,6 +92,11 @@ fn _sffi_core_array_rt_string_chars(value: i64) -> i64:
 fn _sffi_core_array_rt_native_eq(left: i64, right: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_native_eq(left, right)
+
+@always_inline
+fn _sffi_core_array_rt_string_new(bytes: i64, len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_new(bytes, len)
 
 # Registry links live in the private fifth word of each pure-Simple array.
 var array_registry_head: i64 = 0
@@ -288,6 +295,24 @@ pub fn rt_array_bytes_copy_checked(value: i64, out: i64, capacity: i64) -> i64:
         _sffi_core_array_store_u8(out, i, byte)
         i = i + 1
     len
+
+pub fn rt_bytes_to_text(value: i64) -> i64:
+    val len = rt_array_bytes_validate(value)
+    if len <= 0:
+        return _sffi_core_array_rt_string_new(0, 0)
+    val items = array_items(value)
+    if array_flags(value) == 8:
+        return _sffi_core_array_rt_string_new(items, len)
+    val bytes = _sffi_core_array_calloc(len, 1)
+    if bytes < 1:
+        return 3
+    var i = 0
+    while i < len:
+        _sffi_core_array_store_u8(bytes, i, _sffi_core_array_load_i64(items, i * 8) >> 3)
+        i = i + 1
+    val out = _sffi_core_array_rt_string_new(bytes, len)
+    _sffi_core_array_free(bytes)
+    return out
 
 pub fn rt_array_bytes_store_checked(value: i64, bytes: i64, len: i64) -> i64:
     val capacity = rt_array_bytes_validate(value)
