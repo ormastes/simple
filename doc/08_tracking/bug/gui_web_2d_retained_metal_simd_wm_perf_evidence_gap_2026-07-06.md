@@ -87,6 +87,12 @@ captured here. The bug remains **open**. A schema-admitted row alone does not
 establish that its timing samples came from live retained frames; the producing
 WM and guest run still need review and the live campaign still needs to run.
 
+TODO: after the Linux bootstrap publishes an admitted self-hosted compiler,
+run the SimpleOS QEMU WM producer and validate its retained receipt with
+`sh scripts/check/check-wm-production-fullscreen-evidence.shs --validate-retained-perf-receipt RECEIPT.env`.
+Retain the guest executable, launch log, captures, hashes, p50/p95, and maximum
+RSS; this schema-only change does not claim live performance verification.
+
 ## Sidecar Status
 
 Multiple `gpt-5.3-codex-spark` sidecar launches were attempted for Metal,
