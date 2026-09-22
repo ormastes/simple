@@ -693,6 +693,8 @@ impl Lowerer {
                 // Otherwise still ANY for dynamic typing.
                 let ty = if let Some(ref t) = s.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if matches!(&s.value, Expr::Bool(_)) {
+                    TypeId::BOOL
                 } else if try_const_eval(&s.value).is_some() {
                     TypeId::I64
                 } else if matches!(&s.value, Expr::String(_) | Expr::FString { .. }) {
@@ -764,6 +766,8 @@ impl Lowerer {
                 // Register constant
                 let ty = if let Some(ref t) = c.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if matches!(&c.value, Expr::Bool(_)) {
+                    TypeId::BOOL
                 } else if try_const_eval(&c.value).is_some() {
                     // Unannotated integer literal const → infer i64 so comparisons
                     // against it don't fall into the ANY boxing path (bug: stage4_imported_const_compare)
@@ -852,6 +856,10 @@ impl Lowerer {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
                     } else if let Some(ref t) = extract_pattern_type(&l.pattern) {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else if matches!(&l.value, Some(Expr::Bool(_))) {
+                        // Match raw 0/1 global initialization and later typed
+                        // stores; ANY would box assignments but not reads.
+                        TypeId::BOOL
                     } else if l.value.as_ref().and_then(try_const_eval).is_some() {
                         TypeId::I64
                     } else if matches!(&l.value, Some(Expr::String(_)) | Some(Expr::FString { .. })) {
