@@ -14752,12 +14752,14 @@ __attribute__((naked)) static void _rich_fault_entry(void)
         "movq 16(%%rsp), %%rax\n\t"
         /* Do not let the diagnostic probe cross a page boundary while already
          * handling an exception: an unmapped following page would recurse
-         * into #PF/#DF. A cross-page ud2 keeps the legacy recovery behavior. */
+         * into #PF/#DF. The shared ISR has no vector number, so the boundary
+         * case is ambiguous; fail closed as a fatal ud2 candidate rather than
+         * ever advancing past an intentional cross-page ud2. */
         "movq %%rax, %%rcx\n\t"
         "andl $0xFFF, %%ecx\n\t"
         "cmpl $0xFFF, %%ecx\n\t"
         "jne 4f\n\t"
-        "xorl %%ecx, %%ecx\n\t"
+        "movl $0x0B0F, %%ecx\n\t"
         "jmp 5f\n\t"
         "4:\n\t"
         "movzwl (%%rax), %%ecx\n\t"
