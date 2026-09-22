@@ -47,6 +47,73 @@ initial window placement can also generate a moved event. Full acceptance
 requires the independent AX bounds comparison above. This fixture avoids the
 widget showcase's unrelated application startup and unwired button handler.
 
+### Root-bound producer handoff
+
+For the current P0 lane, the producer root is
+`/Users/ormastes/simple-tmp/macos-bootstrap-restart-20260922`. The launcher,
+trusted manifest, full CLI, source imports, and producer verifier must all use
+that same root. Using this winit checkout's launcher with a manifest from P0
+will be rejected by `macos_gpu_full_cli_gui_admit`; copying the manifest does
+not repair its path, source, and provenance bindings.
+
+The canonical producer is
+`scripts/check/build-macos-full-cli-gui-provenance.shs --build`. Its required
+inputs include the admitted compiler and manifest at
+`build/wm-to-i64-bootstrap/stage3/aarch64-apple-darwin/`,
+`build/sffi/libspl_winit.dylib`, `libsimple_runtime_wm.dylib`, and
+`libsimple_runtime_c_wm.dylib`, plus clean source and an admitted Endpoint
+Security collector policy. A newly built general full CLI or a compiler at a
+different bootstrap output path is not automatically this admitted artifact.
+The P0/provenance owner must resolve the canonical producer inputs; this lane
+must not create aliases, manufacture receipts, or run a competing build.
+
+Both producer `--build` and `--verify` call
+`macos_gui_history_require_trust_root`. The inspected policy has
+`status=unavailable`, `signing_identity=unassigned`, and
+`team_identifier=unassigned`. Consequently this regression depends on **both**
+P0 artifact admission and the ES lane's signing/entitlement admission. A
+successful bootstrap alone does not unblock strict GUI execution.
+
+After those gates and launch monitoring are established, the prepared command
+shape is below. This is a handoff, not an executed or passing command. Set
+`WINIT_RUN_DIR` to a new evidence directory owned by this lane; retain the
+fixture SHA-256 before and after execution. The fixture may remain in this
+isolated winit checkout, avoiding source changes to the admitted producer root.
+
+```sh
+producer_root=/Users/ormastes/simple-tmp/macos-bootstrap-restart-20260922
+winit_fixture=/Users/ormastes/simple-tmp/mac-winit-registration-20260922/test/03_system/app/gui/feature/macos_window_registration_spec.spl
+: "${WINIT_RUN_DIR:?fresh absolute evidence directory required}"
+sh "$producer_root/scripts/check/build-macos-full-cli-gui-provenance.shs" --verify || exit 1
+SIMPLE_LIB="$producer_root/src" \
+SIMPLE_GUI_STRICT_EVIDENCE=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+SIMPLE_GUI_BACKEND=metal SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
+SIMPLE_GUI_BINARY="$producer_root/build/bootstrap/full/aarch64-apple-darwin/simple" \
+SIMPLE_GUI_TRUSTED_MANIFEST_PATH="$producer_root/build/bootstrap/full/aarch64-apple-darwin/provenance/gui-driver.env" \
+SIMPLE_GUI_LAUNCHED_PID_PATH="$WINIT_RUN_DIR/launched-pid.env" \
+    "$producer_root/scripts/gui/macos-gui-run.shs" "$winit_fixture" \
+    >"$WINIT_RUN_DIR/launcher.log" 2>&1
+```
+
+Treat any verifier or launcher failure as terminal for that attempt. Unset
+`SIMPLE_GUI_ALLOW_RUST_DRIVER`; never retry without strict evidence. Retain
+the launcher-selected stdout/stderr paths, receipt hash, full-CLI hash, source
+revision, and fixture hash. Before input, validate receipt PID/executable/hash
+identity and require exactly one AX window titled
+`Simple registration regression` for that PID.
+
+The PID-scoped observer must use AX coordinates in points, independent of
+display pixel scaling. Read position `(x,y)` and size `(w,h)`, activate that
+exact process, and use a titlebar point clear of the traffic lights (for
+example `(x+100,y+7)` when inside its recorded bounds). Record a CGEvent drag
+from that point to `(x+250,y+87)`, then require AX position `(x+150,y+80)`.
+Click inside the new content bounds, send Q, and click the center of the
+identified native AX close button using CGEvent coordinates. Revalidate the
+same PID/window immediately before injection. Preserve each action and both
+bounds; require the fixture assertions and natural PID/window disappearance.
+AX `set position`, process-name selection, synthetic renderer events, or
+forced process termination cannot substitute for these checks.
+
 ## Resource and platform review
 
 The loop uses one renderer and scalar event flags, with no accumulated frame
