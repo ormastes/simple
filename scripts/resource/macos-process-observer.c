@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
+#include <mach/mach_time.h>
 
 static int detail_failure(const char *operation, int pid, int bytes,
                           unsigned long long sec, unsigned long long usec) {
@@ -122,7 +124,104 @@ static int detail(int pid, unsigned long long sec, unsigned long long usec) {
                   (unsigned long long)((task.pti_resident_size + 1023) / 1024), sid) < 0;
 }
 
-int main(void) {
+/* Progress reporting uses the same unprivileged syscalls as containment. Never
+ * exec Darwin's setuid /bin/ps from inside the measured workload. The existing
+ * M/R protocol remains unchanged; each progress request has a hard deadline. */
+static int progress(int root, int identity_only) {
+    alarm(5);
+    if (geteuid() != getuid() || getegid() != getgid()) return 89;
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || !timebase.denom) return 89;
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    struct kinfo_proc *rows = NULL;
+    size_t bytes = 0;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (sysctl(mib, 4, NULL, &bytes, NULL, 0) || bytes > 64 * 1024 * 1024) return 89;
+        bytes += 64 * sizeof(*rows);
+        rows = malloc(bytes);
+        if (!rows) return 89;
+        if (!sysctl(mib, 4, rows, &bytes, NULL, 0)) break;
+        int error = errno;
+        free(rows); rows = NULL;
+        if (error != ENOMEM) return 89;
+    }
+    if (!rows || bytes % sizeof(*rows)) { free(rows); return 89; }
+    size_t count = bytes / sizeof(*rows), root_index = count;
+    for (size_t i = 0; i < count; ++i)
+        if (rows[i].kp_proc.p_pid == root) root_index = i;
+    if (root_index == count) { free(rows); return 0; }
+    if (identity_only) {
+        const struct timeval *start = &rows[root_index].kp_proc.p_starttime;
+        time_t seconds = start->tv_sec, elapsed = time(NULL) - seconds;
+        char birth[64];
+        struct tm local;
+        if (!localtime_r(&seconds, &local) ||
+            !strftime(birth, sizeof(birth), "%a %b %e %T %Y", &local)) { free(rows); return 89; }
+        printf("%lld:%d %lld %s\n", (long long)seconds, start->tv_usec,
+               (long long)(elapsed < 0 ? 0 : elapsed), birth);
+        free(rows);
+        return fflush(stdout) ? 89 : 0;
+    }
+    unsigned char *selected = calloc(count, 1);
+    if (!selected) { free(rows); return 89; }
+    selected[root_index] = 1;
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (selected[i]) continue;
+            for (size_t j = 0; j < count; ++j)
+                if (selected[j] && rows[i].kp_eproc.e_ppid == rows[j].kp_proc.p_pid) {
+                    selected[i] = 1; changed = 1; break;
+                }
+        }
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const struct kinfo_proc *p = rows + i;
+        if ((!selected[i] && p->kp_eproc.e_pgid != rows[root_index].kp_eproc.e_pgid) ||
+            p->kp_proc.p_pid <= 0 || p->kp_proc.p_stat == SZOMB) continue;
+        struct proc_taskinfo task;
+        struct proc_bsdinfo after;
+        errno = 0;
+        int n = proc_pidinfo(p->kp_proc.p_pid, PROC_PIDTASKINFO, 0, &task, sizeof(task));
+        if (!n && errno == ESRCH) continue;
+        if (n != sizeof(task)) { free(selected); free(rows); return 89; }
+        errno = 0;
+        n = proc_pidinfo(p->kp_proc.p_pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after));
+        if (!n && errno == ESRCH) continue;
+        if (n != sizeof(after) || after.pbi_start_tvsec != (uint64_t)p->kp_proc.p_starttime.tv_sec ||
+            after.pbi_start_tvusec != (uint64_t)p->kp_proc.p_starttime.tv_usec) {
+            free(selected); free(rows); return 89;
+        }
+        char name[sizeof(p->kp_proc.p_comm) + 1];
+        size_t j;
+        for (j = 0; j < sizeof(p->kp_proc.p_comm) && p->kp_proc.p_comm[j]; ++j) {
+            unsigned char c = p->kp_proc.p_comm[j];
+            name[j] = c > 32 && c < 127 ? (char)c : '_';
+        }
+        name[j] = 0;
+        /* Five birth fields preserve the shared BSD snapshot parser, while
+         * retaining microseconds instead of ps's second-resolution identity. */
+        printf("%d %d %d %llu %llu:%llu _ _ _ _ %.9f %s\n", p->kp_proc.p_pid,
+               after.pbi_ppid, after.pbi_pgid,
+               (unsigned long long)((task.pti_resident_size + 1023) / 1024),
+               (unsigned long long)after.pbi_start_tvsec, (unsigned long long)after.pbi_start_tvusec,
+               ((double)task.pti_total_user + (double)task.pti_total_system) *
+                   timebase.numer / timebase.denom / 1e9,
+               name[0] ? name : "unknown");
+    }
+    free(selected); free(rows);
+    return fflush(stdout) ? 89 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 1) {
+        char *end;
+        if (argc != 3 || (strcmp(argv[1], "--progress") && strcmp(argv[1], "--identity"))) return 89;
+        long pid = strtol(argv[2], &end, 10);
+        if (*end || pid <= 0 || pid > INT32_MAX) return 89;
+        return progress((int)pid, !strcmp(argv[1], "--identity"));
+    }
     char line[128], extra;
     while (fgets(line, sizeof(line), stdin)) {
         int pid;

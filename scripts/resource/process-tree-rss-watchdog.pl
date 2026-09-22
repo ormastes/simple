@@ -558,6 +558,10 @@ if ($leader == 0) {
     $ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} = $opt{'rss-cap-mode'};
     $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = $session_id || $$;
     $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} = $session_helper;
+    if ($observer_path) {
+        $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER} = $observer_path;
+        $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256} = $observer_sha;
+    }
     my $go;
     sysread($gate_read, $go, 1) == 1 && $go eq 'G' or POSIX::_exit(89);
     close $gate_read;
