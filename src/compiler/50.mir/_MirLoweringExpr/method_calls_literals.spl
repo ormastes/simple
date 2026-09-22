@@ -529,6 +529,11 @@ impl MirLowering:
                                 result_struct_name = type_symbol.name
                                 supported = true
                             case _: ()
+            # Result payloads are boxed runtime values.  Keeping the carrier
+            # as i64 lets `Result<Result<T, E>, F>.ok` use the same
+            # discriminant/payload path as scalar projections.
+            case HirTypeKind.Result(_, _):
+                supported = true
             case _: ()
         if not supported:
             val operation = if unwrap_err: "unwrap_err" else: "unwrap"
@@ -609,10 +614,22 @@ impl MirLowering:
         var b_merge = self.builder
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
+        self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
         if result_struct_name != "":
             self.struct_value_syms[result_local.id] = result_struct_name
-            self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
         result_local
+
+    me lower_result_projection(receiver: HirExpr, payload_type: HirType, project_err: bool) -> LocalId:
+        """Lower `result.ok` / `result.err` once: evaluate the receiver once,
+        return its matching payload, or the language nil value on the other
+        variant.  It reuses the proven unwrap branch builder but supplies a
+        nil fallback instead of emitting unwrap's mismatch panic."""
+        val nil_fallback = HirExpr(
+            kind: HirExprKind.NilLit,
+            has_type_: true,
+            type_: HirType(kind: HirTypeKind.Unit, span: receiver.span),
+            span: receiver.span)
+        self.lower_result_unwrap(receiver, payload_type, nil_fallback, project_err)
 
     me try_lower_option_method(receiver: HirExpr, method: text, args: [HirCallArg], result_ok_type: HirType?, result_err_type: HirType?, option_method_receiver: bool, prelowered_method_receiver: LocalId) -> LocalId?:
         if method == "is_some" and args.len() == 0 and option_method_receiver:
