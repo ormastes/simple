@@ -14,6 +14,15 @@ regression of the import patch.  The exhausted three-cycle full-matrix result
 must not be rerun until this patchset is integrated into the frozen Linux
 bootstrap source revision.
 
+The same retained cycle-3 log contains 15 method-resolution failures covered
+by `codex/phase2-cycle3-method-resolution-20260923`: one `str.char_count`, one
+`ord`, five scalar float (`floor`/`ceil`/`round`), one `Array.remove_at`, four
+`Array.write_span`, two `str.to_i64_opt`, and one erased-provider
+`source_to_addr` call.  Focused LLVM IR regressions and source compatibility
+changes cover those errors without rerunning the exhausted Phase 2 matrix.
+They remain pending immutable-capsule verification together with the import
+fixes above.
+
 Deferred verification:
 
 - Publish a new SHA-qualified Linux Phase 2 runtime capsule after rebuilding
