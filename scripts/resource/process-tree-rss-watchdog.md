@@ -17,7 +17,8 @@ observations, and warms executable admission before starting the sample clock.
 The first helper observation has a five-second deadline for cold executable
 admission on macOS; the workload does not exist during this warmup. A stalled
 helper still fails installation with exit 89. Subsequent workload observations
-remain within the configured sampling interval (at most 100 ms).
+have a separate one-second deadline. The configured sampling interval (at most
+100 ms) is the target cadence, not a guaranteed observation completion time.
 The helper and source SHA-256 values are included in the receipt.
 
 The canonical outer guard uses `--session-mode=new` and rejects any inbound
@@ -36,9 +37,12 @@ The guard exports `SIMPLE_BOOTSTRAP_SESSION_ID` and an absolute
 by the transcript writer, verifier, and final exporter; explicit environment
 assignments cannot overwrite them. One persistent Perl supervisor samples `ps`
 without shell pipelines. Sampling failure, malformed output, or a sample
-exceeding its interval budget causes exit 89. Scheduling uses the remaining
+exceeding its one-second observation budget causes exit 89. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler
 delays are reported as `sample_gap_max_ms`; this is not a real-time guarantee.
+Receipts also report `observation_budget_ms`, `sample_duration_max_ms` for
+completed observations (including cleanup), and `sample_overruns` for those
+exceeding the target cadence. No extra cadence sleep follows a slow sample.
 
 RSS breach returns 88; timeout returns 124; observed session escape returns
 90; installation, helper integrity or measurement failure returns 89.
