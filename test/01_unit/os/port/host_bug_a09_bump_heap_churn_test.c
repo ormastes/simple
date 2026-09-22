@@ -37,8 +37,8 @@ typedef struct {
 
 static int measure_allocator_latency(size_t live_count, LatencySample *sample)
 {
-    uint8_t *live[24];
-    if (live_count > 24) return 0;
+    static uint8_t *live[4096];
+    if (live_count > 4096) return 0;
     for (size_t i = 0; i < live_count; ++i) {
         live[i] = (uint8_t *)malloc(64);
         if (!live[i]) return 0;
@@ -78,8 +78,17 @@ int main(void)
     volatile size_t overflow = (size_t)-1;
     rt_baremetal_heap_test_reset();
     LatencySample latency_8;
-    LatencySample latency_24;
-    if (!measure_allocator_latency(8, &latency_8) || !measure_allocator_latency(24, &latency_24)) return 19;
+    LatencySample latency_4096;
+    if (!measure_allocator_latency(8, &latency_8) ||
+        !measure_allocator_latency(4096, &latency_4096)) return 19;
+    /* The retired first-fit implementation scanned every live block while
+     * IRQs were masked. A 4096-block session must keep churn latency bounded,
+     * not scale linearly with the retained object count. */
+    if (latency_4096.ticks > (latency_8.ticks + 100) * 8) {
+        fprintf(stderr, "allocator_latency_regression live8_ticks=%ld live4096_ticks=%ld\n",
+                latency_8.ticks, latency_4096.ticks);
+        return 20;
+    }
 
     for (size_t i = 0; i < LIVE_COUNT; ++i) {
         live[i] = (uint8_t *)malloc(LIVE_BYTES);
@@ -120,10 +129,29 @@ int main(void)
     uint8_t *coalesced = (uint8_t *)malloc(1536);
     if (coalesced != first) return 8;
     free((void *)(uintptr_t)((uintptr_t)coalesced + 1U)); /* invalid pointer must not change adjacent live data */
+    uintptr_t released_address = (uintptr_t)coalesced;
     free(coalesced);
-    free(coalesced);     /* double free is ignored */
+    free((void *)released_address); /* double free is ignored */
     if (!intact(third, 1024, 99)) return 9;
     free(third);
+
+    uint8_t *left = (uint8_t *)malloc(256);
+    uint8_t *middle = (uint8_t *)malloc(512);
+    uint8_t *right = (uint8_t *)malloc(256);
+    if (!left || !middle || !right) return 21;
+    fill(left, 256, 31);
+    fill(right, 256, 47);
+    free(middle);
+    uint8_t *left_grown = (uint8_t *)realloc(left, 640);
+    if (left_grown != left || !intact(left_grown, 256, 31) || !intact(right, 256, 47)) return 22;
+    free(left_grown);
+    free(right);
+
+    uint8_t *zeroed = (uint8_t *)calloc(4096, 4);
+    if (!zeroed) return 23;
+    for (size_t i = 0; i < 4096 * 4; ++i)
+        if (zeroed[i] != 0) return 24;
+    free(zeroed);
 
     uint8_t *grown = (uint8_t *)malloc(64);
     if (!grown) return 10;
@@ -144,8 +172,8 @@ int main(void)
     if (pthread_join(workers[0], 0) != 0 || pthread_join(workers[1], 0) != 0 || worker_failed) return 18;
     printf("allocator_latency live_blocks=8 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
            latency_8.ticks, latency_8.retained_committed);
-    printf("allocator_latency live_blocks=24 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
-           latency_24.ticks, latency_24.retained_committed);
+    printf("allocator_latency live_blocks=4096 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
+           latency_4096.ticks, latency_4096.retained_committed);
     printf("churn_live_blocks=%u peak_committed_bytes=%zu live_bytes=%u\n",
            (unsigned)LIVE_COUNT, peak_high_water, (unsigned)(LIVE_COUNT * LIVE_BYTES));
     return final_status;

@@ -362,8 +362,8 @@ RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val)
  * importantly _vfs_boot_read_file_chain_raw, which knows the FAT32 file size
  * before it reads a byte -- was therefore forced through the doubling growth
  * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On this
- * BUMP-ONLY heap free() is a no-op, so every intermediate buffer is leaked
- * permanently -- a 24 MiB boot asset burns ~63 MiB. That is what drove
+ * The former bump-only heap made free() a no-op, so every intermediate buffer
+ * was leaked permanently -- a 24 MiB boot asset burned ~63 MiB. That drove
  * heap_off to 0xbf12660 during vfs-init, before any render code ran.
  * Honouring the reservation makes that one exact allocation instead.
  *
@@ -566,12 +566,16 @@ static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
 
 typedef struct {
     size_t span;
+    size_t previous_span;
     uint32_t magic;
     uint32_t is_free;
+    uint64_t reserved;
 } SimpleOSHeapBlock;
 
 static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(SIMPLEOS_HEAP_ALIGNMENT)));
 static size_t _heap_off = 0; /* high-water boundary; retained for existing boot diagnostics */
+static size_t _heap_tail_span = 0;
+static size_t _heap_free_blocks = 0;
 static volatile uint32_t _heap_lock = 0;
 
 void *malloc(size_t sz);
@@ -589,6 +593,17 @@ static inline int simpleos_heap_block_valid(const SimpleOSHeapBlock *block, size
            block->span >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT &&
            (block->span & (SIMPLEOS_HEAP_ALIGNMENT - 1U)) == 0 &&
            block->span <= _heap_off - offset;
+}
+
+static inline void simpleos_heap_set_following_previous_span(size_t offset, size_t span)
+{
+    size_t next_offset = offset + span;
+    if (next_offset < _heap_off) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
+        next->previous_span = span;
+    } else {
+        _heap_tail_span = span;
+    }
 }
 
 /* Allocation may run on an IRQ path as well as task context.  Mask local IRQs
@@ -622,34 +637,34 @@ static SimpleOSHeapBlock *simpleos_heap_block_for_ptr(void *ptr, size_t *offset_
 {
     uintptr_t wanted = (uintptr_t)ptr;
     uintptr_t heap_begin = (uintptr_t)_heap;
-    size_t offset = 0;
     if (!ptr || wanted < heap_begin + sizeof(SimpleOSHeapBlock) || wanted >= heap_begin + _heap_off)
         return NULL;
-    while (offset < _heap_off) {
-        SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
-        if (!simpleos_heap_block_valid(block, offset)) return NULL;
-        if ((uintptr_t)block + sizeof(SimpleOSHeapBlock) == wanted) {
-            if (offset_out) *offset_out = offset;
-            return block;
-        }
-        offset += block->span;
+    uintptr_t header_address = wanted - sizeof(SimpleOSHeapBlock);
+    if ((header_address - heap_begin) & (SIMPLEOS_HEAP_ALIGNMENT - 1U)) return NULL;
+    size_t offset = (size_t)(header_address - heap_begin);
+    SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)header_address;
+    if (!simpleos_heap_block_valid(block, offset)) return NULL;
+    if (offset == 0 ? block->previous_span != 0 :
+        block->previous_span > offset) return NULL;
+    if (offset != 0) {
+        SimpleOSHeapBlock *previous = (SimpleOSHeapBlock *)((uint8_t *)block - block->previous_span);
+        if (!simpleos_heap_block_valid(previous, offset - block->previous_span) ||
+            previous->span != block->previous_span) return NULL;
     }
-    return NULL;
+    if (offset_out) *offset_out = offset;
+    return block;
 }
 
 static void simpleos_heap_release_tail(void)
 {
-    size_t offset = 0;
-    size_t last_offset = 0;
-    SimpleOSHeapBlock *last = NULL;
-    while (offset < _heap_off) {
-        SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
-        if (!simpleos_heap_block_valid(block, offset)) return;
-        last = block;
-        last_offset = offset;
-        offset += block->span;
+    while (_heap_off != 0 && _heap_tail_span != 0) {
+        size_t last_offset = _heap_off - _heap_tail_span;
+        SimpleOSHeapBlock *last = (SimpleOSHeapBlock *)((uint8_t *)_heap + last_offset);
+        if (!simpleos_heap_block_valid(last, last_offset) || !last->is_free) return;
+        _heap_off = last_offset;
+        _heap_tail_span = last->previous_span;
+        _heap_free_blocks--;
     }
-    if (last && last->is_free) _heap_off = last_offset;
 }
 
 static void *simpleos_heap_alloc_unlocked(size_t size)
@@ -661,7 +676,7 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
     needed = sizeof(SimpleOSHeapBlock) + aligned;
 
     offset = 0;
-    while (offset < _heap_off) {
+    while (_heap_free_blocks != 0 && offset < _heap_off) {
         SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
         if (!simpleos_heap_block_valid(block, offset)) return NULL;
         if (block->is_free && block->span >= needed) {
@@ -669,9 +684,14 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
             if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
                 SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
                 next->span = remainder;
+                next->previous_span = needed;
                 next->magic = SIMPLEOS_HEAP_MAGIC;
                 next->is_free = 1;
+                next->reserved = 0;
                 block->span = needed;
+                simpleos_heap_set_following_previous_span(offset + needed, remainder);
+            } else {
+                _heap_free_blocks--;
             }
             block->is_free = 0;
             return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
@@ -682,9 +702,12 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
     if (needed > sizeof(_heap) - _heap_off) return NULL;
     SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + _heap_off);
     block->span = needed;
+    block->previous_span = _heap_tail_span;
     block->magic = SIMPLEOS_HEAP_MAGIC;
     block->is_free = 0;
+    block->reserved = 0;
     _heap_off += needed;
+    _heap_tail_span = needed;
     return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
 }
 
@@ -694,22 +717,28 @@ static void simpleos_heap_free_unlocked(void *ptr)
     SimpleOSHeapBlock *block = simpleos_heap_block_for_ptr(ptr, &offset);
     if (!block || block->is_free) return; /* invalid and double free are harmless */
     block->is_free = 1;
+    _heap_free_blocks++;
 
     size_t next_offset = offset + block->span;
     if (next_offset < _heap_off) {
         SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
-        if (simpleos_heap_block_valid(next, next_offset) && next->is_free)
+        if (simpleos_heap_block_valid(next, next_offset) && next->is_free) {
             block->span += next->span;
+            _heap_free_blocks--;
+            simpleos_heap_set_following_previous_span(offset, block->span);
+        }
     }
 
-    size_t scan = 0;
     SimpleOSHeapBlock *previous = NULL;
-    while (scan < offset) {
-        previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + scan);
-        if (!simpleos_heap_block_valid(previous, scan)) return;
-        scan += previous->span;
+    if (block->previous_span != 0) {
+        size_t previous_offset = offset - block->previous_span;
+        previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + previous_offset);
+        if (simpleos_heap_block_valid(previous, previous_offset) && previous->is_free) {
+            previous->span += block->span;
+            _heap_free_blocks--;
+            simpleos_heap_set_following_previous_span(previous_offset, previous->span);
+        }
     }
-    if (previous && previous->is_free && scan == offset) previous->span += block->span;
     simpleos_heap_release_tail();
 }
 
@@ -770,10 +799,15 @@ void *realloc(void *ptr, size_t size)
             if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
                 SimpleOSHeapBlock *tail = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
                 tail->span = remainder;
+                tail->previous_span = needed;
                 tail->magic = SIMPLEOS_HEAP_MAGIC;
                 tail->is_free = 1;
+                tail->reserved = 0;
+                simpleos_heap_set_following_previous_span(offset + needed, remainder);
             } else {
                 block->span += remainder;
+                simpleos_heap_set_following_previous_span(offset, block->span);
+                _heap_free_blocks--;
             }
             simpleos_heap_lock_release(flags);
             return ptr;
@@ -781,6 +815,7 @@ void *realloc(void *ptr, size_t size)
     } else if (needed <= sizeof(_heap) - offset) {
         block->span = needed;
         _heap_off = offset + needed;
+        _heap_tail_span = needed;
         simpleos_heap_lock_release(flags);
         return ptr;
     }
@@ -816,7 +851,7 @@ void *calloc(size_t count, size_t size)
 }
 
 #ifdef SIMPLEOS_HEAP_TEST
-void rt_baremetal_heap_test_reset(void) { _heap_off = 0; }
+void rt_baremetal_heap_test_reset(void) { _heap_off = 0; _heap_tail_span = 0; _heap_free_blocks = 0; }
 size_t rt_baremetal_heap_test_capacity(void) { return sizeof(_heap); }
 size_t rt_baremetal_heap_test_high_water(void) { return _heap_off; }
 #endif
@@ -9605,11 +9640,10 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
                 if (!new_data) return ENCODE_PTR(a);
                 for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
             } else {
-                /* REUSE rather than reallocate: free() is a no-op on the bump
-                 * heap, so an unconditional fresh malloc+copy leaks the entire
-                 * old buffer on every doubling. simpleos_heap_realloc_last
-                 * extends in place when this is the most recent allocation (the
-                 * common append-loop case) and copies only when it is not. The
+                /* Reallocate instead of unconditional fresh malloc+copy.
+                 * simpleos_heap_realloc_last extends in place when this is the
+                 * most recent allocation (the common append-loop case) and
+                 * otherwise copies and reclaims the old buffer. The
                  * value-array branch below has always done this; the packed byte
                  * branch did not. Same realloc-instead-of-reuse defect fixed in
                  * _reset_font_atlas (font_renderer.spl). */
