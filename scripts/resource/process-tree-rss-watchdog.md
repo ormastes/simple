@@ -35,9 +35,33 @@ Only a successful initial RSS and `getsid()` measurement releases exec.
 The guard exports `SIMPLE_BOOTSTRAP_SESSION_ID` and an absolute
 `SIMPLE_BOOTSTRAP_SESSION_EXEC` path to the workload. Both names are reserved
 by the transcript writer, verifier, and final exporter; explicit environment
-assignments cannot overwrite them. One persistent Perl supervisor samples `ps`
-without shell pipelines. Sampling failure, malformed output, or a sample
-exceeding its one-second observation budget causes exit 89. Scheduling uses the remaining
+assignments cannot overwrite them. On Linux the persistent Perl supervisor
+samples `ps` without shell pipelines. On macOS it compiles and pins the adjacent
+`macos-process-observer.c` helper before workload creation, then keeps that
+observer alive through private request/response pipes. `sysctl(KERN_PROC_ALL)`
+provides one process metadata snapshot (PID, parent, group, zombie state and
+microsecond birth identity). The supervisor applies the existing descendant,
+retained-group and known-identity selection to that snapshot. Only selected
+live members receive `libproc` RSS and `getsid()` queries, with birth identity
+checked before and after each RSS read. Newly forked children are discovered
+by the next snapshot; cleanup still freezes parents and takes another snapshot
+before killing them. No host-wide RSS query or per-sample exec is used on macOS.
+
+The native protocol rejects incomplete/malformed/duplicate rows, caps each row
+at 129 bytes including newline and the table at 131,072 rows, and validates PID
+ranges. The kernel metadata allocation is independently bounded. A vanished
+process is excluded only after ESRCH or a confirmed zombie; permission errors,
+short reads, and changed birth identities fail the observation. Observer path,
+binary/source SHA-256, backend, starts/restarts/errors and last PID are receipted.
+The session helper remains verified during native observations. Observer failure
+kills/reaps the observer; a fresh observer may be started for cleanup only,
+never to resume the workload. A persistently broken observer kills the anchored
+root group and reports unverified quiescence. SIGPIPE is ignored before helper
+admission so early pipe closure produces a caught exit 89 with a receipt; the
+workload receives its original SIGPIPE disposition.
+
+Sampling failure, malformed output, or a sample exceeding its one-second
+observation budget causes exit 89. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler
 delays are reported as `sample_gap_max_ms`; this is not a real-time guarantee.
 Receipts also report `observation_budget_ms`, `sample_duration_max_ms` for
@@ -102,12 +126,19 @@ This is a material regression on that short native workload and is recorded in
 `doc/08_tracking/bugs/bootstrap_rss_guard_helper_startup_overhead_20260921.md`.
 No Simple bootstrap performance gate is claimed.
 
+The 2026-09-22 native observer check measured 8.836 s plain versus 10.281 s
+guarded median across three interleaved 3,500-function compilations on this
+loaded host (+16.36%, including both helper builds/admission). The final receipt
+had 96 samples, maximum sample duration 18.98 ms, maximum start gap 113.41 ms,
+zero sample overruns, zero observer restarts/errors, and peak 308,208 KiB. This
+does not resolve the invocation startup overhead report or establish bootstrap
+performance. The measurement covers the native syscall backend while protocol
+failure handling was being tightened; it is not an immutable release benchmark.
+
 ## Delivery state
 
-Committed at the user's explicit stop-and-push-as-is boundary. Helper integration,
-core RSS, identity, deadline/grace, retry, reserved-env attacks, and phase authority
-checks passed before the final explicit new/inherit admission changes. The final
-mode/admission changes and associated revised fixtures have **not** received a
-complete suite rerun or independent launch approval. Source-matched Simple
-rebuilds and verification on the accepted PR head remain required. This is a
-relaxed, unverified delivery state; the strict launch gate remains closed.
+Focused native cap/escape/fork/orphan/stdin, PID identity, session admission and
+tampering, timeout/grace, slow/hung observer and protocol checks are recorded in
+`doc/08_tracking/bugs/macos_watchdog_hostwide_ps_timeout_20260922.md`. No bootstrap
+retry was run after its three-cycle limit. Source-matched bootstrap verification
+remains required before claiming the original build failure resolved end to end.
