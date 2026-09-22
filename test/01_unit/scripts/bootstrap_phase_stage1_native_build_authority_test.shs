@@ -6,13 +6,28 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase1-authority.XXXXXX")
 trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "bootstrap_phase_stage1_native_build_authority_test: $*" >&2; exit 1; }
 
+# An inherited export attribute can hide assignment-before-function differences
+# between host shells. Require the verifier to export its task environment.
+unset TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NATIVE_BUILD_CACHE_DIR
+unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+
 mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/good" "$tmp/silent/outputs"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
   "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
 
 cat >"$tmp/fake-seed" <<'EOF'
 #!/bin/sh
+work=$(dirname "$0")
+[ "${HOME:-}" = "$work/home" ] || exit 71
+[ "${TMPDIR:-}" = "$work/tmp" ] || exit 72
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 73
+case "${SIMPLE_NATIVE_BUILD_CACHE_DIR:-}" in
+  "$work/cache/"?*) ;;
+  *) exit 74 ;;
+esac
 if [ "${1:-}" = --version ]; then
+  [ "$SIMPLE_NATIVE_BUILD_CACHE_DIR" = "$work/cache/compiler_version" ] || exit 75
+  [ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}${SIMPLE_BINARY:-}" ] || exit 76
   echo fake-phase1-seed
   exit 0
 fi
@@ -53,6 +68,8 @@ PHASE1_EXECUTIONS="$tmp/good.executions" \
     --source-root="$tmp/source" --work-root="$tmp/good" \
     --timeout-seconds=30 || status=$?
 [ "$status" -ne 0 ] || fail "Stage 1 unsupported rows unexpectedly admitted the whole matrix"
+grep -Fq 'task=compiler_version|result=PASS|status=0' "$tmp/good/summary.env" ||
+  fail "compiler version child did not receive isolated task environment"
 [ "$(wc -l <"$tmp/good.invocations" | tr -d ' ')" = 2 ] ||
   fail "expected both Stage 1 server builds"
 snapshot="$tmp/good/compiler.snapshot"
