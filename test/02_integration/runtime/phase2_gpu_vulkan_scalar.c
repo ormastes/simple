@@ -120,9 +120,17 @@ const char *rt_vulkan_selected_device_type(void) {
 #else
 #include "runtime.h"
 #ifdef PHASE2_SCALAR_LOADER
+/* The production loader also includes the scalar fragment after integration.
+ * Suppress that include for baseline/lock-removal probes so their selected
+ * implementation, rather than the normal guarded one, is exercised. */
+#if defined(PHASE2_SCALAR_BASELINE) || defined(PHASE2_SCALAR_HEADER)
+#define SIMPLE_GPU_VULKAN_SCALAR_PRIVATE_H
+#endif
 #include "../../../src/runtime/runtime_dynload.c"
 #ifndef PHASE2_SCALAR_BASELINE
-#ifndef PHASE2_SCALAR_HEADER
+#ifdef PHASE2_SCALAR_HEADER
+#undef SIMPLE_GPU_VULKAN_SCALAR_PRIVATE_H
+#else
 #define PHASE2_SCALAR_HEADER "../../../src/runtime/runtime_gpu_vulkan_scalar_private.h"
 #endif
 #include PHASE2_SCALAR_HEADER
