@@ -1,0 +1,118 @@
+#!/bin/sh
+# Focused lock cleanup regression; no compiler bootstrap.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+if [ "${1:-}" = --workload ]; then
+  work=$2
+  PORTABLE_LOCK_ATOMIC_HELPER_PATH=${LOCK_OBSERVER_TEST_HELPER:-$root/scripts/check/lib/portable-hardlink-lock.pl}
+  export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+  . "$root/scripts/check/lib/portable-process-lock.shs"
+  portable_lock_acquire "$work/locks" bootstrap 2
+  claim=$PORTABLE_LOCK_HANDLE
+  trap 'saved=$?; portable_lock_release "$claim" || exit 99; exit "$saved"' EXIT
+  # A foreign process must not release our claim, including from its EXIT trap.
+  sh -c '
+    . "$1/scripts/check/lib/portable-process-lock.shs"
+    claim=$2
+    trap '\''portable_lock_release "$claim" && exit 98; exit 1'\'' EXIT
+    portable_lock_release "$claim" && exit 97
+    exit 1
+  ' sh "$root" "$claim" && exit 96 || foreign=$?
+  [ "$foreign" -eq 1 ]
+  portable_lock_handle_is_owned "$claim"
+  # Keep the same conservative live-group result even for a mismatched birth.
+  [ "$(portable_lock_claim_state "$PORTABLE_LOCK_OWNER_PID" 00 "$PORTABLE_LOCK_OWNER_PGID")" = live ]
+  exit 2
+fi
+[ "$(uname -s)" = Darwin ] || { echo 'SKIP: Darwin lock observer'; exit 0; }
+work=$(mktemp -d "${TMPDIR:-/tmp}/lock-no-setuid.XXXXXXXX")
+cleanup() {
+  status=$?
+  if [ -n "${LOCK_OBSERVER_TEST_EVIDENCE:-}" ]; then
+    mkdir -p "$LOCK_OBSERVER_TEST_EVIDENCE"
+    cp -R "$work/." "$LOCK_OBSERVER_TEST_EVIDENCE/"
+  fi
+  [ "$status" -eq 0 ] || { echo "FAIL: lock observer test status=$status" >&2; tail -10 "$work/guard.err" 2>/dev/null || true; }
+  rm -rf "$work"
+}
+trap cleanup EXIT
+mkdir "$work/bin"
+# Re-exec this script as a ps sentinel: any ps call records evidence and fails.
+ln -s "$root/test/01_unit/scripts/fixture_lock_observer_ps.shs" "$work/bin/ps"
+export LOCK_PS_SENTINEL=$work/ps-invoked
+original_path=$PATH
+export PATH="$work/bin:$PATH"
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+status=0
+perl "$guard" --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=20 --receipt="$work/receipt" -- \
+  sh "$0" --workload "$work" >"$work/guard.out" 2>"$work/guard.err" || status=$?
+[ "$status" -eq 2 ]
+[ ! -e "$work/ps-invoked" ]
+[ ! -e "$work/locks/.bootstrap.lock" ]
+for row in status=complete exit_status=2 observer_errors=0 observer_restarts=0 quiescent=1 rss_cap_enforced=1; do
+  grep -Fxq "$row" "$work/receipt"
+done
+observer=$(sed -n 's/^observer_path=//p' "$work/receipt")
+observer_sha=$(sed -n 's/^observer_sha256=//p' "$work/receipt")
+export SIMPLE_BOOTSTRAP_PROCESS_OBSERVER=$observer SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256=$observer_sha
+helper=$root/scripts/check/lib/portable-hardlink-lock.pl
+# Successful and failing EXIT traps, foreign owners and snapshot failure paths.
+sh "$root/test/01_unit/scripts/portable_process_lock_exit_owner_test.shs" >"$work/exit-owner.log" 2>&1
+# Legacy standalone identity encoding remains compatible with native snapshots.
+"$observer" --identity "$$" >"$work/native-identity"
+perl "$helper" owner-snapshot >"$work/owner-identity"
+env -u SIMPLE_BOOTSTRAP_PROCESS_OBSERVER -u SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256 \
+  -u SIMPLE_BOOTSTRAP_RSS_CAP_MODE PATH="$original_path" perl "$helper" owner-snapshot >"$work/legacy-identity"
+cmp "$work/owner-identity" "$work/legacy-identity"
+perl -e '
+  open(my $n,"<",$ARGV[0]) or die $!; my $native=<$n>;
+  $native =~ /^\d+:\d+ \d+ (.+)\n$/ or die "bad native row";
+  my $hex=unpack("H*",$1);
+  open(my $o,"<",$ARGV[1]) or die $!; my $owner=join("",<$o>);
+  $owner =~ /^start_hex=$hex$/m or die "manifest format changed";
+' "$work/native-identity" "$work/owner-identity"
+for fault in hash missing setuid setgid symlink; do
+  cp "$observer" "$work/observer-$fault"
+  chmod 0700 "$work/observer-$fault"
+  case "$fault" in
+    hash) printf x >>"$work/observer-$fault" ;;
+    missing) rm "$work/observer-$fault" ;;
+    setuid) chmod 4500 "$work/observer-$fault" ;;
+    setgid) chmod 2500 "$work/observer-$fault" ;;
+    symlink) rm "$work/observer-$fault"; ln -s "$observer" "$work/observer-$fault" ;;
+  esac
+  if SIMPLE_BOOTSTRAP_PROCESS_OBSERVER="$work/observer-$fault" perl "$helper" owner-snapshot >"$work/$fault.out"; then
+    echo "FAIL: admitted $fault observer" >&2; exit 1
+  fi
+  [ ! -s "$work/$fault.out" ]
+done
+if SIMPLE_BOOTSTRAP_PROCESS_OBSERVER= SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce perl "$helper" owner-snapshot; then
+  echo 'FAIL: missing guarded observer fell back to ps' >&2; exit 1
+fi
+# A pinned executable can still fail or return malformed/inconsistent results.
+fixture=$root/test/01_unit/scripts/fixture_lock_identity_observer.pl
+fixture_sha=$(shasum -a 256 "$fixture" | awk '{print $1}')
+for fault in malformed oversized failed reused timeout; do
+  if LOCK_OBSERVER_FAULT="$fault" LOCK_OBSERVER_STATE="$work/$fault.state" \
+    SIMPLE_BOOTSTRAP_PROCESS_OBSERVER="$fixture" SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256="$fixture_sha" \
+    perl "$helper" owner-snapshot >"$work/$fault.out" 2>"$work/$fault.err"; then
+    echo "FAIL: accepted $fault identity" >&2; exit 1
+  fi
+  [ ! -s "$work/$fault.out" ]
+done
+if kill -0 "$(cat "$work/timeout.state")" 2>/dev/null; then
+  echo 'FAIL: timed-out observer survived' >&2; exit 1
+fi
+[ ! -e "$work/ps-invoked" ]
+perl -MTime::HiRes=time -e '
+  my $begin=time;
+  for (1..20) {
+    open(my $p,"-|",$^X,$ARGV[0],"owner-snapshot") or die $!;
+    my @rows=<$p>; close($p) or die "snapshot failed";
+    @rows==3 or die "incomplete owner snapshot";
+  }
+  printf "owner_snapshot_mean_ms=%.3f samples=20\n",(time-$begin)*50;
+' "$helper" >"$work/perf.txt"
+cat "$work/perf.txt"
+grep -E '^(status|exit_status|samples|sample_duration_max_ms|sample_gap_max_ms|peak_rss_kib|observer_errors|observer_restarts|quiescent)=' "$work/receipt"
+echo 'PASS: unprivileged measured lock cleanup preserves exit2, ownership, group and observer admission'
