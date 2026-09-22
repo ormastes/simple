@@ -70,7 +70,24 @@ verify_capsule() {
   [ -f "$capsule/$hosted_relative" ] && [ ! -L "$capsule/$hosted_relative" ] || return 1
   [ "$(hash_file "$capsule/$hosted_relative")" = "$hosted_sha" ] || return 1
   [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
-  aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha" | hash_lines)
+  dynamic_sha=$(value dynamic_runtime_sha256 "$receipt")
+  if grep -q '^dynamic_runtime_sha256=' "$receipt"; then
+    require_unique_keys "$receipt" dynamic_runtime_sha256 || return 1
+    [ -n "$dynamic_sha" ] || return 1
+  fi
+  case "$dynamic_sha" in
+    ''|absent) [ ! -e "$capsule/libsimple_runtime.dylib" ] && [ ! -L "$capsule/libsimple_runtime.dylib" ] || return 1 ;;
+    *)
+      case "$dynamic_sha" in *[!0-9a-f]*) return 1 ;; esac
+      [ "${#dynamic_sha}" = 64 ] || return 1
+      [ -f "$capsule/libsimple_runtime.dylib" ] && [ ! -L "$capsule/libsimple_runtime.dylib" ] || return 1
+      [ "$(hash_file "$capsule/libsimple_runtime.dylib")" = "$dynamic_sha" ] || return 1 ;;
+  esac
+  aggregate=$({
+    printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha"
+    # Old v1 capsules omit this optional field and retain their original hash.
+    [ -z "$dynamic_sha" ] || printf '%s\n' "$dynamic_sha"
+  } | hash_lines)
   [ "$(value capsule_identity_sha256 "$receipt")" = "$aggregate" ] || return 1
   # `-perm /MODE` (any of these bits) is a GNU findutils extension. BSD find,
   # which is what /bin/sh gets on macOS, rejects it with
@@ -114,10 +131,18 @@ case ${1:-} in
     hosted_relative=$(value relative_path "$authority/hosted-runtime.env")
     case "$hosted_relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) die 'invalid hosted authority path' ;; esac
     cp "$authority/$hosted_relative" "$staging/$hosted_relative"
+    dynamic_sha=absent
+    if [ -e "$authority/libsimple_runtime.dylib" ] || [ -L "$authority/libsimple_runtime.dylib" ]; then
+      [ -f "$authority/libsimple_runtime.dylib" ] && [ ! -L "$authority/libsimple_runtime.dylib" ] || die 'unsafe dynamic runtime'
+      dynamic_sha=$(hash_file "$authority/libsimple_runtime.dylib")
+      cp "$authority/libsimple_runtime.dylib" "$staging/libsimple_runtime.dylib"
+      [ "$(hash_file "$authority/libsimple_runtime.dylib")" = "$dynamic_sha" ] || die 'dynamic runtime changed during publication'
+      [ "$(hash_file "$staging/libsimple_runtime.dylib")" = "$dynamic_sha" ] || die 'dynamic runtime copy hash mismatch'
+    fi
     hosted_receipt_sha=$(hash_file "$authority/hosted-runtime.env")
     stamp_sha=$(hash_file "$authority/simple.inputs.sha256")
     backfill_sha=$(value backfill_sha256 "$authority/simple.inputs.sha256")
-    aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha" | hash_lines)
+    aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha" "$dynamic_sha" | hash_lines)
     {
       echo schema=simple-phase2-runtime-capsule-v1
       echo status=frozen
@@ -125,6 +150,7 @@ case ${1:-} in
       echo native_all_sha256="$native_sha"
       echo hosted_authority_receipt_sha256="$hosted_receipt_sha"
       echo seed_authority_stamp_sha256="$stamp_sha"
+      echo dynamic_runtime_sha256="$dynamic_sha"
       echo capsule_identity_sha256="$aggregate"
       echo source_authority_path="$(CDPATH= cd -- "$authority" && pwd -P)"
     } >"$staging/phase2-runtime-capsule.env"
