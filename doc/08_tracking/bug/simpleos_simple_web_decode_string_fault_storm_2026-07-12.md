@@ -6,12 +6,15 @@
 The earlier live decode fault fix remains recorded below. The theme-package
 parser still used interpolation around `line.trim()` and `value.trim()` to
 force primitive text dispatch after array element type erasure. Those copies
-were replaced with typed text helpers, which keep the receiver's method owner
-explicit without allocating a second string. The reciprocal source count is
-eight removed interpolation copies and eight typed helper calls; runtime heap
-and latency profiling remains pending the guest gate. A compiled fixture exercises
-split elements and trimmed text beside a custom `Path.starts_with` method;
-its executable verdict is the offline regression. In this isolated checkout,
+were replaced with typed text helpers, which request primitive-text method
+dispatch without an interpolation copy. The reciprocal source count is ten
+removed interpolation sites (eight trim copies and two line copies); runtime
+heap and latency profiling remains pending the guest gate. The compiled fixture
+exercises split elements, trimmed text, and unindented versus indented section
+boundaries beside a custom `Path.starts_with` method. Its executable verdict
+is the offline regression. Typed locals alone previously failed to rebind
+the method owner, so correctness of the helper-call shape remains unproven.
+In this isolated checkout,
 three bounded native attempts did not reach compilation: SCV reported missing
 compile-event or filesystem-event inventory, including when cold-init and
 freeze-fallback were requested. The regression remains unverified here.

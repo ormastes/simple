@@ -469,16 +469,22 @@ fn _source_manifest_sha256(paths: [text]) -> text:
     sha256_text(manifest)
 
 fn _theme_trim_text(value: text) -> text:
-    # Keep the primitive text owner across split-element and chained calls.
-    # Interpolation also forced that owner, but allocated a second string.
+    # Call the primitive text method inside a typed-parameter boundary.
+    # The prior interpolation workaround allocated a second string.
     value.trim()
 
 fn _theme_starts_with_text(value: text, prefix: text) -> bool:
     value.starts_with(prefix)
 
+fn _theme_ends_with_text(value: text, suffix: text) -> bool:
+    value.ends_with(suffix)
+
+fn _theme_contains_text(value: text, needle: text) -> bool:
+    value.contains(needle)
+
 fn _strip_value(value: text) -> text:
     var v: text = _theme_trim_text(value)
-    if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
+    if _theme_starts_with_text(v, "\"") and _theme_ends_with_text(v, "\"") and v.len() >= 2:
         v = v[1:v.len() - 1]
     v
 
@@ -486,7 +492,7 @@ fn _root_value(content: text, key: text) -> text:
     val prefix = "{key}:"
     for line in content.split("\n"):
         val trimmed: text = _theme_trim_text(line)
-        if trimmed.starts_with(prefix):
+        if _theme_starts_with_text(trimmed, prefix):
             return _strip_value(trimmed[prefix.len():])
     ""
 
@@ -496,15 +502,15 @@ fn _section_value(content: text, section: text, key: text) -> text:
     val prefix = "{key}:"
     for line in content.split("\n"):
         val trimmed: text = _theme_trim_text(line)
-        if trimmed == "" or trimmed.starts_with("#"):
+        if trimmed == "" or _theme_starts_with_text(trimmed, "#"):
             continue
-        if not _theme_starts_with_text(line, " ") and trimmed.ends_with(":"):
+        if not _theme_starts_with_text(line, " ") and _theme_ends_with_text(trimmed, ":"):
             current = trimmed[0:trimmed.len() - 1]
             continue
         if trimmed == section_header:
             current = section
             continue
-        if current == section and trimmed.starts_with(prefix):
+        if current == section and _theme_starts_with_text(trimmed, prefix):
             return _strip_value(trimmed[prefix.len():])
     ""
 
@@ -514,15 +520,15 @@ fn _section_items(content: text, section: text) -> [text]:
     val section_header = "{section}:"
     for line in content.split("\n"):
         val trimmed: text = _theme_trim_text(line)
-        if trimmed == "" or trimmed.starts_with("#"):
+        if trimmed == "" or _theme_starts_with_text(trimmed, "#"):
             continue
         if trimmed == section_header:
             current = section
             continue
-        if not _theme_starts_with_text(line, " ") and trimmed.ends_with(":"):
+        if not _theme_starts_with_text(line, " ") and _theme_ends_with_text(trimmed, ":"):
             current = trimmed[0:trimmed.len() - 1]
             continue
-        if current == section and trimmed.starts_with("- "):
+        if current == section and _theme_starts_with_text(trimmed, "- "):
             items.push(_strip_value(trimmed[2:]))
     items
 
@@ -609,7 +615,7 @@ fn _css_var(css: text, name: text, fallback: text) -> text:
     val prefix = "{name}:"
     for line in css.split("\n"):
         val trimmed: text = _theme_trim_text(line)
-        if trimmed.starts_with(prefix):
+        if _theme_starts_with_text(trimmed, prefix):
             var value = trimmed[prefix.len():].trim()
             if value.ends_with(";"):
                 value = value[0:value.len() - 1].trim()
@@ -629,7 +635,7 @@ fn _token_map_from_css(css: text) -> Dict<text, text>:
     var out: Dict<text, text> = {}
     for line in css.split("\n"):
         val trimmed: text = _theme_trim_text(line)
-        if trimmed.starts_with("--") and trimmed.contains(":"):
+        if _theme_starts_with_text(trimmed, "--") and _theme_contains_text(trimmed, ":"):
             val parts = trimmed.split(":")
             if parts.len() >= 2:
                 val key = parts[0].trim()
@@ -1036,7 +1042,7 @@ fn _px_int(value: text, fallback: i32) -> i32:
 
 fn _argb_from_css(value: text, fallback: u32) -> u32:
     val v: text = _theme_trim_text(value)
-    if v.starts_with("rgba(") and v.ends_with(")"):
+    if _theme_starts_with_text(v, "rgba(") and _theme_ends_with_text(v, ")"):
         val parts = v[5:v.len() - 1].split(",")
         if parts.len() == 4:
             val r = _clamp_css_channel(parts[0].trim().to_i64() ?? 0)
@@ -1052,7 +1058,7 @@ fn _argb_from_css(value: text, fallback: u32) -> u32:
             val alpha = ((clamped_milli.to_i64() * 255 + 500) / 1000).to_u32()
             return (alpha << 24) | (r << 16) | (g << 8) | b
         return fallback
-    if v.starts_with("rgb(") and v.ends_with(")"):
+    if _theme_starts_with_text(v, "rgb(") and _theme_ends_with_text(v, ")"):
         val parts = v[4:v.len() - 1].split(",")
         if parts.len() == 3:
             val r = _clamp_css_channel(parts[0].trim().to_i64() ?? 0)
@@ -1060,7 +1066,7 @@ fn _argb_from_css(value: text, fallback: u32) -> u32:
             val b = _clamp_css_channel(parts[2].trim().to_i64() ?? 0)
             return 0xFF000000 | (r << 16) | (g << 8) | b
         return fallback
-    if not v.starts_with("#"):
+    if not _theme_starts_with_text(v, "#"):
         return fallback
     if v.len() == 4:
         val r = _theme_package_hex_digit(v.char_code_at(1) as i64)
@@ -1109,7 +1115,7 @@ fn _defined_tokens(css: text) -> [text]:
     var tokens: [text] = []
     for line in css.split("\n"):
         val trimmed: text = _theme_trim_text(line)
-        if trimmed.starts_with("--") and trimmed.contains(":"):
+        if _theme_starts_with_text(trimmed, "--") and _theme_contains_text(trimmed, ":"):
             val parts = trimmed.split(":")
             tokens.push(parts[0].trim())
     tokens
