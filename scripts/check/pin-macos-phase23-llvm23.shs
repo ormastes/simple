@@ -1,0 +1,44 @@
+#!/bin/sh
+# Fail closed before the Stage 2 fingerprint if CI lacks exact LLVM authority.
+set -eu
+
+required=23.1.1
+[ "$(uname -s)" = Darwin ] || { echo 'macOS host required' >&2; exit 2; }
+[ -n "${GITHUB_ENV:-}" ] || { echo 'GITHUB_ENV required' >&2; exit 2; }
+llvm_prefix=$(brew --prefix llvm)
+lld_prefix=$(brew --prefix lld)
+case $llvm_prefix:$lld_prefix in
+    /*:/*) ;;
+    *) echo 'LLVM and LLD prefixes must be absolute' >&2; exit 1 ;;
+esac
+cc=$llvm_prefix/bin/clang
+cxx=$llvm_prefix/bin/clang++
+ar=$llvm_prefix/bin/llvm-ar
+llvm_config=$llvm_prefix/bin/llvm-config
+ld=$lld_prefix/bin/ld64.lld
+for tool in "$cc" "$cxx" "$ar" "$llvm_config" "$ld"; do
+    [ -x "$tool" ] || { echo "missing executable: $tool" >&2; exit 1; }
+done
+[ "$("$llvm_config" --version)" = "$required" ] || {
+    echo 'LLVM version is not 23.1.1' >&2; exit 1;
+}
+"$cc" --version | grep -F "clang version $required" >/dev/null || {
+    echo 'Clang version is not 23.1.1' >&2; exit 1;
+}
+"$ld" --version | grep -F "$required" >/dev/null || {
+    echo 'LLD version is not 23.1.1' >&2; exit 1;
+}
+rust_llvm=$(rustc --version --verbose | awk '/^LLVM version:/ { print $3 }')
+[ "$rust_llvm" = "$required" ] || {
+    echo "rustc LLVM version is $rust_llvm, expected $required" >&2; exit 1;
+}
+cat >>"$GITHUB_ENV" <<EOF
+SIMPLE_LLVM_REQUIRED_VERSION=$required
+CC=$cc
+CXX=$cxx
+AR=$ar
+LD=$ld
+LLVM_CONFIG=$llvm_config
+CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=$cc
+EOF
+echo "PASS: pinned macOS Rust/Clang/LLVM/LLD $required"
