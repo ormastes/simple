@@ -270,3 +270,7 @@ and verify by diffing **both directions** -- origin's version may be ahead on
 some axes and behind on others, so overwriting either way can revert real work.
 Read both the `-` and `+` sides of `diff -u <origin> <local>` before choosing,
 then apply the readiness/diagnostic change on top of the reconciled file.
+
+TODO(deferred-environment): after the arm64 SimpleOS QEMU phase is available,
+boot this entry point with one invalid non-default face and verify that the
+loaded default face remains selected without a startup-time or RSS regression.
