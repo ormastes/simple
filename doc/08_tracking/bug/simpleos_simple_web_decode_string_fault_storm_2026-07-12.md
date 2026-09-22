@@ -182,3 +182,11 @@ compiler/source incompatibility: committed `src/lib/common/encoding/sfnt_glyf.sp
 fails to parse with the current stage3 binary (`expected Comma, found Plus`).
 The decode fix itself is verified GREEN (0 decode-string-bad, 0 exception frames)
 from the last clean build (diag7).
+
+## Deferred environment TODO — 2026-09-22
+
+TODO: after the Linux bootstrap publishes an admitted self-hosted compiler,
+run `sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` in the
+SimpleOS QEMU phase and retain the production theme-parser, framebuffer, fault,
+and maximum-RSS receipts. The current production-path regression does not
+substitute for a fresh native guest run.
