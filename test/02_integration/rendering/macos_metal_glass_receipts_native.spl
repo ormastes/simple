@@ -66,34 +66,36 @@ fn main() -> i64:
         ok = ok and receipt.readback_checksum == readback.checksum
         print "metal_glass_active index={index} id={receipt.material_id} opacity=1000 alpha=1000 fulfilled={receipt.fulfilled} target={receipt.execution_target} handle={receipt.backend_handle} device={receipt.device_identity} source={receipt.readback_source} checksum={receipt.readback_checksum}"
         index = index + 1
-    # The same framebuffer must remain unchanged when sub-opaque parent sampling
-    # is rejected before either material reaches the Metal device.
-    val inactive = engine2d_draw_ir_adv_composition(engine, glass_composition(930, "500"), true)
-    val after = engine.read_pixels_with_source()
-    ok = ok and inactive.fallback_required
-    ok = ok and inactive.rendered_command_count == 0 and inactive.skipped_command_count == 2
-    ok = ok and inactive.metal_device_glass_requested_count == 2
-    ok = ok and inactive.metal_device_glass_material_count == 0
-    ok = ok and inactive.metal_device_glass_unfulfilled_count == 2
-    ok = ok and inactive.metal_device_glass_receipts.len() == 2
-    ok = ok and after.source == "device_readback" and after.checksum == readback.checksum
-    ok = ok and after.backend_handle == readback.backend_handle
-    ok = ok and after.device_identity == readback.device_identity
-    ok = ok and after.pixels.len() == 16
-    if after.pixels.len() == 16 and readback.pixels.len() == 16:
-        for i in 0..16:
-            ok = ok and after.pixels[i] == readback.pixels[i]
-    index = 0
-    for receipt in inactive.metal_device_glass_receipts:
-        val expected_id = if index == 0: "body-glass" else: "title-glass"
-        ok = ok and receipt.material_id == expected_id and not receipt.fulfilled
-        ok = ok and receipt.execution_target == "unavailable"
-        ok = ok and receipt.backend_handle == 0 and receipt.device_identity == 0
-        print "metal_glass_inactive index={index} id={receipt.material_id} opacity=930 alpha=500 fulfilled={receipt.fulfilled} target={receipt.execution_target} handle={receipt.backend_handle} device={receipt.device_identity}"
-        index = index + 1
+    # First vary only embedding opacity: a separate alpha rejection must not
+    # mask a missing opacity gate. Retain the translucent-material case too.
+    # Both cases must leave the same framebuffer and owner identity unchanged.
+    for alpha in ["1000", "500"]:
+        val inactive = engine2d_draw_ir_adv_composition(engine, glass_composition(930, alpha), true)
+        val after = engine.read_pixels_with_source()
+        ok = ok and inactive.fallback_required
+        ok = ok and inactive.rendered_command_count == 0 and inactive.skipped_command_count == 2
+        ok = ok and inactive.metal_device_glass_requested_count == 2
+        ok = ok and inactive.metal_device_glass_material_count == 0
+        ok = ok and inactive.metal_device_glass_unfulfilled_count == 2
+        ok = ok and inactive.metal_device_glass_receipts.len() == 2
+        ok = ok and after.source == "device_readback" and after.checksum == readback.checksum
+        ok = ok and after.backend_handle == readback.backend_handle
+        ok = ok and after.device_identity == readback.device_identity
+        ok = ok and after.pixels.len() == 16
+        if after.pixels.len() == 16 and readback.pixels.len() == 16:
+            for i in 0..16:
+                ok = ok and after.pixels[i] == readback.pixels[i]
+        index = 0
+        for receipt in inactive.metal_device_glass_receipts:
+            val expected_id = if index == 0: "body-glass" else: "title-glass"
+            ok = ok and receipt.material_id == expected_id and not receipt.fulfilled
+            ok = ok and receipt.execution_target == "unavailable"
+            ok = ok and receipt.backend_handle == 0 and receipt.device_identity == 0
+            print "metal_glass_inactive index={index} id={receipt.material_id} opacity=930 alpha={alpha} fulfilled={receipt.fulfilled} target={receipt.execution_target} handle={receipt.backend_handle} device={receipt.device_identity}"
+            index = index + 1
     engine.shutdown()
     if not ok:
         print "metal_glass_status=FAIL reason=receipt-or-pixel-mismatch"
         return 1
-    print "metal_glass_status=PASS active_receipts=2 inactive_receipts=2 pixels=16"
+    print "metal_glass_status=PASS active_receipts=2 inactive_receipts=4 inactive_cases=2 pixels=16"
     return 0

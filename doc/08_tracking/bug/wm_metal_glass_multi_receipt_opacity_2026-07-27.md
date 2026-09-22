@@ -109,8 +109,11 @@ nonzero when the selected backend is not Metal. It requires two ordered,
 fulfilled opaque material receipts bound to the rendered framebuffer and
 device, compares the captured pixels with independent white/black region
 oracles, and compares the receipts' checksums with a second device readback.
-The inactive opacity-930/alpha-500 pass requires zero dispatch, two ordered
-unfulfilled receipts, and unchanged framebuffer pixels and identity.
+Two inactive opacity-930 passes, with material alpha 1000 and 500 respectively,
+each require zero dispatch, two ordered unfulfilled receipts, and unchanged
+framebuffer pixels and identity. The first varies only embedding opacity from
+the accepted active case: material-alpha rejection cannot mask a broken
+opacity gate. The second preserves the original translucent-material case.
 
 Related open TODOs 8 and 9 need actual Metal provider evidence, which this
 fixture can contribute only after native admission and execution. TODOs
@@ -158,7 +161,7 @@ perl "$METAL_RSS_GUARD" \
 ```
 
 Retain exit status, both guard receipts, timing stderr, loaded-provider paths,
-all four material receipt lines, and the final PASS/FAIL line. Require expected
+all six material receipt lines, and the final PASS/FAIL line. Require expected
 provider resolution and guard quiescence before accepting evidence. The RSS
 guard monitors a sampled process tree under decimal 6 GB; it is not a kernel
 hard limit. This 4x4 correctness probe's wall time/RSS does not qualify realistic
@@ -208,3 +211,39 @@ zero-dispatch/unchanged-pixels negative control. The focused host compositor
 spec separately rejects a mismatched **first** receipt even when the last one
 matches, plus missing, duplicate, reordered, extra and unfulfilled receipts.
 Both still require admitted execution; source assertions are not PASS evidence.
+
+### Follow-up: isolate the opacity regression
+
+The strict fixture now executes the additional opacity-930/material-alpha-1000
+negative control described above. It reuses the same 4x4 engine and performs
+one additional bounded composition/readback; production paths are unchanged.
+Its final success row is
+`metal_glass_status=PASS active_receipts=2 inactive_receipts=4 inactive_cases=2 pixels=16`.
+This is a test candidate, not an execution result. Native syntax, receipts and
+pixels remain unverified until the coordinated admitted producer is available.
+
+### Root-bound producer integration route
+
+`build-macos-gpu-2d-live-native.shs` requires the compiler and provenance at
+`$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/<host-triple>/` in both its build
+and manifest-verification paths. The restored P0 run instead selects
+`build/bootstrap/macos-enforced-bd544-stage2` as its bootstrap output root;
+its subsequent Stage 3 path is beneath that output. These paths are not
+interchangeable: the Stage 3 verifier binds canonical repository root, output
+path, inode/hash, source snapshot, command transcripts and recorded authority.
+
+The integration owner must either produce Stage 3 at the consumer's canonical
+root/path, or review a consumer change admitting the actual immutable P0
+origin through the complete existing verifier in both build and verification.
+Do not edit manifest fields, copy/symlink a compiler into the legacy path, or
+start a second bootstrap solely for this fixture. Coordinate source integration
+before producer snapshots are frozen; preserve an active build's frozen source.
+The strict fixture is absent from the reconstructed P0 checkout at this audit,
+so its reviewed source/hash must also be included in the consumer build inputs.
+
+After producer admission, the owner must build the normal Metal trusted
+manifest, with its bound `build/sffi/{libspl_winit,libsimple_runtime_wm,libsimple_runtime_c_wm}.dylib`
+providers, before the strict native recipe above is eligible. Retain provider
+hashes and actual dynamic-loader resolution. Stage 2 admission, a raw Stage 3
+binary, an old trusted manifest, or portable unit tests alone cannot satisfy
+this route. The Metal lane does not author or mint its own producer receipts.
