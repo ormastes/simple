@@ -2,6 +2,38 @@
 
 Status: open, live evidence blocked
 
+## 2026-09-22 delegated continuation: truncated producer receipt
+
+Reconstructed the isolated Vulkan worktree from preserved commit
+`7386266f49f`; the Bungee asset is present at its expected 118996-byte size.
+The selected-outline producer already uses caller-owned coverage, so the
+historical aggregate-return workaround must not be reapplied.
+
+Source inspection found a separate real refusal-contract defect in
+`sfnt_render_glyph_into`: its combined `meta.len() >= 10` cookie reset left
+an existing completion cookie in slot 8 untouched for a nine-element metadata
+array. The function then rejected the undersized metadata. A caller observing
+the completion slot could therefore mistake a refused render for a successful
+one. Clear each present render receipt independently before validating the
+array, matching the existing measurement boundary.
+
+The native SFNT probe now tests metadata lengths 8, 9, 10 and 19 with stale
+receipts and sentinel destination bytes. Every refusal must clear available
+render/alpha receipts and preserve all destination bytes. Its specific failure
+is exit 28, `fail-undersized-stale-render`. Reverting only the two independent
+reset guards to the previous combined guard is the negative control: the
+nine-element case must fail. This is additional producer regression coverage,
+not evidence of Vulkan execution or resolution of the original empty batch.
+
+The production change adds one constant-time length comparison, allocates no
+new memory, and leaves parsing, rasterization and cache paths unchanged.
+`git diff --check` passed. Native positive/negative execution and latency/RSS
+measurements remain pending the P0 owner's admitted compiler and serialized
+host build slot. Do not run the installed bootstrap seed as test evidence.
+Use the enforced process-tree threshold of 5,859,375 KiB for both build and
+probe execution. No producer native cycle has been consumed by this source
+inspection and fixture update.
+
 ## 2026-09-22 main and PR audit: native validation still blocked
 
 Audited `origin/main` at `e0dd873da1b` in an isolated worktree. Merged
