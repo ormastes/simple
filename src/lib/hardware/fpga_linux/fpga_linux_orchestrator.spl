@@ -1,9 +1,251 @@
 # capsule: vhdl.emit.control
-# FPGA Linux orchestration capsule.
-#
-# Bundle generation remains in the data capsule during this compatibility
-# extraction.  This owner records the control boundary and is the extension
-# point for board execution without changing the public module path.
+# FPGA Linux bundle orchestration. The manifest and emitter are dependencies.
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_exists(path: text) -> bool
+fn rtl_file_write_text(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+fn rtl_file_read_text(path: text) -> text:
+    rt_file_read_text(path)
+fn rtl_dir_create(path: text) -> bool:
+    rt_dir_create(path, true)
+fn rtl_file_exists(path: text) -> bool:
+    rt_file_exists(path)
+use std.hardware.fpga_linux.fpga_linux_manifest.{RiscvFpgaLane, RiscvFpgaLinuxManifest, RiscvFpgaProductProfile, create_default_riscv_fpga_linux_manifest, create_default_riscv_fpga_linux_manifest_with_profile, create_riscv_fpga_linux_manifest_for_board, create_riscv_fpga_linux_manifest_for_board_with_profile, create_riscv_fpga_linux_manifest_configured}
+use std.hardware.fpga_linux.fpga_linux_data.{write_rtl_sources}
 
 pub fn fpga_linux_orchestrator_capsule_name() -> text:
     "fpga_linux_orchestrator"
+
+# ============================================================================
+# RTL Bundle
+# ============================================================================
+
+pub struct RtlBundle:
+    """Result of RTL bundle generation — paths to generated artifacts."""
+    output_dir: text
+    manifest_path: text
+    board_linux_boot_products_manifest_path: text
+    bundle_readme_path: text
+    generated_files: [text]
+
+# ============================================================================
+# RTL Bundle Generation
+# ============================================================================
+
+fn write_manifest_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> text:
+    """Writes the main RTL manifest to disk and returns its path."""
+    val path = "{output_dir}/riscv_fpga_rtl_manifest.sdn"
+    rtl_file_write_text(path, manifest.rtl_manifest_text(output_dir))
+    return path
+
+fn write_boot_products_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> text:
+    """Writes the boot products manifest to disk and returns its path."""
+    val path = "{output_dir}/board_linux_boot_products.sdn"
+    val content = manifest.board_linux_boot_products_manifest_text(output_dir)
+    rtl_file_write_text(path, content)
+    return path
+
+fn write_product_byl_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> text:
+    """Writes the generated product BYL model to disk and returns its path."""
+    val path = "{output_dir}/riscv_product.byl"
+    rtl_file_write_text(path, manifest.product_byl_text())
+    return path
+
+fn synth_report_template_text(lane: RiscvFpgaLane, product: RiscvFpgaProductProfile) -> text:
+    val xl = lane.xlen.to_text()
+    val luts = product.rtl_size_budget_luts(lane.xlen)
+    val mhz = product.perf_target_mhz(lane.xlen)
+    var lines: [text] = []
+    lines = lines.push("lane = \"{xl}\"")
+    lines = lines.push("max_luts = {luts}")
+    lines = lines.push("target_mhz = {mhz}")
+    lines = lines.push("actual_luts = 0")
+    lines = lines.push("actual_mhz = 0")
+    lines = lines.push("status = \"template-fill-after-synthesis\"")
+    lines.join("\n") + "\n"
+
+fn write_synth_report_templates(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> [text]:
+    """Writes per-lane synthesis report templates consumed by budget evidence."""
+    val synth_dir = "{output_dir}/synth"
+    rtl_dir_create(synth_dir)
+    var files: [text] = []
+    for lane in manifest.lanes:
+        val xl = lane.xlen.to_text()
+        val path = "{synth_dir}/{xl}_synth.sdn"
+        rtl_file_write_text(path, synth_report_template_text(lane, manifest.product))
+        files = files.push(path)
+    files
+
+fn write_bundle_readme(output_dir: text) -> text:
+    """Writes the bundle README to disk and returns its path."""
+    val path = "{output_dir}/README.md"
+    var lines: [text] = []
+    lines = lines.push("# RISC-V FPGA Linux RTL Bundle")
+    lines = lines.push("")
+    lines = lines.push("Dual-arch RTL bundle for RISC-V FPGA integration with SimpleOS.")
+    lines = lines.push("")
+    lines = lines.push("## Contents")
+    lines = lines.push("")
+    lines = lines.push("- `riscv_fpga_rtl_manifest.sdn` — machine-readable lane manifest with provenance")
+    lines = lines.push("- `board_linux_boot_products.sdn` — per-arch boot products manifest; per-arch boot products manifest: `board_linux_boot_products.sdn`")
+    lines = lines.push("- `riscv_product.byl` — generated product proof-model surface")
+    lines = lines.push("- `synth/rv32_synth.sdn`, `synth/rv64_synth.sdn` — synthesis report templates for budget evidence")
+    lines = lines.push("- `rv32/rtl/` — generated rv32imc_zicsr (soft-float ilp32) Linux lane RTL plus emitted runner testbenches")
+    lines = lines.push("- `rv64/rtl/` — generated rv64im_zicsr (soft-float lp64) Linux lane RTL plus emitted runner testbenches")
+    lines = lines.push("")
+    lines = lines.push("## Provenance")
+    lines = lines.push("")
+    lines = lines.push("Each lane directory is a non-authoritative contract bundle until a canonical compiler-produced CPU replaces the diagnostic placeholder.")
+    lines = lines.push("Contract files are listed by `contract_file`; they must fail execution and formal proof with `GENERATED_RTL_NOT_IMPLEMENTED`.")
+    lines = lines.push("Generated-core runners must compile RTL only from the emitted bundle directories `rv32/rtl` and `rv64/rtl`.")
+    lines = lines.push("Current RV32 and RV64 CPU VHDL is emitted contract material, not product RTL.")
+    lines = lines.push("No file in this bundle is authoritative until the manifest records compiler provenance and semantic execution evidence.")
+    lines = lines.push("")
+    rtl_file_write_text(path, lines.join("\n"))
+    return path
+
+pub fn generate_default_riscv_fpga_rtl_bundle(output_dir: text) -> Result<RtlBundle, text>:
+    """
+    Generates the default dual-arch RTL bundle (generic board) at the
+    given output directory. Copies synthesizable VHDL sources, creates
+    manifest, boot products, and README.
+    """
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    rtl_dir_create(output_dir)
+    val generated_files = match write_rtl_sources(output_dir, manifest):
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    val manifest_path = write_manifest_file(output_dir, manifest)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path,
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+    ))
+
+pub fn generate_default_riscv_fpga_rtl_bundle_with_profile(output_dir: text, configuration_profile: text) -> Result<RtlBundle, text>:
+    """
+    Generates the default dual-arch RTL bundle with a custom configuration profile.
+    """
+    val manifest = create_default_riscv_fpga_linux_manifest_with_profile(configuration_profile)
+    rtl_dir_create(output_dir)
+    val generated_files = match write_rtl_sources(output_dir, manifest):
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    val manifest_path = write_manifest_file(output_dir, manifest)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path,
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+    ))
+
+# @tag(output_dir=output_dir, board_id=board_id)
+pub fn generate_riscv_fpga_rtl_bundle_for_board(output_dir: text, board_id: text) -> Result<RtlBundle, text>:
+    """
+    Generates a board-specific RTL bundle at the given output directory.
+    """
+    val manifest_result = create_riscv_fpga_linux_manifest_for_board(board_id)
+    val manifest = match manifest_result:
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    rtl_dir_create(output_dir)
+    val generated_files = match write_rtl_sources(output_dir, manifest):
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    val manifest_path = write_manifest_file(output_dir, manifest)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path,
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+    ))
+
+pub fn generate_riscv_fpga_rtl_bundle_for_board_with_profile(output_dir: text, board_id: text, configuration_profile: text) -> Result<RtlBundle, text>:
+    """
+    Generates a board-specific RTL bundle with a custom configuration profile.
+    """
+    val manifest_result = create_riscv_fpga_linux_manifest_for_board_with_profile(board_id, configuration_profile)
+    val manifest = match manifest_result:
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    rtl_dir_create(output_dir)
+    val generated_files = match write_rtl_sources(output_dir, manifest):
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    val manifest_path = write_manifest_file(output_dir, manifest)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path,
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+    ))
+
+pub fn generate_riscv_fpga_rtl_bundle_configured(output_dir: text, board_id: text, product_level: text, configuration_profile: text, rv32_luts: i64, rv64_luts: i64, rv32_mhz: i64, rv64_mhz: i64) -> Result<RtlBundle, text>:
+    """
+    Generates a dual-arch RTL bundle with explicit product metadata and budgets.
+    """
+    val manifest_result = create_riscv_fpga_linux_manifest_configured(board_id, product_level, configuration_profile, rv32_luts, rv64_luts, rv32_mhz, rv64_mhz)
+    val manifest = match manifest_result:
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    rtl_dir_create(output_dir)
+    val generated_files = match write_rtl_sources(output_dir, manifest):
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+    val manifest_path = write_manifest_file(output_dir, manifest)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val byl_path = write_product_byl_file(output_dir, manifest)
+    val synth_templates = write_synth_report_templates(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path,
+        generated_files: (generated_files + synth_templates).push(manifest_path).push(products_path).push(byl_path).push(readme_path)
+    ))
+
+pub fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
+    """Reads a generated RTL file from disk. Returns empty string on failure."""
+    if rtl_file_exists(path):
+        return rtl_file_read_text(path)
+    return ""
