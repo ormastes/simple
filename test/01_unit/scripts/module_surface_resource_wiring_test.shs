@@ -1,0 +1,42 @@
+#!/bin/sh
+# Resource qualification requires the full, admitted self-hosted test runtime.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+perl - "$root" <<'PERL'
+use strict;
+use warnings;
+my ($root) = @ARGV;
+open my $fh, '<', "$root/.github/workflows/candidate.yml" or die "$!\n";
+my $workflow = do { local $/; <$fh> };
+sub wired {
+    my ($text) = @_;
+    my $built = 0;
+    for my $step (split /^      - /m, $text) {
+        if ($step =~ /--resume-stage4-from-admitted=build\/bootstrap/ &&
+            $step =~ /--release --strategy=full/) {
+            return 0 if $step =~ /^        (?:if|continue-on-error):/m;
+            $built = 1;
+        }
+        next unless $step =~ /sh scripts\/check\/check-module-surface-freeze-resource\.shs/;
+        return 0 unless $built;
+        return 0 if $step =~ /^        (?:if|continue-on-error|working-directory):/m;
+        return 0 unless $step =~ /set -euo pipefail/;
+        return 0 unless $step =~ /runtime="\$PWD\/bin\/release\/x86_64-unknown-linux-gnu\/simple"/;
+        return 0 unless $step =~ /test -x "\$runtime"/;
+        return 0 unless $step =~ /"\$runtime" "\$PWD\/build\/verify\/module-surface-freeze"/;
+        return 1;
+    }
+    return 0;
+}
+wired($workflow) or die "resource gate missing or not after admitted Stage 4\n";
+my $missing = $workflow;
+$missing =~ s/check-module-surface-freeze-resource\.shs/missing.shs/g;
+wired($missing) and die "missing guard accepted\n";
+my $no_build = $workflow;
+$no_build =~ s/--resume-stage4-from-admitted=build\/bootstrap/--stop-after-stage2/g;
+wired($no_build) and die "missing full runtime accepted\n";
+my $advisory = $workflow;
+$advisory =~ s/(name: Enforce module surface freeze resource profile\n)/$1        continue-on-error: true\n/;
+wired($advisory) and die "advisory resource gate accepted\n";
+print "PASS: resource gate requires admitted Stage 4; missing guard, build, and advisory controls rejected\n";
+PERL
