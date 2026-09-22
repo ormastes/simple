@@ -1,0 +1,134 @@
+# SimpleOS libc — pure-Simple floating-point parsing core.
+#
+# This is a decimal-only staging parser for a future C strtod/strtof port.  The
+# returned byte index carries endptr without introducing a raw-pointer
+# dependency.  Hex floats, inf/nan, locale, errno, and guaranteed correct
+# rounding remain with the C implementation until parity is proven.
+
+struct FloatParseResult:
+    value: f64
+    end_index: i64
+    converted: bool
+
+fn libc_strtod(s: [u8]) -> FloatParseResult:
+    """Parse a decimal floating-point prefix and report the first unused byte.
+
+    Leading ASCII whitespace, an optional sign, a decimal point, and an
+    optional signed exponent are accepted.  A malformed exponent is not
+    consumed, matching C strtod's endptr rule.  Exponents are accumulated with
+    saturation so hostile input cannot overflow an integer or cause an
+    unbounded scaling loop.
+    """
+    val n = s.len()
+    var i = 0
+    while i < n and _float_space(s[i]):
+        i = i + 1
+
+    var negative = false
+    if i < n and (s[i] == 43 or s[i] == 45):
+        negative = s[i] == 45
+        i = i + 1
+
+    var value: f64 = 0.0
+    var digits = 0
+    var significant_digits = 0
+    var decimal_exponent: i64 = 0
+    var significant = false
+    while i < n and s[i] >= 48 and s[i] <= 57:
+        val digit = s[i] - 48
+        if digit != 0 or significant:
+            significant = true
+            if significant_digits < 17:
+                value = value * 10.0 + (digit as f64)
+                significant_digits = significant_digits + 1
+            else:
+                decimal_exponent = decimal_exponent + 1
+        digits = digits + 1
+        i = i + 1
+
+    if i < n and s[i] == 46:
+        i = i + 1
+        while i < n and s[i] >= 48 and s[i] <= 57:
+            val digit = s[i] - 48
+            if digit != 0 or significant:
+                significant = true
+                if significant_digits < 17:
+                    value = value * 10.0 + (digit as f64)
+                    significant_digits = significant_digits + 1
+                    decimal_exponent = decimal_exponent - 1
+            else:
+                decimal_exponent = decimal_exponent - 1
+            digits = digits + 1
+            i = i + 1
+
+    if digits == 0:
+        return FloatParseResult(value: 0.0, end_index: 0, converted: false)
+
+    if i < n and (s[i] == 101 or s[i] == 69):
+        val exponent_marker = i
+        i = i + 1
+        var exponent_negative = false
+        if i < n and (s[i] == 43 or s[i] == 45):
+            exponent_negative = s[i] == 45
+            i = i + 1
+        val exponent_digits_start = i
+        var exponent = 0
+        # Preserve cancellation against every decimal position in this input.
+        # The extra 400 spans the finite binary64 decimal exponent range.
+        val exponent_limit = n + 400
+        while i < n and s[i] >= 48 and s[i] <= 57:
+            if exponent < exponent_limit:
+                exponent = exponent * 10 + (s[i] - 48)
+                if exponent > exponent_limit:
+                    exponent = exponent_limit
+            i = i + 1
+        if i == exponent_digits_start:
+            i = exponent_marker
+        else:
+            if exponent_negative:
+                decimal_exponent = decimal_exponent - exponent
+            else:
+                decimal_exponent = decimal_exponent + exponent
+
+    if decimal_exponent < -10000:
+        decimal_exponent = -10000
+    if decimal_exponent > 10000:
+        decimal_exponent = 10000
+    value = _scale_decimal(value, decimal_exponent)
+
+    if negative:
+        value = -value
+    FloatParseResult(value: value, end_index: i, converted: true)
+
+fn libc_strtof(s: [u8]) -> FloatParseResult:
+    """Parse the decimal subset and apply binary32 rounding before widening."""
+    val result = libc_strtod(s)
+    val rounded = result.value as f32
+    FloatParseResult(
+        value: rounded as f64,
+        end_index: result.end_index,
+        converted: result.converted,
+    )
+
+fn _float_space(ch: u8) -> bool:
+    ch == 32 or ch == 9 or ch == 10 or ch == 13 or ch == 11 or ch == 12
+
+fn _scale_decimal(input: f64, exponent: i64) -> f64:
+    var value = input
+    var remaining = if exponent < 0: -exponent else: exponent
+    val negative = exponent < 0
+    # Scaling in 10^8 chunks bounds even a deliberately huge exponent to 1250
+    # iterations while retaining ordinary decimal precision.
+    while remaining >= 8:
+        if negative:
+            value = value * 0.00000001
+        else:
+            value = value * 100000000.0
+        remaining = remaining - 8
+    while remaining > 0:
+        if negative:
+            value = value * 0.1
+        else:
+            value = value * 10.0
+        remaining = remaining - 1
+    value
