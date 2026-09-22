@@ -173,3 +173,10 @@ All Phase 5 edits are `.spl` source. Verify in interpreter mode
 (`bin/simple test`). If compile-mode (`--mode=native`) regressions are
 introduced, record as a separate FR and do not mark AC-8 passed until
 interpreter-mode passes. See memory: `compile-mode false-greens`.
+
+TODO(`rtl_mdsoc_reorg_fpga_linux_split_never_executed_2026-08-04`): When an
+admitted cached self-hosted compiler and the FPGA artifact environment are
+available, run the interpreter and native split specs, regenerate the RTL and
+debug-sidecar artifacts, compare their hashes with the pre-refactor baseline,
+and record cross-host timing, peak RSS, and boot-readiness evidence. Keep this
+bug open until those checks pass.
