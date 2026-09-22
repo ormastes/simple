@@ -50,6 +50,7 @@ mod class_tests;
 mod control_flow_tests;
 mod expression_tests;
 mod function_tests;
+mod imported_default_metadata_tests;
 mod lenient_global_diag_tests;
 mod lifetime_tests;
 mod seed_regression_tests;
