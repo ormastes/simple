@@ -70,6 +70,11 @@ static int fake_sysctl(int *mib, u_int count, void *buffer, size_t *size,
     p->kp_proc.p_starttime.tv_sec = 100;
     p->kp_proc.p_starttime.tv_usec = !strcmp(proof_mode, "reused") ? 43 : 42;
     p->kp_proc.p_stat = !strcmp(proof_mode, "live") ? SRUN : SZOMB;
+    memcpy(p->kp_proc.p_comm, "guard\ntest", 10);
+    p->kp_eproc.e_ppid = 122;
+    p->kp_eproc.e_pgid = 321;
+    p->kp_eproc.e_ucred.cr_uid = 501;
+    p->kp_eproc.e_pcred.p_ruid = 502;
     *size = sizeof(*p) - (!strcmp(proof_mode, "short") ? 1 : 0);
     return 0;
 }
