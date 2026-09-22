@@ -13,6 +13,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.backend.simpleos_native_guards.{simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
+use std.io_runtime.{file_write, process_run}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -25,6 +26,57 @@ fn setup_host_bug_a08(source: text):
     var lowering = MirLowering.new(hir.symbols)
     val mir = lowering.lower_module(hir)
     (mir, lowering.errors.len())
+
+fn execute_module_init_order_probe() -> (text, text, i64):
+    val dir = "build/test-artifacts/host_bug_a08_module_init"
+    val generated = dir + "/module_init.c"
+    val harness = dir + "/order_probe.c"
+    val compatibility_stub = dir + "/compatibility_stub.c"
+    val executable = dir + "/order_probe"
+    val (_mkdir_out, mkdir_err, mkdir_code) = process_run("mkdir", ["-p", dir])
+    if mkdir_code != 0:
+        return ("", mkdir_err, mkdir_code)
+    file_write(generated, simpleos_module_init_caller_source_for_symbol([
+        "__module_init_a_first", "__module_init_b_second"
+    ], "__wrap___simple_call_module_inits"))
+    # Replace markers after Simple string parsing so C braces cannot be
+    # mistaken for interpolation expressions in this executable reproducer.
+    val harness_source = (
+        "#include <unistd.h>\n" +
+        "static char trace[16];\n" +
+        "static unsigned char used;\n" +
+        "static unsigned char first_calls;\n" +
+        "extern void __simple_call_module_inits(void) __attribute__((weak));\n" +
+        "static void crt_call_module_inits(void) [LB]\n" +
+        "  if (__simple_call_module_inits) __simple_call_module_inits();\n" +
+        "[RB]\n" +
+        "void __module_init_a_first(void) [LB]\n" +
+        "  first_calls++;\n" +
+        "  if (used < sizeof(trace)) trace[used++] = 'A';\n" +
+        "  if (first_calls < 4) crt_call_module_inits();\n" +
+        "[RB]\n" +
+        "void __module_init_b_second(void) [LB]\n" +
+        "  if (used < sizeof(trace)) trace[used++] = 'B';\n" +
+        "[RB]\n" +
+        "int main(void) [LB]\n" +
+        "  crt_call_module_inits();\n" +
+        "  crt_call_module_inits();\n" +
+        "  if (first_calls != 1 || used != 2 || trace[0] != 'A' || trace[1] != 'B') return 91;\n" +
+        "  return write(1, trace, 2) == 2 ? 0 : 92;\n" +
+        "[RB]\n").replace("[LB]", "{").replace("[RB]", "}")
+    file_write(harness, harness_source)
+    file_write(compatibility_stub,
+        "void __simple_call_module_inits(void) [LB] [RB]\n"
+            .replace("[LB]", "{").replace("[RB]", "}"))
+    val (_cc_out, cc_err, cc_code) = process_run("cc", [
+        "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-ffunction-sections", "-fdata-sections", generated, harness, compatibility_stub,
+        "-Wl,--wrap=__simple_call_module_inits", "-Wl,--gc-sections",
+        "-o", executable
+    ])
+    if cc_code != 0:
+        return ("", cc_err, cc_code)
+    process_run(executable, [])
 
 describe "host bug A08 freestanding array initializer":
     it "lowers one runtime initializer for a module-level text array":
@@ -69,6 +121,9 @@ describe "host bug A08 freestanding array initializer":
             "__module_init_host_bug_a08_dynamic"
         ], "__wrap___simple_call_module_inits")
         expect(wrapped_caller).to_contain("void __wrap___simple_call_module_inits(void)")
+        expect(wrapped_caller).to_contain("static unsigned char initialized;")
+        expect(wrapped_caller).to_contain("if (initialized) return;")
+        expect(wrapped_caller).to_contain("initialized = 1;")
 
         val linker = rt_file_read_text(
             "src/compiler/70.backend/backend/simpleos_native_linkers.spl") ?? ""
@@ -82,6 +137,14 @@ describe "host bug A08 freestanding array initializer":
         expect(userspace).to_contain("user_args.push(\"--wrap=__simple_call_module_inits\")")
         expect(userspace).to_contain("if init_o != \"\":")
         expect(userspace).to_contain("user_args.push(init_o)")
+
+    it "executes initializers in stable order exactly once":
+        step("compile the generated production dispatcher with two observable initializers")
+        val (out, err, code) = execute_module_init_order_probe()
+        step("re-enter from the first initializer, call again, and retain only the first ordered pass")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_equal("AB")
 
     it "uses Clang with the SimpleOS target for generated C":
         val symbols = rt_file_read_text(
