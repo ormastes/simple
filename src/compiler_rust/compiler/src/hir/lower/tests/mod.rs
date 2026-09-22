@@ -56,3 +56,4 @@ mod lifetime_tests;
 mod seed_regression_tests;
 mod struct_spread_tests;
 mod coverage_metadata_tests;
+mod conditional_empty_array_tests;
