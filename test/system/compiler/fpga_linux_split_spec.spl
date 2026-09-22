@@ -24,13 +24,13 @@ preserves the original public API, and that line-count budgets are respected.
 
 ## Split Design (Phase 3 D-2)
 
-- `fpga_linux_orchestrator.spl` — Control capsule: lane runner, board structs,
-  bundle generation (budget: < 900 lines)
+- `fpga_linux_orchestrator.spl` — Control capsule: bundle generation and output assembly
+  (budget: < 900 lines)
 - `fpga_linux_data.spl` — Data capsule: VHDL-emission methods (budget: < 2700 lines)
   NOTE: Phase 3 sizing estimated ~2855 lines for data — budget < 2700 may require
   additional split in Phase 5. Phase 5 SA-3 must resolve and record any deviation.
-- `fpga_linux_manifest.spl` — Metadata capsule: debug sidecar JSON emission
-  (budget: < 200 lines)
+- `fpga_linux_manifest.spl` — Metadata capsule: board/lane model, factories,
+  manifest serialization, and debug sidecar JSON (budget: < 900 lines)
 - `riscv_fpga_linux.spl` — Thin re-export facade (budget: < 30 lines)
 
 ## Public API Preservation (AC-1, AC-6)
@@ -165,14 +165,30 @@ describe "FPGA Linux Split: line-count budgets (AC-1)":
         check_msg(lines < 2700, "data line count " + lines.to_text() + " exceeds budget of 2700 (Phase 3 estimated 2855 — SA-3 must resolve)")
         expect(lines).to_be_less_than(2700)
 
-    it "AC-1: fpga_linux_manifest.spl is under 200 lines":
+    it "AC-1: fpga_linux_manifest.spl is under 900 lines":
         # @req REQ-SSPEC-SYSTEM
-        step("AC-1: fpga_linux_manifest.spl is under 200 lines")
+        step("AC-1: fpga_linux_manifest.spl is under 900 lines")
         val path = fpga_manifest_path()
         check_msg(rt_file_exists(path), "file not found: " + path)
         val lines = file_line_count(path)
-        check_msg(lines < 200, "manifest line count " + lines.to_text() + " exceeds budget of 200")
-        expect(lines).to_be_less_than(200)
+        check_msg(lines < 900, "manifest line count " + lines.to_text() + " exceeds budget of 900")
+        expect(lines).to_be_less_than(900)
+
+describe "FPGA Linux Split: implementation ownership (AC-1)":
+    it "manifest owns lane models and serialization":
+        step("manifest owns lane models and serialization")
+        val content = read_file(fpga_manifest_path())
+        expect(content.contains("pub struct RiscvFpgaLinuxManifest:")).to_equal(true)
+        expect(content.contains("fn rtl_manifest_text(output_dir: text)")).to_equal(true)
+        expect(content.contains("pub fn sidecar_json(")).to_equal(true)
+
+    it "data owns RTL emission and orchestration calls it":
+        step("data owns RTL emission and orchestration calls it")
+        val data = read_file(fpga_data_path())
+        val control = read_file(fpga_orch_path())
+        expect(data.contains("pub fn write_rtl_sources(")).to_equal(true)
+        expect(control.contains("val generated_files = match write_rtl_sources(")).to_equal(true)
+        expect(control.contains("pub fn generate_riscv_fpga_rtl_bundle_configured(")).to_equal(true)
 
 describe "FPGA Linux Split: re-export facade preserves public API (AC-1, AC-6)":
     """
