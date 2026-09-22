@@ -675,6 +675,24 @@ private final class SpawnedRoot {
             throw CollectorError.launchFailure
         }
     }
+
+#if COLLECTOR_SELF_TEST
+    // Even test observations must keep reaping inside the canonical owner.
+    func isRunning() -> Bool {
+        guard !reaped else { return false }
+        var status: Int32 = 0
+        while true {
+            let result = waitpid(pid, &status, WNOHANG)
+            if result == 0 { return true }
+            if result == pid || (result < 0 && errno == ECHILD) {
+                reaped = true
+                return false
+            }
+            if result < 0 && errno == EINTR { continue }
+            return false
+        }
+    }
+#endif
 }
 
 private func admitSpawnedRoot(_ child: pid_t) throws -> SpawnedRoot {
@@ -946,8 +964,7 @@ private func selfTestSpawnCleanup() throws {
     try selfTestExpectFailure { _ = try admitSpawnedRoot(ungrouped) }
     try selfTestExpectReaped(ungrouped)
 
-    var status: Int32 = 0
-    guard waitpid(sibling.pid, &status, WNOHANG) == 0 else {
+    guard sibling.isRunning() else {
         throw CollectorError.outputFailure
     }
     let success = try spawnProcessGroup(executable: "/usr/bin/true",
