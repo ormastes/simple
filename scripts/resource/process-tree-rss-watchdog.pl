@@ -179,7 +179,7 @@ sub native_snapshot {
     for my $pid (members(\%all)) {
         print {$observer_write} "R $pid $all{$pid}{identity}\n" or die "process observer write failed";
         my $line = observer_line();
-        defined($line) or die "incomplete process detail";
+        defined($line) or die "incomplete process detail for PID $pid identity=$all{$pid}{identity}";
         if ($line eq "R $pid gone\n") { $all{$pid}{zombie} = 1; next }
         $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
         $all{$pid}{rss} = 0+$1;

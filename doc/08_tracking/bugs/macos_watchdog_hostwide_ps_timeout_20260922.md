@@ -51,3 +51,34 @@ under `build/evidence/macos-observer-native-20260922`; the measurement was taken
 during final protocol hardening and is not a release benchmark. Linux runtime
 behavior was not exercised on this Darwin host. No bootstrap was rerun because
 the parent task exhausted its three-cycle limit.
+
+## Native observer integration follow-up: unresolved detail EOF
+
+A separately authorized attempt at `90fe7dc50e1` subsequently failed before
+compiler work: `build/evidence/macos-enforced-bd544/stage2-native-sampler`.
+The observer closed its output during a detail request. Its receipt records
+exit 89, 38 completed samples, peak 43,936 KiB, maximum sample 42.997 ms,
+maximum gap 120.531 ms, one observer error/restart for cleanup, quiescent=1
+and no session escapes. The old native helper did not identify the syscall
+or identity comparison that failed. **The cause of this EOF remains OPEN.**
+
+A diagnostic-only follow-up records the operation, PID, return size and errno
+for syscall/short-read failures, expected/actual birth identity for identity
+mismatches, and the requested PID/identity in the supervisor's EOF message.
+It does not suppress errors, extend budgets, or change exit/containment policy.
+
+Deterministic `macos_process_observer_detail_test.shs` coverage injects failures
+at both BSD identity reads, task RSS, and session reads; short reads; both
+identity mismatches; ESRCH exit transitions at each syscall; a zombie; and a
+successful live sample. The unchanged production detail function is compiled
+into the fixture with syscall replacements. Its `-Wall -Wextra -Werror` build
+and checks pass. A real unreaped-zombie probe returns 0/ESRCH for both BSD and
+TASKINFO on this host, confirming that ordinary zombie exit is already handled.
+Three bounded local workloads (500 sequential exits, 200 pipeline/fork groups,
+40 xcrun/sw_vers/git discovery loops with pinned Clang 23) completed without
+reproducing the integration failure. Logs and receipts are retained under
+`build/evidence/macos-observer-exit-race-20260922`.
+
+The diagnostic work ran no bootstrap. Another independently authorized native
+attempt must capture the failing operation before any behavioral fix is claimed.
+Invocation overhead remains OPEN as documented above.
