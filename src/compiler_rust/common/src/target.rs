@@ -1205,6 +1205,7 @@ mod host_aware_default_tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn the_host_target_widens_exactly_when_the_host_admits_avx512() {
         // The whole point: this must track the real probe, and it must be
         // REACHABLE -- the previous widening sat behind llvm_cpu_name() and
@@ -1213,8 +1214,7 @@ mod host_aware_default_tests {
         if host.arch != TargetArch::X86_64 {
             return;
         }
-        let expected_wide = cfg!(target_arch = "x86_64")
-            && std::is_x86_feature_detected!("avx512f")
+        let expected_wide = std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512vl")
             && std::is_x86_feature_detected!("avx512bw");
         let got = TargetCpu::host_aware_default_for(host);
