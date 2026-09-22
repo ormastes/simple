@@ -283,6 +283,10 @@ glyph_digest_matches() {
     [ "$glyph_mode" = pinned ] && [ "$glyph_sha" = "$GLYPH_RGB_SHA256" ]
 }
 
+glyph_live_pixels_match() {
+    cmp -s "$1" "$2"
+}
+
 write_glyph_calibration_candidate() {
     [ "$GLYPH_CALIBRATION" = 1 ] || return 1
     [ "$glyph_diagnostics_status" = pass ] || return 1
@@ -647,7 +651,27 @@ if [ "$SELF_TEST" -eq 1 ]; then
         echo "linux_hosted_wm_live_window_self_test_status=fail"
         exit 1
     fi
+    font_identity='sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=100,wdth=100'
+    if glyph_crop_diagnostics "$glyph_fixture"; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
     font_identity="$GLYPH_FONT_IDENTITY"
+    live_fixture="$BUILD_DIR/live-glyph-fixture.rgb"
+    printf '\001\002\003\004' >"$live_fixture"
+    cp "$live_fixture" "$WINDOW_GLYPH_RGB"
+    glyph_live_pixels_match "$live_fixture" "$WINDOW_GLYPH_RGB"
+    printf '\377' | dd of="$WINDOW_GLYPH_RGB" bs=1 seek=0 conv=notrunc 2>/dev/null
+    if glyph_live_pixels_match "$live_fixture" "$WINDOW_GLYPH_RGB"; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    live_glyph_match=false
+    if glyph_crop_diagnostics "$glyph_fixture"; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    live_glyph_match=true
     digest_fixture="$BUILD_DIR/glyph-digest-fixture.rgb"
     printf '\001\002\003\004' >"$digest_fixture"
     glyph_sha="$(sha256_file "$digest_fixture")"
@@ -737,6 +761,8 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_glyph_missing_character=rejected"
     echo "linux_hosted_wm_live_window_self_test_glyph_bars=rejected"
     echo "linux_hosted_wm_live_window_self_test_glyph_wrong_font=rejected"
+    echo "linux_hosted_wm_live_window_self_test_glyph_wrong_axis=rejected"
+    echo "linux_hosted_wm_live_window_self_test_glyph_live_mismatch=rejected"
     echo "linux_hosted_wm_live_window_self_test_glyph_corrupt_digest=rejected"
     echo "linux_hosted_wm_live_window_self_test_native_source_manifest=stable"
     echo "linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected"
@@ -1142,7 +1168,7 @@ fi
 convert "$CAPTURE_LIVE" -crop 60x18+122+82 +repage -depth 8 "rgb:$GLYPH_RGB"
 convert "$WINDOW_PNG" -crop 60x18+122+82 +repage -depth 8 "rgb:$WINDOW_GLYPH_RGB"
 glyph_sha="$(sha256_file "$GLYPH_RGB")"
-if cmp -s "$GLYPH_RGB" "$WINDOW_GLYPH_RGB"; then live_glyph_match=true; fi
+if glyph_live_pixels_match "$GLYPH_RGB" "$WINDOW_GLYPH_RGB"; then live_glyph_match=true; fi
 glyph_mode="$(glyph_oracle_mode "$GLYPH_RGB_SHA256" "$GLYPH_CALIBRATION")"
 cp "$GLYPH_RGB" "$CALIBRATION_RGB"
 printf '\377' | dd of="$CALIBRATION_RGB" bs=1 seek=0 conv=notrunc 2>/dev/null
