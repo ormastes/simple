@@ -92,6 +92,23 @@ reject() {
 }
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
+reject_wrong_gitlink_root() {
+    # Keep the exact pinned HEAD but direct Git's worktree outside this child.
+    # Accepting the bound MSYS spelling must never accept another root.
+    git -C "$repo/child-module" config core.worktree "$(cygpath -am "$tmp/child-source")"
+    test "$(git -C "$repo/child-module" rev-parse HEAD)" = "$child_head"
+    reject same-head-wrong-gitlink-root
+    grep -Fq 'git.gitlink-root' "$tmp/error"
+    git -C "$repo/child-module" config --unset core.worktree
+}
+
+if [ "${1:-}" = --gitlink-root-only ]; then
+    git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
+    reject_wrong_gitlink_root
+    echo 'bootstrap_stage3_same_head_wrong_gitlink_root=true'
+    exit 0
+fi
+
 accept positive-file-dir-pending
 git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
 git -C "$repo/child-module" config core.autocrlf false
@@ -111,6 +128,7 @@ mkdir -p "$repo/.git/modules"
 mv "$repo/child-module/.git" "$repo/.git/modules/child-module"
 printf 'gitdir: ../.git/modules/child-module\n' >"$repo/child-module/.git"
 accept clean-git-pointer-file
+reject_wrong_gitlink_root
 rm "$repo/child-module/.git"
 mv "$repo/.git/modules/child-module" "$repo/child-module/.git"
 printf changed >>"$repo/child-module/child.txt"
