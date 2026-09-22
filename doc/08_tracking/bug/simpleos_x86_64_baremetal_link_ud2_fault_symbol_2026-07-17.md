@@ -162,3 +162,6 @@ link and host code-generation contract, not QEMU guest-kernel evidence. The
 complete focused test passed in 0.11 s wall time with 59,624 KiB maximum RSS.
 The new production instructions execute only on an exception path; no
 steady-state allocation or hot-path work was added.
+
+TODO(deferred-environment): after Linux bootstrap succeeds, run the x86_64
+SimpleOS guest-kernel UD2 scenario in QEMU and retain its serial fault receipt.
