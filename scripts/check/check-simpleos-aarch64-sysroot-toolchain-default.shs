@@ -6,13 +6,20 @@ sysroot="$root/scripts/os/simpleos-sysroot-aarch64.shs"
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-aarch64-tools.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 mkdir -p "$fixture/bin"
-for tool in clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
-    printf '#!/bin/sh\necho "LLVM version 23.1.0"\n' >"$fixture/bin/$tool"
+for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+    case "$tool" in
+        clang|clang++) version='clang version 23.1.0' ;;
+        *) version='LLVM version 23.1.0' ;;
+    esac
+    printf '#!/bin/sh\necho "%s"\n' "$version" >"$fixture/bin/$tool"
     chmod +x "$fixture/bin/$tool"
 done
+rm "$fixture/bin/clang++"
+ln -s clang "$fixture/bin/clang++"
 
 default=$(LLVM_23_1_PREFIX="$fixture" sh "$sysroot" --print-toolchain)
 printf '%s\n' "$default" | grep -qx "CLANG=$fixture/bin/clang"
+printf '%s\n' "$default" | grep -qx "CXX=$fixture/bin/clang++"
 printf '%s\n' "$default" | grep -qx "AR=$fixture/bin/llvm-ar"
 
 overridden=$(LLVM_23_1_PREFIX="$fixture" CLANG=/custom/clang AR=/custom/ar \
@@ -22,6 +29,7 @@ printf '%s\n' "$overridden" | grep -qx 'AR=/custom/ar'
 
 validated=$(LLVM_23_1_PREFIX="$fixture" sh "$sysroot" --check-toolchain)
 printf '%s\n' "$validated" | grep -qx "CLANG=$fixture/bin/clang"
+printf '%s\n' "$validated" | grep -qx "CXX=$fixture/bin/clang++"
 printf '%s\n' "$validated" | grep -qx "AR=$fixture/bin/llvm-ar"
 
 printf '#!/bin/sh\necho "LLVM version 18.1.0"\n' >"$fixture/bin/llvm-ar"
@@ -31,13 +39,24 @@ if LLVM_23_1_PREFIX="$fixture" sh "$sysroot" --check-toolchain >/dev/null 2>&1; 
 fi
 
 mkdir -p "$fixture/override"
-printf '#!/bin/sh\nexit 0\n' >"$fixture/override/clang"
+printf '#!/bin/sh\necho "clang version 18.1.0"\n' >"$fixture/override/clang"
+printf '#!/bin/sh\necho "clang version 18.1.0"\n' >"$fixture/override/clang++"
 printf '#!/bin/sh\nexit 0\n' >"$fixture/override/ar"
-chmod +x "$fixture/override/clang" "$fixture/override/ar"
+chmod +x "$fixture/override/clang" "$fixture/override/clang++" "$fixture/override/ar"
 bare=$(PATH="$fixture/override:$PATH" LLVM_23_1_PREFIX="$fixture" CLANG=clang AR=ar \
     sh "$sysroot" --check-toolchain)
 printf '%s\n' "$bare" | grep -qx "CLANG=$fixture/override/clang"
+printf '%s\n' "$bare" | grep -qx "CXX=$fixture/override/clang++"
 printf '%s\n' "$bare" | grep -qx "AR=$fixture/override/ar"
+
+printf '#!/bin/sh\necho "gcc version 13.0.0"\n' >"$fixture/override/gcc"
+printf '#!/bin/sh\necho "g++ version 13.0.0"\n' >"$fixture/override/g++"
+chmod +x "$fixture/override/gcc" "$fixture/override/g++"
+if PATH="$fixture/override:$PATH" CLANG=gcc CXX=g++ AR=ar \
+    sh "$sysroot" --check-toolchain >/dev/null 2>&1; then
+    echo 'FAIL: GCC override was accepted' >&2
+    exit 1
+fi
 
 grep -Fq 'exec "$CC_PATH" -target aarch64-unknown-none-elf' "$sysroot"
 printf 'PASS: AArch64 sysroot defaults to one LLVM 23.1 provider and preserves tool overrides\n'

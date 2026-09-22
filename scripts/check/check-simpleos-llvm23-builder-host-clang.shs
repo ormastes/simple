@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+builder="$root/scripts/setup/build-llvm-23-1-provider.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-llvm-host-clang.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+for tool in clang clang++ clang-18 clang++-18 other-clang gcc g++; do
+    case "$tool" in clang*|other-clang) name=clang ;; *) name=gcc ;; esac
+    printf '#!/bin/sh\necho "%s version 18.1.0"\n' "$name" >"$fixture/$tool"
+    chmod +x "$fixture/$tool"
+done
+
+selected=$(CC="$fixture/clang" CXX="$fixture/clang++" CLANG="$fixture/clang" \
+    sh "$builder" --print-host-compilers)
+printf '%s\n' "$selected" | grep -qx "CC=$fixture/clang"
+printf '%s\n' "$selected" | grep -qx "CXX=$fixture/clang++"
+printf '%s\n' "$selected" | grep -qx "CLANG=$fixture/clang"
+versioned=$(CC="$fixture/clang-18" sh "$builder" --print-host-compilers)
+printf '%s\n' "$versioned" | grep -qx "CXX=$fixture/clang++-18"
+if CC="$fixture/gcc" CXX="$fixture/g++" sh "$builder" --print-host-compilers >/dev/null 2>&1; then
+    echo 'FAIL: GCC host compilers were accepted' >&2
+    exit 1
+fi
+if CC="$fixture/clang" CLANG="$fixture/other-clang" CXX="$fixture/clang++" \
+    sh "$builder" --print-host-compilers >/dev/null 2>&1; then
+    echo 'FAIL: distinct Clang CC and CLANG were accepted' >&2
+    exit 1
+fi
+printf 'PASS: LLVM provider builder selects Clang and rejects GCC host compilers\n'

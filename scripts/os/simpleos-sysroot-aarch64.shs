@@ -28,13 +28,24 @@ LIBC_DIR="src/os/libc"
 # explicit caller selection still wins for each tool.
 LLVM_23_1_PREFIX="${LLVM_23_1_PREFIX:-$REPO_ROOT/build/toolchains/llvm-23.1.0-rc2}"
 DEFAULT_LLVM_PROVIDER=0
-if [ -z "${CLANG:-}" ] && [ -z "${AR:-}" ]; then
+if [ -z "${CLANG:-}${CC:-}${CXX:-}${CLANGXX:-}${AR:-}" ]; then
   DEFAULT_LLVM_PROVIDER=1
 fi
-CC="${CLANG:-$LLVM_23_1_PREFIX/bin/clang}"
+CC="${CLANG:-${CC:-$LLVM_23_1_PREFIX/bin/clang}}"
+if [ -n "${CXX:-}${CLANGXX:-}" ]; then
+  CXX="${CXX:-$CLANGXX}"
+elif [ -n "${CLANG:-}${CC:-}" ]; then
+  clang_name=$(basename "$CC")
+  case "$CC" in
+    */*) CXX="$(dirname "$CC")/clang++${clang_name#clang}" ;;
+    *) CXX="clang++${clang_name#clang}" ;;
+  esac
+else
+  CXX="$LLVM_23_1_PREFIX/bin/clang++"
+fi
 AR="${AR:-$LLVM_23_1_PREFIX/bin/llvm-ar}"
 if [ "${1:-}" = --print-toolchain ]; then
-  printf 'CLANG=%s\nAR=%s\nLLVM_23_1_PREFIX=%s\n' "$CC" "$AR" "$LLVM_23_1_PREFIX"
+  printf 'CLANG=%s\nCXX=%s\nAR=%s\nLLVM_23_1_PREFIX=%s\n' "$CC" "$CXX" "$AR" "$LLVM_23_1_PREFIX"
   exit 0
 fi
 if [ "$DEFAULT_LLVM_PROVIDER" -eq 1 ]; then
@@ -45,14 +56,27 @@ if [ "$DEFAULT_LLVM_PROVIDER" -eq 1 ]; then
   }
 fi
 CC_PATH="$(command -v "$CC" 2>/dev/null)" || { echo "[sysroot-aarch64] missing clang: $CC" >&2; exit 1; }
+CXX_PATH="$(command -v "$CXX" 2>/dev/null)" || { echo "[sysroot-aarch64] missing clang++: $CXX" >&2; exit 1; }
 AR_PATH="$(command -v "$AR" 2>/dev/null)" || { echo "[sysroot-aarch64] missing archiver: $AR" >&2; exit 1; }
 [ -x "$CC_PATH" ] || { echo "[sysroot-aarch64] missing clang: $CC_PATH" >&2; exit 1; }
+[ -x "$CXX_PATH" ] || { echo "[sysroot-aarch64] missing clang++: $CXX_PATH" >&2; exit 1; }
 [ -x "$AR_PATH" ] || { echo "[sysroot-aarch64] missing archiver: $AR_PATH" >&2; exit 1; }
+case "$("$CC_PATH" --version 2>/dev/null | sed -n '1p')" in
+  *clang\ version*) : ;;
+  *) echo "[sysroot-aarch64] C compiler is not Clang: $CC_PATH" >&2; exit 1 ;;
+esac
+case "$("$CXX_PATH" --version 2>/dev/null | sed -n '1p')" in
+  *clang\ version*) : ;;
+  *) echo "[sysroot-aarch64] C++ compiler is not Clang: $CXX_PATH" >&2; exit 1 ;;
+esac
 CC="$CC_PATH"
+CXX="$CXX_PATH"
 AR="$AR_PATH"
+CLANG="$CC"
+export CC CXX CLANG
 export PATH="$LLVM_23_1_PREFIX/bin:$PATH"
 if [ "${1:-}" = --check-toolchain ]; then
-  printf 'CLANG=%s\nAR=%s\n' "$CC" "$AR"
+  printf 'CC=%s\nCXX=%s\nCLANG=%s\nAR=%s\n' "$CC" "$CXX" "$CLANG" "$AR"
   exit 0
 fi
 TRIPLE="aarch64-unknown-none-elf"

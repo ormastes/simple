@@ -15,6 +15,7 @@ TARGETS="X86;AArch64;RISCV;WebAssembly"
 JOBS=""
 CLONE=0
 VERIFY_ONLY=0
+PRINT_HOST_COMPILERS=0
 
 usage() {
     cat <<'EOF'
@@ -30,10 +31,13 @@ LLVM 23.1 is not yet available.
   --targets LIST      semicolon-separated LLVM targets
   --jobs N            parallel build jobs
   --verify-only       validate source tag and an existing installed provider
+  --print-host-compilers  resolve Clang C/C++ host compilers without building
   --help              show this help
 
 The default target set is X86;AArch64;RISCV;WebAssembly. No download occurs
 unless --clone is passed. Tag signature verification is mandatory.
+Builds use Clang and clang++ as host compilers; CC/CXX/CLANG overrides must
+resolve to Clang binaries. GCC and G++ are rejected.
 EOF
 }
 
@@ -68,10 +72,47 @@ while [ "$#" -gt 0 ]; do
         --targets) [ "$#" -ge 2 ] || die "--targets requires a list"; TARGETS=$2; shift 2 ;;
         --jobs) [ "$#" -ge 2 ] || die "--jobs requires a count"; JOBS=$2; shift 2 ;;
         --verify-only) VERIFY_ONLY=1; shift ;;
+        --print-host-compilers) PRINT_HOST_COMPILERS=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
+
+resolve_clang_host_compiler() {
+    compiler_name=$1
+    compiler_role=$2
+    compiler_path=$(command -v "$compiler_name" 2>/dev/null) || die "missing Clang $compiler_role: $compiler_name"
+    case "$("$compiler_path" --version 2>/dev/null | sed -n '1p')" in
+        *clang\ version*) printf '%s\n' "$compiler_path" ;;
+        *) die "$compiler_role must be Clang: $compiler_name" ;;
+    esac
+}
+
+clangxx_companion() {
+    clang_c=$1
+    clang_base=$(basename "$clang_c")
+    case "$clang_base" in
+        clang*) clang_cpp="clang++${clang_base#clang}" ;;
+        *) clang_cpp=clang++ ;;
+    esac
+    case "$clang_c" in
+        */*) printf '%s/%s\n' "$(dirname "$clang_c")" "$clang_cpp" ;;
+        *) printf '%s\n' "$clang_cpp" ;;
+    esac
+}
+
+if [ "$VERIFY_ONLY" -eq 0 ] || [ "$PRINT_HOST_COMPILERS" -eq 1 ]; then
+    HOST_CC=$(resolve_clang_host_compiler "${CC:-${CLANG:-clang}}" C)
+    HOST_CXX=$(resolve_clang_host_compiler "${CXX:-${CLANGXX:-$(clangxx_companion "$HOST_CC")}}" C++)
+    if [ -n "${CC:-}" ] && [ -n "${CLANG:-}" ]; then
+        [ "$(resolve_clang_host_compiler "$CC" C)" = "$(resolve_clang_host_compiler "$CLANG" C)" ] ||
+            die "CC and CLANG select different compilers"
+    fi
+fi
+if [ "$PRINT_HOST_COMPILERS" -eq 1 ]; then
+    printf 'CC=%s\nCXX=%s\nCLANG=%s\n' "$HOST_CC" "$HOST_CXX" "$HOST_CC"
+    exit 0
+fi
 
 [ -n "$SOURCE_DIR" ] || die "pass --source-dir (and --clone for an explicit network checkout)"
 case "$TARGETS" in
@@ -111,6 +152,7 @@ head_commit=$(git -C "$SOURCE_DIR" rev-parse HEAD)
 
 validate_provider() {
     clang_bin="$PREFIX/bin/clang"
+    clangxx_bin="$PREFIX/bin/clang++"
     lld_bin="$PREFIX/bin/ld.lld"
     llvm_config_bin="$PREFIX/bin/llvm-config"
     llvm_ar_bin="$PREFIX/bin/llvm-ar"
@@ -119,6 +161,7 @@ validate_provider() {
     llc_bin="$PREFIX/bin/llc"
     llvm_objcopy_bin="$PREFIX/bin/llvm-objcopy"
     [ -x "$clang_bin" ] || die "missing installed clang: $clang_bin"
+    [ -x "$clangxx_bin" ] || die "missing installed clang++: $clangxx_bin"
     [ -x "$lld_bin" ] || die "missing installed ld.lld: $lld_bin"
     [ -x "$llvm_config_bin" ] || die "missing installed llvm-config: $llvm_config_bin"
     [ -x "$llvm_ar_bin" ] || die "missing installed llvm-ar: $llvm_ar_bin"
@@ -127,8 +170,10 @@ validate_provider() {
     [ -x "$llc_bin" ] || die "missing installed llc: $llc_bin"
     [ -x "$llvm_objcopy_bin" ] || die "missing installed llvm-objcopy: $llvm_objcopy_bin"
     prefix_real=$(canonical_path "$PREFIX")
+    clangxx_invocation="$prefix_real/bin/clang++"
     source_real=$(canonical_path "$SOURCE_DIR")
     clang_bin=$(canonical_path "$clang_bin")
+    clangxx_bin=$(canonical_path "$clangxx_bin")
     lld_bin=$(canonical_path "$lld_bin")
     llvm_config_bin=$(canonical_path "$llvm_config_bin")
     llvm_ar_bin=$(canonical_path "$llvm_ar_bin")
@@ -136,7 +181,7 @@ validate_provider() {
     opt_bin=$(canonical_path "$opt_bin")
     llc_bin=$(canonical_path "$llc_bin")
     llvm_objcopy_bin=$(canonical_path "$llvm_objcopy_bin")
-    for provider_bin in "$clang_bin" "$lld_bin" "$llvm_config_bin" "$llvm_ar_bin" \
+    for provider_bin in "$clang_bin" "$clangxx_bin" "$lld_bin" "$llvm_config_bin" "$llvm_ar_bin" \
         "$llvm_as_bin" "$opt_bin" "$llc_bin" "$llvm_objcopy_bin"; do
         case "$provider_bin" in
             "$prefix_real"/bin/*) ;;
@@ -144,6 +189,7 @@ validate_provider() {
         esac
     done
     clang_version=$($clang_bin --version | sed -n '1p')
+    clangxx_version=$($clangxx_bin --version | sed -n '1p')
     lld_version=$($lld_bin --version | sed -n '1p')
     llvm_version=$($llvm_config_bin --version)
     llvm_ar_version=$($llvm_ar_bin --version)
@@ -152,6 +198,8 @@ validate_provider() {
     llc_version=$($llc_bin --version)
     printf '%s\n' "$clang_version" | grep -Eq 'clang version 23\.1\.0([^0-9]|$)' \
         || die "clang is not LLVM 23.1.0: $clang_version"
+    printf '%s\n' "$clangxx_version" | grep -Eq 'clang version 23\.1\.0([^0-9]|$)' \
+        || die "clang++ is not LLVM 23.1.0: $clangxx_version"
     printf '%s\n' "$lld_version" | grep -Eq 'LLD 23\.1\.0([^0-9]|$)' \
         || die "ld.lld is not LLVM 23.1.0: $lld_version"
     printf '%s\n' "$llvm_version" | grep -Eq '^23\.1\.0([^0-9]|$)' \
@@ -164,8 +212,9 @@ validate_provider() {
         || die "opt is not LLVM 23.1.0: $opt_version"
     printf '%s\n' "$llc_version" | grep -Eq 'LLVM version 23\.1\.0([^0-9]|$)' \
         || die "llc is not LLVM 23.1.0: $llc_version"
-    printf 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2\nLLVM_23_1_PREFIX=%s\nLLVM_SOURCE_DIR=%s\nLLVM_TARGETS=%s\nCLANG=%s\nCLANG_SHA256=%s\nLINKER=%s\nLINKER_SHA256=%s\nLLVM_AR=%s\nLLVM_AR_SHA256=%s\nLLVM_AS=%s\nLLVM_AS_SHA256=%s\nLLVM_OPT=%s\nLLVM_OPT_SHA256=%s\nLLVM_LLC=%s\nLLVM_LLC_SHA256=%s\nLLVM_OBJCOPY=%s\nLLVM_OBJCOPY_SHA256=%s\nLLVM_CONFIG=%s\nLLVM_CONFIG_SHA256=%s\nLLVM_TAG=%s\nLLVM_TAG_COMMIT=%s\n' \
+    printf 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2\nLLVM_23_1_PREFIX=%s\nLLVM_SOURCE_DIR=%s\nLLVM_TARGETS=%s\nCLANG=%s\nCLANG_SHA256=%s\nCLANGXX=%s\nCLANGXX_SHA256=%s\nLINKER=%s\nLINKER_SHA256=%s\nLLVM_AR=%s\nLLVM_AR_SHA256=%s\nLLVM_AS=%s\nLLVM_AS_SHA256=%s\nLLVM_OPT=%s\nLLVM_OPT_SHA256=%s\nLLVM_LLC=%s\nLLVM_LLC_SHA256=%s\nLLVM_OBJCOPY=%s\nLLVM_OBJCOPY_SHA256=%s\nLLVM_CONFIG=%s\nLLVM_CONFIG_SHA256=%s\nLLVM_TAG=%s\nLLVM_TAG_COMMIT=%s\n' \
         "$prefix_real" "$source_real" "$TARGETS" "$clang_bin" "$(sha256_file "$clang_bin")" \
+        "$clangxx_invocation" "$(sha256_file "$clangxx_bin")" \
         "$lld_bin" "$(sha256_file "$lld_bin")" \
         "$llvm_ar_bin" "$(sha256_file "$llvm_ar_bin")" \
         "$llvm_as_bin" "$(sha256_file "$llvm_as_bin")" \
@@ -185,6 +234,7 @@ command -v cmake >/dev/null 2>&1 || die "cmake is required"
 command -v ninja >/dev/null 2>&1 || die "ninja is required"
 
 cmake -S "$SOURCE_DIR/llvm" -B "$BUILD_DIR" -G Ninja \
+    -DCMAKE_C_COMPILER="$HOST_CC" -DCMAKE_CXX_COMPILER="$HOST_CXX" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DLLVM_ENABLE_PROJECTS='clang;lld' \
