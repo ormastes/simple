@@ -47,6 +47,18 @@ checked before and after each RSS read. Newly forked children are discovered
 by the next snapshot; cleanup still freezes parents and takes another snapshot
 before killing them. No host-wide RSS query or per-sample exec is used on macOS.
 
+Guarded macOS portable-lock owner checks, including bootstrap EXIT cleanup,
+also use the admitted observer path and SHA-256. They reject missing, symlinked,
+privilege-bearing or hash-mismatched observers without falling back to setuid
+`ps`. Two bounded `--identity` requests compare microsecond birth identity
+around the kernel process-group query. The stored lock identity keeps the
+existing C-locale `lstart` encoding, allowing guarded and standalone callers to
+share locks. Each request has a five-second deadline and 256-byte output bound;
+failed children are killed/reaped. Unguarded callers and Linux/MSYS retain their
+existing identity backend, and stale-lock group recovery is unchanged. This
+uses the progress watcher's trusted admission-directory model; checking a hash
+before executing a path is not an atomic defense against same-user replacement.
+
 The native protocol rejects incomplete/malformed/duplicate rows, caps each row
 at 129 bytes including newline and the table at 131,072 rows, and validates PID
 ranges. The kernel metadata allocation is independently bounded. A vanished
