@@ -403,6 +403,40 @@ impl HirLowering:
                         # same-module calls) round-trips to `ident_name_t`
                         # unchanged, so this is a no-op there.
                         val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                        # Capture the callable signature while this SymbolId
+                        # still belongs to this HIR symbol table. NamedVar's
+                        # name survives flat cross-module lowering, but its
+                        # numeric id can collide in MIR's later table.
+                        if val definition = self.symbols.get_symbol_raw(found_symbol.id):
+                            # Imported callable definitions have an owner;
+                            # local/parameter function values do not. Avoid
+                            # the native cross-module SymbolKind comparison
+                            # hazard documented by field_module_callable.
+                            if definition != nil and definition.defining_module != nil:
+                                if val declared_type = definition.type_:
+                                    if declared_type != nil:
+                                        match declared_type.kind:
+                                            case HirTypeKind.Function(params, ret, _):
+                                                # Only table-independent signatures cross
+                                                # this boundary. Aggregate/Named types
+                                                # need owner-aware relocation and shape
+                                                # sidecars; function-valued locals keep
+                                                # their existing inference path.
+                                                var portable_signature = true
+                                                match ret.kind:
+                                                    case Int(_, _) | Float(_) | Bool | Char | Str | Unit: ()
+                                                    case _: portable_signature = false
+                                                for param_type in params:
+                                                    match param_type.kind:
+                                                        case Int(_, _) | Float(_) | Bool | Char | Str | Unit: ()
+                                                        case _: portable_signature = false
+                                                if portable_signature:
+                                                    return HirExpr(
+                                                        kind: HirExprKind.NamedVar(found_symbol, display_name),
+                                                        has_type_: true,
+                                                        type_: declared_type,
+                                                        span: e.span)
+                                            case _: ()
                         HirExprKind.NamedVar(found_symbol, display_name)
                 else:
                     self.lower_unresolved_ident(ident_name_t, e.span)
