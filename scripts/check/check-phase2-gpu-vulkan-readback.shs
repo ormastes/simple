@@ -1,0 +1,57 @@
+#!/bin/sh
+# Scoped synthetic-provider ABI test; this does not qualify GPU hardware.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner=${GPU_READBACK_OWNER_ROOT:-$root}
+out=${1:?usage: check-phase2-gpu-vulkan-readback.shs NEW_EVIDENCE_DIR}
+[ ! -e "$out" ] || { echo 'evidence directory already exists' >&2; exit 2; }
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
+cc=${CC:-cc}
+case $(uname -s) in
+  Darwin) strip_flag=-Wl,-dead_strip; dl_flag= ;;
+  *) strip_flag=-Wl,--gc-sections; dl_flag=-ldl ;;
+esac
+fixture="$root/test/02_integration/runtime/phase2_gpu_vulkan_readback.c"
+wrapper="$root/test/02_integration/runtime/phase2_gpu_vulkan_readback_loader.c"
+shasum -a 256 "$owner/src/runtime/runtime_native.c" "$owner/src/runtime/runtime.h" \
+  "$owner/src/runtime/runtime_dynload.c" "$root/src/runtime/runtime_gpu_vulkan_readback_private.h" \
+  "$fixture" "$wrapper" "$root/test/02_integration/runtime/phase2_gpu_vulkan_readback_native.spl" \
+  "$0" > "$out/source.sha256"
+"$cc" -std=gnu11 -fPIC -shared -DPHASE2_GPU_READBACK_PROVIDER "$fixture" -o "$out/provider.so"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 -I"$owner/src/runtime" -I"$owner/src/runtime/platform" \
+  -c "$owner/src/runtime/runtime_native.c" -o "$out/native.o"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DPHASE2_GPU_READBACK_INCLUDE_FRAGMENT -I"$owner/src/runtime" -I"$root/src/runtime" \
+  -include "$owner/src/runtime/runtime.h" -I"$owner/src/runtime/platform" \
+  -c "$wrapper" -o "$out/loader.o"
+"$cc" -std=gnu11 -O1 -I"$owner/src/runtime" "$strip_flag" "$fixture" \
+  "$out/native.o" "$out/loader.o" -lm -lpthread $dl_flag -o "$out/check"
+"$out/check" "$out/provider.so" good
+"$out/check" "$out/missing-provider.so" absent
+if [ -n "${GPU_READBACK_SIMPLE_ARCHIVE:-}" ]; then
+  shasum -a 256 "$GPU_READBACK_SIMPLE_ARCHIVE" > "$out/simple-archive.sha256"
+  "$cc" -std=gnu11 -O1 -DPHASE2_GPU_READBACK_NATIVE -I"$owner/src/runtime" \
+    "$strip_flag" "$fixture" "$GPU_READBACK_SIMPLE_ARCHIVE" \
+    "$out/native.o" "$out/loader.o" -lm -lpthread $dl_flag -o "$out/native-check"
+  "$out/native-check" "$out/provider.so" good
+fi
+if [ -n "${GPU_READBACK_BASELINE_ROOT:-}" ]; then
+  "$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$GPU_READBACK_BASELINE_ROOT/src/runtime" -I"$GPU_READBACK_BASELINE_ROOT/src/runtime/platform" \
+    -c "$GPU_READBACK_BASELINE_ROOT/src/runtime/runtime_dynload.c" -o "$out/baseline-loader.o"
+  if "$cc" -std=gnu11 -O1 -I"$owner/src/runtime" "$strip_flag" "$fixture" \
+      "$out/native.o" "$out/baseline-loader.o" -lm -lpthread $dl_flag -o "$out/baseline-check" \
+      >"$out/baseline-link.log" 2>&1; then
+    echo 'baseline unexpectedly linked' >&2; exit 1
+  fi
+  for symbol in rt_vulkan_copy_from_buffer_array rt_vulkan_copy_from_buffer_regions \
+      rt_vulkan_copy_from_buffer_strided rt_vulkan_copy_to_buffer_u32 \
+      rt_vulkan_read_buffer_bytes rt_vulkan_readback_u32_array rt_vulkan_readback_u32_array_checksum \
+      rt_vulkan_readback_u32_checksum; do
+    grep -q "$symbol" "$out/baseline-link.log"
+  done
+fi
+shasum -a 256 -c "$out/source.sha256"
+echo 'phase2-gpu-vulkan-readback: scoped synthetic ABI PASS'

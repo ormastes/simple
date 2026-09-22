@@ -1,0 +1,37 @@
+# Native Simple -> core-C array adapters -> synthetic raw provider boundary.
+# Direct externs deliberately exercise the exact compiler ABI under repair.
+extern fn rt_vulkan_copy_from_buffer_array(data: [u8], count: i64, handle: i64, offset: i64) -> i64
+extern fn rt_vulkan_copy_from_buffer_regions(data: [u8], handle: i64, regions: [i64]) -> i64
+extern fn rt_vulkan_copy_from_buffer_strided(data: [u8], handle: i64, offset: i64, width: i64, rows: i64, stride: i64) -> i64
+extern fn rt_vulkan_copy_to_buffer_u32(handle: i64, words: [i64], offset: i64) -> i64
+extern fn rt_vulkan_read_buffer_bytes(handle: i64, count: i64, offset: i64) -> [u8]
+extern fn rt_vulkan_readback_u32_array(handle: i64, count: i64, offset: i64) -> [u32]
+extern fn rt_vulkan_readback_u32_array_checksum(handle: i64, count: i64, offset: i64) -> i64
+extern fn rt_vulkan_readback_u32_checksum(dest: [u32], count: i64, handle: i64, offset: i64) -> i64
+
+fn phase2_gpu_vulkan_readback_native() -> i64:
+    val dest: [u8] = [9, 9, 9, 9, 9, 9]
+    if rt_vulkan_copy_from_buffer_array(dest, 4, 51, 2) != 1: return 1
+    if dest[0] != 2 or dest[3] != 5 or dest[4] != 9: return 2
+    if rt_vulkan_copy_from_buffer_array(dest, 6, 52, 0) != 0: return 3
+    if dest[0] != 2 or dest[4] != 9: return 4
+    if rt_vulkan_copy_from_buffer_strided(dest, 51, 1, 2, 3, 4) != 1: return 5
+    if dest[0] != 1 or dest[2] != 5 or dest[5] != 10: return 6
+    val regions: [i64] = [258, 2, 2, 4, 257, 2, 1, 2]
+    if rt_vulkan_copy_from_buffer_regions(dest, 51, regions) != 1: return 7
+    if dest[0] != 2 or dest[2] != 6 or dest[5] != 2: return 8
+    val words: [i64] = [67305985, -1, -2147483648]
+    if rt_vulkan_copy_to_buffer_u32(51, words, 7) != 1: return 9
+    val bytes = rt_vulkan_read_buffer_bytes(51, 6, 0)
+    if bytes.len() != 6 or bytes[5] != 5: return 10
+    val pixels = rt_vulkan_readback_u32_array(51, 2, 0)
+    if pixels.len() != 2 or pixels[0] != 50462976 or pixels[1] != 117835012: return 11
+    if rt_vulkan_readback_u32_array_checksum(51, 2, 0) != 168297988: return 12
+    if rt_vulkan_copy_from_buffer_array(dest, 7, 51, 0) != 0: return 13
+    if rt_vulkan_readback_u32_array_checksum(51, 0, 0) != -1: return 14
+    val reuse: [u32] = [9, 9, 9]
+    if rt_vulkan_readback_u32_checksum(reuse, 2, 51, 0) != 168297988: return 15
+    if reuse[0] != 50462976 or reuse[1] != 117835012 or reuse[2] != 9: return 16
+    if rt_vulkan_readback_u32_checksum(reuse, 2, 52, 0) != -1: return 17
+    if reuse[0] != 50462976 or reuse[2] != 9: return 18
+    return 0
