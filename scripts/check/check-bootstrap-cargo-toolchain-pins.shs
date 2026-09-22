@@ -10,6 +10,15 @@ cat > "$tmp/clang" <<'TOOL'
 printf '%s\n' 'clang version 23.1.1'
 TOOL
 chmod +x "$tmp/clang"
+bootstrap_stage3_verify_llvm_pin "$tmp/clang" 23.1.1
+if bootstrap_stage3_verify_llvm_pin "$tmp/clang" 22.1.2 > /dev/null 2>&1; then
+    echo 'FAIL: LLVM version mismatch accepted' >&2
+    exit 1
+fi
+if bootstrap_stage3_verify_llvm_pin clang 23.1.1 > /dev/null 2>&1; then
+    echo 'FAIL: nonabsolute LLVM pin accepted' >&2
+    exit 1
+fi
 CC="$tmp/clang"
 export CC
 [ "$(bootstrap_stage3_target_c_compiler aarch64-apple-darwin)" = "$CC" ]
@@ -22,6 +31,9 @@ if CXX=/usr/bin/g++ bootstrap_stage3_target_c_compiler aarch64-apple-darwin > /d
     echo 'FAIL: macOS accepted g++' >&2
     exit 1
 fi
+sed -n '/^run_rust_authority_env() {/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/env-function.sh"
+. "$tmp/env-function.sh"
 sed -n '/^run_rust_authority_cargo() {/,/^}/p' \
     "$root/scripts/bootstrap/bootstrap-from-scratch.sh" > "$tmp/cargo-function.sh"
 . "$tmp/cargo-function.sh"
@@ -58,4 +70,7 @@ for rust_llvm_status in enabled disabled; do
         run_rust_authority_cargo pin-probe "$lto"
     done
 done
+unset CXX AR LD LLVM_CONFIG RUSTFLAGS
+os=windows
+run_rust_authority_env windows-defaults /bin/sh -c 'test "${CXX-unset}" = unset && test "${AR-unset}" = unset && test "${RUSTFLAGS-unset}" = unset'
 printf '%s\n' 'PASS: explicit Clang selected, gcc rejected, all four Cargo branches retain pins and scrub unrelated environment'

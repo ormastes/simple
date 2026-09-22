@@ -54,3 +54,15 @@ The candidate adds a real Clang version validation subprocess; this is a bounded
 startup cost, not a compilation throughput measurement. Peak is under 32 MiB,
 well below the 6 GiB cap. No complete bootstrap performance claim is made.
 Logs: `/tmp/simple-llvm23-toolchain/{base,candidate}-profile.log`.
+
+## Review corrections
+
+Explicit LLVM_CONFIG now selects the binary in both snapshot and seed receipts.
+Darwin tool snapshots use the same selected CC as Cargo. Unset CXX/AR/LD remain
+unset in hermetic Cargo, preserving Windows target-aware defaults; a contract
+case exercises this directly. `SIMPLE_LLVM_REQUIRED_VERSION=23.1.1` enables the
+invocation-owned fail-closed gate: CC/CXX/AR/LD/LLVM_CONFIG must be absolute,
+executable, and report exactly that version; rustc embedded LLVM must match.
+The producer must set this variable; this does not migrate repository-wide
+default backend policy. CXX/AR/LD seed fields bind setting strings, not immutable
+binary content hashes. Exact versioned Cellar paths are used for this run.

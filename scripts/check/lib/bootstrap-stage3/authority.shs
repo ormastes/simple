@@ -736,6 +736,19 @@ bootstrap_stage3_host_platform() {
     esac
 }
 
+# Optional exact-version gate used by pinned LLVM producer lanes.
+bootstrap_stage3_verify_llvm_pin() {
+    [ "$#" -eq 2 ] || return 1
+    case "$1" in /*) ;; *) echo 'bootstrap: LLVM pins must be absolute paths' >&2; return 1 ;; esac
+    [ -x "$1" ] || return 1
+    bootstrap_stage3_pin_version=$("$1" --version 2>/dev/null |
+        sed -n '1s/^[^0-9]*\([0-9][0-9.]*\).*/\1/p') || return 1
+    [ "$bootstrap_stage3_pin_version" = "$2" ] || {
+        echo "bootstrap: LLVM pin $1 is $bootstrap_stage3_pin_version; required $2" >&2
+        return 1
+    }
+}
+
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
@@ -764,6 +777,19 @@ bootstrap_stage3_target_c_compiler() {
                     return 1 ;;
             esac
             bootstrap_stage3_mac_cc=$(command -v "${CC:-clang}") || return 1
+            if [ -n "${SIMPLE_LLVM_REQUIRED_VERSION:-}" ]; then
+                for bootstrap_stage3_pin in "$bootstrap_stage3_mac_cc" "${CXX:-}" \
+                    "${AR:-}" "${LD:-}" "${LLVM_CONFIG:-}"; do
+                    bootstrap_stage3_verify_llvm_pin "$bootstrap_stage3_pin" \
+                        "$SIMPLE_LLVM_REQUIRED_VERSION" || return 1
+                done
+                bootstrap_stage3_rust_llvm_version=$("${RUSTC:-rustc}" -vV |
+                    sed -n 's/^LLVM version: //p') || return 1
+                [ "$bootstrap_stage3_rust_llvm_version" = "$SIMPLE_LLVM_REQUIRED_VERSION" ] || {
+                    echo "bootstrap: rustc LLVM $bootstrap_stage3_rust_llvm_version does not match $SIMPLE_LLVM_REQUIRED_VERSION" >&2
+                    return 1
+                }
+            fi
             case "$bootstrap_stage3_mac_cc" in
                 */gcc|*/gcc-*|*/g++|*/g++-*)
                     echo 'bootstrap: GCC/G++ is forbidden for the macOS C toolchain' >&2
@@ -1885,7 +1911,7 @@ bootstrap_stage3_tool_authority_snapshot() (
     # consumes this exact selected identity.
     bootstrap_stage3_tool_c_path=$(command -v cc 2>/dev/null || printf '')
     case "$(bootstrap_stage3_host_platform)" in
-        *-pc-windows-msvc|*-pc-windows-gnu)
+        *-pc-windows-msvc|*-pc-windows-gnu|*-apple-darwin)
             bootstrap_stage3_tool_c_path=$(
                 bootstrap_stage3_target_c_compiler \
                     "$(bootstrap_stage3_host_platform)"
@@ -4381,7 +4407,7 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         bootstrap_stage3_seed_trace native-cc-recorded
         # Forwarded Cargo settings distinguish cached seed authorities.
         printf 'cxx=%s\nar=%s\nld=%s\nllvm-config=%s\nrustflags=%s\nmac-linker=%s\n' \
-            "${CXX:-clang++}" "${AR:-ar}" "${LD:-ld}" \
+            "${CXX-<unset>}" "${AR-<unset>}" "${LD-<unset>}" \
             "${LLVM_CONFIG:-llvm-config}" "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
             "${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$bootstrap_stage3_seed_cc}" \
             >>"$bootstrap_stage3_seed_records" || exit 1
