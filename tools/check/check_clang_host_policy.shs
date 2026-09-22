@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+# Guard the host-compiler policy against agent or host-specific GCC fallbacks.
+set -eu
+
+fail() {
+  printf '%s\n' "clang host policy: $1" >&2
+  exit 1
+}
+
+require() {
+  file=$1 pattern=$2
+  grep -Fq -- "$pattern" "$file" || fail "missing '$pattern' in $file"
+}
+
+forbid() {
+  file=$1 pattern=$2
+  if grep -Fq -- "$pattern" "$file"; then
+    fail "forbidden '$pattern' in $file"
+  fi
+}
+
+require .github/workflows/windows-build.yml 'choco install llvm --version=23.1.1'
+require .github/workflows/windows-build.yml 'CC=clang-cl'
+require .github/workflows/windows-build.yml 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=clang'
+require .github/workflows/cross-platform.yml 'compiler: [clang]'
+require .github/workflows/simple-llvm-cross.yml 'clang --target=x86_64-w64-windows-gnu -fuse-ld=lld'
+require tools/gui_perf_bench/run_all_benchmarks.shs 'clang -O2 -o "$GTK_BIN"'
+require tools/docker/Dockerfile.cross-language-perf '        clang \'
+
+forbid .github/workflows/windows-build.yml 'LINKER=gcc'
+forbid .github/workflows/cross-platform.yml 'compiler: [clang, gcc]'
+forbid .github/workflows/simple-llvm-cross.yml 'x86_64-w64-windows-gnu-gcc'
+forbid tools/gui_perf_bench/run_all_benchmarks.shs 'gcc -O2'
+forbid tools/docker/Dockerfile.cross-language-perf '        gcc \'
+
+printf '%s\n' 'clang host policy: PASS'
