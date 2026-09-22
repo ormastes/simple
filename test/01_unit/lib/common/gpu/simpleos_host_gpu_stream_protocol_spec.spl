@@ -1,0 +1,116 @@
+"""Header framing and correlation gates for the proposed host-GPU serial transport."""
+
+# @cover src/lib/common/gpu/simpleos_host_gpu_stream_protocol.spl 100%
+
+use std.spec.*
+use std.common.gpu.simpleos_host_gpu_stream_protocol.{
+    SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES,
+    SIMPLEOS_HOST_GPU_STREAM_VERSION,
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE,
+    SimpleOsHostGpuStreamHeader,
+    SimpleOsHostGpuStreamHeaderDecode,
+    simpleos_host_gpu_stream_header_encode,
+    simpleos_host_gpu_stream_header_decode,
+    simpleos_host_gpu_stream_response_correlates,
+    simpleos_host_gpu_stream_checksum_step,
+    simpleos_host_gpu_stream_checksum_valid
+}
+
+fn submit_header() -> SimpleOsHostGpuStreamHeader:
+    SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, body_bytes: 32, body_checksum: 99, generation: 7, run_id_hash: 11, frame_id: 13, backend_code: 1, kind_or_status: 3)
+
+describe "SimpleOS host-GPU stream header":
+    it "encodes a fixed little-endian header and round trips":
+        val bytes = simpleos_host_gpu_stream_header_encode(submit_header())
+        expect(bytes.len()).to_equal(64)
+        expect(bytes[0]).to_equal(83u8)
+        expect(bytes[8]).to_equal(3u8)
+        expect(bytes[12]).to_equal(32u8)
+        val decoded = simpleos_host_gpu_stream_header_decode(bytes)
+        expect(decoded.ok).to_be(true)
+        expect(decoded.header.generation).to_equal(7)
+        expect(decoded.header.run_id_hash).to_equal(11)
+        expect(decoded.header.frame_id).to_equal(13)
+
+    it "rejects malformed or oversized headers before body allocation":
+        val good = simpleos_host_gpu_stream_header_encode(submit_header())
+        var short: [u8] = []
+        expect(simpleos_host_gpu_stream_header_decode(short).reason).to_equal("header-size")
+        var bad_magic = good
+        bad_magic[0] = 0u8
+        expect(simpleos_host_gpu_stream_header_decode(bad_magic).reason).to_equal("magic")
+        var reserved = good
+        reserved[20] = 1u8
+        expect(simpleos_host_gpu_stream_header_decode(reserved).reason).to_equal("reserved")
+        var unknown_type = good
+        unknown_type[8] = 9u8
+        expect(simpleos_host_gpu_stream_header_decode(unknown_type).reason).to_equal("invalid-fields")
+        var unknown_backend = good
+        unknown_backend[48] = 9u8
+        expect(simpleos_host_gpu_stream_header_decode(unknown_backend).reason).to_equal("invalid-fields")
+        var oversized = good
+        oversized[12] = 1u8
+        oversized[14] = 1u8
+        expect(simpleos_host_gpu_stream_header_decode(oversized).reason).to_equal("invalid-fields")
+
+    it "requires an exact response correlation tuple":
+        val request = submit_header()
+        val response = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, body_bytes: 32, body_checksum: 99, generation: 7, run_id_hash: 11, frame_id: 13, backend_code: 1, kind_or_status: 1)
+        expect(simpleos_host_gpu_stream_response_correlates(request, response)).to_be(true)
+        val stale = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, body_bytes: 32, body_checksum: 99, generation: 6, run_id_hash: 11, frame_id: 13, backend_code: 1, kind_or_status: 1)
+        expect(simpleos_host_gpu_stream_response_correlates(request, stale)).to_be(false)
+        val wrong_frame = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, body_bytes: 32, body_checksum: 99, generation: 7, run_id_hash: 11, frame_id: 14, backend_code: 1, kind_or_status: 1)
+        expect(simpleos_host_gpu_stream_response_correlates(request, wrong_frame)).to_be(false)
+
+    it "checks a body checksum incrementally across read boundaries":
+        val first = simpleos_host_gpu_stream_checksum_step(0, 7u8)
+        val second = simpleos_host_gpu_stream_checksum_step(first, 9u8)
+        expect(simpleos_host_gpu_stream_checksum_valid(second, 16)).to_be(true)
+        expect(simpleos_host_gpu_stream_checksum_valid(second, 15)).to_be(false)
+
+    it "exports the complete stream ABI surface with stable constants":
+        val decoded: SimpleOsHostGpuStreamHeaderDecode = simpleos_host_gpu_stream_header_decode(simpleos_host_gpu_stream_header_encode(submit_header()))
+        expect(decoded.ok).to_be(true)
+        expect(SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES).to_equal(64)
+        expect(SIMPLEOS_HOST_GPU_STREAM_VERSION).to_equal(1)
+        expect(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST).to_equal(1)
+        expect(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE).to_equal(2)
+        expect(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST).to_equal(3)
+        expect(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE).to_equal(4)
+        expect(SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE).to_equal(5)
+
+    it "correlates hello and error responses without weakening identity checks":
+        val hello_request = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, body_bytes: 0, body_checksum: 0, generation: 9, run_id_hash: 0, frame_id: 0, backend_code: 1, kind_or_status: 0)
+        val hello_response = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, body_bytes: 0, body_checksum: 0, generation: 9, run_id_hash: 0, frame_id: 0, backend_code: 1, kind_or_status: 1)
+        expect(simpleos_host_gpu_stream_response_correlates(hello_request, hello_response)).to_be(true)
+        val request = submit_header()
+        val error_response = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE, body_bytes: 0, body_checksum: 0, generation: 7, run_id_hash: 11, frame_id: 13, backend_code: 1, kind_or_status: 3)
+        expect(simpleos_host_gpu_stream_response_correlates(request, error_response)).to_be(true)
+        val cross_session_error = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE, body_bytes: 0, body_checksum: 0, generation: 7, run_id_hash: 12, frame_id: 13, backend_code: 1, kind_or_status: 3)
+        expect(simpleos_host_gpu_stream_response_correlates(request, cross_session_error)).to_be(false)
+
+    it "rejects every malformed fixed-header class and invalid encoder input":
+        val good = simpleos_host_gpu_stream_header_encode(submit_header())
+        var bad_version = good
+        bad_version[4] = 2u8
+        expect(simpleos_host_gpu_stream_header_decode(bad_version).reason).to_equal("version-or-size")
+        var bad_header_size = good
+        bad_header_size[6] = 63u8
+        expect(simpleos_host_gpu_stream_header_decode(bad_header_size).reason).to_equal("version-or-size")
+        val invalid_generation = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, body_bytes: 1, body_checksum: 1, generation: 0, run_id_hash: 1, frame_id: 1, backend_code: 1, kind_or_status: 1)
+        expect(simpleos_host_gpu_stream_header_encode(invalid_generation).len()).to_equal(0)
+        val invalid_kind = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, body_bytes: 1, body_checksum: 1, generation: 1, run_id_hash: 1, frame_id: 1, backend_code: 1, kind_or_status: 4)
+        expect(simpleos_host_gpu_stream_header_encode(invalid_kind).len()).to_equal(0)
+        val invalid_hello_identity = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, body_bytes: 0, body_checksum: 0, generation: 1, run_id_hash: 1, frame_id: 0, backend_code: 1, kind_or_status: 0)
+        expect(simpleos_host_gpu_stream_header_encode(invalid_hello_identity).len()).to_equal(0)
+        val invalid_hello_kind = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, body_bytes: 0, body_checksum: 0, generation: 1, run_id_hash: 0, frame_id: 0, backend_code: 1, kind_or_status: 999)
+        expect(simpleos_host_gpu_stream_header_encode(invalid_hello_kind).len()).to_equal(0)
+        val invalid_response_status = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, body_bytes: 0, body_checksum: 0, generation: 1, run_id_hash: 1, frame_id: 1, backend_code: 1, kind_or_status: 5)
+        expect(simpleos_host_gpu_stream_header_encode(invalid_response_status).len()).to_equal(0)
+        val invalid_error_reason = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE, body_bytes: 0, body_checksum: 0, generation: 1, run_id_hash: 1, frame_id: 1, backend_code: 1, kind_or_status: 19)
+        expect(simpleos_host_gpu_stream_header_encode(invalid_error_reason).len()).to_equal(0)
+        expect(simpleos_host_gpu_stream_checksum_valid(-1, -1)).to_be(false)

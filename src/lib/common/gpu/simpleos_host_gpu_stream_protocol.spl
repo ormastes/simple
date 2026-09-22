@@ -1,0 +1,148 @@
+"""Bounded header codec for the proposed host-GPU VirtIO serial stream."""
+
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    simpleos_host_gpu_max_readback_bytes,
+    SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES,
+    SIMPLEOS_HOST_GPU_KIND_HELLO,
+    SIMPLEOS_HOST_GPU_KIND_RENDER,
+    SIMPLEOS_HOST_GPU_KIND_DRAW_IR,
+    SIMPLEOS_HOST_GPU_STATUS_IDLE,
+    SIMPLEOS_HOST_GPU_STATUS_FALLBACK,
+    SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST,
+    SIMPLEOS_HOST_GPU_REASON_OFFLOAD_OVERHEAD
+}
+
+val SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES: i64 = 64
+val SIMPLEOS_HOST_GPU_STREAM_VERSION: i64 = 1
+val SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST: i64 = 1
+val SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE: i64 = 2
+val SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST: i64 = 3
+val SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE: i64 = 4
+val SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE: i64 = 5
+
+struct SimpleOsHostGpuStreamHeader:
+    message_type: i64
+    body_bytes: i64
+    body_checksum: i64
+    generation: i64
+    run_id_hash: i64
+    frame_id: i64
+    backend_code: i64
+    kind_or_status: i64
+
+struct SimpleOsHostGpuStreamHeaderDecode:
+    ok: bool
+    reason: text
+    header: SimpleOsHostGpuStreamHeader
+
+fn _stream_empty_header() -> SimpleOsHostGpuStreamHeader:
+    SimpleOsHostGpuStreamHeader(message_type: 0, body_bytes: 0, body_checksum: 0, generation: 0, run_id_hash: 0, frame_id: 0, backend_code: 0, kind_or_status: 0)
+
+fn _stream_reject(reason: text) -> SimpleOsHostGpuStreamHeaderDecode:
+    SimpleOsHostGpuStreamHeaderDecode(ok: false, reason: reason, header: _stream_empty_header())
+
+fn _stream_push_le(out: [u8], value: i64, count: i64) -> [u8]:
+    var bytes = out
+    var shifted = value
+    var i: i64 = 0
+    while i < count:
+        bytes.push((shifted & 255).to_u8())
+        shifted = shifted >> 8
+        i = i + 1
+    bytes
+
+fn _stream_read_le(bytes: [u8], offset: i64, count: i64) -> i64:
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        value = value | (bytes[offset + i].to_i64() << (i * 8))
+        i = i + 1
+    value
+
+fn _stream_type_valid(message_type: i64) -> bool:
+    message_type >= SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST and message_type <= SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE
+
+fn _stream_header_valid(header: SimpleOsHostGpuStreamHeader) -> bool:
+    if not _stream_type_valid(header.message_type) or header.generation <= 0:
+        return false
+    if header.body_bytes < 0 or header.body_checksum < 0 or header.body_checksum > 0xFFFFFFFF:
+        return false
+    if header.backend_code < 1 or header.backend_code > 5:
+        return false
+    if header.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST and header.kind_or_status != SIMPLEOS_HOST_GPU_KIND_HELLO:
+        return false
+    if header.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST and (header.kind_or_status < SIMPLEOS_HOST_GPU_KIND_RENDER or header.kind_or_status > SIMPLEOS_HOST_GPU_KIND_DRAW_IR):
+        return false
+    if (header.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE or header.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE) and (header.kind_or_status < SIMPLEOS_HOST_GPU_STATUS_IDLE or header.kind_or_status > SIMPLEOS_HOST_GPU_STATUS_FALLBACK):
+        return false
+    if header.message_type == SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE and (header.kind_or_status < SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST or header.kind_or_status > SIMPLEOS_HOST_GPU_REASON_OFFLOAD_OVERHEAD):
+        return false
+    val hello = header.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST or header.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE
+    if hello:
+        return header.run_id_hash == 0 and header.frame_id == 0 and header.body_bytes <= SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES
+    if header.run_id_hash <= 0 or header.frame_id <= 0:
+        return false
+    if header.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST:
+        return header.body_bytes <= SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES
+    header.body_bytes <= simpleos_host_gpu_max_readback_bytes()
+
+fn simpleos_host_gpu_stream_header_encode(header: SimpleOsHostGpuStreamHeader) -> [u8]:
+    if not _stream_header_valid(header):
+        return []
+    var bytes: [u8] = [83u8, 72u8, 71u8, 70u8]
+    bytes = _stream_push_le(bytes, SIMPLEOS_HOST_GPU_STREAM_VERSION, 2)
+    bytes = _stream_push_le(bytes, SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES, 2)
+    bytes = _stream_push_le(bytes, header.message_type, 2)
+    bytes = _stream_push_le(bytes, 0, 2)
+    bytes = _stream_push_le(bytes, header.body_bytes, 4)
+    bytes = _stream_push_le(bytes, header.body_checksum, 4)
+    bytes = _stream_push_le(bytes, 0, 4)
+    bytes = _stream_push_le(bytes, header.generation, 8)
+    bytes = _stream_push_le(bytes, header.run_id_hash, 8)
+    bytes = _stream_push_le(bytes, header.frame_id, 8)
+    bytes = _stream_push_le(bytes, header.backend_code, 8)
+    _stream_push_le(bytes, header.kind_or_status, 8)
+
+fn simpleos_host_gpu_stream_header_decode(bytes: [u8]) -> SimpleOsHostGpuStreamHeaderDecode:
+    if bytes.len().to_i64() != SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES:
+        return _stream_reject("header-size")
+    if bytes[0] != 83u8 or bytes[1] != 72u8 or bytes[2] != 71u8 or bytes[3] != 70u8:
+        return _stream_reject("magic")
+    if _stream_read_le(bytes, 4, 2) != SIMPLEOS_HOST_GPU_STREAM_VERSION or _stream_read_le(bytes, 6, 2) != SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES:
+        return _stream_reject("version-or-size")
+    if _stream_read_le(bytes, 10, 2) != 0 or _stream_read_le(bytes, 20, 4) != 0:
+        return _stream_reject("reserved")
+    val header = SimpleOsHostGpuStreamHeader(
+        message_type: _stream_read_le(bytes, 8, 2),
+        body_bytes: _stream_read_le(bytes, 12, 4),
+        body_checksum: _stream_read_le(bytes, 16, 4),
+        generation: _stream_read_le(bytes, 24, 8),
+        run_id_hash: _stream_read_le(bytes, 32, 8),
+        frame_id: _stream_read_le(bytes, 40, 8),
+        backend_code: _stream_read_le(bytes, 48, 8),
+        kind_or_status: _stream_read_le(bytes, 56, 8)
+    )
+    if not _stream_header_valid(header):
+        return _stream_reject("invalid-fields")
+    SimpleOsHostGpuStreamHeaderDecode(ok: true, reason: "ok", header: header)
+
+fn simpleos_host_gpu_stream_response_correlates(request: SimpleOsHostGpuStreamHeader, response: SimpleOsHostGpuStreamHeader) -> bool:
+    if request.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST:
+        return response.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE and response.generation == request.generation and response.run_id_hash == 0 and response.frame_id == 0 and response.backend_code == request.backend_code
+    val submit_response = response.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE or response.message_type == SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE
+    request.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST and submit_response and response.generation == request.generation and response.run_id_hash == request.run_id_hash and response.frame_id == request.frame_id and response.backend_code == request.backend_code
+
+fn simpleos_host_gpu_stream_checksum_step(checksum: i64, byte: u8) -> i64:
+    (checksum + byte.to_i64()) % 2147483647
+
+fn simpleos_host_gpu_stream_checksum_valid(checksum: i64, expected: i64) -> bool:
+    checksum >= 0 and checksum == expected
+
+export SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES, SIMPLEOS_HOST_GPU_STREAM_VERSION
+export SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE
+export SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE
+export SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE
+export SimpleOsHostGpuStreamHeader, SimpleOsHostGpuStreamHeaderDecode
+export simpleos_host_gpu_stream_header_encode, simpleos_host_gpu_stream_header_decode
+export simpleos_host_gpu_stream_response_correlates
+export simpleos_host_gpu_stream_checksum_step, simpleos_host_gpu_stream_checksum_valid
