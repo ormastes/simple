@@ -11,8 +11,16 @@ its target to `*-unknown-none-elf`; that path needs its own SSP policy before
 this bug can close. Guest symbol, startup, and fault-path evidence is also
 outstanding.
 
+The LLVM switch currently uses a hardcoded `target_os == "simpleos" and not
+bare_metal` condition rather than `resolve_hardening(preset).ssp`. The
+`embedded_with_heap` preset opts out of SSP in that policy, but no matching
+codegen path or test proves the opt-out. Both policy wiring and the default
+Cranelift route remain unresolved source work.
+
 Source checks on 2026-09-22: focused compiler and app hardening specs passed
-(4/4 and 4/4). A Clang x86_64-unknown-simpleos C probe with a 64-byte local
+(4/4 and 4/4) using the available Rust bootstrap seed. These passes are
+diagnostic only; no admitted self-hosted compiler ran them. A Clang
+x86_64-unknown-simpleos C probe with a 64-byte local
 array and an escaping pointer emitted both `__stack_chk_guard` and
 `__stack_chk_fail` undefined references under `-fstack-protector-strong`.
 One-shot reciprocal compile measurements: baseline object 1200 bytes, SSP
