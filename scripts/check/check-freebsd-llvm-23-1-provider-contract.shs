@@ -123,4 +123,24 @@ if grep -F 'pkg install -y' "$freebsd_qemu" | grep -Eq '[[:space:]]llvm([[:space
     fail "FreeBSD runner still installs generic LLVM as a fallback"
 fi
 
+for disk_case in zero malformed insufficient; do
+    disk_gb=30
+    guest_gb=1
+    case "$disk_case" in
+        zero) disk_gb=0 ;;
+        malformed) disk_gb=invalid ;;
+        insufficient) guest_gb=31 ;;
+    esac
+    if QEMU_PORT=2222 QEMU_USER=freebsd QEMU_MEM=8G QEMU_CPUS=12 \
+        SIMPLE_FREEBSD_SELFHOST_JOBS=12 QEMU_DISK_GB="$disk_gb" \
+        QEMU_MIN_FREE_GB=30 QEMU_GUEST_MIN_FREE_GB="$guest_gb" \
+        sh "$freebsd_qemu" --preflight > "$tmp/preflight-$disk_case" 2>&1; then
+        fail "invalid disk configuration accepted: $disk_case"
+    fi
+    grep -qx 'freebsd_qemu_preflight_reason=disk' "$tmp/preflight-$disk_case" \
+        || fail "disk rejection order changed: $disk_case"
+    grep -qx 'freebsd_qemu_preflight_checks=21' "$tmp/preflight-$disk_case" \
+        || fail "preflight check count changed: $disk_case"
+done
+
 printf 'PASS: FreeBSD QEMU bootstrap requires one complete explicit LLVM 23.1 provider\n'
