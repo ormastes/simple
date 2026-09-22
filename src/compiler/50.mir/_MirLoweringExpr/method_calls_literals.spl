@@ -18,6 +18,7 @@ use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_instruction_support.{GpuBarrierScope, GpuMemoryScope}
@@ -528,6 +529,9 @@ impl MirLowering:
                             case Struct:
                                 result_struct_name = type_symbol.name
                                 supported = true
+                            case Class:
+                                result_struct_name = mir_class_identity(type_symbol)
+                                supported = true
                             case _: ()
             case _: ()
         if not supported:
@@ -759,7 +763,11 @@ impl MirLowering:
                         match self.symbols.get_symbol_raw(inner_owner_symbol.id):
                             case Some(inner_owner_sym):
                                 if inner_owner_sym.name != "":
-                                    self.struct_value_syms[result_local_uw.id] = inner_owner_sym.name
+                                    var inner_owner_name = inner_owner_sym.name
+                                    match inner_owner_sym.kind:
+                                        case Class: inner_owner_name = mir_class_identity(inner_owner_sym)
+                                        case _: ()
+                                    self.struct_value_syms[result_local_uw.id] = inner_owner_name
                             case _: ()
                     case _: ()
 
@@ -1372,6 +1380,9 @@ impl MirLowering:
                                 val chr_owner_definition = self.symbols.get_symbol_raw(chr_owner_symbol.id)
                                 if chr_owner_definition != nil:
                                     declared_chr_owner = chr_owner_definition.name
+                                    match chr_owner_definition.kind:
+                                        case Class: declared_chr_owner = mir_class_identity(chr_owner_definition)
+                                        case _: ()
                             case _: ()
                 if declared_chr_owner != "" and self.struct_method_syms.contains("{declared_chr_owner}::{method}"):
                     if not has_prelowered_method_receiver:
@@ -4003,7 +4014,11 @@ impl MirLowering:
         var name = self.bootstrap_symbol_name(symbol)
         var builtin_method_tag = BUILTIN_METHOD_NONE
         if sym != nil:
-            name = sym.name
+            # The link registry is populated from defining HirFunction metadata,
+            # which retains the ABI exceptions unavailable on a HirSymbol.
+            # Unknown symbols deliberately keep their stored spelling: extern
+            # runtime functions must remain bare.
+            name = self.provider_callable_symbol_name(symbol, sym.name)
             builtin_method_tag = sym.builtin_method_tag
         name = name.replace("::", ".")
         # MethodResolution transports the resolved SymbolId; HirSymbol carries
@@ -4030,14 +4045,16 @@ impl MirLowering:
         ))
 
     me named_function_operand(fallback_name: text) -> MirOperand?:
-        var known_function = false
-        for name in self.current_function_names:
-            if name == fallback_name:
-                known_function = true
-        if not known_function:
+        var callable_name = fallback_name
+        var symbol = self.symbols.lookup_or_invalid(fallback_name)
+        if symbol.id < 0 and self.symbols.exact_symbols.has(fallback_name):
+            symbol = SymbolId(id: self.symbols.exact_symbols[fallback_name])
+        if symbol.is_valid():
+            callable_name = self.provider_callable_symbol_name(symbol, fallback_name)
+        if not self.is_known_top_level_function(fallback_name, symbol):
             return nil
         Some(MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str(fallback_name),
+            MirConstValue.Str(callable_name),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                 params: [], return_type: MirType.i64(), is_variadic: false
             )))

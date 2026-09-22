@@ -385,9 +385,27 @@ impl HirLowering:
                 return
             val kind = if composite.kind == "class": SymbolKind.Class else: SymbolKind.Struct
             val composite_define_started = hir_phase_profile_now()
-            val imported_type = self.symbols.define(local_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            # Canonical owner/name allocation precedes the local alias.  A
+            # second same-named class must never reuse the first short-name ID.
+            val canonical_imported = if kind == SymbolKind.Class:
+                self.symbols.lookup_qualified_type_raw(
+                    imported_mod.module_name, imported_name)
+            else:
+                -1
+            val imported_type = if canonical_imported >= 0:
+                SymbolId(id: canonical_imported)
+            else:
+                val allocation_name = if kind == SymbolKind.Class:
+                    imported_name
+                else:
+                    local_name
+                self.symbols.define(allocation_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name), kind != SymbolKind.Class)
             hir_phase_profile_add(HIR_PROF_RIS_DEFINE, composite_define_started)
             if not already_bound:
+                # Bind exactly the requested local spelling only when it has
+                # no competing short spelling.
+                self.symbols.bind_local_type_if_free(local_name, imported_type)
+            if not already_bound and kind != SymbolKind.Class:
                 self.symbols.rename_symbol(imported_type, imported_name)
             # Repeated visits to the same owner are not a reason to skip its
             # qualified identity or dependency closure. Package prebinding can
