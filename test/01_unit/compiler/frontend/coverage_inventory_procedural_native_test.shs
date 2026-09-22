@@ -1,0 +1,27 @@
+#!/bin/sh
+# Must pass all cases; the initially discovered global-bool failure remains red.
+set -eu
+candidate=${1:?usage: checker NATIVE_FIXTURE NEW_EVIDENCE_DIR}
+evidence=${2:?usage: checker NATIVE_FIXTURE NEW_EVIDENCE_DIR}
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+[ -x "$candidate" ]
+[ ! -e "$evidence" ]
+mkdir -p "$evidence"
+shasum -a 256 "$candidate" > "$evidence/candidate.sha256"
+set +e
+SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000 \
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --rss-cap-mode=enforce --max-rss-kib=5859375 --interval-ms=100 \
+    --timeout-seconds=60 --session-mode=new --receipt="$evidence/run.rss.env" -- \
+    /usr/bin/time -l "$candidate" > "$evidence/run.log" 2>&1
+status=$?
+set -e
+printf 'exit_status=%s\n' "$status" > "$evidence/status.env"
+[ "$status" = 0 ] || exit "$status"
+for case_name in excluded-and-dedup included invalid-and-disabled collision; do
+    grep -Fx "coverage-inventory: $case_name PASS" "$evidence/run.log" >/dev/null
+done
+grep -Fx 'coverage-inventory: PASS cases=5 repeats=1000' "$evidence/run.log" >/dev/null
+grep -Fx 'quiescent=1' "$evidence/run.rss.env" >/dev/null
+grep -Fx 'rss_cap_enforced=1' "$evidence/run.rss.env" >/dev/null
+printf 'coverage_inventory_procedural_native=PASS\n'

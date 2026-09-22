@@ -1,0 +1,78 @@
+# Import the production flat-AST inventory, not a duplicate stand-in.
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_coverage_inventory.*
+use compiler.core.types.{flat_span_new}
+use std.common.mcdc.model.{mcdc_path_in_instrumentation_scope}
+
+fn guarded_module(span_id: i64) -> ():
+    ast_reset()
+    val guard = expr_bool_lit(1, span_id)
+    val pattern = expr_int_lit(1, span_id)
+    val arm = arm_new(pattern, guard, [])
+    val match_stmt = stmt_match_stmt(pattern, [arm], span_id)
+    module_add_decl(decl_fn("covered", [], [], -1, [match_stmt], 0, [], span_id))
+
+fn main() -> i64:
+    val span_id = flat_span_new(10, 20, 2, 3)
+    guarded_module(span_id)
+    compiler_coverage_inventory_reset(true, "", "")
+    # Actual failure path: an excluded compiler module retains coverage rows
+    # but does not produce MC/DC obligations. This must return normally.
+    compiler_coverage_inventory_record_module("src/compiler/core.spl")
+    val once = compiler_coverage_inventory_sdn()
+    if not once.contains("11, src/compiler/core.spl, 2, 3, 0, 0"): return 11
+    if not once.contains("11, 11, src/compiler/core.spl, 2, 3, 0, 0"): return 12
+    if compiler_mcdc_obligation_manifest_sdn().contains("condition|"): return 13
+    # Duplicate decisions and conditions take their own early-return paths.
+    compiler_coverage_inventory_record_module("src/compiler/core.spl")
+    if compiler_coverage_inventory_sdn() != once: return 14
+    if not compiler_coverage_inventory_valid(): return 15
+    print "coverage-inventory: excluded-and-dedup PASS"
+
+    # Eligible source still emits the actual condition obligation.
+    val included_scope = mcdc_path_in_instrumentation_scope("src/app/coverage_fixture.spl", "", "")
+    print "coverage-inventory: included-scope={included_scope}"
+    compiler_coverage_inventory_reset(true, "", "")
+    compiler_coverage_inventory_record_module("src/app/coverage_fixture.spl")
+    if not compiler_coverage_inventory_valid(): return 21
+    if not compiler_mcdc_obligation_manifest_sdn().contains("condition|"):
+        print compiler_mcdc_obligation_manifest_sdn()
+        print compiler_coverage_inventory_sdn()
+        return 22
+    val included = compiler_coverage_inventory_sdn()
+    compiler_coverage_inventory_record_module("src/app/coverage_fixture.spl")
+    if compiler_coverage_inventory_sdn() != included: return 23
+    print "coverage-inventory: included PASS"
+
+    # Invalid spans and disabled inventory leave the row tables empty.
+    guarded_module(-1)
+    compiler_coverage_inventory_reset(true, "", "")
+    compiler_coverage_inventory_record_module("src/compiler/invalid.spl")
+    if compiler_coverage_inventory_sdn().contains("invalid.spl"): return 31
+    guarded_module(span_id)
+    compiler_coverage_inventory_reset(false, "", "")
+    compiler_coverage_inventory_record_module("src/app/disabled.spl")
+    if compiler_coverage_inventory_sdn().contains("disabled.spl"): return 32
+    print "coverage-inventory: invalid-and-disabled PASS"
+
+    # Same source identity at another location remains a real diagnostic.
+    compiler_coverage_inventory_reset(true, "", "")
+    compiler_coverage_inventory_record_module("src/compiler/collision.spl")
+    val other_span = flat_span_new(10, 20, 9, 7)
+    guarded_module(other_span)
+    compiler_coverage_inventory_record_module("src/compiler/collision.spl")
+    if compiler_coverage_inventory_valid(): return 41
+    if not compiler_coverage_inventory_error().contains("conflicting locations"): return 42
+    print "coverage-inventory: collision PASS"
+
+    guarded_module(span_id)
+    compiler_coverage_inventory_reset(true, "", "")
+    for index in 0..1000:
+        compiler_coverage_inventory_record_module("src/compiler/repeated.spl")
+    if not compiler_coverage_inventory_valid(): return 51
+    val repeated = compiler_coverage_inventory_sdn()
+    if repeated.split("11, 11, src/compiler/repeated.spl").len() != 2: return 52
+    print "coverage-inventory: PASS cases=5 repeats=1000"
+    0
