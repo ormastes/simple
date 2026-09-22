@@ -1711,8 +1711,19 @@ bootstrap_stage_sanity() (
   # 180s) can raise it; without this the scrub always restored the 180s
   # default and the probe timed out with raw_status=124.
   sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
     esac
     unset "${sanity_env_name}"
