@@ -144,9 +144,10 @@ abandoned interrupt stack with `andq $-16, %rsp` before calling C.
 
 The review also found that the two-byte opcode probe could cross into an
 unmapped page and recursively fault. The handler now rejects RIP at page offset
-`0xFFF` before loading the opcode. This deliberately leaves a rare cross-page
-`ud2` on the legacy recovery path rather than risking #PF/#DF while diagnosing
-an unrelated no-error-code exception.
+`0xFFF` before loading the opcode. Because the shared ISR does not receive the
+vector number, that boundary case is ambiguous and fails closed into the fatal
+hook. It cannot silently advance past an intentional cross-page `ud2`, and it
+cannot trigger #PF/#DF by reading the following page.
 
 The focused contract now marks the extracted ISR as used and checks the emitted
 machine code, so its alignment/call assertions cannot pass merely because the
