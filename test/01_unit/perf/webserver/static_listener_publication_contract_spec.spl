@@ -1,0 +1,40 @@
+# @cover test/05_perf/webserver/static_file_server.spl
+# @cover test/perf/webserver/static_file_server.spl
+
+"""
+The live static-server benchmark must publish its bound socket with listen
+before it reports readiness or enters accept. A listen failure closes the
+owned descriptor and cannot advertise a ready server.
+"""
+
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+
+fn check_listener_publication(path: text):
+    val source = file_read(path)
+    val bind_at = source.find("val listener = rt_io_tcp_bind(addr)")
+    val listen_at = source.find("rt_io_tcp_listen(listener, 128)")
+    val ready_at = source.find("[simple-static-server-ready]")
+    val accept_at = source.find("rt_io_tcp_accept(listener)")
+
+    expect(bind_at).to_be_greater_than(-1)
+    expect(listen_at).to_be_greater_than(bind_at)
+    expect(ready_at).to_be_greater_than(listen_at)
+    expect(accept_at).to_be_greater_than(ready_at)
+
+    val listen_failure = source.split(
+        "if not rt_io_tcp_listen(listener, 128):")[1].split(
+            "[simple-static-server-ready]")[0]
+    expect(listen_failure).to_contain("rt_io_tcp_close(listener)")
+    expect(listen_failure).to_contain("[simple-static-server-error] listen")
+    expect(listen_failure.find("[simple-static-server-ready]")).to_equal(-1)
+
+describe "static server listener publication":
+    it "publishes the canonical performance target before readiness":
+        step("Inspect the canonical performance source")
+        check_listener_publication("test/05_perf/webserver/static_file_server.spl")
+
+    it "keeps the compatibility mirror behavior identical":
+        step("Inspect the compatibility performance source")
+        check_listener_publication("test/perf/webserver/static_file_server.spl")
