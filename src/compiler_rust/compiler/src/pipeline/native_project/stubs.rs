@@ -1534,19 +1534,48 @@ mod tests {
 
     #[test]
     fn unresolved_bytespan_method_is_refused_before_weak_stub_fallback() {
-        let missing = "lib__common__bytes__span__ByteSpan_dot_starts_with";
-        let defined: HashSet<String> = ["lib__common__bytes__span__ByteSpan_dot_len"]
-            .iter()
-            .map(|symbol| (*symbol).to_string())
-            .collect();
+        use std::process::Command;
 
-        let report = unresolved_simple_module_closure_report(&[missing.to_string()], &defined)
-            .expect("a missing ByteSpan method must fail before a weak stub is emitted");
+        let missing = "lib__common__bytes__span__ByteSpan_dot_starts_with";
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("bytespan_missing_method.c");
+        let object = dir.path().join("bytespan_missing_method.o");
+        std::fs::write(
+            &source,
+            "extern long lib__common__bytes__span__ByteSpan_dot_starts_with(void);\n\
+             long lib__common__bytes__span__ByteSpan_dot_len(void) { return 1; }\n\
+             long bytespan_probe(void) {\n\
+                 return lib__common__bytes__span__ByteSpan_dot_starts_with();\n\
+             }\n",
+        )
+        .unwrap();
+        let compile = Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+
+        let report = with_freestanding_stub_env(None, Some("1"), None, || {
+            generate_stub_object_freestanding(
+                dir.path(),
+                std::slice::from_ref(&object),
+                &[],
+                "x86_64-unknown-none",
+                "x86-64",
+                "",
+                dir.path(),
+                Path::new("bytespan-kernel.elf"),
+            )
+        })
+        .expect_err("a missing ByteSpan method must fail before a weak stub is emitted");
         assert!(report.contains(missing));
         assert!(report.contains("freestanding link refused"));
         assert!(report.contains("weak nil-returning stub"));
-
-        assert!(unresolved_simple_module_closure_report(&["rt_array_copy".to_string()], &defined).is_none());
+        assert!(!dir.path().join("_stubs_freestanding.c").exists());
+        assert!(!dir.path().join("_stubs_freestanding.o").exists());
     }
 
     #[test]
