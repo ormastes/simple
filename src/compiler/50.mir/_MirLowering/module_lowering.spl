@@ -1138,8 +1138,32 @@ impl MirLowering:
                     val prescan_return_symbol = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
                     if prescan_return_symbol != nil:
                         prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
-                case Array(_, _) | Slice(_):
+                case Array(prescan_element_type, _) | Slice(prescan_element_type):
                     prescan_return_shape = "__runtime_array__"
+                    var prescan_element_shape = "__no_struct_element__"
+                    var prescan_element_identity = "__no_struct_element__"
+                    # Resolve while this module owns the SymbolId space.
+                    # A caller cannot safely look up an imported element id.
+                    match prescan_element_type.kind:
+                        case Named(prescan_element_id, _):
+                            val prescan_element = module.symbols.get_symbol_raw(prescan_element_id.id)
+                            if prescan_element != nil:
+                                match prescan_element.kind:
+                                    case Class | Struct:
+                                        prescan_element_shape = prescan_element.name
+                                        prescan_element_identity = self.composite_layout_key(prescan_element)
+                                    case _: ()
+                        case _: ()
+                    # Include scalar arrays in ambiguity detection so a name
+                    # collision cannot lend a struct layout to an integer.
+                    val array_return_names = [prescan_fn.name, prescan_call_name,
+                        prescan_call_name.replace("-", "_"),
+                        prescan_call_name.replace("::", "."),
+                        prescan_call_name.replace("-", "_").replace("::", ".")]
+                    for array_return_name in array_return_names:
+                        bootstrap_fn_ret_array_element_shape_register(
+                            array_return_name, prescan_element_shape, prescan_element_identity)
+                        bootstrap_fn_ret_shape_register(array_return_name, "__runtime_array__")
                 case Result(prescan_ok_type, _):
                     # Ok-payload struct/class layout key, resolved HERE while
                     # `module.symbols` is still the DEFINING module's own

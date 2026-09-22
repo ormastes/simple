@@ -987,6 +987,35 @@ fn bootstrap_fn_ret_shape_lookup(name: text) -> text?:
         return Some(_bootstrap_fn_ret_shapes[name])
     nil
 
+# Array/Slice element layout identity, resolved in the defining module.
+var _bootstrap_fn_ret_array_element_shapes: Dict<text, text> = {}
+var _bootstrap_fn_ret_array_element_identities: Dict<text, text> = {}
+var _bootstrap_fn_ret_array_element_shape_ambig: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_array_element_shape_register(name: text, shape: text, identity: text):
+    if shape == "" or _bootstrap_fn_ret_array_element_shape_ambig.contains_key(name):
+        return
+    if _bootstrap_fn_ret_array_element_shapes.contains_key(name):
+        if _bootstrap_fn_ret_array_element_identities[name] != identity:
+            _bootstrap_fn_ret_array_element_shape_ambig[name] = true
+            # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+            # natively (rt_dict_remove); assigning it back destroys the map on the
+            # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+            # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+            var _kept_bootstrap_fn_ret_array_element_shapes: Dict<text, text> = {}
+            for _k in _bootstrap_fn_ret_array_element_shapes.keys():
+                if _k != name:
+                    _kept_bootstrap_fn_ret_array_element_shapes[_k] = _bootstrap_fn_ret_array_element_shapes[_k]
+            _bootstrap_fn_ret_array_element_shapes = _kept_bootstrap_fn_ret_array_element_shapes
+        return
+    _bootstrap_fn_ret_array_element_shapes[name] = shape
+    _bootstrap_fn_ret_array_element_identities[name] = identity
+
+fn bootstrap_fn_ret_array_element_shape_lookup(name: text) -> text?:
+    if _bootstrap_fn_ret_array_element_shapes.contains_key(name):
+        return Some(_bootstrap_fn_ret_array_element_shapes[name])
+    nil
+
 # Result<T, E>'s Ok-payload struct/class layout key, name-keyed like the plain
 # return-shape registry above. Needed because a Result<T,E> return type's
 # inner `ok_type` is an HirTypeKind.Named(SymbolId) whose SymbolId was minted
@@ -1202,6 +1231,9 @@ fn bootstrap_fn_registries_promote() -> bool:
     val ret_hir_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_hir_ambig)
     val ret_shapes_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_shapes)
     val ret_shape_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_shape_ambig)
+    val ret_array_element_identities_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_array_element_identities)
+    val ret_array_element_shapes_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_array_element_shapes)
+    val ret_array_element_shape_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_array_element_shape_ambig)
     val ret_ok_shapes_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_ok_shapes)
     val ret_ok_shape_ambig_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_ok_shape_ambig)
     val ret_opt_shapes_ok = _promote_bootstrap_registry(_bootstrap_fn_ret_opt_shapes)
@@ -1212,6 +1244,7 @@ fn bootstrap_fn_registries_promote() -> bool:
     ret_types_ok and ret_hir_types_ok and ret_hir_ambig_ok and ret_shapes_ok and
         ret_shape_ambig_ok and ret_ok_shapes_ok and ret_ok_shape_ambig_ok and
         ret_opt_shapes_ok and ret_opt_shape_ambig_ok and
+        ret_array_element_shapes_ok and ret_array_element_shape_ambig_ok and ret_array_element_identities_ok and
         param_hir_types_ok and param_defaults_ok and param_defaults_ambig_ok
 
 export use compiler.mir.mir_instruction_support.{BlockId}
@@ -1223,3 +1256,5 @@ export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
 export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup
 export bootstrap_fn_param_defaults_register, bootstrap_fn_param_defaults_lookup
 export bootstrap_fn_registries_promote
+
+export bootstrap_fn_ret_array_element_shape_register, bootstrap_fn_ret_array_element_shape_lookup

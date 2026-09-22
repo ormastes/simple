@@ -826,6 +826,14 @@ impl MirLowering:
             eprint("[mir-default-pad] callee={callee_name} given={args_in.len()} arity={params.len()}\n")
         result
 
+    me remember_direct_array_return_element(local: LocalId, call_name: text):
+        # The return's MIR Array type preserves storage, but field projection
+        # also needs the defining module's element layout name. Do not resolve
+        # its SymbolId against the caller's unrelated symbol table.
+        if val element_shape = bootstrap_fn_ret_array_element_shape_lookup(call_name):
+            if element_shape != "__no_struct_element__":
+                self.array_element_struct_syms[local.id] = element_shape
+
     me emit_resolved_direct_call(func: MirOperand, args_in_raw: [MirOperand], return_type: MirType) -> LocalId:
         val args_in = self.pad_trailing_default_args(func, args_in_raw)
         val boxed_args = self.box_text_abi_args(func, args_in)
@@ -841,6 +849,7 @@ impl MirLowering:
                 case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                     self.runtime_array_locals[dest.id] = true
                     self.mark_runtime_value_local(dest.id)
+                    self.remember_direct_array_return_element(dest, self.direct_call_extern_name(func))
                 case MirTypeKind.Struct(struct_symbol):
                     # A direct call whose declared return type is a Named
                     # struct (`fn make() -> P: ...`) yields a struct value
