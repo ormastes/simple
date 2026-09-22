@@ -21,9 +21,9 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-freebsd-llvm23.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/provider/bin"
 
-for tool in clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
     case "$tool" in
-        clang) version='clang version 23.1.0' ;;
+        clang|clang++) version='clang version 23.1.0' ;;
         ld.lld) version='LLD 23.1.0' ;;
         llvm-config) version='23.1.0' ;;
         *) version='LLVM version 23.1.0' ;;
@@ -45,6 +45,7 @@ if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$t
     fail "LLVM 23.1 llc escaping the provider prefix was accepted"
 fi
 
+rm -f "$tmp/provider/bin/llc"
 printf '#!/bin/sh\nprintf "%%s\\n" "LLVM version 18.1.0"\n' > "$tmp/provider/bin/llc"
 chmod +x "$tmp/provider/bin/llc"
 if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider" >/dev/null 2>&1; then
@@ -61,10 +62,16 @@ grep -Fq 'require_freebsd_llvm_23_1_provider' "$freebsd_qemu" \
     || fail "FreeBSD runner lacks provider admission"
 grep -Fq 'FREEBSD_LLVM_23_1_PREFIX is required' "$freebsd_qemu" \
     || fail "FreeBSD runner permits an implicit provider"
-grep -Fq 'clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy' "$freebsd_qemu" \
+grep -Fq 'clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy' "$freebsd_qemu" \
     || fail "FreeBSD runner does not require all LLVM native-build tools"
 grep -Fq 'FREEBSD_LLVM_23_1_ENV' "$freebsd_qemu" \
     || fail "FreeBSD runner does not bind the admitted provider to guest commands"
+grep -Fq 'QEMU_DISK_GB="${QEMU_DISK_GB:-64}"' "$freebsd_qemu" \
+    || fail "FreeBSD full bootstrap does not default to a 64G overlay"
+grep -Fq 'qemu-img resize "$OVERLAY_IMAGE" "${QEMU_DISK_GB}G"' "$freebsd_qemu" \
+    || fail "FreeBSD overlay size ignores QEMU_DISK_GB"
+grep -Fq 'QEMU_GUEST_MIN_FREE_GB="${QEMU_GUEST_MIN_FREE_GB:-30}"' "$freebsd_qemu" \
+    || fail "FreeBSD full bootstrap lacks a 30G guest free-space floor"
 grep -Fq 'provision_freebsd_llvm_23_1_provider' "$freebsd_qemu" \
     || fail "FreeBSD full bootstrap does not provision its provider"
 grep -Fq 'llvm-release-tobias-hieta.asc' "$freebsd_qemu" \
@@ -87,8 +94,23 @@ grep -Fq 'cmp -s "$FREEBSD_PROVIDER_HOST_MANIFEST" "$FREEBSD_PROVIDER_HOST_POST_
     || fail "FreeBSD runner does not compare complete pre/post provider receipts"
 grep -Fq 'llvm-23.1-provider-post-verify.log' "$freebsd_qemu" \
     || fail "FreeBSD runner does not retain post-native provider verification evidence"
+grep -F 'check-freebsd-selfhost-ci.shs' "$freebsd_qemu" | grep -Fq 'FREEBSD_RUST_SEED_ENV' \
+    || fail "FreeBSD Rust seed is not bound to its LLVM 18 compatibility provider"
+grep -Fq 'LLVM_VERSIONS=18 LLVM_SYS_180_PREFIX=/usr/local/llvm18' "$freebsd_qemu" \
+    || fail "FreeBSD Rust seed does not select LLVM 18 for inkwell"
+grep -Fq 'LLVM_VERSIONS=23 SIMPLE_LLVM_BIN=' "$freebsd_qemu" \
+    || fail "FreeBSD post-bootstrap checks do not select LLVM 23"
+grep -Fq 'CC=/usr/bin/clang CXX=/usr/bin/clang++ gtimeout' "$freebsd_qemu" \
+    || fail "FreeBSD LLVM provider build is not pinned to base Clang/Clang++"
+grep -Fq 'CC=/usr/local/llvm18/bin/clang CXX=/usr/local/llvm18/bin/clang++' "$freebsd_qemu" \
+    || fail "FreeBSD Rust seed is not pinned to LLVM 18 Clang/Clang++"
+grep -Fq 'CC=${FREEBSD_LLVM_23_1_PREFIX}/bin/clang CXX=${FREEBSD_LLVM_23_1_PREFIX}/bin/clang++' "$freebsd_qemu" \
+    || fail "FreeBSD post-bootstrap gates are not pinned to LLVM 23.1 Clang/Clang++"
+grep -Fq "clang_23_1_require '\${FREEBSD_LLVM_23_1_PREFIX}/bin/clang++' clang++" "$freebsd_qemu" \
+    || fail "FreeBSD provider does not admit its Clang++ executable"
+grep -Fq 'clang++) provider_name=CLANGXX' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt uses an invalid Clang++ key"
 for compiler_gate in \
-    'bootstrap-from-scratch.sh' \
     'cargo test -p simple-compiler' \
     'check-stage4-hosted-dynload-provider-archive.shs' \
     'NATIVE_SMOKE_BACKEND=llvm' \
