@@ -7,7 +7,7 @@ sh -n "$pin"
 grep -F 'run: brew install llvm lld' "$workflow" >/dev/null
 grep -F 'run: sh scripts/check/pin-macos-phase23-llvm23.shs' "$workflow" >/dev/null
 grep -F 'SIMPLE_LLVM_REQUIRED_VERSION=$required' "$pin" >/dev/null
-for name in CC CXX AR LD LLVM_CONFIG CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER; do
+for name in CC CXX AR LD LLVM_CONFIG CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS; do
     grep -F "$name=" "$pin" >/dev/null || { echo "missing pin $name" >&2; exit 1; }
 done
 grep -F 'rustc --version --verbose' "$pin" >/dev/null
@@ -59,6 +59,20 @@ PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/env" sh "$pin" >"$tmp/out"
 grep -F 'SIMPLE_LLVM_REQUIRED_VERSION=23.1.1' "$tmp/env" >/dev/null
 grep -F "CC=$tmp/llvm/bin/clang" "$tmp/env" >/dev/null
 grep -F "LD=$tmp/lld/bin/ld64.lld" "$tmp/env" >/dev/null
+assert_lld_rustflags() {
+    grep -Fx "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=-C link-arg=--ld-path=$tmp/lld/bin/ld64.lld" "$1" >/dev/null
+}
+assert_lld_rustflags "$tmp/env"
+sed '/^CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=/d' "$tmp/env" >"$tmp/missing-flag"
+if assert_lld_rustflags "$tmp/missing-flag"; then
+    echo 'FAIL: missing LLD Rust flag was accepted' >&2
+    exit 1
+fi
+sed 's@/bin/ld64.lld@/bin/ld@' "$tmp/env" >"$tmp/wrong-flag"
+if assert_lld_rustflags "$tmp/wrong-flag"; then
+    echo 'FAIL: wrong LLD Rust flag was accepted' >&2
+    exit 1
+fi
 
 for name in llvm-config clang clang++ ld64.lld rustc; do
     case $name in
