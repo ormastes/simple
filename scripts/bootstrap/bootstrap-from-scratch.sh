@@ -2265,6 +2265,9 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_toolchain_authority}" |
       sed -n 's/^cargo-path=//p'
   )
+  rust_authority_dylib="${rust_authority_root}/rust-helper-lib-$(
+    printf '%s\n' "${rust_toolchain_authority}" | sed -n 's/^rust-llvm-dylib-sha256=//p'
+  )"
   [ -x "${rustc_abs}" ] && [ -x "${cargo_abs}" ] || {
     echo "error: Rust toolchain binaries missing under sysroot: ${rust_sysroot}" >&2
     exit 1
@@ -2396,6 +2399,24 @@ prepare_rust_authority_workspace() {
     echo "error: could not create private offline Cargo configuration" >&2
     exit 1
   }
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_prepare \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || {
+      echo "error: Rust macOS helper/library authority invalid" >&2
+      exit 1
+    }
+    printf '%s\n' "${rust_toolchain_authority}" \
+      >"${rust_authority_root}/rust-toolchain-authority.env"
+    if printf '%s\n' "${rust_toolchain_authority}" | grep -qx 'rust-helper-library-mode=private-dylib'; then
+      printf 'rust-helper-capsule-path=%s\nrust-helper-copied-dylib-sha256=%s\n' \
+        "${rust_authority_dylib}" \
+        "$(bootstrap_stage3_hash_file "${rust_authority_dylib}/libLLVM.dylib")" \
+        >>"${rust_authority_root}/rust-toolchain-authority.env"
+    else
+      printf 'rust-helper-capsule-path=absent\nrust-helper-copied-dylib-sha256=absent\n' \
+        >>"${rust_authority_root}/rust-toolchain-authority.env"
+    fi
+  fi
   rust_authority_workspace_prepared=1
 }
 
@@ -2409,12 +2430,29 @@ run_rust_authority_env() {
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
   if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
   if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_validate \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1
+    for rust_env_arg in "$@"; do
+      case "$rust_env_arg" in DYLD_*=*) echo 'error: unadmitted Rust DYLD assignment' >&2; return 1 ;; esac
+    done
+    if printf '%s\n' "${rust_toolchain_authority}" | grep -qx 'rust-helper-library-mode=private-dylib'; then
+      set -- "DYLD_LIBRARY_PATH=${rust_authority_dylib}" "$@"
+    fi
     set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$cc_abs}" "$@"
     if [ "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS+x}${RUSTFLAGS+x}" != '' ]; then
       set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" "$@"
     fi
   fi
   run_logged "$rust_env_log" env -i "$@"
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_validate \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1
+    if grep -Fq 'stripping debug info with `rust-objcopy` failed' \
+      "${log_dir}/${rust_env_log}.log"; then
+      echo "error: Rust objcopy stripping failed despite Cargo success" >&2
+      return 1
+    fi
+  fi
 }
 
 run_rust_authority_cargo() {
