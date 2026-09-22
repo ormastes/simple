@@ -44,3 +44,13 @@ updating Inkwell/llvm-sys, vendored dependencies and checksums, LLVM API call
 sites, platform detection defaults and consistency checks, and native runtime
 LLVM loading compatibility, followed by backend correctness and bootstrap
 verification. This change does not claim that migration.
+
+## Focused baseline/candidate resource profile
+
+Single paired `/usr/bin/time -l` authority selection probe, both resolving the
+same pinned Clang23.1.1 (baseline PATH cc shim, candidate explicit CC): baseline
+0.01 s / 3,604,480 bytes max RSS; candidate 0.19 s / 32,751,616 bytes max RSS.
+The candidate adds a real Clang version validation subprocess; this is a bounded
+startup cost, not a compilation throughput measurement. Peak is under 32 MiB,
+well below the 6 GiB cap. No complete bootstrap performance claim is made.
+Logs: `/tmp/simple-llvm23-toolchain/{base,candidate}-profile.log`.
