@@ -26,7 +26,9 @@ checksum helper supports incremental body reads.
 
 The stream ABI symbols are explicitly exported and the focused interpreter
 spec now covers fixed ABI constants, encode/decode, malformed headers, bounded
-fields, type-specific request-kind/status/reason enums, HELLO/SUBMIT/ERROR correlation, cross-session rejection, and
+fields (including exact payload boundaries and multi-byte values), type-specific
+request-kind/status/reason enums with undefined reasons 4–6 rejected,
+HELLO/SUBMIT/ERROR correlation, cross-session rejection, and
 incremental checksum behavior. The ERROR response path preserves the exact
 pending request identity instead of being rejected unconditionally.
 
@@ -34,11 +36,13 @@ This remains source-only progress. There is no socket endpoint, guest VirtIO con
 queue driver, WM session integration, or live x86_64/RISC-V QEMU evidence.
 The wrapper must continue reporting `virtio-serial-unimplemented`; the bug
 remains open. The isolated checkout has no admitted pure-Simple `bin/simple`;
-the focused 7-example interpreter spec passed with the available bootstrap-only
-runtime as bounded development evidence. Its final measured maximum RSS was 321,432
+the focused 8-example interpreter spec passed with the available bootstrap-only
+runtime as bounded development evidence. Its final measured maximum RSS was 333,372
 KiB versus 340,404 KiB for the earlier 4-example run in the same lane. Codec
 cost is constant for a header; body checksum is linear in bytes and requires no
-body-sized scratch buffer.
+body-sized scratch buffer. Exact command, diagnostics, verdict, timing, and RSS
+output is retained at `build/evidence/virtio_stream_codec/focused-test-time.log`
+in the isolated lane.
 
 The current wrapper correctly reports `virtio-serial-unimplemented` when
 `ivshmem-plain` and the AArch64-only file-backed RAM tail are unavailable but
@@ -121,7 +125,7 @@ starts with one fixed 64-byte header:
 | 32 | 8 | session `run_id_hash` (`0` only for HELLO request/response) |
 | 40 | 8 | frame ID (`0` only for HELLO request/response) |
 | 48 | 8 | backend code |
-| 56 | 8 | request kind for requests; status/reason packing for responses |
+| 56 | 8 | request kind for HELLO/SUBMIT requests; status enum for HELLO/SUBMIT responses; reason enum for ERROR responses |
 
 The body is the canonical request or response codec, not a native struct dump.
 It has explicit field order and lengths followed by payload/image-resource or
