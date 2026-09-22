@@ -4720,7 +4720,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -4741,6 +4741,10 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
     assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
     assert!(!selected.1);
+    let symbols = super::tools::archive_defined_symbols(&selected.0).expect("inspect host-gpu archive");
+    for symbol in ["rt_gpu_provider_loaded", "rt_cuda_module_load_data_array", "rt_vulkan_compile_spirv_array"] {
+        assert!(symbols.contains(symbol) || symbols.contains(&format!("_{symbol}")), "host-gpu lacks provider loader symbol {symbol}");
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -1281,7 +1281,7 @@ int main(int argc, char** argv) {
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
         let host_gpu_core_runtime = if host_gpu_lane {
             Some(
-                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
+                super::tools::build_host_gpu_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
                     .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
             )
         } else {

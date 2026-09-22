@@ -1586,6 +1586,108 @@ GPU_CALL0(int64_t, rt_cuda_init, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_init", 3)
 GPU_CALL1(int64_t, rt_cuda_mem_alloc, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_mem_alloc", -3, int64_t)
 GPU_CALL3(int64_t, rt_cuda_memset_d32, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memset_d32", -3, int64_t, int64_t, int64_t)
 GPU_CALL3(int64_t, rt_cuda_memcpy_dtoh, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtoh", -3, int64_t, int64_t, int64_t)
+GPU_CALL1(int64_t, rt_cuda_device_get, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_get", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_device_identity, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_identity", 0, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_create, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_create", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_destroy, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_destroy", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_set_current, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_set_current", -3, int64_t)
+GPU_CALL0(int64_t, rt_cuda_ctx_synchronize, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_synchronize", -3)
+GPU_CALL1(int64_t, rt_cuda_device_compute_capability, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_compute_capability", 0, int64_t)
+GPU_CALL1(int64_t, rt_cuda_mem_free, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_mem_free", -3, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memcpy_htod, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_htod", -3, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memcpy_dtod, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtod", -3, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memset, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memset", -3, int64_t, int64_t, int64_t)
+GPU_CALL1(int64_t, rt_cuda_module_unload, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_unload", -3, int64_t)
+GPU_CALL2(int64_t, rt_cuda_module_load, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load", -3, const uint8_t *, uint64_t)
+GPU_CALL0(int64_t, rt_cuda_sync, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_sync", -3)
+
+int64_t rt_cuda_module_get_function(int64_t module, int64_t name_value) {
+    typedef int64_t (*Fn)(int64_t, const char *);
+    SimpleGpuCallPinV1 pin;
+    const uint8_t *data = rt_string_data(name_value);
+    int64_t len = rt_string_len(name_value);
+    char name[4097];
+    int64_t result;
+    if (!data || len <= 0 || len > 4096 || memchr(data, 0, (size_t)len)) return -1;
+    memcpy(name, data, (size_t)len);
+    name[len] = 0;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_module_get_function", &pin)) return -3;
+    result = ((Fn)pin.symbol)(module, name);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* C-string results must outlive the call lease: the provider may be unloaded
+ * immediately after release. CUDA's device-name ABI is bounded to 256 bytes. */
+const char *rt_cuda_device_name(int64_t device) {
+    typedef const char *(*Fn)(int64_t);
+    static SIMPLE_GPU_THREAD_LOCAL char copy[256];
+    SimpleGpuCallPinV1 pin;
+    const char *name;
+    size_t len;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_device_name", &pin)) return "No CUDA";
+    name = ((Fn)pin.symbol)(device);
+    if (!name) {
+        simple_gpu_call_release_v1(&pin);
+        return "Unknown";
+    }
+    for (len = 0; len < sizeof(copy) - 1 && name[len]; len++) copy[len] = name[len];
+    copy[len] = 0;
+    simple_gpu_call_release_v1(&pin);
+    return copy;
+}
+
+const char *rt_cuda_get_error_string(int64_t code) {
+    typedef const char *(*Fn)(int64_t);
+    static SIMPLE_GPU_THREAD_LOCAL char copy[1024];
+    SimpleGpuCallPinV1 pin;
+    const char *message;
+    size_t len;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_get_error_string", &pin)) {
+        switch (code) {
+            case 0: return "CUDA_SUCCESS";
+            case -1: return "CUDA_ERROR_INVALID_VALUE";
+            case -2: return "CUDA_ERROR_OUT_OF_MEMORY";
+            case -3: return "CUDA_ERROR_NOT_INITIALIZED";
+            case -100: return "CUDA_ERROR_NO_DEVICE";
+            case -200: return "CUDA_ERROR_INVALID_IMAGE";
+            case -218: return "CUDA_ERROR_INVALID_PTX";
+            case -301: return "CUDA_ERROR_FILE_NOT_FOUND";
+            case -500: return "CUDA_ERROR_NOT_FOUND";
+            case -700: return "CUDA_ERROR_ILLEGAL_ADDRESS";
+            case -701: return "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES";
+            default: return "CUDA_ERROR_UNKNOWN";
+        }
+    }
+    message = ((Fn)pin.symbol)(code);
+    if (!message) {
+        simple_gpu_call_release_v1(&pin);
+        return "Unknown CUDA error";
+    }
+    for (len = 0; len < sizeof(copy) - 1 && message[len]; len++) copy[len] = message[len];
+    copy[len] = 0;
+    simple_gpu_call_release_v1(&pin);
+    return copy;
+}
+
+int64_t rt_cuda_launch_kernel(int64_t module, const uint8_t *name, uint64_t length,
+        int64_t gx, int64_t gy, int64_t gz, int64_t bx, int64_t by, int64_t bz,
+        int64_t args) {
+    typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,
+        int64_t,int64_t,int64_t,int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!name || !length || length > INT32_MAX || memchr(name, 0, (size_t)length)) return -1;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_launch_kernel_name", &pin)) return -3;
+    result = ((Fn)pin.symbol)(module, (int64_t)(intptr_t)name, (int64_t)length,
+        gx, gy, gz, bx, by, bz, args);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
 
 /* Public text spans and the provider's signed integer byte-span ABI differ.
  * Convert explicitly; calling the provider through a pointer/u64 Fn is UB. */
@@ -1788,21 +1890,96 @@ int64_t rt_vulkan_async_session_snapshot_word(int64_t session, int64_t snapshot,
 GPU_CALL2(int64_t, rt_vulkan_alloc_buffer, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_alloc_buffer", 0, int64_t, int64_t)
 
 static int simple_gpu_array_to_bytes(int64_t array_value, uint8_t **bytes, int64_t *length) {
-    SplArray *array = (SplArray *)(intptr_t)array_value;
-    int64_t len = rt_array_len(array);
-    int64_t i;
+    int64_t len = rt_array_bytes_validate(array_value);
     uint8_t *out;
-    if (!array || len < 0 || len > INT32_MAX) return 0;
+    if (len < 0 || len > INT32_MAX) return 0;
     out = len == 0 ? NULL : (uint8_t *)malloc((size_t)len);
     if (len != 0 && !out) return 0;
-    for (i = 0; i < len; i++) {
-        int64_t value = rt_value_as_int(rt_array_get(array, i));
-        if (value < 0 || value > 255) { free(out); return 0; }
-        out[i] = (uint8_t)value;
-    }
+    if (rt_array_bytes_copy_checked(array_value, out, len) != len) { free(out); return 0; }
     *bytes = out;
     *length = len;
     return 1;
+}
+
+#include "runtime_gpu_vulkan_scalar_private.h"
+#include "runtime_gpu_vulkan_readback_private.h"
+#include "runtime_gpu_vulkan_pipeline_private.h"
+
+/* Core-C arrays never cross into a Rust provider as boxed RuntimeValue values.
+ * Project one owned byte copy, keep it live through the pinned raw call, then
+ * release it on both the unavailable and success paths. */
+int64_t rt_cuda_module_load_data_array(int64_t array_value) {
+    typedef int64_t (*Fn)(int64_t,int64_t);
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) || len == 0) {
+        free(bytes); return -1;
+    }
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_module_load_data_bytes", &pin)) { free(bytes); return -3; }
+    result = ((Fn)pin.symbol)((int64_t)(intptr_t)bytes, len);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes); return result;
+}
+
+int64_t rt_cuda_memcpy_htod_array(int64_t dst, int64_t array_value, int64_t count) {
+    typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) || count < 0 || count > len) {
+        free(bytes); return -1;
+    }
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_memcpy_htod", &pin)) { free(bytes); return -3; }
+    result = ((Fn)pin.symbol)(dst, (int64_t)(intptr_t)bytes, count);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes); return result;
+}
+
+int64_t rt_cuda_launch_kernel_name_array(int64_t module, int64_t array_value,
+        int64_t gx, int64_t gy, int64_t gz, int64_t bx, int64_t by, int64_t bz,
+        int64_t args) {
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len)) return -1;
+    result = rt_cuda_launch_kernel(module, bytes, (uint64_t)len, gx, gy, gz, bx, by, bz, args);
+    free(bytes); return result;
+}
+
+int64_t rt_vulkan_compile_spirv_array(int64_t array_value) {
+    typedef int64_t (*Fn)(int64_t,int64_t);
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len)) return 0;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_VULKAN,
+            "rt_vulkan_compile_spirv_raw", &pin)) { free(bytes); return 0; }
+    result = ((Fn)pin.symbol)((int64_t)(intptr_t)bytes, len);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes); return result;
+}
+
+int64_t rt_vulkan_compile_spirv(int64_t array_value) {
+    return rt_vulkan_compile_spirv_array(array_value);
+}
+
+int64_t rt_vulkan_copy_to_buffer_array(int64_t handle, int64_t array_value,
+        int64_t count, int64_t offset) {
+    typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
+    SimpleGpuCallPinV1 pin;
+    uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
+    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) || count < 0 || count > len || offset < 0) {
+        free(bytes); return 0;
+    }
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_VULKAN,
+            "rt_vulkan_copy_to_buffer_raw", &pin)) { free(bytes); return 0; }
+    result = ((Fn)pin.symbol)(handle, (int64_t)(intptr_t)bytes, count, offset);
+    simple_gpu_call_release_v1(&pin);
+    free(bytes); return result;
+}
+
+int64_t rt_vulkan_copy_to_buffer(int64_t handle, int64_t array_value, int64_t offset) {
+    if (!array_value) return 0;
+    return rt_vulkan_copy_to_buffer_array(handle, array_value,
+        rt_array_len((SplArray *)(intptr_t)array_value), offset);
 }
 
 int64_t rt_metal_compile_shader(int64_t device, int64_t source) {

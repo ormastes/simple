@@ -643,6 +643,10 @@ int64_t  rt_array_bytes_basis_ptr(SplArray* array);
 int64_t  rt_array_bytes_validate(int64_t value);
 int64_t  rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t capacity);
 int64_t  rt_array_bytes_store_checked(int64_t value, const uint8_t* bytes, int64_t length);
+/* Registered tagged-i64 arrays only. Packed bytes/u64 and tuples are rejected.
+ * Validation/copy return length, or -22 without writing output on failure. */
+int64_t  rt_array_i64_validate(int64_t value);
+int64_t  rt_array_i64_copy_checked(int64_t value, int64_t* out, int64_t capacity);
 int64_t  rt_array_header_ptr(SplArray* array);
 int8_t   rt_array_set_len_known(int64_t header_ptr, int64_t len);
 int8_t   rt_array_set_len_known_text(int64_t header_ptr, int64_t len);

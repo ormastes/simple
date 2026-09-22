@@ -374,7 +374,7 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
-fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
+fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool, include_dynload: bool) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let target = effective_target();
@@ -519,6 +519,15 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "platform/platform.h",
         "platform/windows_command_line_private.h",
     ];
+    if include_dynload {
+        runtime_inputs.extend([
+            "runtime_dynload.c",
+            "simple_gpu_provider_abi_v1.h",
+            "runtime_gpu_vulkan_scalar_private.h",
+            "runtime_gpu_vulkan_readback_private.h",
+            "runtime_gpu_vulkan_pipeline_private.h",
+        ]);
+    }
     if target.os == simple_common::target::TargetOS::Linux {
         // The portable compositor remains in the full CLI closure on Linux.
         // Reuse its canonical non-target providers so live Cocoa/Win32 calls
@@ -607,6 +616,9 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
                 .arg("-fPIC")
                 .arg("-std=gnu11");
         }
+        if include_dynload {
+            command.arg("-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1");
+        }
         let status = command
             .args(msvc_c11_atomics_flags(&cc))
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
@@ -682,11 +694,16 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false)
+    build_c_runtime_library(build_dir, false, false)
+}
+
+/// Host-GPU consumers own the dynamic provider registry, never a GPU implementation.
+pub(crate) fn build_host_gpu_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false, true)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true)
+    build_c_runtime_library(build_dir, true, false)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.

@@ -7649,6 +7649,27 @@ int64_t rt_array_bytes_basis_ptr(SplArray* a) {
 #define SPL_ARRAY_OWNER_WEAK
 #endif
 
+SPL_ARRAY_OWNER_WEAK int64_t rt_array_i64_validate(int64_t value) {
+    RtCoreArray* array = rt_core_as_registered_array(value);
+    if (!array || array->len < 0 ||
+            (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED | RT_CORE_ARRAY_FLAG_TUPLE))) return -22;
+    int64_t* items = (int64_t*)array->data;
+    if (array->len > 0 && !items) return -22;
+    for (int64_t i = 0; i < array->len; i++) {
+        if (!rt_core_is_int(items[i])) return -22;
+    }
+    return array->len;
+}
+
+SPL_ARRAY_OWNER_WEAK int64_t rt_array_i64_copy_checked(int64_t value, int64_t* out, int64_t capacity) {
+    int64_t length = rt_array_i64_validate(value);
+    if (length < 0 || capacity < length || (length > 0 && !out)) return -22;
+    RtCoreArray* array = rt_core_as_registered_array(value);
+    int64_t* items = (int64_t*)array->data;
+    for (int64_t i = 0; i < length; i++) out[i] = rt_core_as_int(items[i]);
+    return length;
+}
+
 SPL_ARRAY_OWNER_WEAK int64_t rt_array_bytes_validate(int64_t value) {
     RtCoreArray* array = rt_core_as_registered_array(value);
     if (!array || array->len < 0) return -22;
