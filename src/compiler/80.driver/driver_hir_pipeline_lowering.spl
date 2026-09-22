@@ -129,6 +129,49 @@ fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
                 ctx.modules[source.module_name], source.path)
 
 impl CompilerDriver:
+    # The normal Stage-3 path retains the phase-2 ParserModule graph, but the
+    # HIR graph and all lowering scratch allocated from it are per-source.  A
+    # direct lower_module call leaves that scratch outside the transient owner
+    # and grows RSS once for every module.  Use the same pause/promote/end
+    # protocol as the streaming reparse path, while deliberately keeping the
+    # retained parser module itself outside this scope.
+    me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool) -> Result<HirModule, text>:
+        if not rt_transient_array_scope_begin():
+            return Err("transient HIR scope unavailable for {source_path}")
+        val flat_row_count_before = bootstrap_hir_module_count()
+        val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
+        if not rt_transient_array_scope_pause():
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient HIR scope pause failed for {source_path}")
+        if not rt_transient_heap_promote(hir_module):
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR ownership promotion failed for {source_path}")
+        if not lowering.promote_diagnostics_transient_owner():
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR diagnostic ownership promotion failed for {source_path}")
+        if not lowering.promote_phase_memo_transient_owners():
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR phase memo ownership promotion failed for {source_path}")
+        val flat_row_count_after = bootstrap_hir_module_count()
+        if flat_row_count_after != flat_row_count_before:
+            if (flat_row_count_after != flat_row_count_before + 1 or
+                not bootstrap_hir_modules_promote_last()):
+                driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+                val _ended = driver_end_transient_parse_scope()
+                return Err("flat HIR row ownership promotion failed for {source_path}")
+        if not driver_promote_frontend_registry_owners():
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_end_transient_parse_scope()
+            return Err("frontend registry promotion failed during retained HIR lowering for {source_path}")
+        if not driver_end_transient_parse_scope():
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            return Err("transient HIR scope end failed for {source_path}")
+        Ok(hir_module)
+
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
@@ -153,6 +196,10 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR diagnostic ownership promotion failed for {source.path}")
+        if not lowering.promote_phase_memo_transient_owners():
+            driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR phase memo ownership promotion failed for {source.path}")
         val flat_row_count_after = bootstrap_hir_module_count()
         if flat_row_count_after != flat_row_count_before:
             if (flat_row_count_after != flat_row_count_before + 1 or
@@ -752,18 +799,29 @@ impl CompilerDriver:
                 # functions Dict. Reparse the one authoritative entry source
                 # immediately before HIR lowering so real bodies are owned by
                 # this lowering pass rather than a stale arena-backed cache.
-                if src.content != "":
-                    val reparsed_entry_module = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                    lowering.lower_parser_module_unstub(reparsed_entry_module, is_bootstrap_entry)
+                val bootstrap_module_for_hir: ParserModule = if src.content != "":
+                    parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                 else:
-                    val entry_module_for_hir = self.ctx.modules[name]
-                    lowering.lower_parser_module_unstub(entry_module_for_hir, is_bootstrap_entry)
+                    self.ctx.modules[name]
+                val bootstrap_lower_result = self.lower_retained_surface_module(
+                    lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry)
+                if bootstrap_lower_result.is_err():
+                    self.ctx.add_error(bootstrap_lower_result.unwrap_err())
+                    mem_snapshot_abort()
+                    return (self.ctx, false)
+                bootstrap_lower_result.unwrap()
             elif unstub_hir and (self.ctx.modules[name] != nil):
                 # Reuse phase 2's parsed closure module. Re-parsing every source
                 # makes entry-closure HIR lowering superlinear and bypasses the
                 # object cache before code generation starts.
                 dtrace("[DRV] branch=unstub_cached")
-                lowering.lower_parser_module_unstub(self.ctx.modules[name], is_bootstrap_entry)
+                val cached_lower_result = self.lower_retained_surface_module(
+                    lowering, self.ctx.modules[name], src.path, is_bootstrap_entry)
+                if cached_lower_result.is_err():
+                    self.ctx.add_error(cached_lower_result.unwrap_err())
+                    mem_snapshot_abort()
+                    return (self.ctx, false)
+                cached_lower_result.unwrap()
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
                 # MUST call the uniquely-named lower_parser_module_unstub: a plain
@@ -772,7 +830,13 @@ impl CompilerDriver:
                 # HIR lowering body never runs.
                 dtrace("[DRV] branch=unstub_reparse")
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                val lowered_hm: HirModule = lowering.lower_parser_module_unstub(entry_module_for_hir, is_bootstrap_entry)
+                val reparsed_lower_result = self.lower_retained_surface_module(
+                    lowering, entry_module_for_hir, src.path, is_bootstrap_entry)
+                if reparsed_lower_result.is_err():
+                    self.ctx.add_error(reparsed_lower_result.unwrap_err())
+                    mem_snapshot_abort()
+                    return (self.ctx, false)
+                val lowered_hm: HirModule = reparsed_lower_result.unwrap()
                 dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
                 lowered_hm
             else:
