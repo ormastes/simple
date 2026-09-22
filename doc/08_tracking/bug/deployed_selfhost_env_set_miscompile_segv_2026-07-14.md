@@ -657,3 +657,38 @@ environment use is the host configuration adapter's `rt_env_get(key: text) ->
 text?` read. The SFFI generator's setter result change therefore does not
 alter a SOSIX public signature or provider contract; SOSIX has no setter
 callers requiring adaptation.
+
+## GitHub issue #497 closure TODO (2026-09-22)
+
+The exact tagged `v1.0.1-beta.1` `bin/simple_native` hashes to
+`7fc570189e1d689c8c99988981a4766b0a42ba9a70dc97571c71d2a75c46823b`.
+Its x86-64 disassembly proves the mismatch: callers load the key pointer/length
+and value pointer/length into `rdi`, `rsi`, `rdx`, and `rcx`, but the linked
+`rt_env_set` forwards only `rdi` and `rsi` to `setenv`. Consequently the key
+length is interpreted as the value pointer, explaining the pre-SSpec SIGSEGV.
+The tagged bytes therefore reproduce the stale two-word provider defect; the
+source correction still requires a clean Phase 4 rebuild and deployment.
+
+The source repair is not release closure. Complete every item below with the
+same admitted Linux x86-64 Phase 4 full CLI that will be packaged; a Rust seed,
+another architecture, or a source-only gate is not substitute evidence:
+
+- **Linux x86-64 Phase 4 / candidate admission:** run
+  `scripts/check/check-env-runtime-abi.shs --binary <candidate>` and require the
+  environment set/get round trip to pass without a signal.
+- **Linux x86-64 Phase 4 / focused compiler regression:** run
+  `test/01_unit/compiler/backend/text_extern_abi_ptr_len_registry_spec.spl`
+  in interpreter mode and require all three examples, including semantic
+  two-text to raw four-word `rt_env_set`, to pass.
+- **Linux x86-64 Phase 4 / CLI surface:** run `<candidate> --version` and
+  `<candidate> test --help`; both must exit zero and identify a pure-Simple
+  runtime.
+- **Linux x86-64 Phase 4 / consumer boundary:** run the external Simply
+  project-proof SSpec from issue #497 through `<candidate> test`; require a
+  non-vacuous `Results:` line and zero failed examples.
+- **Tagged release asset / clean Ubuntu runner:** download the immutable asset,
+  verify its recorded SHA-256 matches the admitted candidate, then repeat the
+  version, help, and consumer-SSpec commands against the downloaded bytes.
+
+Until all five receipts exist, issue #497 and this P1 remain OPEN even though
+the focused source ABI gate passes.
