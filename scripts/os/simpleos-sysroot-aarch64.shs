@@ -25,6 +25,21 @@ cd "$REPO_ROOT"
 toolchain_self_test() (
   fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-aarch64-tools.XXXXXX") || exit 1
   trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+  host_clang=$(command -v clang 2>/dev/null) || {
+    echo 'FAIL: Clang is required for the SimpleOS wchar_t header check' >&2
+    exit 1
+  }
+  cat > "$fixture/wchar-smoke.c" <<'EOF'
+#include <stddef.h>
+#include <wchar.h>
+_Static_assert(sizeof(wchar_t) == __SIZEOF_WCHAR_T__, "wchar_t ABI");
+int simpleos_wchar_smoke(wchar_t value) { return (int)value; }
+EOF
+  "$host_clang" -target aarch64-unknown-none-elf -fsyntax-only \
+    -isystem "$REPO_ROOT/src/os/libc/include" "$fixture/wchar-smoke.c" || {
+      echo 'FAIL: SimpleOS wchar.h conflicts with the compiler wchar_t ABI' >&2
+      exit 1
+    }
   mkdir -p "$fixture/bin" "$fixture/override"
   for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
     case "$tool" in
