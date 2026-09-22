@@ -14,8 +14,16 @@ RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-}"
 RUNTIME_LIB_EXPECTED_SHA256="${SIMPLE_WM_RUNTIME_LIB_SHA256:-}"
 FONT_ASSET='assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf'
 FONT_ASSET_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
-# Filled from the exact raw RGB crop after the first current-path capture.
+# The title raster must come from the registered default instance, rather than
+# merely any valid-looking Noto Sans Mono variable-font axis selection.
+GLYPH_FONT_IDENTITY='sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100'
+GLYPH_ORACLE_ID='font-identity-live-pixels-and-eight-title-cells-v1'
+# This value is set only after a real calibration candidate has been reviewed.
+# Shape metrics below are diagnostics; they must never substitute for this pin.
 GLYPH_RGB_SHA256=pending
+GLYPH_MIN_INK_PIXELS=64
+GLYPH_MIN_INK_ROWS=4
+GLYPH_MIN_WIDE_CELLS=6
 GLYPH_CALIBRATION="${LINUX_HOSTED_WM_CALIBRATE_GLYPH:-0}"
 TIMEOUT_SECS="${LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS:-60}"
 BUILD_TIMEOUT_SECS="${LINUX_HOSTED_WM_BUILD_TIMEOUT_SECS:-600}"
@@ -55,6 +63,7 @@ SOURCE_MANIFEST="$BUILD_DIR/native-source-manifest.sha256"
 SOURCE_MANIFEST_AFTER="$BUILD_DIR/native-source-manifest.after.sha256"
 SOURCE_MANIFEST_ID='native-build-entry-closure:src/os/hosted/hosted_entry.spl:src/os+src/lib:all-spl:sha256-v1'
 CALIBRATION_RGB="$BUILD_DIR/terminal-title.deliberate-red.rgb"
+CALIBRATION_RECORD="$BUILD_DIR/glyph-calibration-candidate.env"
 BASELINE_SNAPSHOT="$BUILD_DIR/baseline.snapshot.json"
 BASELINE_CAPTURE="$BUILD_DIR/baseline.framebuffer.ppm"
 INPUT_SNAPSHOT="$BUILD_DIR/input.snapshot.json"
@@ -70,7 +79,7 @@ mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
     "$COMMAND_PATH" "$WINDOW_ENV" "$WINDOW_PNG" "$GLYPH_RGB" \
     "$WINDOW_GLYPH_RGB" "$EVIDENCE_ENV" "$SOURCE_DIFF" "$SOURCE_MANIFEST" \
-    "$SOURCE_MANIFEST_AFTER" "$CALIBRATION_RGB" "$REPORT_PATH" \
+    "$SOURCE_MANIFEST_AFTER" "$CALIBRATION_RGB" "$CALIBRATION_RECORD" "$REPORT_PATH" \
     "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" \
     "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" \
     "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE"
@@ -187,6 +196,74 @@ capture_argb_checksum() {
         }'
 }
 
+glyph_crop_metrics() {
+    # The crop begins two pixels before the fixed Terminal title origin.  Each
+    # of its eight monospaced character cells spans seven pixels.  Find the
+    # modal RGB background separately for each titlebar row, then count pixels
+    # which differ from it.  That remains robust to the titlebar gradient while
+    # rejecting an empty crop and a partial title.
+    convert -size 60x18 -depth 8 "rgb:$1" txt:- 2>/dev/null | awk \
+        -v min_ink="$GLYPH_MIN_INK_PIXELS" \
+        -v min_rows="$GLYPH_MIN_INK_ROWS" \
+        -v min_wide_cells="$GLYPH_MIN_WIDE_CELLS" '
+        /^[0-9]+,[0-9]+:/ {
+            coord = $1
+            sub(/:$/, "", coord)
+            split(coord, xy, ",")
+            x = xy[1] + 0
+            y = xy[2] + 0
+            # ImageMagick has emitted both compact `(r,g,b)` and spaced
+            # `( r, g, b)` txt:- tuples.  Parse the tuple from the full line
+            # so the oracle does not depend on its whitespace formatting.
+            rgb = $0
+            sub(/^.*\(/, "", rgb)
+            sub(/\).*/, "", rgb)
+            gsub(/[[:space:]]/, "", rgb)
+            count[y SUBSEP rgb]++
+            pixel[x SUBSEP y] = rgb
+        }
+        END {
+            for (key in count) {
+                split(key, parts, SUBSEP)
+                y = parts[1]
+                if (count[key] > mode_count[y]) {
+                    mode_count[y] = count[key]
+                    mode[y] = parts[2]
+                }
+            }
+            for (key in pixel) {
+                split(key, parts, SUBSEP)
+                x = parts[1] + 0
+                y = parts[2] + 0
+                if (pixel[key] != mode[y]) {
+                    ink++
+                    if (x >= 2 && x < 58) {
+                        cell = int((x - 2) / 7)
+                        cells[cell] = 1
+                        cell_pixels[cell]++
+                        cell_columns[cell SUBSEP x] = 1
+                        cell_rows[cell SUBSEP y] = 1
+                    }
+                }
+            }
+            for (cell = 0; cell < 8; cell++) {
+                if (cells[cell]) populated++
+                for (key in cell_columns) {
+                    split(key, parts, SUBSEP)
+                    if (parts[1] == cell) columns[cell]++
+                }
+                for (key in cell_rows) {
+                    split(key, parts, SUBSEP)
+                    if (parts[1] == cell) rows[cell]++
+                }
+                if (columns[cell] >= 2 && rows[cell] >= min_rows) wide_cells++
+            }
+            printf "ink_pixels=%d;populated_cells=%d;wide_cells=%d", ink, populated, wide_cells
+            exit !(ink >= min_ink && populated == 8 && wide_cells >= min_wide_cells)
+        }
+    '
+}
+
 glyph_oracle_mode() {
     if [ "$1" != pending ]; then
         printf pinned
@@ -195,6 +272,38 @@ glyph_oracle_mode() {
     else
         printf calibration-required
     fi
+}
+
+glyph_crop_diagnostics() {
+    glyph_metrics="$(glyph_crop_metrics "$1")" || return 1
+    [ "$font_identity" = "$GLYPH_FONT_IDENTITY" ] && [ "$live_glyph_match" = true ]
+}
+
+glyph_digest_matches() {
+    [ "$glyph_mode" = pinned ] && [ "$glyph_sha" = "$GLYPH_RGB_SHA256" ]
+}
+
+write_glyph_calibration_candidate() {
+    [ "$GLYPH_CALIBRATION" = 1 ] || return 1
+    [ "$glyph_diagnostics_status" = pass ] || return 1
+    [ "$calibration_status" = pass ] || return 1
+    {
+        echo "schema=linux-hosted-wm-glyph-calibration-candidate/v1"
+        echo "review_status=unreviewed"
+        echo "oracle=$GLYPH_ORACLE_ID"
+        echo "glyph_crop_sha256=$glyph_sha"
+        echo "glyph_metrics=$glyph_metrics"
+        echo "glyph_diagnostics_status=$glyph_diagnostics_status"
+        echo "font_identity=$font_identity"
+        echo "font_asset_sha256=$font_sha"
+        echo "source_revision=$source_revision"
+        echo "source_diff_sha256=$source_diff_sha"
+        echo "native_source_manifest_sha256=$source_manifest_admitted_sha"
+        echo "simple_bin_sha256=$simple_bin_sha"
+        echo "native_artifact_sha256=$hosted_bin_sha"
+        echo "live_window_match=$live_glyph_match"
+        echo "deliberate_red_status=$calibration_status"
+    } >"$CALIBRATION_RECORD"
 }
 
 write_native_source_manifest() {
@@ -276,9 +385,14 @@ emit() {
         echo "linux_hosted_wm_live_window_live_window_status=$window_status"
         echo "linux_hosted_wm_live_window_glyph_crop_status=$glyph_status"
         echo "linux_hosted_wm_live_window_glyph_crop_sha256=$glyph_sha"
+        echo "linux_hosted_wm_live_window_glyph_crop_oracle=$GLYPH_ORACLE_ID"
+        echo "linux_hosted_wm_live_window_glyph_crop_metrics=$glyph_metrics"
+        echo "linux_hosted_wm_live_window_glyph_crop_diagnostics_status=$glyph_diagnostics_status"
+        echo "linux_hosted_wm_live_window_glyph_font_expected_identity=$GLYPH_FONT_IDENTITY"
         echo "linux_hosted_wm_live_window_glyph_crop_expected_sha256=$GLYPH_RGB_SHA256"
         echo "linux_hosted_wm_live_window_glyph_crop_live_match=$live_glyph_match"
         echo "linux_hosted_wm_live_window_deliberate_red_status=$calibration_status"
+        echo "linux_hosted_wm_live_window_glyph_calibration_candidate=$(artifact_status "$CALIBRATION_RECORD")"
         echo "linux_hosted_wm_live_window_focus_status=$focus_status"
         echo "linux_hosted_wm_live_window_pointer_status=$pointer_status"
         echo "linux_hosted_wm_live_window_keyboard_status=$keyboard_status"
@@ -370,7 +484,7 @@ emit() {
         echo "- runtime provider admission: ${runtime_provider_admission_sha256:--}"
         echo "- wrapper SHA-256: ${wrapper_sha:--}"
         echo "- font identity: ${font_identity:--}"
-        echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--})"
+        echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--}, oracle=$GLYPH_ORACLE_ID, ${glyph_metrics:--})"
         echo "- live window: $WINDOW_PNG"
         echo "- framebuffer: $CAPTURE_LIVE"
         echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status text=$text_status receipt=$input_receipt_status replay=$replay_status move=$move_status maximize=$maximize_status restore=$restore_status"
@@ -389,6 +503,8 @@ framebuffer_status=fail
 window_status=fail
 glyph_status=fail
 glyph_sha=""
+glyph_metrics=""
+glyph_diagnostics_status=fail
 live_glyph_match=false
 calibration_status=fail
 focus_status=fail
@@ -485,9 +601,66 @@ if [ "$SELF_TEST" -eq 1 ]; then
         echo "linux_hosted_wm_live_window_self_test_status=fail"
         exit 1
     }
-    [ "$(glyph_oracle_mode pending 0)" = calibration-required ]
-    [ "$(glyph_oracle_mode pending 1)" = calibration-only ]
-    [ "$(glyph_oracle_mode pinned 0)" = pinned ]
+    # The source-contract self-test stays host-tool independent.  Its fixture
+    # is ImageMagick txt:- syntax, the exact interface glyph_crop_metrics uses;
+    # production still requires the real convert executable before any capture.
+    convert() {
+        test_input=""
+        for test_arg in "$@"; do
+            case "$test_arg" in rgb:*) test_input=${test_arg#rgb:} ;; esac
+        done
+        case "$test_input:$*" in
+            *glyph-fixture*)
+                case "$test_input" in
+                    *missing*) test_cells=7; test_columns=2 ;;
+                    *bars*) test_cells=8; test_columns=1 ;;
+                    *) test_cells=8; test_columns=2 ;;
+                esac
+                awk -v cells="$test_cells" -v columns="$test_columns" 'BEGIN {
+                    print "# ImageMagick pixel enumeration: 60,18,255,rgb"
+                    for (y = 0; y < 18; y++) for (x = 0; x < 60; x++) {
+                        ink = y >= 5 && y < 9 && x >= 2 && x < 2 + cells * 7 && ((x - 2) % 7 < columns)
+                        if (ink) printf "%d,%d: (255,255,255) #FFFFFF  rgb(255,255,255)\n", x, y
+                        else printf "%d,%d: (17,18,19) #111213  rgb(17,18,19)\n", x, y
+                    }
+                }'
+                ;;
+            *checksum-fixture*) printf '\001\002\003\377' ;;
+            *) return 1 ;;
+        esac
+    }
+    glyph_fixture="$BUILD_DIR/glyph-fixture.ppm"
+    font_identity="$GLYPH_FONT_IDENTITY"
+    live_glyph_match=true
+    glyph_crop_diagnostics "$glyph_fixture"
+    [ "$glyph_metrics" = "ink_pixels=64;populated_cells=8;wide_cells=8" ]
+    if glyph_crop_diagnostics "$BUILD_DIR/glyph-fixture-missing.ppm"; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    if glyph_crop_diagnostics "$BUILD_DIR/glyph-fixture-bars.ppm"; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    font_identity='sha256=wrong;axes=wght=400,wdth=100'
+    if glyph_crop_diagnostics "$glyph_fixture"; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    font_identity="$GLYPH_FONT_IDENTITY"
+    digest_fixture="$BUILD_DIR/glyph-digest-fixture.rgb"
+    printf '\001\002\003\004' >"$digest_fixture"
+    glyph_sha="$(sha256_file "$digest_fixture")"
+    GLYPH_RGB_SHA256="$glyph_sha"
+    glyph_mode="$(glyph_oracle_mode "$GLYPH_RGB_SHA256" 0)"
+    glyph_digest_matches
+    printf '\377' | dd of="$digest_fixture" bs=1 seek=0 conv=notrunc 2>/dev/null
+    glyph_sha="$(sha256_file "$digest_fixture")"
+    if glyph_digest_matches; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    GLYPH_RGB_SHA256=pending
     checksum_fixture="$BUILD_DIR/checksum-fixture.ppm"
     printf 'P6\n1 1\n255\n\001\002\003' >"$checksum_fixture"
     [ "$(capture_argb_checksum "$checksum_fixture")" = 2130772484 ]
@@ -560,8 +733,11 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_source_vcs=$source_vcs"
     echo "linux_hosted_wm_live_window_self_test_source_provenance_status=$source_provenance_status"
     echo "linux_hosted_wm_live_window_self_test_simple_bin_default=explicit-required"
-    echo "linux_hosted_wm_live_window_self_test_pending_glyph=calibration-required"
-    echo "linux_hosted_wm_live_window_self_test_calibration_glyph=calibration-only"
+    echo "linux_hosted_wm_live_window_self_test_glyph_oracle=pass"
+    echo "linux_hosted_wm_live_window_self_test_glyph_missing_character=rejected"
+    echo "linux_hosted_wm_live_window_self_test_glyph_bars=rejected"
+    echo "linux_hosted_wm_live_window_self_test_glyph_wrong_font=rejected"
+    echo "linux_hosted_wm_live_window_self_test_glyph_corrupt_digest=rejected"
     echo "linux_hosted_wm_live_window_self_test_native_source_manifest=stable"
     echo "linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected"
     echo "linux_hosted_wm_live_window_self_test_text_receipt=required"
@@ -937,7 +1113,7 @@ case "$frame_line" in
         frame_marker=pass
         ;;
 esac
-font_identity="$(printf '%s\n' "$frame_line" | sed -n 's/.* identity=\([^ ;]*\).*/\1/p')"
+font_identity="$(printf '%s\n' "$frame_line" | sed -n 's/.* identity=\([^ ]*\);target=.*/\1/p')"
 if [ "$font_identity" = "" ] || [ "$font_identity" = bitmap-default ]; then
     emit fail selected-font-identity-missing
     exit 1
@@ -956,6 +1132,10 @@ fi
 if [ -s "$CAPTURE_LIVE" ] && [ "$(convert "$CAPTURE_LIVE" -format '%w %h' info:)" = "1024 720" ]; then
     framebuffer_status=pass
 fi
+if ! jq -e '[.compositor.windows[] | select(.title == "Terminal")] | length == 1' "$SNAPSHOT_LIVE" >/dev/null; then
+    emit fail terminal-title-semantic-missing
+    exit 1
+fi
 
 # The live-proof Terminal title is fixed at 58+66, 76+8. Compare the exact
 # production framebuffer crop with the pixels presented by the real X11 window.
@@ -964,17 +1144,20 @@ convert "$WINDOW_PNG" -crop 60x18+122+82 +repage -depth 8 "rgb:$WINDOW_GLYPH_RGB
 glyph_sha="$(sha256_file "$GLYPH_RGB")"
 if cmp -s "$GLYPH_RGB" "$WINDOW_GLYPH_RGB"; then live_glyph_match=true; fi
 glyph_mode="$(glyph_oracle_mode "$GLYPH_RGB_SHA256" "$GLYPH_CALIBRATION")"
-if [ "$glyph_mode" = calibration-required ]; then
-    emit fail "glyph-oracle-pending-calibration-required-$glyph_sha"
-    exit 1
-fi
-if [ "$glyph_mode" = pinned ] && [ "$glyph_sha" = "$GLYPH_RGB_SHA256" ] && [ "$live_glyph_match" = true ]; then
-    glyph_status=pass
-fi
 cp "$GLYPH_RGB" "$CALIBRATION_RGB"
 printf '\377' | dd of="$CALIBRATION_RGB" bs=1 seek=0 conv=notrunc 2>/dev/null
 if [ "$(sha256_file "$CALIBRATION_RGB")" != "$glyph_sha" ]; then
     calibration_status=pass
+fi
+if glyph_crop_diagnostics "$GLYPH_RGB"; then
+    glyph_diagnostics_status=pass
+fi
+if glyph_digest_matches && [ "$glyph_diagnostics_status" = pass ]; then
+    glyph_status=pass
+fi
+if [ "$glyph_mode" = calibration-required ]; then
+    emit fail "glyph-oracle-pending-calibration-required-$glyph_sha"
+    exit 1
 fi
 
 issue 1 snapshot && retain_phase baseline 1 snapshot-only "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" || {
@@ -1117,11 +1300,11 @@ evidence_except_glyph_complete() {
         && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]
 }
 
-if [ "$glyph_mode" = calibration-only ]; then
-    if evidence_except_glyph_complete && [ "$live_glyph_match" = true ]; then
-        emit fail "glyph-oracle-calibration-only-$glyph_sha"
+if [ "$GLYPH_CALIBRATION" = 1 ]; then
+    if evidence_except_glyph_complete && write_glyph_calibration_candidate; then
+        emit fail "glyph-oracle-calibration-candidate-$glyph_sha"
     else
-        emit fail live-font-or-event-evidence-incomplete
+        emit fail glyph-oracle-calibration-candidate-invalid
     fi
     exit 1
 fi
