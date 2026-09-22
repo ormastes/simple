@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+guard=${RSS_GUARD_UNDER_TEST:-$root/scripts/resource/process-tree-rss-watchdog.pl}
+fail() { echo "FAIL: $*" >&2; exit 1; }
+mkdir "$tmp/bin"
+export RSS_TEST_REAL_PS RSS_TEST_PS_DELAY RSS_TEST_PS_FAIL_AFTER
+RSS_TEST_REAL_PS=$(command -v ps)
+RSS_TEST_PS_DELAY=.15
+RSS_TEST_PS_FAIL_AFTER=$tmp/never
+cat >"$tmp/bin/ps" <<'EOF'
+#!/usr/bin/perl
+use Time::HiRes qw(sleep);
+exit 77 if -e $ENV{RSS_TEST_PS_FAIL_AFTER};
+sleep($ENV{RSS_TEST_PS_DELAY});
+exec {$ENV{RSS_TEST_REAL_PS}} $ENV{RSS_TEST_REAL_PS}, @ARGV;
+EOF
+chmod +x "$tmp/bin/ps"
+"$tmp/bin/ps" -p $$ >/dev/null
+# A valid observation may outlast the cadence without becoming a failed read.
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/slow.env" -- sleep .65
+grep -Fxq 'status=complete' "$tmp/slow.env" || fail 'slow valid observation failed'
+grep -Fxq 'observation_budget_ms=1000' "$tmp/slow.env" || fail 'missing observation bound'
+grep -Fxq 'hard_memory_limit=0' "$tmp/slow.env" || fail 'claimed hard memory cap'
+awk -F= '
+    /^sample_gap_max_ms=/ { gap=$2 }
+    /^sample_duration_max_ms=/ { duration=$2 }
+    /^sample_overruns=/ { overruns=$2 }
+    /^session_checks=/ { checks=$2 }
+    END { exit !(gap >= 150 && duration >= 150 && duration < 1000 && overruns > 0 && checks > 1) }
+' "$tmp/slow.env" || fail 'slow sampling evidence concealed timing or SID observations'
+
+# A hung observer still refuses startup and terminates within a bounded time.
+RSS_TEST_PS_DELAY=10
+begin=$(date +%s)
+status=0
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/hung.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/started" >"$tmp/hung.log" 2>&1 || status=$?
+elapsed=$(($(date +%s) - begin))
+[ "$status" -eq 89 ] && [ ! -e "$tmp/started" ] || fail 'hung sampler launched workload'
+[ "$elapsed" -lt 8 ] || fail "hung sampler was unbounded: $elapsed seconds"
+grep -Fxq 'status=rss-measurement-failed' "$tmp/hung.env" || fail 'missing hung observer failure'
+
+# Read failure after launch must kill the anchored root, even if it persists
+# during cleanup. Its receipt must not claim that the tree was measured empty.
+RSS_TEST_PS_DELAY=.15
+RSS_TEST_PS_FAIL_AFTER=$tmp/fail-now
+status=0
+PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/failed.env" -- \
+    /bin/sh -c 'echo $$ >"$1"; touch "$2"; exec sleep 10' sh \
+    "$tmp/root.pid" "$RSS_TEST_PS_FAIL_AFTER" >"$tmp/failed.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] || fail 'persistent sampling failure did not fail closed'
+grep -Fxq 'status=rss-measurement-failed' "$tmp/failed.env" || fail 'missing read failure'
+grep -Fxq 'quiescent=0' "$tmp/failed.env" || fail 'unmeasured cleanup claimed quiescence'
+kill -0 "$(cat "$tmp/root.pid")" 2>/dev/null && fail 'anchored workload survived read failure'
+echo 'PASS: slow valid observations, honest cadence, bounded hang, persistent read failure cleanup'

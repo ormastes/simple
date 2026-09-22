@@ -45,6 +45,10 @@ my $session_root_confirmed = 0;
 my ($session_admission, $parent_admission_sha) = ('', '');
 my %unexpected_sid;
 my $sample_started_at;
+# The cadence is a scheduling target, not a deadline for a host-wide process
+# observation. Keep slow but valid samples bounded separately from that target.
+my $observation_budget_ms = 1000;
+my ($sample_duration_max_ms, $sample_overruns) = (0, 0);
 
 sub hash_handle {
     my ($fh) = @_;
@@ -66,7 +70,7 @@ sub observe_sessions {
     my ($budget, @pids) = @_;
     verify_session_helper();
     return {} unless @pids;
-    $budget > 0 or die "session observation exceeded sample budget";
+    $budget > 0 or die "session observation exceeded observation budget";
     my %expected = map { $_ => 1 } @pids;
     my %result;
     my $observer = open(my $fh, '-|', $session_helper, '--sid', @pids);
@@ -132,7 +136,7 @@ sub install_session_helper {
     $helper_sha = hash_handle($helper_fd);
     # Cold Darwin executable admission can exceed two seconds under host load.
     # No workload exists yet: allow one bounded warmup, while snapshot() keeps
-    # the strict interval budget for every observation after workload creation.
+    # a separate bounded observation deadline after workload creation.
     my $own_sid = observe_sessions(5, $$)->{$$};
     $own_sid > 0 or die "cannot determine supervisor session";
     if ($opt{'session-mode'} eq 'inherit') {
@@ -192,7 +196,7 @@ sub snapshot {
     defined($ps_pid) or die "cannot start ps";
     my %all;
     local $SIG{ALRM} = sub { kill 'KILL', $ps_pid; die "ps timed out" };
-    alarm($opt{'interval-ms'} / 1000);
+    alarm($observation_budget_ms / 1000);
     while (my $line = <$ps>) {
         $line =~ /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/
             or die "malformed ps row";
@@ -207,13 +211,17 @@ sub snapshot {
     if ($leader && defined($session_helper) && !$helper_failed &&
         ($session_root_confirmed || (exists($all{$leader}) && $all{$leader}{group} == $leader))) {
         my @live = members(\%all);
-        my $remaining = $opt{'interval-ms'} / 1000 - (time - $sample_started_at);
+        my $remaining = $observation_budget_ms / 1000 - (time - $sample_started_at);
         my $sids = observe_sessions($remaining, @live);
         $session_root_confirmed = 1 if ($sids->{$leader} || 0) == $session_id;
         for my $id (keys %$sids) {
             $unexpected_sid{$id} = $sids->{$id} if $sids->{$id} && $sids->{$id} != $session_id;
         }
     }
+    my $duration_ms = (time - $sample_started_at) * 1000;
+    $duration_ms <= $observation_budget_ms or die "process observation exceeded observation budget";
+    $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
+    ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
     return \%all;
 }
 
@@ -314,6 +322,8 @@ sub receipt {
     my $body = "status=$status\nexit_status=$code\nroot_pid=$leader\n" .
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
+        "observation_budget_ms=$observation_budget_ms\n" .
+        "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .
         "containment_scope=observed-descendants-and-process-groups\n" .
         "hard_memory_limit=0\nquiescent=$quiet\n" .
         "session_id=$session_id\nsession_checks=$session_checks\n" .
