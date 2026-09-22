@@ -5,6 +5,34 @@
 - **Severity:** high (blocks the stage3-compiled stage-4 lane entirely; seed-compiled fallback lane unaffected)
 - **Lane:** bootstrap `--full-bootstrap --mode=one-binary --backend=cranelift`, x86_64-linux
 
+## 2026-09-22 audit — OPEN; native scale admission still missing
+
+The historical updates below are investigation records, not a current claim
+that every native allocation is unreclaimable. Transient parser string
+reclamation landed in `a323583b0dc`; entry-closure scoped parsing was subsequently
+wired in `07d2ac8834d` and `e7380eaee50`. The current source at `e0dd873da1b`
+uses the selected frontend provider seam: its scalar provider calls
+`parse_and_build_module_scoped(..., false)`, while streaming surface parsing
+owns an outer transient scope. The existence or name of the helper therefore
+does not prove reclamation is enabled on the retained entry-closure path.
+
+[Draft #1282](https://github.com/ormastes/simple/pull/1282) changes retained HIR
+ownership and explicitly lacks native ownership/RSS validation. [Draft #1285](https://github.com/ormastes/simple/pull/1285)
+changes process shard selection and also awaits runtime admission. Neither
+closes this parse-phase row. The source owner is the driver/frontend scope and
+runtime ownership boundary; `primary_expr.spl` alone is not an evidenced owner.
+
+The bounded Windows attempt used an admitted older bootstrap executable, but
+all four cases were refused before parsing because Stage 4 accepts only its
+canonical CLI/OS entry. Its refusal time/RSS is not parser performance evidence.
+No baseline-versus-candidate improvement or cross-host regression verdict is
+claimed. The new native scale probe checks retained AST literal values after
+all modules parse and includes malformed-source rejection; it still requires
+compilation and execution by an admitted phase artifact.
+
+Exact provenance, commands, limits, and remaining admission work:
+[2026-09-22 report](../../09_report/stage4_parse_memory_audit_2026-09-22.md).
+
 ## Symptom
 When the stage-3 self-hosted binary compiles the full CLI (stage 4, `main.spl`,
 1777 files), RSS grows ~160MB per parsed file and reached **64GB at 403/1777
