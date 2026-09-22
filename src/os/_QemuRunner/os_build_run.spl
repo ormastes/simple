@@ -188,6 +188,9 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val args = os_native_build_args(target, backend_name)
     val objcopy_prefix = _objcopy_path_prefix()
     val simple_bin = _find_simple_binary_for_target(target, backend_name)
+    if simple_bin == "":
+        print "[build][{arch_label}] phase=tooling FAILED: no runnable pure-Simple compiler"
+        return false
     val stamp_content = _native_build_stamp_content(target, backend_name, args, simple_bin, log_mode)
     if build_marker == "" and _native_build_cache_hit(target, stamp_content, simple_bin):
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
@@ -412,23 +415,24 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     """
     if not rt_file_exists(candidate):
         return false
-    val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
-    exit_code == 0 and stdout != ""
+    # The Rust seed hides its warning under bootstrap env inherited from an OS
+    # build, so force the version probe to expose its identity.
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "env", ["SIMPLE_BOOTSTRAP=0", "SIMPLE_RUST_SEED_WARNING=1", candidate, "--version"], 5000
+    )
+    simpleos_candidate_version_is_selfhosted(stdout, stderr, exit_code)
+
+pub fn simpleos_candidate_version_is_selfhosted(stdout: text, stderr: text, exit_code: i32) -> bool:
+    """Admit only a runnable compiler whose version output lacks the Rust seed banner."""
+    val version = stdout + "\n" + stderr
+    exit_code == 0 and stdout != "" and not version.contains("bootstrap seed only") and not version.contains("Rust-built Simple binary")
 
 fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
     if not _simple_binary_is_valid(candidate):
         return false
     if backend_name != "llvm":
         return true
-    val probe_args = [
-        "native-build",
-        "--backend", "llvm",
-        "--source", "src",
-        "--entry", "src/app/cli/main.spl",
-        "--target", "definitely-invalid-target",
-        "-o", "/tmp/simple_backend_probe.elf",
-        "--linker-script", "examples/09_embedded/simple_os/arch/riscv64/linker.ld"
-    ]
+    val probe_args = ["native-build", "--mode", "definitely-invalid-mode"]
     val (stdout, stderr, exit_code) = _run_candidate_admission_pinned(
         candidate, probe_args, _os_probe_timeout_ms()
     )
@@ -437,7 +441,7 @@ fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
 
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "":
+    if env_bin != "" and _simple_binary_is_valid(env_bin):
         return env_bin
     # Probe in priority order. Prefer freshly built local binaries first so
     # QEMU/native-build lanes see the current source tree instead of an older
@@ -445,10 +449,9 @@ fn _find_simple_binary() -> text:
     # Each candidate is validated via `<candidate> --version` (exit 0 +
     # non-empty stdout) so stale or segfaulting binaries fall through.
     val candidates: [text] = [
-        "src/compiler_rust/target/debug/simple",
-        "src/compiler_rust/target/bootstrap/simple",
-        "src/compiler_rust/target/release/simple",
         "bin/simple",
+        "release/x86_64-unknown-linux-gnu/simple",
+        "bin/release/x86_64-unknown-linux-gnu/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
         "bin/release/darwin-aarch64/simple",
@@ -458,21 +461,19 @@ fn _find_simple_binary() -> text:
     for cand in candidates:
         if _simple_binary_is_valid(cand):
             return cand
-    "bin/simple"
+    ""
 
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
-    if backend_name == "llvm" and target.arch == Architecture.X86 and _simple_binary_supports_backend("src/compiler_rust/target/bootstrap/simple", backend_name):
-        return "src/compiler_rust/target/bootstrap/simple"
-    if backend_name == "llvm" and _simple_binary_supports_backend("src/compiler_rust/target/release/simple", backend_name):
-        return "src/compiler_rust/target/release/simple"
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "" and _simple_binary_supports_backend(env_bin, backend_name):
         return env_bin
+    val env_simple_bin = rt_env_get("SIMPLE_BIN") ?? ""
+    if env_simple_bin != "" and _simple_binary_supports_backend(env_simple_bin, backend_name):
+        return env_simple_bin
     val candidates: [text] = [
-        "src/compiler_rust/target/debug/simple",
-        "src/compiler_rust/target/bootstrap/simple",
-        "src/compiler_rust/target/release/simple",
         "bin/simple",
+        "release/x86_64-unknown-linux-gnu/simple",
+        "bin/release/x86_64-unknown-linux-gnu/simple",
         "bin/release/aarch64-apple-darwin-macho/simple",
         "bin/release/macos-arm64/simple",
         "bin/release/darwin-aarch64/simple",
@@ -482,7 +483,7 @@ fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
     for cand in candidates:
         if _simple_binary_supports_backend(cand, backend_name):
             return cand
-    _find_simple_binary()
+    ""
 
 fn _build_sources(target: OsTarget) -> [text]:
     if _is_riscv64_live_helper_target(target):
