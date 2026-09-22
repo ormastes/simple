@@ -108,11 +108,73 @@ snapshot. This does not establish reuse of full bootstrap authority: Git,
 bootstrap script, helper bundle, command transcript, and planner bindings are
 separate identities and must still match their consumers.
 
-This sparse checkout intentionally omits the complete source inventory and
-cannot resolve a production admission against current source. Do not invoke
-the downstream matrix here or adopt these scripts into the running candidate.
-The main agent must first review actual Stage2 admission and all relevant
-source/helper/Git bindings against the full materialized checkout.
+The initial sparse checkout omitted the complete source inventory and could
+not resolve a production admission. The main agent subsequently authorized a
+full LFS-smudge-disabled checkout, initialization of the recorded SPipe gitlink,
+and current-HEAD materialization in this isolated repository. Available D:
+space before expansion was 69,522,481,152 bytes, above the 10 GiB build floor.
+The resulting receipt and canonical source snapshot are to be retained under
+`build/mini_builds/phase2-prepared-source/`, after committing this report so
+the materializer sees a fixed HEAD. Completion is established by those runtime
+evidence files, not this prospective description. No Phase2 build is authorized
+until the main agent reviews the real Stage2 admission and snapshot comparison.
+
+## Supported external admitted-compiler route
+
+Contract inspection confirms that a full prepared source checkout may consume
+the admitted `392a899` compiler at its original external path. The Phase2
+binding contract does not require the same repository HEAD, Git-state hash, or
+helper hash. It requires exact admission-v2 candidate path/hash, stable
+admission bytes, the admission-bound runtime snapshot, and a recomputed canonical
+compiler-source snapshot equal to `source_snapshot_sha256` in that admission.
+The snapshot format uses paths relative to the source root, but includes link
+text and resolved relative targets. Equal committed source trees are therefore
+necessary evidence, not sufficient proof of equal materialized snapshots.
+
+The source roots and `command-snapshot.shs` are byte-identical in the prepared
+tree and `392a899`. The explicit resolve operation must still prove their
+actual on-disk equality. No contract override or receipt rewriting is needed
+or permitted. The compiler cannot simply be relocated: its admission's
+`candidate_path` is checked exactly.
+
+After the real admission exists and the full prepared checkout is ready, the
+main agent can use this supported sequence (not executed during preparation):
+
+```sh
+set -eu
+phase2_root=/d/b-phase2
+phase2_admission=/d/b-sync/build/bootstrap-sync-20260922/stage3/x86_64-pc-windows-msvc/stage2-admitted/admission.env
+phase2_field() {
+    awk -F= -v key="$1" '$1 == key { count++; value=substr($0,index($0,"=")+1) }
+        END { if (count != 1) exit 2; print value }' "$2"
+}
+phase2_compiler=$(phase2_field candidate_path "$phase2_admission")
+phase2_compiler_sha=$(phase2_field candidate_sha256 "$phase2_admission")
+phase2_runtime=$(phase2_field runtime_authority_path "$phase2_admission")
+phase2_work="$phase2_root/build/mini_builds/phase2-real-$phase2_compiler_sha"
+phase2_capsule=$(sh "$phase2_root/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+    "$phase2_compiler" "$phase2_runtime" "$phase2_root/build/phase2-runtime-capsules")
+sh "$phase2_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
+    "$phase2_compiler" "$phase2_root" "$phase2_work"
+SIMPLE_NO_STUB_FALLBACK=1 sh "$phase2_root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage2 --compiler="$phase2_compiler" --compiler-sha256="$phase2_compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$phase2_root" \
+    --runtime-path="$phase2_capsule" --work-root="$phase2_work" \
+    --cache-root="$phase2_root/build/bootstrap/tool_cache"
+```
+
+`publish` adds a new capsule binding sidecar beside the original compiler;
+it does not rewrite `admission.env`. Existing differing bindings are rejected.
+Permission failure or any source/runtime mismatch is a blocker to investigate,
+not permission to thaw or forge existing authority.
+
+The Stage3 planner-admission-v2 key set binds parent compiler, Stage2 sanity
+and provenance, runtime snapshot, Git state, planner source/closure, and planner
+execution. It contains no Phase2 verification summary/test-receipt field, and
+Stage3 resume does not consume one. Thus a planner bootstrap receipt does not
+itself prove this Phase2 gate. Retain the Phase2 summary, command-owner receipts,
+executed-count inventories and logs separately; the main agent must require
+their PASS before scheduling Stage3 as the restart plan directs.
 
 ## Downstream gate, not executed
 
