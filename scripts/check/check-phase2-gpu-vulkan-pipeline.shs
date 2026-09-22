@@ -1,0 +1,66 @@
+#!/bin/sh
+# Focused synthetic ABI qualification; no physical GPU or phase admission.
+set -eu
+[ "$#" = 4 ] || { echo 'usage: checker COMPILER CAPSULE SHARED_OWNER OUTPUT_DIR' >&2; exit 2; }
+compiler=$1 capsule=$2 shared=$3 dest=$4
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+if [ "${PHASE2_GPU_PIPELINE_RESUME:-0}" = 0 ]; then
+[ ! -e "$dest" ]
+mkdir -p "$dest/owner" "$dest/cache"
+cp "$shared/src/runtime/runtime_dynload.c" "$dest/owner/runtime_dynload.c"
+cp "$shared/src/runtime/runtime_native.c" "$dest/owner/runtime_native.c"
+cp "$shared/src/runtime/runtime.h" "$dest/owner/runtime.h"
+shasum -a 256 "$compiler" "$capsule/phase2-runtime-capsule.env" \
+    "$dest/owner/runtime_dynload.c" "$dest/owner/runtime_native.c" \
+    "$dest/owner/runtime.h" "$root/src/runtime/runtime_gpu_vulkan_pipeline_private.h" > "$dest/identities.txt"
+else
+    shasum -a 256 -c "$dest/identities.txt" > "$dest/resume-identities.log"
+    [ -s "$dest/fixture.a" ]
+fi
+. /tmp/simple-llvm23-toolchain/env.sh
+export SIMPLE_LLVM_REQUIRED_VERSION=23.1.1 SIMPLE_NO_STUB_FALLBACK=1
+# The archive route delegates to the Rust bootstrap compiler. This fixture is
+# native ABI evidence, not self-hosted frontend or compiler-matrix evidence.
+export SIMPLE_NATIVE_BUILD_RUST=1
+export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000
+guard() {
+    receipt=$1; shift
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --rss-cap-mode=enforce \
+        --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=300 \
+        --session-mode=new --receipt="$receipt" -- "$@"
+}
+if [ "${PHASE2_GPU_PIPELINE_RESUME:-0}" = 0 ]; then
+guard "$dest/native-build.rss.env" "$compiler" native-build --backend cranelift \
+    --emit-archive --no-mangle --entry "$root/test/02_integration/runtime/phase2_gpu_vulkan_pipeline.spl" \
+    --entry-closure --runtime-bundle core-c-bootstrap --runtime-path "$capsule" \
+    --threads 1 --cache-dir "$dest/cache" --output "$dest/fixture.a" > "$dest/native-build.log" 2>&1
+fi
+inc="$root/test/02_integration/runtime"
+"$CC" -std=c11 -O2 -fPIC -shared -I"$shared/src/runtime" -I"$inc" \
+    "$inc/phase2_gpu_vulkan_pipeline_provider.c" -o "$dest/provider.dylib"
+"$CC" -std=c11 -O2 -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 -I"$dest/owner" \
+    -I"$shared/src/runtime" -I"$shared/src/runtime/platform" \
+    -c "$dest/owner/runtime_native.c" -o "$dest/runtime.o" > "$dest/runtime-build.log" 2>&1
+"$CC" -std=c11 -O2 -I"$dest/owner" -I"$root/src/runtime" -I"$shared/src/runtime" \
+    -DPHASE2_GPU_PIPELINE_LOADER_SOURCE=\"$dest/owner/runtime_dynload.c\" \
+    -c "$inc/phase2_gpu_vulkan_pipeline_loader.c" -o "$dest/loader.o" > "$dest/loader-build.log" 2>&1
+"$CC" -std=c11 -O2 -I"$dest/owner" -I"$shared/src/runtime" \
+    -DPHASE2_GPU_PIPELINE_LOADER_SOURCE=\"$dest/owner/runtime_dynload.c\" \
+    -DPHASE2_GPU_PIPELINE_BASELINE=1 \
+    -c "$inc/phase2_gpu_vulkan_pipeline_loader.c" -o "$dest/baseline-loader.o"
+set +e
+"$CC" -std=c11 -O2 -Wl,-dead_strip -Wl,-exported_symbol,_rt_gpu_provider_unload -I"$shared/src/runtime" \
+    "$inc/phase2_gpu_vulkan_pipeline_check.c" "$dest/fixture.a" \
+    "$dest/baseline-loader.o" "$dest/runtime.o" -lm -o "$dest/baseline" > "$dest/baseline-link.log" 2>&1
+baseline_status=$?
+set -e
+[ "$baseline_status" != 0 ]
+rg -q 'rt_vulkan_create_compute_pipeline|rt_vulkan_push_constants|rt_vulkan_present_buffer_regions' "$dest/baseline-link.log"
+"$CC" -std=c11 -O2 -Wl,-dead_strip -Wl,-exported_symbol,_rt_gpu_provider_unload -I"$shared/src/runtime" \
+    "$inc/phase2_gpu_vulkan_pipeline_check.c" "$dest/fixture.a" \
+    "$dest/loader.o" "$dest/runtime.o" -lm -o "$dest/check" > "$dest/link.log" 2>&1
+digest=$(shasum -a 256 "$dest/provider.dylib" | awk '{print $1}')
+guard "$dest/check.rss.env" /usr/bin/time -l "$dest/check" "$dest/provider.dylib" "$digest" > "$dest/check.log" 2>&1
+rg -q '^phase2_gpu_vulkan_pipeline=PASS ' "$dest/check.log"
+printf 'phase2_gpu_vulkan_pipeline=PASS evidence=%s\n' "$dest"
