@@ -1,0 +1,80 @@
+# Narrow WM-to-render-evidence seam.
+#
+# The producer accepts only an already-admitted presentation.  It binds the
+# real firmware/build digest, boot identity, monotonically admitted frame,
+# scanout identity, and committed framebuffer readback into one receipt.  It
+# owns no global state and retains no pixel buffers between frames.
+
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    BackendRenderReceiptHeader,
+    BackendRenderReceiptEvent,
+    BackendRenderReceiptTrailer
+}
+use os.compositor.baremetal_wm_present_owner.{
+    BaremetalWmPresentReceiptV1,
+    BaremetalWmScanoutIdentityV1
+}
+use os.compositor.engine2d_render_evidence.{
+    SimpleOsBuildIdentityV1,
+    SimpleOsRenderReceipt,
+    simpleos_render_receipt
+}
+
+pub struct BackendRenderReceiptEmissionV1:
+    accepted: bool
+    reason: text
+    boot_id: u64
+    frame_id: u64
+    receipt: SimpleOsRenderReceipt?
+
+fn _render_emission_rejected(
+    reason: text,
+    boot_id: u64,
+    frame_id: u64
+) -> BackendRenderReceiptEmissionV1:
+    BackendRenderReceiptEmissionV1(
+        accepted: false,
+        reason: reason,
+        boot_id: boot_id,
+        frame_id: frame_id,
+        receipt: nil)
+
+pub fn produce_backend_render_receipt_after_present_v1(
+    arch_code: u32,
+    backend_code: u32,
+    firmware: SimpleOsBuildIdentityV1,
+    boot_id: u64,
+    scanout: BaremetalWmScanoutIdentityV1,
+    present: BaremetalWmPresentReceiptV1,
+    pixels: [u32]
+) -> BackendRenderReceiptEmissionV1:
+    if not present.accepted:
+        return _render_emission_rejected("presentation-not-admitted", boot_id, present.frame_id)
+    if boot_id == 0u64:
+        return _render_emission_rejected("boot-id-invalid", boot_id, present.frame_id)
+    if present.frame_id == 0u64:
+        return _render_emission_rejected("frame-id-invalid", boot_id, present.frame_id)
+    if scanout.architecture != arch_code:
+        return _render_emission_rejected("architecture-mismatch", boot_id, present.frame_id)
+    if scanout.scanout_id == 0u64:
+        return _render_emission_rejected("scanout-id-invalid", boot_id, present.frame_id)
+    if scanout.stride != scanout.width * 4u32 or scanout.bpp != 32u32:
+        return _render_emission_rejected("scanout-layout-invalid", boot_id, present.frame_id)
+    val receipt = simpleos_render_receipt(
+        arch_code,
+        backend_code,
+        firmware,
+        boot_id,
+        present.frame_id,
+        scanout.scanout_id,
+        scanout.width,
+        scanout.height,
+        pixels)
+    if receipt == nil:
+        return _render_emission_rejected("receipt-invalid", boot_id, present.frame_id)
+    BackendRenderReceiptEmissionV1(
+        accepted: true,
+        reason: "ready-for-serial-and-capture",
+        boot_id: boot_id,
+        frame_id: present.frame_id,
+        receipt: receipt)

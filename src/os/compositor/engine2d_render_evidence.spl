@@ -14,7 +14,6 @@ use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
     backend_render_receipt_header_valid,
     backend_render_receipt_trailer_valid
 }
-use os.drivers.framebuffer.ramfb.{FirmwareSha256, parse_sha256_hex_words}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 
 val SIMPLEOS_RENDER_RUNTIME_QEMU: u32 = 1u32
@@ -28,6 +27,38 @@ struct SimpleOsRenderReceipt:
     header: BackendRenderReceiptHeader
     event: BackendRenderReceiptEvent
     trailer: BackendRenderReceiptTrailer
+
+pub struct SimpleOsBuildIdentityV1:
+    word0: u64
+    word1: u64
+    word2: u64
+    word3: u64
+
+fn _render_hex_word(value: text, start: i64) -> u64?:
+    if start < 0 or start + 16 > value.len():
+        return nil
+    val digits = "0123456789abcdef"
+    var out = 0u64
+    var index = start
+    while index < start + 16:
+        val digit = digits.index_of(value[index].to_text())
+        if digit < 0:
+            return nil
+        out = (out << 4) | digit.to_u64()
+        index = index + 1
+    Some(out)
+
+fn _render_sha256_words(value: text) -> SimpleOsBuildIdentityV1?:
+    if value.len() != 64:
+        return nil
+    val word0 = _render_hex_word(value, 0)
+    val word1 = _render_hex_word(value, 16)
+    val word2 = _render_hex_word(value, 32)
+    val word3 = _render_hex_word(value, 48)
+    if word0 == nil or word1 == nil or word2 == nil or word3 == nil:
+        return nil
+    Some(SimpleOsBuildIdentityV1(
+        word0: word0!, word1: word1!, word2: word2!, word3: word3!))
 
 fn simpleos_argb_canonical_bytes(pixels: [u32]) -> [u8]:
     """Encode packed ARGB pixels as stable A,R,G,B bytes."""
@@ -68,7 +99,7 @@ fn simpleos_nonblank_pixel_count(pixels: [u32]) -> u64:
 fn simpleos_render_receipt(
     arch_code: u32,
     backend_code: u32,
-    firmware: FirmwareSha256,
+    firmware: SimpleOsBuildIdentityV1,
     boot_id: u64,
     frame_id: u64,
     surface_handle: u64,
@@ -81,8 +112,7 @@ fn simpleos_render_receipt(
         return nil
     if pixels.len().to_u64() != width.to_u64() * height.to_u64():
         return nil
-    val pixel_hash = parse_sha256_hex_words(
-        simpleos_argb_pixel_sha256(pixels).bytes())
+    val pixel_hash = _render_sha256_words(simpleos_argb_pixel_sha256(pixels))
     if pixel_hash == nil:
         return nil
     val digest = pixel_hash!

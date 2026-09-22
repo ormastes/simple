@@ -4,6 +4,16 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+Status: fixed in `codex/simpleos-render-receipt` (2026-09-22).
+
+The guest producer is now `os.compositor.backend_render_receipt_producer`.
+It accepts exactly one already-admitted `BaremetalWmPresentReceiptV1` seam and
+binds the firmware/build digest, boot ID, frame ID, scanout identity, geometry,
+and committed ARGB pixels.  The x86 capture control module emits fixed-width
+`W/A/K` records and accepts an ACK only when both boot and frame identities
+match.  The focused producer spec includes malformed, reordered, truncated,
+wrong-frame ACK, rejected-presentation, and 256-repeat stateless cases.
+
 - Status: open
 - Priority: P0
 - Affects: REQ-016, REQ-017, REQ-018, REQ-020, REQ-021

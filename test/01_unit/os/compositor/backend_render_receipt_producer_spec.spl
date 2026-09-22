@@ -1,0 +1,129 @@
+use std.spec.*
+use std.common.string_core.{char_from_code}
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    backend_render_receipt_header_wire_byte_at,
+    backend_render_receipt_header_wire_byte_count,
+    backend_render_receipt_event_wire_byte_at,
+    backend_render_receipt_event_wire_byte_count,
+    backend_render_receipt_trailer_wire_byte_at,
+    backend_render_receipt_trailer_wire_byte_count
+}
+use common.renderdoc.backend_render_receipt_wire.{parse_backend_render_receipt_wire}
+use os.compositor.baremetal_wm_present_owner.{
+    WM_PRESENT_ARCH_X86_64,
+    BaremetalWmPresentOwnerV1,
+    BaremetalWmScanoutIdentityV1
+}
+use os.compositor.engine2d_render_evidence.{
+    SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+    SimpleOsBuildIdentityV1
+}
+use os.compositor.backend_render_receipt_producer.{produce_backend_render_receipt_after_present_v1}
+use os.kernel.arch.x86.render_capture_ack.{
+    RenderCaptureAckV1,
+    render_capture_control_wire_byte_at,
+    render_capture_control_wire_byte_count
+}
+
+fn scanout() -> BaremetalWmScanoutIdentityV1:
+    BaremetalWmScanoutIdentityV1(
+        architecture: WM_PRESENT_ARCH_X86_64,
+        scanout_id: 29u64,
+        width: 2u32,
+        height: 1u32,
+        stride: 8u32,
+        bpp: 32u32)
+
+fn valid_emission():
+    var owner = BaremetalWmPresentOwnerV1.create(scanout())
+    val presented = owner.commit_present(scanout(), 3u64, 7u64, 1u64, true)
+    produce_backend_render_receipt_after_present_v1(
+        WM_PRESENT_ARCH_X86_64,
+        SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+        SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+        11u64,
+        scanout(),
+        presented,
+        [0xff112233u32, 0xff445566u32])
+
+fn receipt_wire() -> text:
+    val emission = valid_emission()
+    val receipt = emission.receipt!
+    var wire = ""
+    var i = 0
+    while i < backend_render_receipt_header_wire_byte_count():
+        wire = wire + char_from_code(backend_render_receipt_header_wire_byte_at(receipt.header, i).to_i64())
+        i = i + 1
+    i = 0
+    while i < backend_render_receipt_event_wire_byte_count():
+        wire = wire + char_from_code(backend_render_receipt_event_wire_byte_at(receipt.event, i).to_i64())
+        i = i + 1
+    i = 0
+    while i < backend_render_receipt_trailer_wire_byte_count():
+        wire = wire + char_from_code(backend_render_receipt_trailer_wire_byte_at(receipt.trailer, i).to_i64())
+        i = i + 1
+    wire
+
+describe "SimpleOS backend render receipt producer":
+    it "binds admitted build boot frame scanout and committed pixels":
+        val emission = valid_emission()
+        expect(emission.accepted).to_be(true)
+        expect(emission.boot_id).to_equal(11u64)
+        expect(emission.frame_id).to_equal(7u64)
+        val parsed = parse_backend_render_receipt_wire(receipt_wire())
+        expect(parsed.valid).to_be(true)
+        expect(parsed.header!.boot_id).to_equal(11u64)
+        expect(parsed.header!.frame_id).to_equal(7u64)
+        expect(parsed.header!.surface_handle).to_equal(29u64)
+
+    it "rejects a frame that the WM presentation owner did not admit":
+        var owner = BaremetalWmPresentOwnerV1.create(scanout())
+        val rejected = owner.commit_present(scanout(), 3u64, 7u64, 1u64, false)
+        val emission = produce_backend_render_receipt_after_present_v1(
+            WM_PRESENT_ARCH_X86_64,
+            SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+            11u64,
+            scanout(),
+            rejected,
+            [0xff112233u32, 0xff445566u32])
+        expect(emission.accepted).to_be(false)
+        expect(emission.reason).to_equal("presentation-not-admitted")
+
+    it "replays malformed reordered and truncated receipt streams fail closed":
+        val valid = receipt_wire()
+        val event_start = valid.index_of("BRR1 E")
+        val trailer_start = valid.index_of("BRR1 T")
+        val header = valid[0:event_start]
+        val event = valid[event_start:trailer_start]
+        val trailer = valid[trailer_start:valid.len()]
+        expect(parse_backend_render_receipt_wire("BRR1 Z\n").code).to_equal("unknown-record-kind")
+        expect(parse_backend_render_receipt_wire(event + header + trailer).code).to_equal("event-out-of-order")
+        expect(parse_backend_render_receipt_wire(header + event).code).to_equal("truncated-receipt")
+
+    it "acknowledges only the exact boot and frame announced for capture":
+        var ack = RenderCaptureAckV1.create(11u64, 7u64)
+        var i = 0
+        while i < render_capture_control_wire_byte_count():
+            ack.feed(render_capture_control_wire_byte_at(65u8, 11u64, 7u64, i))
+            i = i + 1
+        expect(ack.ack_accepted()).to_be(true)
+        expect(ack.confirmation_wire_byte_at(5)).to_equal(75u8)
+
+        var wrong_frame = RenderCaptureAckV1.create(11u64, 7u64)
+        i = 0
+        while i < render_capture_control_wire_byte_count():
+            wrong_frame.feed(render_capture_control_wire_byte_at(65u8, 11u64, 8u64, i))
+            i = i + 1
+        expect(wrong_frame.ack_accepted()).to_be(false)
+        expect(wrong_frame.failed()).to_be(true)
+
+    it "keeps repeated producer calls stateless and identity stable":
+        var iteration = 0
+        var accepted = 0
+        while iteration < 256:
+            val emission = valid_emission()
+            if emission.accepted and emission.boot_id == 11u64 and emission.frame_id == 7u64:
+                accepted = accepted + 1
+            iteration = iteration + 1
+        expect(accepted).to_equal(256)
