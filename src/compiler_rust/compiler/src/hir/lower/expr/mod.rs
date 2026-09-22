@@ -1,6 +1,7 @@
 mod access;
 mod calls;
 mod collections;
+mod comprehension;
 mod contracts;
 pub(crate) mod control;
 mod helpers;
@@ -219,6 +220,12 @@ impl Lowerer {
             Expr::UnwrapOrReturn { expr, default } => self.lower_unwrap_or_return(expr, default, ctx),
             // Range expression: start..end or start..=end
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
+            Expr::ListComprehension {
+                expr,
+                pattern,
+                iterable,
+                condition,
+            } => self.lower_list_comprehension(expr, pattern, iterable, condition.as_deref(), ctx),
             _ => {
                 if self.lenient_types {
                     Ok(HirExpr {
