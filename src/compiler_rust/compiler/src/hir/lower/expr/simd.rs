@@ -324,7 +324,17 @@ impl Lowerer {
 
         let qualified_name = format!("{}.{}", class_name, method);
 
-        let args_hir = self.lower_call_args(args, ctx)?;
+        let mut args_hir = self.lower_call_args(args, ctx)?;
+        if args.iter().all(|arg| arg.name.is_none()) {
+            if let Some(params) = self.fn_param_defaults.get(&qualified_name).cloned() {
+                for default in params.iter().skip(args_hir.len()) {
+                    match default {
+                        Some(expr) if Self::is_constant_default(expr) => args_hir.push(self.lower_expr(expr, ctx)?),
+                        _ => break,
+                    }
+                }
+            }
+        }
 
         // Look up the return type from the module's functions
         let return_ty = self
