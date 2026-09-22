@@ -29,3 +29,12 @@ emergency maximum and separate decimal 1 GB ordinary-compile acceptance.
 
 Work stopped at the user's explicit push-as-is request. No performance PASS or
 strict containment launch approval is implied by this delivery.
+
+2026-09-22 follow-up: the persistent Darwin syscall observer removes per-sample
+ps/SID executable startup and limits RSS queries to the selected workload.
+Three interleaved 3,500-function measurements on the current loaded host gave
+8.835996 s plain versus 10.281471 s guarded median (+16.36%, +1.445475 s).
+The final receipt's maximum sample duration was 18.984 ms with zero overruns.
+Two helpers are now compiled/admitted before each invocation; startup overhead
+is still open. These numbers are not directly comparable across host loads or
+an immutable final-head benchmark. See `macos_watchdog_hostwide_ps_timeout_20260922.md`.
