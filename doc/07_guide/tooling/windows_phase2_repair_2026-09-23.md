@@ -102,6 +102,38 @@ The complete Trace32/CMM source lane was checkpointed locally as
 
 ## Remaining work and scheduling
 
+### Core-C inherited spawn boundary, resumed check
+
+The missing `rt_process_spawn_inherit` now has a core-C implementation in
+`runtime_process.c` and a declaration in `runtime.h`. Windows uses Unicode
+paths/environment, child-only literal wrapper routing, an absolute system
+shell with AutoRun/delayed expansion disabled, an explicit three-stream handle
+allowlist, and a PID-keyed process-handle owner. Blocking wait, timeout retention,
+signed native status and exactly-once wait cleanup use that owner. POSIX uses
+`posix_spawn`; its environment copy assumes no concurrent environment mutation.
+This does not repair pre-existing hosted HANDLE/PID differences or POSIX liveness
+polls that reap exit status.
+
+The resumed deterministic fixture at base
+`69005a35bbc50883c45e7acadac604830dbfb709` compiled, linked and ran once: all three
+statuses were 0, with `child:hello`, `child-stderr`, and `spawn-inherit PASS`.
+It verified real Windows execution from a spaces/%/!/ampersand/Unicode path,
+child-only marker filtering, route spoof resistance, unrelated inheritable
+handle exclusion, timeout followed by wait, repeated/invalid wait, signed -42
+exit and missing-wrapper refusal. The executable SHA-256 was
+`038cea1944c17a40f542aad3608b4fddda14f4d7bc983059dcd91544901eab9f`.
+Evidence and exact commands:
+`build/mini_builds/phase2-abi-spawn/resume-20260923/`; previous failed cycles
+remain in the adjacent handoff. Only the fixture's stale stdin comment changed
+after the run. This focused PASS does not admit repaired sources or validate
+the full compiler/runner. Independent review accepted this scoped Windows
+boundary; POSIX behavior and full-CLI integration remain unverified. The
+retained driver prints stdout/stderr for inspection rather than asserting exact
+stream contents automatically. The tracked companion fixture
+`src/runtime/test/rt_process_spawn_inherit_selfcheck.cmd` must be copied as
+`simple_mcp_server.cmd` beside the executable named `selfcheck.exe`; it has the
+same commands as the wrapper used by the successful run.
+
 No new admission is scheduled. Remaining field-type, optional narrowing, global
 symbol, enum/API, and per-file timeout failures must not be hidden by narrowing
 the full CLI/test-runner entries or disabling backends.
