@@ -1406,10 +1406,12 @@ impl Lowerer {
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
-                if f.params.iter().any(|p| p.default.is_some()) {
-                    self.fn_param_defaults
-                        .insert(f.name.clone(), f.params.iter().map(|p| p.default.clone()).collect());
-                }
+                let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
+                // An all-None vector is authoritative too: a declaration with
+                // no defaults must not borrow an imported namesake's defaults.
+                self.fn_param_defaults
+                    .insert(symbol, f.params.iter().map(|p| p.default.clone()).collect());
             }
         }
     }
@@ -1454,11 +1456,11 @@ impl Lowerer {
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
 
         self.module.name = ast_module.name.clone();
-        self.collect_fn_param_defaults(ast_module);
         // Codegen-side consumer of the flattened import-binding markers, so
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
@@ -2138,11 +2140,11 @@ impl Lowerer {
 
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
-        self.collect_fn_param_defaults(ast_module);
         // Codegen-side consumer of the flattened import-binding markers, so
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
