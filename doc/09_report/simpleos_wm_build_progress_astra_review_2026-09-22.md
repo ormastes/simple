@@ -80,3 +80,10 @@ the runtime artifact.
   `src/os` and `src/lib` trees).
 - Build-harness bounded time/RSS observation: PASS.
 - New live guest frame-time/max-RSS receipt: UNAVAILABLE, not substituted.
+
+## Deferred environment TODO
+
+TODO: after the Linux bootstrap publishes an admitted self-hosted `bin/simple`,
+run `sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` in the
+SimpleOS QEMU phase and retain the live guest frame-time and maximum-RSS
+receipt. This draft does not treat source equivalence as that runtime proof.
