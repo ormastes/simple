@@ -1,0 +1,83 @@
+#!/bin/sh
+# Synthetic ABI evidence only. Pass an admitted-producer archive for native proof.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-phase2-gpu-vulkan-scalar.shs NEW_DIR [NATIVE_ARCHIVE]}
+native_archive=${2:-}
+[ ! -e "$out" ] || { echo 'evidence directory already exists' >&2; exit 2; }
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
+cc=${CC:-cc}
+case $(uname -s) in
+  Darwin) strip_flag=-Wl,-dead_strip; time_flag=-l ;;
+  *) strip_flag=-Wl,--gc-sections; time_flag=-v ;;
+esac
+fixture="$root/test/02_integration/runtime/phase2_gpu_vulkan_scalar.c"
+for kind in good optional rejected wrong; do
+    case "$kind" in
+      good) flag=-DPHASE2_SCALAR_ABI=1 ;;
+      optional) flag=-DPHASE2_SCALAR_OMIT_OPTIONAL ;;
+      rejected) flag=-DPHASE2_SCALAR_OMIT_REQUIRED ;;
+      wrong) flag=-DPHASE2_SCALAR_ABI=99 ;;
+    esac
+    "$cc" -std=gnu11 -O1 -fPIC -shared -DPHASE2_SCALAR_PROVIDER "$flag" \
+      "$fixture" -o "$out/$kind.so"
+done
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+  -c "$root/src/runtime/runtime_native.c" -o "$out/native.o"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DPHASE2_SCALAR_LOADER -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+  -c "$fixture" -o "$out/loader.o"
+"$cc" -std=gnu11 -O1 -I"$root/src/runtime" "$strip_flag" "$fixture" \
+  "$out/native.o" "$out/loader.o" -lm -lpthread -o "$out/scalar-check"
+for kind in good optional rejected wrong absent; do
+  /usr/bin/time "$time_flag" "$out/scalar-check" "$out/$kind.so" "$kind" \
+    >"$out/$kind.log" 2>"$out/$kind.time"
+  grep -q "phase2_gpu_vulkan_scalar: $kind PASS (29 symbols)" "$out/$kind.log"
+done
+/usr/bin/time "$time_flag" "$out/scalar-check" "$out/good.so" race \
+  >"$out/race.log" 2>"$out/race.time"
+grep -q 'shutdown/text lifetime PASS' "$out/race.log"
+# Sabotage the real production lock sites, not a provider-only stand-in.
+sed -e 's/if (!simple_gpu_scalar_text_lock())/if (0)/g' \
+    -e 's/simple_gpu_scalar_text_unlock();/(void)0;/g' \
+    "$root/src/runtime/runtime_gpu_vulkan_scalar_private.h" >"$out/unguarded.h"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DPHASE2_SCALAR_LOADER -DPHASE2_SCALAR_HEADER="\"$out/unguarded.h\"" \
+  -I"$root/src/runtime" -I"$root/src/runtime/platform" -c "$fixture" -o "$out/unguarded.o"
+"$cc" -std=gnu11 -O1 -I"$root/src/runtime" "$strip_flag" "$fixture" \
+  "$out/native.o" "$out/unguarded.o" -lm -lpthread -o "$out/unguarded-check"
+status=0
+"$out/unguarded-check" "$out/good.so" race >"$out/unguarded.log" 2>&1 || status=$?
+[ "$status" = 73 ]
+grep -q 'shutdown/text copy race detected' "$out/unguarded.log"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DPHASE2_SCALAR_LOADER -DPHASE2_SCALAR_BASELINE -I"$root/src/runtime" \
+  -I"$root/src/runtime/platform" -c "$fixture" -o "$out/baseline.o"
+if "$cc" -std=gnu11 -O1 -I"$root/src/runtime" "$strip_flag" "$fixture" \
+    "$out/native.o" "$out/baseline.o" -lm -lpthread -o "$out/baseline-check" \
+    >"$out/baseline-link.log" 2>&1; then
+  echo 'baseline unexpectedly linked' >&2; exit 1
+fi
+grep -q 'rt_vulkan_bind_buffer' "$out/baseline-link.log"
+grep -q 'rt_vulkan_device_name' "$out/baseline-link.log"
+if [ -n "$native_archive" ]; then
+  "$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    -c "$root/src/runtime/runtime_legacy_core.c" -o "$out/legacy.o"
+  "$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    -c "$root/src/runtime/runtime_string_ffi.c" -o "$out/string.o"
+  "$cc" -std=gnu11 -O1 -DPHASE2_SCALAR_NATIVE_SUPPORT -I"$root/src/runtime" \
+    "$strip_flag" "$fixture" "$native_archive" "$out/native.o" "$out/loader.o" \
+    "$out/legacy.o" "$out/string.o" -lm -lpthread -o "$out/native-boundary"
+  SIMPLE_VULKAN_PROVIDER_PATH="$out/good.so" /usr/bin/time "$time_flag" "$out/native-boundary" \
+    >"$out/native-boundary.log" 2>"$out/native-boundary.time"
+  grep -q 'phase2_gpu_vulkan_scalar native: PASS' "$out/native-boundary.log"
+fi
+if [ "$(uname -s)" = Darwin ]; then
+  otool -L "$out/scalar-check" >"$out/dependencies.txt"
+  if grep -E 'good\.so|libvulkan' "$out/dependencies.txt"; then exit 1; fi
+fi
+printf 'phase2_gpu_vulkan_scalar: C ABI PASS; native_archive=%s\n' "${native_archive:-not-run}"
