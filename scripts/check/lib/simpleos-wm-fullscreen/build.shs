@@ -3,25 +3,28 @@ wm_native_build_with_progress() {
     shift
     "$@" >"$wm_build_log" 2>&1 &
     BUILD_PID=$!
-    wm_elapsed=0
     wm_poll_seconds=${SIMPLEOS_WM_PROGRESS_POLL_SECONDS:-5}
-    while kill -0 "$BUILD_PID" 2>/dev/null; do
-        sleep "$wm_poll_seconds" &
-        BUILD_POLL_PID=$!
-        wait "$BUILD_POLL_PID" || true
-        BUILD_POLL_PID=""
-        kill -0 "$BUILD_PID" 2>/dev/null || break
-        wm_elapsed=$((wm_elapsed + wm_poll_seconds))
-        if [ "$wm_elapsed" -ge "${SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS:-60}" ]; then
-            printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
-                "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
-                "$(wc -c <"$wm_build_log")" >&2
-            wm_elapsed=0
-        fi
-    done
+    (
+        wm_elapsed=0
+        while kill -0 "$BUILD_PID" 2>/dev/null; do
+            sleep "$wm_poll_seconds"
+            kill -0 "$BUILD_PID" 2>/dev/null || break
+            wm_elapsed=$((wm_elapsed + wm_poll_seconds))
+            if [ "$wm_elapsed" -ge "${SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS:-60}" ]; then
+                printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
+                    "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
+                    "$(wc -c <"$wm_build_log")" >&2
+                wm_elapsed=0
+            fi
+        done
+    ) &
+    BUILD_POLL_PID=$!
     wait "$BUILD_PID"
     wm_result=$?
     BUILD_PID=""
+    kill "$BUILD_POLL_PID" 2>/dev/null || true
+    wait "$BUILD_POLL_PID" 2>/dev/null || true
+    BUILD_POLL_PID=""
     return "$wm_result"
 }
 

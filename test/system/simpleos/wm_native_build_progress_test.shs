@@ -19,14 +19,23 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
-SIMPLEOS_WM_PROGRESS_POLL_SECONDS=1
-SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS=1
-export SIMPLEOS_WM_PROGRESS_POLL_SECONDS SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS
 wm_native_build_with_progress "$TEST_TMP/$1.log" sh -c 'echo $$ > "$TEST_TMP/worker.pid"; exec sleep "$1"' sh "$2"
 SH
 chmod +x "$tmp/runner.sh"
 export TEST_TMP="$tmp"
 
+unset SIMPLEOS_WM_PROGRESS_POLL_SECONDS SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS
+start_ns=$(date +%s%N)
+"$tmp/runner.sh" quick 0 >"$tmp/quick.out" 2>&1
+elapsed_ns=$(($(date +%s%N) - start_ns))
+[ "$elapsed_ns" -lt 1000000000 ] || {
+    printf 'quick command waited for progress poll: %s ns\n' "$elapsed_ns" >&2
+    exit 1
+}
+
+SIMPLEOS_WM_PROGRESS_POLL_SECONDS=1
+SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS=1
+export SIMPLEOS_WM_PROGRESS_POLL_SECONDS SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS
 "$tmp/runner.sh" complete 2 >"$tmp/complete.out" 2>&1
 grep -q 'native-build active attempt=1 log_bytes=' "$tmp/complete.out"
 ! kill -0 "$(cat "$tmp/worker.pid")" 2>/dev/null
@@ -46,4 +55,4 @@ worker_pid=$(cat "$tmp/worker.pid")
 kill -TERM "$runner_pid"
 wait "$runner_pid" 2>/dev/null || true
 ! kill -0 "$worker_pid" 2>/dev/null
-printf 'PASS: WM native-build progress completion, failure, and signal cleanup\n'
+printf 'PASS: WM native-build progress latency, completion, failure, and signal cleanup\n'
