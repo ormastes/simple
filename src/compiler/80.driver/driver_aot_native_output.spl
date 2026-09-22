@@ -46,7 +46,7 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
 use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
-    FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
+    FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1, FrozenNativeCapsuleConfigV1,
     frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
@@ -1502,8 +1502,10 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
 
     val entry_module_name = bootstrap_entry_module_name(ctx)
     val capsules = ctx.freeze_native_module_capsules_v1([entry_module_name],
-        output, backend_name, "", env_get_nullable("SIMPLE_NATIVE_CPU") ?? "",
-        driver_opt_level, is_release)
+        output, FrozenNativeCapsuleConfigV1(backend_name: backend_name,
+            target: "", target_cpu: env_get_nullable("SIMPLE_NATIVE_CPU") ?? "",
+            opt_level: driver_opt_level, is_release: is_release,
+            provider_receipt_hash: ""))
     if not capsules.ok:
         return CompileResult.CodegenError(capsules.reason)
     val direct_result = _compile_frozen_module_capsule(capsules, backend_name,
@@ -1761,9 +1763,11 @@ impl CompilerDriver:
                     var candidate_witness_reasons: {text: text} = {}
                     candidate_witness_reasons[name] = expected_witness_reason
                     val candidate_capsules = ctx.freeze_native_module_capsules_v1(
-                        [name], object_base, effective_backend, native_target,
-                        native_cpu, driver_opt_level, is_release,
-                        provider_receipt_hash, candidate_witnesses,
+                        [name], object_base, FrozenNativeCapsuleConfigV1(
+                            backend_name: effective_backend, target: native_target,
+                            target_cpu: native_cpu, opt_level: driver_opt_level,
+                            is_release: is_release, provider_receipt_hash: provider_receipt_hash),
+                        candidate_witnesses,
                         candidate_witness_reasons)
                     if candidate_capsules.ok:
                         val candidate_capsule = candidate_capsules.find(name)
@@ -1822,8 +1826,10 @@ impl CompilerDriver:
                     var capsule_matches = false
                     if all_in_scope and scoped_outputs.len() == 1 and outputs_exist:
                         val cached_capsules = ctx.freeze_native_module_capsules_v1(
-                            [name], object_base, backend_name, native_target,
-                            native_cpu, driver_opt_level, is_release)
+                            [name], object_base, FrozenNativeCapsuleConfigV1(
+                                backend_name: backend_name, target: native_target,
+                                target_cpu: native_cpu, opt_level: driver_opt_level,
+                                is_release: is_release, provider_receipt_hash: ""))
                         if cached_capsules.ok:
                             val cached_capsule = cached_capsules.find(name)
                             capsule_matches = cached_capsule.ok
@@ -1903,8 +1909,10 @@ impl CompilerDriver:
                 frozen_module_witnesses[witness_name] = frozen_witness
                 frozen_module_witness_reasons[witness_name] = frozen_witness_reason
             val capsules = ctx.freeze_native_module_capsules_v1(uncached_names,
-                object_base, effective_backend, native_target, native_cpu,
-                driver_opt_level, is_release, provider_receipt_hash,
+                object_base, FrozenNativeCapsuleConfigV1(
+                    backend_name: effective_backend, target: native_target,
+                    target_cpu: native_cpu, opt_level: driver_opt_level,
+                    is_release: is_release, provider_receipt_hash: provider_receipt_hash),
                 frozen_module_witnesses, frozen_module_witness_reasons)
             if not capsules.ok:
                 return CompileResult.CodegenError(capsules.reason)

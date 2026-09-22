@@ -81,9 +81,21 @@ class FrozenStorageModuleSnapshotV1:
     evidence: [MirTypedStorageViewEvidenceV1]
     reason: text
 
-    fn identity_valid() -> bool:
+    fn identity_valid(self) -> bool:
         self.ok and self.module_identity ==
             frozen_storage_module_identity_v1(self.module_name, self.sites, self.evidence)
+
+# Keep capsule-freeze calls within the observed native argument boundary.
+# The rejected Stage2 caller lost the provider receipt and both witness maps.
+# Explicit self also binds import arity to the actual instance-method ABI.
+# This record transports every identity input without weakening validation.
+class FrozenNativeCapsuleConfigV1:
+    backend_name: text
+    target: text
+    target_cpu: text
+    opt_level: i64
+    is_release: bool
+    provider_receipt_hash: text
 
 class FrozenNativeModuleCapsuleV1:
     ok: bool
@@ -112,16 +124,16 @@ class FrozenNativeModuleCapsuleV1:
     is_release: bool
     reason: text
 
-    fn expected_identity() -> text:
+    fn expected_identity(self) -> text:
         "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(self.cache_source)}|{storage_identity_text_v1(self.source_identity)}|{storage_identity_text_v1(self.module_witness)}|{storage_identity_text_v1(self.module_witness_reason)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.provider_receipt_hash)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
 
-    fn identity_valid() -> bool:
+    fn identity_valid(self) -> bool:
         self.ok and self.mir_identity == native_capsule_mir_identity_v1(self.mir_module)
             and (self.cache_source == "" or self.source_identity != "")
             and self.storage_snapshot.identity_valid()
             and self.capsule_identity == self.expected_identity()
 
-    fn provider_receipt_valid(expected_hash: text) -> bool:
+    fn provider_receipt_valid(self, expected_hash: text) -> bool:
         "" != expected_hash and self.identity_valid()
             and self.provider_receipt_hash == expected_hash
 
@@ -131,7 +143,7 @@ class FrozenNativeModuleCapsuleBatchV1:
     capsules: [FrozenNativeModuleCapsuleV1]
     reason: text
 
-    fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
+    fn find(self, module_name: text) -> FrozenNativeModuleCapsuleV1:
         var found = FrozenNativeModuleCapsuleV1(ok: false,
             module_name: module_name, capsule_identity: "",
             mir_identity: "",
@@ -944,12 +956,12 @@ class CompileContext:
             i = i + 1
         rows.join(";")
 
-    fn storage_binding_identity() -> text:
+    fn storage_binding_identity(self) -> text:
         if self.storage_registry_frozen:
             return self.storage_registry_frozen_identity
         "unfrozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
 
-    fn frozen_storage_registry_well_formed() -> bool:
+    fn frozen_storage_registry_well_formed(self) -> bool:
         if self.frozen_storage_module_names.len() != self.frozen_storage_sites.len()
             or self.frozen_storage_module_names.len() != self.frozen_storage_evidence.len():
             return false
@@ -999,7 +1011,7 @@ class CompileContext:
         self.storage_registry_frozen = true
         self.storage_registry_frozen_identity
 
-    fn frozen_storage_module_snapshot(module_name: text) -> FrozenStorageModuleSnapshotV1:
+    fn frozen_storage_module_snapshot(self, module_name: text) -> FrozenStorageModuleSnapshotV1:
         if not self.storage_registry_frozen:
             return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
                 registry_identity: "", module_identity: "", sites: [], evidence: [],
@@ -1055,7 +1067,7 @@ class CompileContext:
                 result.push(module_name)
         result
 
-    fn frozen_native_cache_source_v1(module_name: text) -> text:
+    fn frozen_native_cache_source_v1(self, module_name: text) -> text:
         var found_path = ""
         for source in self.sources:
             if source.module_name == module_name:
@@ -1094,7 +1106,7 @@ class CompileContext:
     # identity_valid()/driver_native_collect_capsule_result_v1, never admitted
     # on a laundered digest. Contents that are still held hash exactly as
     # before, so the non-streaming path is unchanged byte for byte.
-    fn frozen_native_source_identity_at_v1(index: i64) -> text:
+    fn frozen_native_source_identity_at_v1(self, index: i64) -> text:
         val source = self.sources[index]
         if source.content != "":
             return sha256_text(source.content)
@@ -1114,7 +1126,7 @@ class CompileContext:
         if disk_hash != captured_hash: return ""
         sha256_text(disk_content)
 
-    fn frozen_native_cache_source_identity_v1(module_name: text) -> text:
+    fn frozen_native_cache_source_identity_v1(self, module_name: text) -> text:
         # Read the phase-1 identity owner, NOT `sources[].content`: by the time
         # capsules are frozen the content has been reclaimed and blanked, so
         # hashing it returns sha256("") for every module. See the field comment
@@ -1135,12 +1147,17 @@ class CompileContext:
         found_identity
 
     fn freeze_native_module_capsules_v1(
-        module_names: [text], object_base: text, backend_name: text,
-        target: text, target_cpu: text, opt_level: i64, is_release: bool,
-        provider_receipt_hash: text = "",
+        self, module_names: [text], object_base: text,
+        config: FrozenNativeCapsuleConfigV1,
         module_witnesses: {text: text} = {},
         module_witness_reasons: {text: text} = {}
     ) -> FrozenNativeModuleCapsuleBatchV1:
+        val backend_name = config.backend_name
+        val target = config.target
+        val target_cpu = config.target_cpu
+        val opt_level = config.opt_level
+        val is_release = config.is_release
+        val provider_receipt_hash = config.provider_receipt_hash
         if not self.storage_registry_frozen
             or not self.frozen_storage_registry_well_formed():
             return FrozenNativeModuleCapsuleBatchV1(ok: false,
