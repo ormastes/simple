@@ -5,6 +5,7 @@
 
 use simple_runtime::RuntimeValue;
 
+use crate::codegen::shared::enum_runtime_type_id;
 use crate::value::Value;
 use crate::value_bridge::{bridge_tags, BridgeValue};
 
@@ -79,6 +80,19 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         // across the interpreter bridge (see compile_interp_call).
         Value::Tuple(data) => values_to_runtime_tuple(data.iter()),
         Value::LabeledTuple { values, .. } => values_to_runtime_array(values.iter()),
+        // Enum values cross the interpreter/native boundary as the same boxed
+        // RuntimeEnum ABI used by native constructors and match checks. Type
+        // IDs come from the shared helper: Option and Result have reserved IDs,
+        // while user enum names retain the established hash-based identity.
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        } => simple_runtime::value::rt_enum_new(
+            enum_runtime_type_id(enum_name),
+            simple_runtime::value::hash_variant_discriminant(variant),
+            payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime),
+        ),
         // A Dict must marshal to a real native `RuntimeDict` heap object (not
         // NIL) so a composite (Dict/Map) return value that is forced through
         // the interpreter bridge (`InterpCall` — e.g. via a TryOperator or
@@ -347,6 +361,91 @@ mod tests {
         assert_eq!(runtime_to_value(RuntimeValue::NIL), Value::Nil);
         assert_eq!(runtime_to_value(RuntimeValue::from_int(42)), Value::Int(42));
         assert_eq!(runtime_to_value(RuntimeValue::TRUE), Value::Bool(true));
+    }
+
+    #[test]
+    fn value_to_runtime_enum_uses_the_native_hashed_enum_abi() {
+        use simple_runtime::value::{
+            hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload, HeapObjectType,
+        };
+
+        let value = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(Box::new(Value::Int(42))),
+        };
+        let runtime = value_to_runtime(&value);
+
+        assert_eq!(runtime.heap_type(), Some(HeapObjectType::Enum));
+        assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Option")));
+        assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Some")));
+        assert_eq!(rt_enum_payload(runtime).as_int(), 42);
+    }
+
+    #[test]
+    fn value_to_runtime_enum_marshals_result_ok() {
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload};
+
+        let runtime = value_to_runtime(&Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(Box::new(Value::Int(17))),
+        });
+
+        assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Result")));
+        assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Ok")));
+        assert_eq!(rt_enum_payload(runtime).as_int(), 17);
+    }
+
+    #[test]
+    fn value_to_runtime_enum_preserves_none_err_and_nested_payloads() {
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload};
+
+        let none = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        };
+        let none_runtime = value_to_runtime(&none);
+        assert_eq!(rt_enum_id(none_runtime), i64::from(enum_runtime_type_id("Option")));
+        assert_eq!(rt_enum_discriminant(none_runtime), i64::from(hash_variant_discriminant("None")));
+        assert_eq!(rt_enum_payload(none_runtime), RuntimeValue::NIL);
+
+        let nested = Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            payload: Some(Box::new(Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                payload: Some(Box::new(Value::text("payload".to_string()))),
+            })),
+        };
+        let runtime = value_to_runtime(&nested);
+        assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Result")));
+        assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Err")));
+        let nested_runtime = rt_enum_payload(runtime);
+        assert_eq!(rt_enum_id(nested_runtime), i64::from(enum_runtime_type_id("Option")));
+        assert_eq!(rt_enum_discriminant(nested_runtime), i64::from(hash_variant_discriminant("Some")));
+        assert_eq!(runtime_to_value(rt_enum_payload(nested_runtime)), Value::text("payload".to_string()));
+    }
+
+    #[test]
+    fn enum_marshalling_retains_the_existing_user_enum_collision_contract() {
+        use simple_runtime::value::rt_enum_id;
+
+        let first = value_to_runtime(&Value::Enum {
+            enum_name: "collision.Type175882".to_string(),
+            variant: "Same".to_string(),
+            payload: None,
+        });
+        let second = value_to_runtime(&Value::Enum {
+            enum_name: "collision.Type255081".to_string(),
+            variant: "Same".to_string(),
+            payload: None,
+        });
+
+        assert_eq!(enum_runtime_type_id("collision.Type175882"), enum_runtime_type_id("collision.Type255081"));
+        assert_eq!(rt_enum_id(first), rt_enum_id(second));
     }
 
     #[test]
