@@ -242,3 +242,7 @@ change regresses. `rt_*` symbols are excluded by construction
 (`simple_module_symbol_tail` returns `None` for them), so the `rt_*` channels are
 untouched. Unit test:
 `stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
+
+TODO(deferred-environment): once the Phase-2 compiler is admitted, run the full
+SimpleOS entry-closure build and confirm the real ByteSpan provider is retained
+and no weak nil stub is emitted.
