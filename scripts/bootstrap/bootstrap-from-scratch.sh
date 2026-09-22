@@ -1992,8 +1992,16 @@ bootstrap_native_build_main() {
     --entry src/app/cli/main.spl \
     --runtime-path "${bootstrap_runtime_authority_path}" \
     -o "${output}"
+  # An outer bootstrap guard already owns the session (including the Rust
+  # phase). Keep this subtree monitor in that admitted session. Presence of
+  # either variable selects strict inheritance so partial contracts fail closed.
+  bootstrap_native_session_mode=new
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    bootstrap_native_session_mode=inherit
+  fi
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
-    --session-mode=new \
+    --session-mode="${bootstrap_native_session_mode}" \
+    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
     --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \

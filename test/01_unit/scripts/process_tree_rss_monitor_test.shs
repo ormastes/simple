@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=${RSS_MONITOR_TEST_OUTPUT:-$(mktemp -d)}
+mkdir -p "$work"
+work=$(CDPATH= cd -- "$work" && pwd -P)
+export TMPDIR="$work"
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+# A limit below the startup child RSS proves monitor mode ignores both startup
+# and steady-state thresholds, while still sampling and cleaning descendants.
+perl "$guard" --rss-cap-mode=monitor --max-rss-kib=1 --receipt="$work/monitor.env" -- \
+    sh -c 'test "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" = monitor && sleep 0.3'
+for field in 'status=complete' 'exit_status=0' 'rss_cap_enforced=0' 'rss_limit_kib=unlimited' 'quiescent=1'; do
+    grep -Fxq "$field" "$work/monitor.env" || fail "missing $field"
+done
+awk -F= '$1=="peak_rss_kib" { if ($2 <= 1) exit 1; seen=1 } END { if (!seen) exit 1 }' "$work/monitor.env"
+code=0
+perl "$guard" --max-rss-kib=1 --receipt="$work/enforce.env" -- \
+    sh -c 'touch "$1"' sh "$work/forbidden" >"$work/enforce.log" 2>&1 || code=$?
+[ "$code" -eq 88 ] && [ ! -e "$work/forbidden" ] || fail 'default enforcement disabled'
+grep -Fxq 'rss_cap_enforced=1' "$work/enforce.env" || fail 'default receipt changed'
+code=0
+perl "$guard" --rss-cap-mode=unknown --receipt="$work/invalid.env" -- \
+    sh -c 'touch "$1"' sh "$work/invalid.payload" >"$work/invalid.log" 2>&1 || code=$?
+[ "$code" -ne 0 ] && [ ! -e "$work/invalid.payload" ] || fail 'invalid mode executed'
+code=0
+perl "$guard" --rss-cap-mode=monitor --max-rss-kib=1 --timeout-seconds=1 --term-grace-seconds=1 \
+    --receipt="$work/timeout.env" -- sh -c 'trap "" TERM; sleep 10' >"$work/timeout.log" 2>&1 || code=$?
+[ "$code" -eq 124 ] || fail "monitor timeout returned $code"
+grep -Fxq 'quiescent=1' "$work/timeout.env" || fail 'monitor timeout cleanup failed'
+code=0
+perl "$guard" --rss-cap-mode=monitor --receipt="$work/tamper.env" -- sh -c \
+    'cp /usr/bin/true "$SIMPLE_BOOTSTRAP_SESSION_EXEC.new"; mv "$SIMPLE_BOOTSTRAP_SESSION_EXEC.new" "$SIMPLE_BOOTSTRAP_SESSION_EXEC"; sleep 10' \
+    >"$work/tamper.log" 2>&1 || code=$?
+[ "$code" -eq 89 ] || fail 'monitor failed open on invalid observer'
+grep -Fxq 'status=session-helper-invalid' "$work/tamper.env" || fail 'observer error hidden'
+# Exercise the production Stage2/3 transcript boundary under an outer monitor.
+cat >"$work/transcript.sh" <<'INNER'
+set -eu
+root=$1 work=$2
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+mkdir -p "$work/home" "$work/tmp"
+bootstrap_stage3_run_transcribed "$work/command" "$root" "$work/log" "$work/home" "$work/tmp" /usr/bin:/bin -- /bin/sh -eu -c 'test "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" = monitor; "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check'
+grep -Fxq rss_cap_enforced=0 "$work/log.rss.env"
+grep -Fxq session_mode=inherit "$work/log.rss.env"
+INNER
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor perl "$guard" --max-rss-kib=1 --receipt="$work/transcript-outer.env" -- sh "$work/transcript.sh" "$root" "$work"
+printf 'PASS: monitor RSS and timeout/grace, default enforcement, invalid mode, observer failure\n'
+printf 'evidence=%s\n' "$work"

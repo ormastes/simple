@@ -1,0 +1,83 @@
+#!/bin/sh
+# Exercise the actual bootstrap native-build launcher without a compiler build.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=${NESTED_GUARD_TEST_OUTPUT:-$(mktemp -d)}
+mkdir -p "$work"
+work=$(CDPATH= cd -- "$work" && pwd -P)
+export TMPDIR="$work"
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+# Extract only this function: its runtime wiring is the regression surface.
+sed -n '/^bootstrap_native_build_main() {$/,/^}$/p' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/launcher.sh"
+cat >>"$work/launcher.sh" <<'EOF'
+set -eu
+repo_root=$1
+log_dir=$2
+compiler=$3
+PLATFORM=test
+backend=llvm
+plugin_policy_source_root=src/lib
+NATIVE_FILE_TIMEOUT_SECONDS=5
+NATIVE_LOW_MEMORY=1
+selfhost_jobs=1
+native_cache_dir=$log_dir/cache
+bootstrap_runtime_authority_path=$log_dir/runtime
+build_progress_events=$log_dir/events
+absolute_path() { printf '%s\n' "$1"; }
+bootstrap_native_build_main "$compiler" "$log_dir/output"
+EOF
+cat >"$work/compiler" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$1" = native-build ]
+"$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check
+printf '%s\n' "$SIMPLE_BOOTSTRAP_SESSION_ID" >"$SIMPLE_NATIVE_BUILD_CACHE_DIR.sid"
+case "${NESTED_PAYLOAD:-normal}" in
+    memory) exec perl -e '$x = "x" x (128*1024*1024); sleep 10' ;;
+    fail) exit 37 ;;
+esac
+EOF
+chmod +x "$work/compiler"
+for lane in nested standalone partial spoof cap exit; do mkdir -p "$work/$lane"; done
+# Entire surrogate bootstrap runs under the outer decimal-6GB monitor.
+perl "$guard" --receipt="$work/outer.env" -- \
+    sh "$work/launcher.sh" "$root" "$work/nested" "$work/compiler"
+inner=$work/nested/stage4-native-build.log.rss.env
+sid=$(sed -n 's/^session_id=//p' "$work/outer.env")
+for receipt in "$work/outer.env" "$inner"; do
+    grep -Fxq 'status=complete' "$receipt" || fail 'nested run incomplete'
+    grep -Fxq 'quiescent=1' "$receipt" || fail 'nested run not quiescent'
+    grep -Fxq "session_id=$sid" "$receipt" || fail 'session changed'
+    grep -Fxq 'max_rss_kib=5859375' "$receipt" || fail 'decimal 6GB cap changed'
+    grep -Fxq 'hard_memory_limit=0' "$receipt" || fail 'sampled cap misrepresented'
+done
+grep -Fxq 'session_mode=inherit' "$inner" || fail 'inner guard did not inherit'
+grep -Eq '^parent_session_admission_sha256=[0-9a-f]{64}$' "$inner" || fail 'missing parent admission'
+[ "$(cat "$work/nested/cache.sid")" = "$sid" ] || fail 'payload session mismatch'
+sh "$work/launcher.sh" "$root" "$work/standalone" "$work/compiler"
+grep -Fxq 'session_mode=new' "$work/standalone/stage4-native-build.log.rss.env" || fail 'standalone session wrong'
+for lane in partial spoof; do
+    code=0
+    if [ "$lane" = partial ]; then
+        SIMPLE_BOOTSTRAP_SESSION_ID=1 sh "$work/launcher.sh" "$root" "$work/$lane" "$work/compiler" >"$work/$lane.log" 2>&1 || code=$?
+    else
+        SIMPLE_BOOTSTRAP_SESSION_ID=1 SIMPLE_BOOTSTRAP_SESSION_EXEC=/usr/bin/true \
+            sh "$work/launcher.sh" "$root" "$work/$lane" "$work/compiler" >"$work/$lane.log" 2>&1 || code=$?
+    fi
+    [ "$code" -eq 89 ] && [ ! -e "$work/$lane/cache.sid" ] || fail "$lane contract executed payload"
+done
+code=0
+NESTED_PAYLOAD=memory SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=65536 \
+    perl "$guard" --receipt="$work/cap-outer.env" -- \
+    sh "$work/launcher.sh" "$root" "$work/cap" "$work/compiler" >"$work/cap.log" 2>&1 || code=$?
+[ "$code" -eq 88 ] || fail "nested RSS cap returned $code"
+grep -Fxq 'quiescent=1' "$work/cap/stage4-native-build.log.rss.env" || fail 'cap cleanup incomplete'
+grep -Fxq 'status=rss-cap-exceeded' "$work/cap/stage4-native-build.log.rss.env" || fail 'missing cap attribution'
+code=0
+NESTED_PAYLOAD=fail perl "$guard" --receipt="$work/exit-outer.env" -- \
+    sh "$work/launcher.sh" "$root" "$work/exit" "$work/compiler" || code=$?
+[ "$code" -eq 37 ] || fail 'nested exit code lost'
+printf 'PASS: nested and standalone launcher, same SID, parent admission, partial/spoof rejection, RSS cleanup, exit preservation\n'
+printf 'evidence=%s\n' "$work"
