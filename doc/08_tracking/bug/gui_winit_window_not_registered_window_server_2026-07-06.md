@@ -7,6 +7,18 @@
 - **Fix owner:** GuiRenderer / spl_winit work (task #25)
 - **Related:** `doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md` (predecessor: window not displayed at all; this bug is the residue after the .app-bundle workaround makes it display)
 
+## 2026-09-22 delegated restart audit
+
+The isolated winit branch was recovered at `d98cb8fdc85` with its real-input
+regression intact. Current admitted pure-Simple full-CLI GUI provenance is
+still required before execution. No new native failure or pass is claimed,
+and the record remains open. The regression manual at
+`doc/06_spec/03_system/app/gui/feature/macos_window_registration_spec.md`
+records installed observer tools and the newly identified monitoring gap:
+LaunchServices does not make the GUI application a descendant of the shell
+launcher, and its strict PID receipt arrives after AX registration. A launcher
+RSS receipt cannot stand in for measured application startup/descendant RSS.
+
 ## Symptom
 
 The widget-showcase window launched via `scripts/gui/macos-gui-run.shs` **renders and composites
