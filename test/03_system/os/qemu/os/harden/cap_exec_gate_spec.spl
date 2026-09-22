@@ -13,6 +13,7 @@ Image:  build/os/fat32-x86_64-harden.img
 A missing kernel is a diagnosed RED failure. Never uses skip().
 """
 use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
 use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.qemu_systest_contract.{
@@ -22,6 +23,8 @@ use os.qemu_systest_contract.{
     harden_image_path,
     harden_qemu_args,
     harden_qemu_args_with_media,
+    harden_qemu_args_with_firmware,
+    harden_media_receipt_error,
     harden_cap_exec_markers,
     SYSTEST_PASS
 }
@@ -43,10 +46,15 @@ describe "qemu system test — harden capability-gate exec (AC-1)":
         expect(harden_qemu_args().contains("-kernel")).to_equal(false)
         expect(harden_qemu_args().contains("isa-debug-exit,iobase=0xf4,iosize=0x04")).to_equal(false)
         expect(harden_qemu_args().contains(
-            "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd")).to_equal(true)
+            "if=pflash,format=raw,snapshot=on,file=build/os/harden/firmware/OVMF_VARS_4M.fd"
+        )).to_equal(true)
         val fixture_args = harden_qemu_args_with_media("fixture.img", "fixture-vars.fd", "fixture-esp")
         expect(fixture_args.contains("file=fixture.img,if=none,id=hardennsd,format=raw")).to_equal(true)
-        expect(fixture_args.contains("file=fat:rw:fixture-esp,format=raw,id=hardenesp,if=none")).to_equal(true)
+        expect(fixture_args.contains("file=fat:fixture-esp,format=raw,id=hardenesp,if=none")).to_equal(true)
+        val override_args = harden_qemu_args_with_firmware(
+            "fixture.img", "/opt/ovmf/code.fd", "fixture-vars.fd", "fixture-esp")
+        expect(override_args.contains(
+            "if=pflash,format=raw,readonly=on,file=/opt/ovmf/code.fd")).to_equal(true)
 
         step("reject missing firmware media before QEMU")
         val fixture_root = "build/os/systest/harden-media-refusal"
@@ -61,6 +69,38 @@ describe "qemu system test — harden capability-gate exec (AC-1)":
             "harden_missing_firmware", fixture_kernel, fixture_image,
             fixture_root + "/missing-vars.fd", fixture_esp, harden_cap_exec_markers()
         )).to_equal("missing-media:" + fixture_root + "/missing-vars.fd")
+
+        step("reject stale or forged kernel-to-ESP identity")
+        val fixture_vars = fixture_root + "/vars.fd"
+        val fixture_code = fixture_root + "/code.fd"
+        val fixture_receipt = fixture_root + "/harden-media-receipt.env"
+        expect(rt_file_write_text(fixture_vars, "fixture-vars")).to_equal(true)
+        expect(rt_file_write_text(fixture_code, "fixture-code")).to_equal(true)
+        val fixture_efi = fixture_esp + "/EFI/BOOT/BOOTX64.EFI"
+        val valid_receipt = (
+            "schema=simpleos-harden-media-v1\n" +
+            "kernel_sha256={file_hash_sha256_or_empty(fixture_kernel)}\n" +
+            "firmware_efi_sha256={file_hash_sha256_or_empty(fixture_efi)}\n" +
+            "firmware_code_path={fixture_code}\n" +
+            "firmware_code_sha256={file_hash_sha256_or_empty(fixture_code)}\n")
+        expect(rt_file_write_text(fixture_receipt, valid_receipt)).to_equal(true)
+        expect(harden_media_receipt_error(
+            fixture_receipt, fixture_kernel, fixture_efi, fixture_code
+        )).to_equal("")
+
+        step("reject artifact mutation and duplicate receipt fields")
+        expect(rt_file_write_text(fixture_kernel, "mutated-kernel")).to_equal(true)
+        expect(harden_media_receipt_error(
+            fixture_receipt, fixture_kernel, fixture_efi, fixture_code
+        )).to_equal("invalid-media-receipt:" + fixture_receipt)
+        expect(rt_file_write_text(fixture_kernel, "fixture-kernel")).to_equal(true)
+        expect(rt_file_write_text(
+            fixture_receipt,
+            valid_receipt + valid_receipt
+        )).to_equal(true)
+        expect(harden_media_receipt_error(
+            fixture_receipt, fixture_kernel, fixture_efi, fixture_code
+        )).to_equal("invalid-media-receipt:" + fixture_receipt)
 
     it "records predicate denial only as a diagnostic, never AC-1 success":
         step("report the known live-exec gap")

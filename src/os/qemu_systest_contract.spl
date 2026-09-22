@@ -20,7 +20,7 @@ use os.simpleos_config_matrix.{
     qemu_riscv64_desktop_qemu_args_status
 }
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io_runtime.{file_exists}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_hash_sha256_or_empty, file_read}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
@@ -485,24 +485,37 @@ pub fn harden_firmware_vars_path() -> text:
 pub fn harden_firmware_esp_path() -> text:
     "build/os/harden/firmware/esp"
 
+pub fn harden_firmware_code_path() -> text:
+    val configured = env_get("OVMF_CODE") ?? ""
+    if configured.len() != 0: return configured
+    "/usr/share/OVMF/OVMF_CODE_4M.fd"
+
 pub fn harden_qemu_bin() -> text:
     "qemu-system-x86_64"
 
 pub fn harden_qemu_args() -> [text]:
-    harden_qemu_args_with_media(
-        harden_image_path(), harden_firmware_vars_path(), harden_firmware_esp_path())
+    harden_qemu_args_with_firmware(
+        harden_image_path(), harden_firmware_code_path(), harden_firmware_vars_path(),
+        harden_firmware_esp_path())
 
 pub fn harden_qemu_args_with_media(
     image_path: text, firmware_vars_path: text, firmware_esp_path: text
+) -> [text]:
+    harden_qemu_args_with_firmware(
+        image_path, harden_firmware_code_path(), firmware_vars_path, firmware_esp_path)
+
+pub fn harden_qemu_args_with_firmware(
+    image_path: text, firmware_code_path: text,
+    firmware_vars_path: text, firmware_esp_path: text
 ) -> [text]:
     ["-machine", "q35",
      "-cpu", "qemu64",
      "-m", "512M",
      "-nographic",
      "-no-reboot",
-     "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
-     "-drive", "if=pflash,format=raw,file={firmware_vars_path}",
-     "-drive", "file=fat:rw:{firmware_esp_path},format=raw,id=hardenesp,if=none",
+     "-drive", "if=pflash,format=raw,readonly=on,file={firmware_code_path}",
+     "-drive", "if=pflash,format=raw,snapshot=on,file={firmware_vars_path}",
+     "-drive", "file=fat:{firmware_esp_path},format=raw,id=hardenesp,if=none",
      "-device", "virtio-blk-pci,drive=hardenesp,bootindex=0",
      "-device", "nvme,id=harden,serial=x86-64-harden",
      "-drive", "file={image_path},if=none,id=hardennsd,format=raw",
@@ -510,6 +523,26 @@ pub fn harden_qemu_args_with_media(
 
 pub fn harden_timeout_ms() -> i64:
     default_qemu_timeout_ms()
+
+pub fn harden_media_receipt_error(
+    receipt_path: text, kernel_path: text, firmware_efi_path: text,
+    firmware_code_path: text
+) -> text:
+    if not file_exists(receipt_path): return SYSTEST_PREFIX_MISSING_MEDIA + receipt_path
+    val kernel_sha = file_hash_sha256_or_empty(kernel_path)
+    val efi_sha = file_hash_sha256_or_empty(firmware_efi_path)
+    val code_sha = file_hash_sha256_or_empty(firmware_code_path)
+    if kernel_sha.len() != 64 or efi_sha.len() != 64 or code_sha.len() != 64:
+        return "invalid-media-receipt:" + receipt_path
+    val expected = (
+        "schema=simpleos-harden-media-v1\n" +
+        "kernel_sha256={kernel_sha}\n" +
+        "firmware_efi_sha256={efi_sha}\n" +
+        "firmware_code_path={firmware_code_path}\n" +
+        "firmware_code_sha256={code_sha}\n")
+    if file_read(receipt_path) != expected:
+        return "invalid-media-receipt:" + receipt_path
+    ""
 
 pub fn harden_media_first_missing_path(
     kernel_path: text, kernel_exists: bool,
@@ -537,15 +570,21 @@ pub fn run_harden_qemu_systest_with_media(
     the additional UEFI NVRAM and ESP media required by the harden descriptor.
     """
     val firmware_esp_boot_path = firmware_esp_path + "/EFI/BOOT/BOOTX64.EFI"
+    val firmware_code_path = harden_firmware_code_path()
     val missing = harden_media_first_missing_path(
         kernel_path, file_exists(kernel_path), image_path, file_exists(image_path),
         firmware_vars_path, file_exists(firmware_vars_path), firmware_esp_boot_path,
         file_exists(firmware_esp_boot_path))
     if missing.len() != 0:
         return missing
+    val receipt_error = harden_media_receipt_error(
+        firmware_esp_path + "/../harden-media-receipt.env", kernel_path,
+        firmware_esp_boot_path, firmware_code_path)
+    if receipt_error.len() != 0: return receipt_error
     run_qemu_systest(
         arch, kernel_path, image_path, harden_qemu_bin(),
-        harden_qemu_args_with_media(image_path, firmware_vars_path, firmware_esp_path),
+        harden_qemu_args_with_firmware(
+            image_path, firmware_code_path, firmware_vars_path, firmware_esp_path),
         markers, harden_timeout_ms())
 
 pub fn run_harden_qemu_systest(arch: text, markers: [text]) -> text:
