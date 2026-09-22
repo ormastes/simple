@@ -1,0 +1,24 @@
+use std.io_runtime.{file_read}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+describe "host bug A09 x86_64 baremetal heap churn":
+    it "reclaims and coalesces actual allocator blocks across more cumulative allocation than the arena":
+        step("reproduce reported failure")
+        val source = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        expect(source).to_contain("SIMPLEOS_HEAP_MAGIC")
+        expect(source).to_contain("simpleos_heap_release_tail")
+        expect(source).to_contain("invalid and double free are harmless")
+        expect(source).to_contain("if (ptr != 0) free((void *)(uintptr_t)ptr);")
+        expect(source).to_contain("pushfq; popq %0; cli")
+
+        step("exercise corrected behavior")
+        val command = "work=/tmp/host-bug-a09-heap-$$; trap 'rm -rf \"$work\"' EXIT; mkdir -p \"$work\"; { printf '#include <stdint.h>\\n#include <stddef.h>\\n'; sed -n '/SIMPLEOS_HEAP_ALLOCATOR_BEGIN/,/SIMPLEOS_HEAP_ALLOCATOR_END/p' examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c; } > \"$work/heap.c\" && cc -std=gnu11 -O0 -DSIMPLEOS_HEAP_TEST \"$work/heap.c\" test/01_unit/os/port/host_bug_a09_bump_heap_churn_test.c -pthread -o \"$work/churn\" && \"$work/churn\""
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", command], 120000)
+        expect(exit_code).to_equal(0)
+
+        step("reject adjacent invalid input")
+        expect(source).to_contain("count != 0 && size > (size_t)-1 / count")
+        expect(source).to_contain("if (size == 0) {")
+        expect(source).to_contain("simpleos_heap_free_unlocked(ptr);")
+        expect(source).to_contain("_heap_off = offset + needed")

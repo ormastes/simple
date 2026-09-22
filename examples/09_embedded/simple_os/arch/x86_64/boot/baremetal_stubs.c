@@ -553,109 +553,274 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, Runt
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
+/* SIMPLEOS_HEAP_ALLOCATOR_BEGIN: host regression extracts this exact block. */
 static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 
-static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
-static size_t _heap_off = 0;
+/* A small first-fit allocator for the static baremetal arena.  The preceding
+ * bump allocator made every interactive allocation permanent: a session could
+ * exhaust the arena even when only a few live buffers remained.  Blocks retain
+ * their size in-band so free can validate, reuse, and coalesce them without a
+ * second metadata allocation. */
+#define SIMPLEOS_HEAP_ALIGNMENT 16U
+#define SIMPLEOS_HEAP_MAGIC 0x53484D50U
+
+typedef struct {
+    size_t span;
+    uint32_t magic;
+    uint32_t is_free;
+} SimpleOSHeapBlock;
+
+static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(SIMPLEOS_HEAP_ALIGNMENT)));
+static size_t _heap_off = 0; /* high-water boundary; retained for existing boot diagnostics */
+static volatile uint32_t _heap_lock = 0;
 
 void *malloc(size_t sz);
 
-static inline size_t simpleos_heap_align(size_t sz)
+static inline int simpleos_heap_align(size_t size, size_t *aligned)
 {
-    return (sz + 15U) & ~(size_t)15U;
+    if (size == 0 || size > (size_t)-1 - (SIMPLEOS_HEAP_ALIGNMENT - 1U)) return 0;
+    *aligned = (size + SIMPLEOS_HEAP_ALIGNMENT - 1U) & ~(size_t)(SIMPLEOS_HEAP_ALIGNMENT - 1U);
+    return 1;
 }
 
-static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
+static inline int simpleos_heap_block_valid(const SimpleOSHeapBlock *block, size_t offset)
 {
-    size_t old_aligned = simpleos_heap_align(old_sz);
-    size_t new_aligned = simpleos_heap_align(new_sz);
-    if (!p) return malloc(new_sz);
+    return block->magic == SIMPLEOS_HEAP_MAGIC &&
+           block->span >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT &&
+           (block->span & (SIMPLEOS_HEAP_ALIGNMENT - 1U)) == 0 &&
+           block->span <= _heap_off - offset;
+}
 
-    uint8_t *base = (uint8_t *)p;
-    if (base >= (uint8_t *)_heap &&
-        base + old_aligned == (uint8_t *)&_heap[_heap_off]) {
-        if (new_aligned > old_aligned) {
-            size_t grow = new_aligned - old_aligned;
-            if (_heap_off + grow > sizeof(_heap)) {
-                serial_puts("[PANIC] heap exhausted\r\n");
-                serial_puts("[PANIC] heap_off=");
-                serial_put_hex((uint64_t)_heap_off);
-                serial_puts(" req=");
-                serial_put_hex((uint64_t)grow);
-                serial_puts(" limit=");
-                serial_put_hex((uint64_t)sizeof(_heap));
-                serial_puts("\r\n");
-                for (;;) outb(0xF4, 0);
-            }
-            _heap_off += grow;
-        } else {
-            _heap_off -= (old_aligned - new_aligned);
+/* Allocation may run on an IRQ path as well as task context.  Mask local IRQs
+ * before taking the inter-core lock so an interrupt on this CPU cannot spin on
+ * a lock held by the code it interrupted. */
+static inline uint64_t simpleos_heap_lock_acquire(void)
+{
+#ifdef SIMPLEOS_HEAP_TEST
+    while (__atomic_exchange_n(&_heap_lock, 1U, __ATOMIC_ACQUIRE)) {}
+    return 0;
+#else
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory", "cc");
+    while (__atomic_exchange_n(&_heap_lock, 1U, __ATOMIC_ACQUIRE)) {}
+    return flags;
+#endif
+}
+
+static inline void simpleos_heap_lock_release(uint64_t flags)
+{
+#ifdef SIMPLEOS_HEAP_TEST
+    (void)flags;
+    __atomic_store_n(&_heap_lock, 0U, __ATOMIC_RELEASE);
+#else
+    __atomic_store_n(&_heap_lock, 0U, __ATOMIC_RELEASE);
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+#endif
+}
+
+static SimpleOSHeapBlock *simpleos_heap_block_for_ptr(void *ptr, size_t *offset_out)
+{
+    uintptr_t wanted = (uintptr_t)ptr;
+    uintptr_t heap_begin = (uintptr_t)_heap;
+    size_t offset = 0;
+    if (!ptr || wanted < heap_begin + sizeof(SimpleOSHeapBlock) || wanted >= heap_begin + _heap_off)
+        return NULL;
+    while (offset < _heap_off) {
+        SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
+        if (!simpleos_heap_block_valid(block, offset)) return NULL;
+        if ((uintptr_t)block + sizeof(SimpleOSHeapBlock) == wanted) {
+            if (offset_out) *offset_out = offset;
+            return block;
         }
-        return p;
+        offset += block->span;
     }
-
-    void *n = malloc(new_sz);
-    if (p && n) {
-        size_t copy_sz = old_sz < new_sz ? old_sz : new_sz;
-        __builtin_memcpy(n, p, copy_sz);
-    }
-    return n;
+    return NULL;
 }
 
-void *malloc(size_t sz)
+static void simpleos_heap_release_tail(void)
 {
-    void *caller = __builtin_return_address(0);
-    sz = simpleos_heap_align(sz);
-    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
-        serial_puts("[heap] alloc sz=");
-        serial_put_hex((uint64_t)sz);
-        serial_puts(" off_before=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts(" caller=");
-        serial_put_hex((uint64_t)(uintptr_t)caller);
-        serial_puts("\r\n");
+    size_t offset = 0;
+    size_t last_offset = 0;
+    SimpleOSHeapBlock *last = NULL;
+    while (offset < _heap_off) {
+        SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
+        if (!simpleos_heap_block_valid(block, offset)) return;
+        last = block;
+        last_offset = offset;
+        offset += block->span;
     }
-    if (_heap_off + sz > sizeof(_heap)) {
-        serial_puts("[PANIC] heap exhausted\r\n");
-        serial_puts("[PANIC] heap_off=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts(" req=");
-        serial_put_hex((uint64_t)sz);
-        serial_puts(" limit=");
-        serial_put_hex((uint64_t)sizeof(_heap));
-        serial_puts("\r\n");
-        for(;;) outb(0xF4, 0);
-    }
-    void *p = &_heap[_heap_off];
-    _heap_off += sz;
-    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
-        serial_puts("[heap] alloc off_after=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts("\r\n");
-    }
-    return p;
+    if (last && last->is_free) _heap_off = last_offset;
 }
 
-void free(void *p)
+static void *simpleos_heap_alloc_unlocked(size_t size)
 {
-    (void)p; /* bump allocator: no-op */
+    size_t aligned;
+    size_t needed;
+    size_t offset;
+    if (!simpleos_heap_align(size, &aligned) || aligned > (size_t)-1 - sizeof(SimpleOSHeapBlock)) return NULL;
+    needed = sizeof(SimpleOSHeapBlock) + aligned;
+
+    offset = 0;
+    while (offset < _heap_off) {
+        SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
+        if (!simpleos_heap_block_valid(block, offset)) return NULL;
+        if (block->is_free && block->span >= needed) {
+            size_t remainder = block->span - needed;
+            if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
+                SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
+                next->span = remainder;
+                next->magic = SIMPLEOS_HEAP_MAGIC;
+                next->is_free = 1;
+                block->span = needed;
+            }
+            block->is_free = 0;
+            return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
+        }
+        offset += block->span;
+    }
+
+    if (needed > sizeof(_heap) - _heap_off) return NULL;
+    SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + _heap_off);
+    block->span = needed;
+    block->magic = SIMPLEOS_HEAP_MAGIC;
+    block->is_free = 0;
+    _heap_off += needed;
+    return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
 }
 
-void *realloc(void *p, size_t sz)
+static void simpleos_heap_free_unlocked(void *ptr)
 {
-    void *n = malloc(sz);
-    if (p && n) __builtin_memcpy(n, p, sz);
-    return n;
+    size_t offset;
+    SimpleOSHeapBlock *block = simpleos_heap_block_for_ptr(ptr, &offset);
+    if (!block || block->is_free) return; /* invalid and double free are harmless */
+    block->is_free = 1;
+
+    size_t next_offset = offset + block->span;
+    if (next_offset < _heap_off) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
+        if (simpleos_heap_block_valid(next, next_offset) && next->is_free)
+            block->span += next->span;
+    }
+
+    size_t scan = 0;
+    SimpleOSHeapBlock *previous = NULL;
+    while (scan < offset) {
+        previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + scan);
+        if (!simpleos_heap_block_valid(previous, scan)) return;
+        scan += previous->span;
+    }
+    if (previous && previous->is_free && scan == offset) previous->span += block->span;
+    simpleos_heap_release_tail();
 }
 
-void *calloc(size_t n, size_t sz)
+void *malloc(size_t size)
 {
-    size_t total = n * sz;
-    void *p = malloc(total);
-    if (p) __builtin_memset(p, 0, total);
-    return p;
+    uint64_t flags = simpleos_heap_lock_acquire();
+    void *result = simpleos_heap_alloc_unlocked(size);
+    simpleos_heap_lock_release(flags);
+    return result;
 }
+
+void free(void *ptr)
+{
+    uint64_t flags = simpleos_heap_lock_acquire();
+    simpleos_heap_free_unlocked(ptr);
+    simpleos_heap_lock_release(flags);
+}
+
+void *realloc(void *ptr, size_t size)
+{
+    SimpleOSHeapBlock *block;
+    size_t old_size;
+    size_t offset;
+    size_t aligned;
+    size_t needed;
+    uint64_t flags = simpleos_heap_lock_acquire();
+    if (!ptr) {
+        void *result = simpleos_heap_alloc_unlocked(size);
+        simpleos_heap_lock_release(flags);
+        return result;
+    }
+    if (size == 0) {
+        simpleos_heap_free_unlocked(ptr);
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    block = simpleos_heap_block_for_ptr(ptr, &offset);
+    if (!block || block->is_free) {
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    old_size = block->span - sizeof(SimpleOSHeapBlock);
+    if (!simpleos_heap_align(size, &aligned) || aligned > (size_t)-1 - sizeof(SimpleOSHeapBlock)) {
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    needed = sizeof(SimpleOSHeapBlock) + aligned;
+    if (needed <= block->span) {
+        simpleos_heap_lock_release(flags);
+        return ptr;
+    }
+    size_t next_offset = offset + block->span;
+    if (next_offset < _heap_off) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
+        if (simpleos_heap_block_valid(next, next_offset) && next->is_free && block->span + next->span >= needed) {
+            size_t remainder = block->span + next->span - needed;
+            block->span = needed;
+            if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
+                SimpleOSHeapBlock *tail = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
+                tail->span = remainder;
+                tail->magic = SIMPLEOS_HEAP_MAGIC;
+                tail->is_free = 1;
+            } else {
+                block->span += remainder;
+            }
+            simpleos_heap_lock_release(flags);
+            return ptr;
+        }
+    } else if (needed <= sizeof(_heap) - offset) {
+        block->span = needed;
+        _heap_off = offset + needed;
+        simpleos_heap_lock_release(flags);
+        return ptr;
+    }
+    void *replacement = simpleos_heap_alloc_unlocked(size);
+    if (!replacement) {
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    /* The caller retains exclusive ownership of ptr throughout realloc.  Keep
+     * the IRQ-masked section to metadata changes; copying a large buffer with
+     * interrupts disabled would delay device service unnecessarily. */
+    simpleos_heap_lock_release(flags);
+    __builtin_memcpy(replacement, ptr, old_size);
+    flags = simpleos_heap_lock_acquire();
+    simpleos_heap_free_unlocked(ptr);
+    simpleos_heap_lock_release(flags);
+    return replacement;
+}
+
+static void *simpleos_heap_realloc_last(void *ptr, size_t old_size, size_t new_size)
+{
+    (void)old_size;
+    return realloc(ptr, new_size);
+}
+
+void *calloc(size_t count, size_t size)
+{
+    if (count != 0 && size > (size_t)-1 / count) return NULL;
+    size_t total = count * size;
+    void *ptr = malloc(total);
+    if (ptr) __builtin_memset(ptr, 0, total);
+    return ptr;
+}
+
+#ifdef SIMPLEOS_HEAP_TEST
+void rt_baremetal_heap_test_reset(void) { _heap_off = 0; }
+size_t rt_baremetal_heap_test_capacity(void) { return sizeof(_heap); }
+size_t rt_baremetal_heap_test_high_water(void) { return _heap_off; }
+#endif
+/* SIMPLEOS_HEAP_ALLOCATOR_END */
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
@@ -685,7 +850,10 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
 {
-    (void)ptr;
+    /* rt_alloc returns a raw pointer on this ABI.  Managed collection remains
+     * intentionally unavailable here because heap objects have no ownership
+     * metadata; explicit runtime deallocation must still reclaim raw buffers. */
+    if (ptr != 0) free((void *)(uintptr_t)ptr);
     return NIL_VALUE;
 }
 
@@ -1476,8 +1644,7 @@ static struct {
 } _nvme;
 
 typedef struct {
-    size_t prev_heap_off;
-    size_t alloc_end_off;
+    void *raw;
 } nvme_aligned_alloc_header_t;
 
 /* Allocate page-aligned memory from the bump allocator.
@@ -1487,8 +1654,9 @@ static void *nvme_alloc_aligned(size_t size, size_t alignment)
 {
     if (alignment == 0) return (void *)0;
     /* Allocate extra space so we can align within it */
+    if (alignment > (size_t)-1 - sizeof(nvme_aligned_alloc_header_t) ||
+        size > (size_t)-1 - alignment - sizeof(nvme_aligned_alloc_header_t)) return (void *)0;
     size_t total = size + alignment + sizeof(nvme_aligned_alloc_header_t);
-    size_t prev_heap_off = _heap_off;
     void *raw = malloc(total);
     if (!raw) return (void *)0;
     /* Align the pointer within the allocated region */
@@ -1496,8 +1664,7 @@ static void *nvme_alloc_aligned(size_t size, size_t alignment)
     uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)(aligned - sizeof(nvme_aligned_alloc_header_t));
-    hdr->prev_heap_off = prev_heap_off;
-    hdr->alloc_end_off = _heap_off;
+    hdr->raw = raw;
     return (void *)aligned;
 }
 
@@ -1506,8 +1673,7 @@ static void nvme_free_aligned(void *ptr)
     if (!ptr) return;
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)((uintptr_t)ptr - sizeof(nvme_aligned_alloc_header_t));
-    if (_heap_off == hdr->alloc_end_off && hdr->prev_heap_off <= hdr->alloc_end_off)
-        _heap_off = hdr->prev_heap_off;
+    free(hdr->raw);
 }
 
 /* Ring a doorbell: SQ tail doorbell = BAR0 + 0x1000 + (2*qid) * stride
@@ -13686,7 +13852,8 @@ RuntimeValue rt_abort(RuntimeValue msg)
     return NIL_VALUE;
 }
 
-/* GC: safe no-ops on bare metal (bump allocator, no GC) */
+/* GC has no tracing metadata in this freestanding ABI. Explicit rt_dealloc
+ * reclaims raw buffers; rt_gc_collect must not guess at live heap objects. */
 RuntimeValue rt_gc_collect(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_enable(void)  { return NIL_VALUE; }
