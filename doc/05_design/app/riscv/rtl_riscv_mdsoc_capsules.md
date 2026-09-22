@@ -71,14 +71,15 @@ Decision D-2: `riscv_fpga_linux.spl` (4547 lines) is safe to split.
 
 | New File | Lines (budget) | Capsule | Content |
 |---|---|---|---|
-| `fpga_linux_orchestrator.spl` | < 900 | `vhdl.emit.control` | `RiscvXlen`, `RiscvFpgaLane` identity, `XilinxBoardProfile`, `LinuxArtifactSet`, `FpgaPrepareManifest`, `generate_riscv_fpga_rtl_bundle`, top-level helpers |
-| `fpga_linux_data.spl` | < 2700 | `vhdl.emit.data` | `RiscvFpgaLane` VHDL-emission methods: `hardware_source_*`, `package_vhdl`, `core_vhdl_*`, decode definitions |
-| `fpga_linux_manifest.spl` | < 200 | `vhdl.emit.metadata` | `debug_sidecar_json`, `debug_sidecar_file_name`, `json_escape`, `json_text_array`, `json_source_map_array`, `json_runner_success_markers`, testbench renderers |
+| `fpga_linux_orchestrator.spl` | < 900 | `vhdl.emit.control` | `RtlBundle`, bundle assembly, output files, and public `generate_*_riscv_fpga_rtl_bundle` entrypoints |
+| `fpga_linux_data.spl` | < 2700 | `vhdl.emit.data` | VHDL templates and RTL artifact emission through `write_rtl_sources` |
+| `fpga_linux_manifest.spl` | < 900 | `vhdl.emit.metadata` | Board and lane types, manifest factories and serializers, debug sidecar JSON, and type-adjacent `generated_core_source` / `rv32_generated_hardware_source_spl` templates |
 | `riscv_fpga_linux.spl` (facade) | < 30 | `re-export` | Thin `use` + re-export of all three split files |
 
-**Note on data budget:** Phase 3 estimated the data module at ~2855 lines.
-The task specification sets the budget at < 2700. Phase 5 SA-3 must either
-fit within 2700 lines or record a deviation and file a follow-up split task.
+**Final layout:** The manifest budget is 900 lines because board and lane
+types and their serialization live together. The retained source templates
+serve `RiscvFpgaLane.hardware_source_spl()` without a reverse import into
+the data emitter. The data budget remains 2700 lines.
 
 **D-4 invariant:** All `json_*` helper functions live exclusively in
 `fpga_linux_manifest.spl`. No other capsule may emit JSON key-value pairs
@@ -102,10 +103,9 @@ vhdl_emit_hart_stub.spl    — vhdl.emit.state.hart  — Feature B
 ## Dependency Map
 
 ```
-fpga_linux_data.spl          -> fpga_linux_orchestrator.spl  (RiscvXlen, RiscvFpgaLane structs)
-fpga_linux_manifest.spl      -> fpga_linux_orchestrator.spl  (RiscvFpgaLane, GeneratedCoreDebugMetadata)
-fpga_linux_orchestrator.spl  -> fpga_linux_data.spl          (RiscvFpgaLane VHDL emission methods)
-fpga_linux_orchestrator.spl  -> fpga_linux_manifest.spl      (debug_sidecar_json, debug_sidecar_file_name)
+fpga_linux_data.spl          -> fpga_linux_manifest.spl      (lane/product types, source metadata, sidecar JSON)
+fpga_linux_orchestrator.spl  -> fpga_linux_data.spl          (write_rtl_sources)
+fpga_linux_orchestrator.spl  -> fpga_linux_manifest.spl      (types, factories, manifest serializers)
 riscv_fpga_linux.spl (facade)-> fpga_linux_orchestrator.spl  (re-export)
 riscv_fpga_linux.spl (facade)-> fpga_linux_data.spl          (re-export)
 riscv_fpga_linux.spl (facade)-> fpga_linux_manifest.spl      (re-export)
@@ -120,9 +120,8 @@ vhdl/mod.spl                 -> all 4 stubs (re-export)
 
 No circular dependencies.
 
-**Cycle watch:** `fpga_linux_manifest.spl` needs `generated_testbench_from_template`
-which is data-class. If this creates a cycle at resolution time, move it into
-`fpga_linux_manifest.spl` (testbench rendering is Metadata-class). Resolve in Phase 5.
+The final FPGA module graph is acyclic. The manifest does not import the data
+module; its retained source templates are adjacent to the public lane method.
 
 ---
 
