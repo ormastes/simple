@@ -19,6 +19,7 @@ use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_a
 use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void}
 use compiler.backend.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
 use std.nogc_sync_mut.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
@@ -106,17 +107,21 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to declare module statics"))
 
+    val is_entry = cl_module_is_native_entry(module.name, rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? "")
+    val no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
     var func_handles: Dict<text, i64> = {}
     for func in module.functions.values():
-        val emit_name = cl_function_emit_name(func.name)
+        val emit_name = cl_function_emit_name(func, module.name, is_entry, no_mangle)
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
         val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
         func_handles[func.name] = handle
+        func_handles[emit_name] = handle
 
     for func in module.functions.values():
         print "[cranelift-direct] compile {func.name}"
-        val result = compile_function(cl_module, func, func_handles, global_handles)
+        val emit_name = cl_function_emit_name(func, module.name, is_entry, no_mangle)
+        val result = compile_function(cl_module, func, func_handles, global_handles, emit_name)
         if not result:
             cranelift_free_module(cl_module)
             return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -166,16 +171,20 @@ impl Codegen for CraneliftCodegenAdapter:
                 "Failed to declare module statics"))
 
         # First pass: declare all functions so forward references work
+        val is_entry = cl_module_is_native_entry(module.name, rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? "")
+        val no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
         var func_handles: Dict<text, i64> = {}
         for func in module.functions.values():
             val sig = build_signature(func.signature, func.name == "main")
-            val emit_name = cl_function_emit_name(func.name)
+            val emit_name = cl_function_emit_name(func, module.name, is_entry, no_mangle)
             val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
             func_handles[func.name] = handle
+            func_handles[emit_name] = handle
 
         # Second pass: compile each function
         for func in module.functions.values():
-            val result = compile_function(cl_module, func, func_handles, global_handles)
+            val emit_name = cl_function_emit_name(func, module.name, is_entry, no_mangle)
+            val result = compile_function(cl_module, func, func_handles, global_handles, emit_name)
             if not result:
                 cranelift_free_module(cl_module)
                 return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -323,8 +332,7 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>:
 # Function Compilation
 # ============================================================================
 
-fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, i64>) -> bool:
-    val emit_name = cl_function_emit_name(func.name)
+fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, i64>, emit_name: text) -> bool:
     val sig = build_signature(func.signature, func.name == "main")
     val ctx = cranelift_begin_function(cl_module, emit_name, sig)
     if ctx == 0:
@@ -1357,10 +1365,20 @@ fn cl_translate_call(
 fn cl_is_lowering_owned_runtime(name: text) -> bool:
     name == "rt_array_len" or name == "rt_array_get" or name == "rt_array_get_text" or name == "rt_array_set" or name == "rt_array_set_text" or name == "rt_bytes_u8_at"
 
-fn cl_function_emit_name(name: text) -> text:
+fn cl_module_is_native_entry(module_name: text, native_entry: text) -> bool:
+    # Share the logical path policy with LLVM. A library may itself contain
+    # main, while an entry module may have no main; body names are not policy.
+    if native_entry == "": return true
+    module_name == module_logical_name_from_path(native_entry)
+
+fn cl_function_emit_name(func: MirFunction, module_name: text, is_entry: bool, no_mangle: bool) -> text:
+    val name = func.name
     if name == "main":
-        return "__simple_main"
-    if (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1":
+        if is_entry: return "__simple_main"
+        return "__simple_main_" + module_name.replace(".", "_")
+    if func.export_name != "": return func.export_name
+    if func.is_global: return name
+    if no_mangle:
         return name
     # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
     # in cl_translate_call above -- a same-named local body is unreachable
@@ -1378,6 +1396,10 @@ fn cl_function_emit_name(name: text) -> text:
     # keeps both interpretations coexisting in one module.
     if cl_is_lowering_owned_runtime(name) or mir_runtime_owned_call_name(name):
         return "__simple_local_{name}"
+    # Call operands already carry this owner-qualified spelling. Use it for
+    # both declaration and body, retaining bare/local aliases in func_handles.
+    if not is_entry and module_name != "" and not name.contains("."):
+        return "{module_name}.{name}"
     name
 
 # ============================================================================

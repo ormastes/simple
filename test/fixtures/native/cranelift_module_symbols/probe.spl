@@ -1,0 +1,63 @@
+use std.nogc_sync_mut.sffi.codegen.*
+use symbol_support.*
+
+fn signature() -> i64:
+    val sig = cranelift_new_signature(-1)
+    cranelift_sig_set_return(sig, 4)
+    sig
+
+fn finish(module: i64, ctx: i64) -> bool:
+    cranelift_seal_all_blocks(ctx)
+    val body = cranelift_end_function(ctx)
+    if body == 0: return false
+    cranelift_aot_define_function(module, body)
+
+fn define_constant(module: i64, name: text, value: i64) -> bool:
+    val sig = signature()
+    val handle = cranelift_declare_function(module, name, sig, 0)
+    if handle == 0: return false
+    val ctx = cranelift_begin_function(module, name, sig)
+    if ctx == 0: return false
+    val block = cranelift_create_block(ctx)
+    cranelift_switch_to_block(ctx, block)
+    cranelift_return(ctx, cranelift_iconst(ctx, 4, value))
+    finish(module, ctx)
+
+fn emit_owner(owner: text, value: i64) -> bool:
+    val module = cranelift_new_aot_module(owner, "aarch64-apple-darwin")
+    if module == 0: return false
+    # Definition and body use the same production name helper. Inputs model
+    # the bare MIR function name and its canonical logical module owner.
+    val name = probe_emit_name("value", owner)
+    if not define_constant(module, name, value): return false
+    val ok = cranelift_emit_object(module, "{owner}.o")
+    cranelift_free_module(module)
+    ok
+
+fn emit_caller() -> bool:
+    val module = cranelift_new_aot_module("caller", "aarch64-apple-darwin")
+    if module == 0: return false
+    val alpha = cranelift_declare_function(module, "alpha.value", signature(), 1)
+    val beta = cranelift_declare_function(module, "beta.value", signature(), 1)
+    val sig = signature()
+    val main_handle = cranelift_declare_function(module, "main", sig, 0)
+    val ctx = cranelift_begin_function(module, "main", sig)
+    if ctx == 0: return false
+    val block = cranelift_create_block(ctx)
+    cranelift_switch_to_block(ctx, block)
+    val a = cranelift_call(ctx, cranelift_import_function(ctx, alpha), [])
+    val b = cranelift_call(ctx, cranelift_import_function(ctx, beta), [])
+    val sum = cranelift_iadd(ctx, a, b)
+    val result = cranelift_isub(ctx, sum, cranelift_iconst(ctx, 4, 141))
+    cranelift_return(ctx, result)
+    if not finish(module, ctx): return false
+    val ok = cranelift_emit_object(module, "caller.o")
+    cranelift_free_module(module)
+    ok
+
+fn main() -> i64:
+    if not emit_owner("alpha", 42): return 10
+    if not emit_owner("beta", 99): return 11
+    if not emit_caller(): return 12
+    print "cranelift-symbol-objects-emitted"
+    0
