@@ -66,3 +66,10 @@ executable, and report exactly that version; rustc embedded LLVM must match.
 The producer must set this variable; this does not migrate repository-wide
 default backend policy. CXX/AR/LD seed fields bind setting strings, not immutable
 binary content hashes. Exact versioned Cellar paths are used for this run.
+
+Rust LLVM validation now runs on the repository-policy-resolved compiler in
+both resolver paths, not ambient RUSTC. A negative fixture verifies an ambient
+override cannot hide a resolved LLVM mismatch. Strict mode requires the
+effective Rust linker to equal selected CC, preventing a linker override from
+bypassing the compiler pin. Installed resolved nightly Rust passes; an alternate
+Apple Clang linker override is rejected.
