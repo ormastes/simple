@@ -89,6 +89,22 @@ fn primitive_type_symbol_name(ty: crate::hir::TypeId) -> Option<&'static str> {
     })
 }
 
+/// The receiver-blind LLVM method table may use the collection helper only for
+/// an erased receiver. Exact/import user targets are resolved before this gate;
+/// owner suffix scans are deliberately excluded because they can capture an
+/// unrelated `Owner.set` and turn the method lookup into an O(calls×functions)
+/// walk.
+#[cfg(feature = "llvm")]
+fn uses_erased_collection_set_fallback(
+    receiver_ty: Option<crate::hir::TypeId>,
+    method: &str,
+    arg_count: usize,
+) -> bool {
+    method == "set"
+        && arg_count == 2
+        && matches!(receiver_ty, None | Some(crate::hir::TypeId::ANY))
+}
+
 #[cfg(feature = "llvm")]
 fn build_vreg_types(
     func: &MirFunction,
@@ -2456,7 +2472,14 @@ impl LlvmBackend {
                     .or_else(|| resolved_direct.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                     .or_else(|| module.get_function(func_name))
                     .or_else(|| module.get_function(&dotted_direct));
-                if direct_func.is_some() && (func_name.contains('.') || func_name.contains("_dot_")) {
+                // `set` has an erased-collection runtime fallback below. A
+                // exact/import-mapped user method with this name is resolved
+                // before that fallback. Do not scan all module functions here:
+                // suffix discovery is both receiver-blind for Any and linear in
+                // module size on a hot codegen path.
+                if direct_func.is_some()
+                    && (func_name.contains('.') || func_name.contains("_dot_") || func_name == "set")
+                {
                     let mut all_args = vec![*receiver];
                     all_args.extend_from_slice(args);
                     let func = direct_func.unwrap();
@@ -2944,7 +2967,15 @@ impl LlvmBackend {
                     "get" => Some("rt_index_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
-                    "set" => Some("rt_collection_set"),
+                    // The name-only fallback is safe only for the exact Dict
+                    // method shape. User methods were considered above.
+                    "set" if uses_erased_collection_set_fallback(
+                        vreg_types.get(receiver).copied(),
+                        method,
+                        args.len(),
+                    ) && resolved_direct.is_none() => {
+                        Some("rt_collection_set")
+                    }
                     // Receiver-dispatched — see the matching arm in
                     // codegen/instr/closures_structs.rs. Name-keyed table with
                     // no receiver type, so `rt_dict_remove` here silently
@@ -3046,7 +3077,9 @@ impl LlvmBackend {
                         let mut val = self.get_vreg(arg, vreg_map)?;
                         // Membership needle must be boxed to match the tagged
                         // store; see build_wrap_membership_needle.
-                        if (rt_name == "rt_contains" && arg_idx == 1) || (rt_name == "rt_collection_set" && arg_idx > 0) {
+                        if (rt_name == "rt_contains" && arg_idx == 1)
+                            || (rt_name == "rt_collection_set" && arg_idx > 0)
+                        {
                             val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
                         }
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
@@ -3203,6 +3236,11 @@ impl LlvmBackend {
                         .or_else(|| module.get_function(&dotted_name));
                     let called_func = if let Some(func) = called_func {
                         Some(func)
+                    } else if func_name == "set" && resolved.is_some() {
+                        // An explicit cross-unit mapping is authoritative. Do
+                        // not let a local, receiver-blind `.set` suffix steal
+                        // it before the existing external declaration path.
+                        None
                     } else {
                         suffix_match()?
                     };
@@ -3851,6 +3889,18 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn erased_collection_set_fallback_is_exact_arity_and_any_only() {
+        // This control prevents one or many unrelated Owner.set symbols from
+        // changing erased Dict dispatch: user targets are resolved directly,
+        // never by a module-wide leaf-name scan.
+        assert!(uses_erased_collection_set_fallback(None, "set", 2));
+        assert!(uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "set", 2));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::I64), "set", 2));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "set", 1));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "push", 2));
+    }
 
     #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {

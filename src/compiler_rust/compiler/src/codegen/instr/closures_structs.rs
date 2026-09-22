@@ -2558,7 +2558,10 @@ fn try_compile_builtin_method_call<M: Module>(
         // above, and falls through to `rt_dict_remove` for non-arrays.
         // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
         "remove" => "rt_collection_remove",
-        "set" => "rt_collection_set",
+        // Keep `set` out of the broad bare-name gate: a user-defined
+        // `set(k, v)` must retain normal method resolution. This arm is used
+        // only after the existing erased-collection route selected it.
+        "set" if args.len() == 2 => "rt_collection_set",
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
         // `d.items()` on an erased (bare) receiver: same runtime call the
