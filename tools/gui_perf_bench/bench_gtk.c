@@ -1,6 +1,6 @@
 // GUI Perf Benchmark — C/GTK3 8K fill + widget render
 // Measures: cold startup, warm frame, 8K (7680x4320) fill rate
-// Build: gcc -O2 $(pkg-config --cflags --libs gtk+-3.0) -o bench_gtk bench_gtk.c
+// Build: clang -O2 $(pkg-config --cflags --libs gtk+-3.0) -o bench_gtk bench_gtk.c
 // Run:   ./bench_gtk [--width 7680 --height 4320 --frames 60]
 
 #include <gtk/gtk.h>

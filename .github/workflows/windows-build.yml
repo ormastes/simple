@@ -41,22 +41,26 @@ jobs:
         if: matrix.toolchain == 'msvc'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # MSVC: Install LLVM for llvm-lib backend testing (optional — stage2 LLVM step is continue-on-error)
+      # Windows host C/C++ policy: LLVM 23.1.1 clang-cl with the MSVC ABI/C mode.
+      # Do not downgrade or replace this with GCC/MinGW for another host or agent.
+      # The Rust toolchain remains selected independently below.
       - name: Install LLVM (MSVC)
         if: matrix.toolchain == 'msvc'
-        continue-on-error: true
         shell: bash
         run: |
-          choco install llvm --version=18.1.8 -y --no-progress
+          choco install llvm --version=23.1.1 -y --no-progress
           echo "SIMPLE_LLVM_PATH=C:/Program Files/LLVM/bin/LLVM-C.dll" >> "$GITHUB_ENV"
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
+          clang-cl --version
 
-      # MinGW: set up MSYS2 with GCC + LLVM toolchain
+      # GNU-target support comes from the MinGW sysroot; Clang remains the driver.
       - name: Setup MSYS2 (MinGW)
         if: matrix.toolchain == 'mingw'
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-llvm
+          install: mingw-w64-x86_64-clang mingw-w64-x86_64-llvm
 
       - name: Add MinGW to PATH
         if: matrix.toolchain == 'mingw'
@@ -69,12 +73,16 @@ jobs:
         run: echo "MSYSTEM=MINGW64" >> "$GITHUB_ENV"
 
       # Override .cargo/config.toml linker for native MSYS2 builds.
-      # config.toml sets linker = "x86_64-w64-mingw32-gcc" (Linux cross-compile name),
-      # but native MSYS2 uses plain "gcc".
+      # Keep Clang as the GNU-target driver; do not change this to GCC as a
+      # host-specific workaround. The Rust target itself is unchanged.
       - name: Set MinGW linker override
         if: matrix.toolchain == 'mingw'
         shell: bash
-        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc" >> "$GITHUB_ENV"
+        run: |
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=clang" >> "$GITHUB_ENV"
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+          clang --version
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
