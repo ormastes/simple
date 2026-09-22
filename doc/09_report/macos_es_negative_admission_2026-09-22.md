@@ -110,3 +110,26 @@ Both runs used the reviewed external watchdog with enforced sampled cap
 budget. Logs, test binaries, mutant source and receipts are retained under
 `build/evidence/macos-es-child-cleanup-20260922/` in this worktree. Neither run
 establishes hard memory containment (`hard_memory_limit=0`) or live ES admission.
+
+Independent Astra review caught a test-only ownership error: direct sibling
+`waitpid(WNOHANG)` observation could reap outside its owner. The test-only
+`SpawnedRoot.isRunning()` method now owns that observation and records reap
+or ECHILD before returning. Astra approved the corrected source at
+`d5922bf44e1`, subject to the collector's exclusive-waiter/default-SIGCHLD
+invariant. The reviewer found no material added memory/performance concern;
+the production change adds constant state per spawned root.
+
+The canonical `macos_es_history_collector_contract.shs` then passed once
+against clean commit `d5922bf44e1`: Swift state-machine/real-process tests,
+builder snapshot/admission self-test and unavailable build/verify rejection.
+Elapsed time was 23.15 seconds, maximum child RSS 174,587,904 bytes, zero swaps,
+and sampled tree peak 208,064 KiB. The receipt records exit 0, quiescence,
+verified helper integrity, no unexpected session PIDs, and one 145 ms sampling
+overrun within the 5000 ms observation budget. Files are
+`source-contract.log` and `source-contract-rss.env` in the same evidence directory.
+Swift was Apple 6.2.4 (`swiftlang-6.2.4.1.4`, clang `1700.6.4.2`) from
+`/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc`,
+using the Xcode `MacOSX26.2.sdk`. Current source SHA256 is
+`f1e8a9fb87c0f8edf80f5305ec0cca90bc3125058ff07a34b582335b17e4d2f9`.
+No live history, signed artifact, admission policy transition or publication
+was performed. The original ES bug remains open for its external admission gate.
