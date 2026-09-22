@@ -17,6 +17,25 @@
 # `__simple_main` -> the whole native-smoke-matrix went 0/19. Consolidating
 # to one function removes the drift class entirely.
 
+fn _module_path_naming_matches_at(value: text, needle: text, start: i64) -> bool:
+    # Bootstrap containment: Cranelift literals are tagged, but the current
+    # starts_with/ends_with MIR argument path assumes raw text. Compare bytes
+    # without retagging or allocation; preserve the canonical path policy.
+    if start < 0:
+        return false
+    val value_len = value.len()
+    if start > value_len:
+        return false
+    val needle_len = needle.len()
+    if needle_len > value_len - start:
+        return false
+    var offset = 0
+    while offset < needle_len:
+        if value.byte_at(start + offset) != needle.byte_at(offset):
+            return false
+        offset = offset + 1
+    true
+
 fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
         return 0
@@ -71,9 +90,9 @@ pub fn module_logical_name_from_path(path: text) -> text:
     is kept repo-relative so temporary/worktree directory names cannot leak
     host-path punctuation into native symbols."""
     var mod_path = path.replace("\\", "/")
-    while mod_path.starts_with("../"):
+    while _module_path_naming_matches_at(mod_path, "../", 0):
         mod_path = mod_path.substring(3)
-    if mod_path.starts_with("./"):
+    if _module_path_naming_matches_at(mod_path, "./", 0):
         mod_path = mod_path.substring(2)
     val absolute_src = _module_path_naming_text_index_of(mod_path, "/src/")
     if absolute_src >= 0:
@@ -82,13 +101,13 @@ pub fn module_logical_name_from_path(path: text) -> text:
         val absolute_examples = _module_path_naming_text_index_of(mod_path, "/examples/")
         if absolute_examples >= 0:
             mod_path = mod_path.substring(absolute_examples + 1)
-    if mod_path.starts_with("src/"):
+    if _module_path_naming_matches_at(mod_path, "src/", 0):
         mod_path = mod_path.substring(4)
     # Stage 2 native currently miscompiles deletion replacement and can turn
     # the entire path into "". These are suffixes, so slice them explicitly.
-    if mod_path.ends_with(".spl"):
+    if _module_path_naming_matches_at(mod_path, ".spl", mod_path.len() - 4):
         mod_path = mod_path.substring(0, mod_path.len() - 4)
-    elif mod_path.ends_with(".sdn"):
+    elif _module_path_naming_matches_at(mod_path, ".sdn", mod_path.len() - 4):
         mod_path = mod_path.substring(0, mod_path.len() - 4)
     mod_path = _module_path_naming_strip_numbered_dirs(mod_path)
     var portable = ""
