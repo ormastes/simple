@@ -11,11 +11,11 @@ its target to `*-unknown-none-elf`; that path needs its own SSP policy before
 this bug can close. Guest symbol, startup, and fault-path evidence is also
 outstanding.
 
-The LLVM switch currently uses a hardcoded `target_os == "simpleos" and not
-bare_metal` condition rather than `resolve_hardening(preset).ssp`. The
-`embedded_with_heap` preset opts out of SSP in that policy, but no matching
-codegen path or test proves the opt-out. Both policy wiring and the default
-Cranelift route remain unresolved source work.
+The LLVM switch now consumes `resolve_hardening(preset).ssp`; its focused spec
+proves that `embedded_with_heap` opts out while hosted SimpleOS opts in. An
+independent bare-metal guard wins even if a caller supplies a contradictory
+hosted or unknown preset. The default Cranelift route remains unresolved
+source work.
 
 Source checks on 2026-09-22: focused compiler and app hardening specs passed
 (4/4 and 4/4) using the available Rust bootstrap seed. These passes are
@@ -27,6 +27,18 @@ One-shot reciprocal compile measurements: baseline object 1200 bytes, SSP
 object 1384 bytes; both 0.01 s; peak Clang RSS 60668 KiB baseline and
 61244 KiB SSP. These small fixture measurements are a code-size and build
 resource signal, not a guest performance claim.
+
+The focused linkage checker `scripts/check/check-simpleos-ssp-linkage.shs`
+also compiles an escaping 64-byte buffer for `x86_64-unknown-simpleos`. The
+object has undefined `__stack_chk_guard` and `__stack_chk_fail`; its negative
+link without the runtime fails, while the same link with the shipped
+`simpleos_cxxabi.c` succeeds and defines both symbols. A host execution of the
+shipped failure handler emits `stack smashing detected` and terminates with
+status 134. One-shot measurements on 2026-09-22 were 1184 bytes without SSP
+and 1848 bytes with the linked handler (+664 bytes), with 0.00 s link time and
+25,420/25,224 KiB linker peak RSS respectively. The handler execution used
+696 KiB peak RSS. These are focused regression bounds, not guest runtime
+performance evidence.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
