@@ -1,0 +1,17 @@
+# Call-scoped CUDA argument marshalling. The caller owns a 320-byte scratch
+# block: twenty raw i64 values followed by twenty pointers to those values.
+use std.nogc_sync_mut.cuda.sffi.{rt_cuda_launch_kernel}
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_write_i64}
+
+@unsafe(reason: "scratch must reference a live exclusive 320-byte raw allocation through the synchronous launch call", capabilities: [ffi, raw_ptr])
+pub fn cuda_launch_i64_args(module: i64, name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, scratch: i64, args: [i64]) -> i64:
+    if module <= 0 or name == "" or scratch == 0 or args.len() == 0 or args.len() > 20:
+        return -1
+    if gx <= 0 or gy <= 0 or gz <= 0 or bx <= 0 or by <= 0 or bz <= 0:
+        return -1
+    var index = 0
+    while index < args.len():
+        rt_ptr_write_i64(scratch, index * 8, args[index])
+        rt_ptr_write_i64(scratch, 160 + index * 8, scratch + index * 8)
+        index = index + 1
+    rt_cuda_launch_kernel(module, name, gx, gy, gz, bx, by, bz, scratch + 160)

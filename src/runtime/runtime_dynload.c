@@ -1587,6 +1587,20 @@ GPU_CALL1(int64_t, rt_cuda_mem_alloc, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_mem_allo
 GPU_CALL3(int64_t, rt_cuda_memset_d32, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memset_d32", -3, int64_t, int64_t, int64_t)
 GPU_CALL3(int64_t, rt_cuda_memcpy_dtoh, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtoh", -3, int64_t, int64_t, int64_t)
 
+/* Public text spans and the provider's signed integer byte-span ABI differ.
+ * Convert explicitly; calling the provider through a pointer/u64 Fn is UB. */
+int64_t rt_cuda_module_load_data(const uint8_t *data, uint64_t length) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (length > INT64_MAX) return -1;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_module_load_data_bytes", &pin)) return -3;
+    result = ((Fn)pin.symbol)((int64_t)(intptr_t)data, (int64_t)length);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
 /* E2 (streams/events/async copies/extended launch): forwarded to the CUDA
  * provider by the exact same symbol names the Simple-facing externs use
  * (`src/lib/nogc_sync_mut/cuda/sffi.spl`) and matching the Rust runtime's
