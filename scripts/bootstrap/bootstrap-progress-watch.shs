@@ -75,10 +75,63 @@ stall_cpu_pct=${BOOTSTRAP_WATCH_STALL_CPU_PCT:-3}
 stall_samples=${BOOTSTRAP_WATCH_STALL_SAMPLES:-4}
 case "$stall_samples" in ''|*[!0-9]*|0) stall_samples=4 ;; esac
 
-process_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
-if [ -n "$expected_start" ] && [ "$process_start" != "$expected_start" ]; then
+watch_platform=$(uname -s)
+native_observer=
+if [ "$watch_platform" = Darwin ]; then
+  native_observer=${SIMPLE_BOOTSTRAP_PROCESS_OBSERVER:-}
+  native_observer_sha=${SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256:-}
+  if [ -z "$native_observer" ]; then
+    # Standalone progress-watch also works outside the RSS guard. Compile once
+    # into a private directory, with a bounded compiler and no shared cache.
+    observer_dir=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-progress-observer.XXXXXXXX")
+    trap 'rm -f "$observer_dir/observer"; rmdir "$observer_dir"' EXIT
+    native_observer=$observer_dir/observer
+    observer_source=$(dirname -- "$0")/../resource/macos-process-observer.c
+    perl -e 'alarm 30; exec @ARGV; exit 127' /usr/bin/clang -O2 "$observer_source" -o "$native_observer"
+    chmod 0500 "$native_observer"
+    native_observer_sha=$(shasum -a 256 "$native_observer" | awk '{print $1}')
+  fi
+fi
+
+native_observe() {
+  # Refuse replacement or privilege-bearing executables BEFORE exec. The
+  # watchdog supplies its admitted helper/hash; standalone uses its private one.
+  perl -MDigest::SHA -MFcntl=O_RDONLY,O_NOFOLLOW -e '
+    alarm 5;
+    my ($path, $sha, @args) = @ARGV;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 89;
+    my @st = stat($fh); my @entry = lstat($path);
+    -f $fh && @entry && !-l $path && $st[0] == $entry[0] && $st[1] == $entry[1] &&
+      !($st[2] & 06000) && Digest::SHA->new(256)->addfile($fh)->hexdigest eq $sha or exit 89;
+    exec {$path} $path, @args; exit 127;
+  ' "$native_observer" "$native_observer_sha" "$@"
+}
+
+read_process_identity() {
+  if [ "$watch_platform" = Darwin ]; then
+    identity_row=$(native_observe --identity "$watch_pid") || return 1
+    set -- $identity_row
+    current_start=${1:-}
+    elapsed_seconds=${2:-unknown}
+    current_start_text=$(printf '%s\n' "$identity_row" | cut -d ' ' -f 3-)
+    process_elapsed=$(awk -v s="$elapsed_seconds" 'BEGIN {
+      if (s == "unknown") {print s; exit}
+      d=int(s/86400); h=int(s/3600)%24; m=int(s/60)%60;
+      if(d) printf "%d-%02d:%02d:%02d\n",d,h,m,s%60;
+      else if(h) printf "%02d:%02d:%02d\n",h,m,s%60;
+      else printf "%02d:%02d\n",m,s%60;
+    }')
+  else
+    current_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
+    current_start_text=$current_start
+    process_elapsed=$(ps -o etime= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1; exit}')
+  fi
+}
+read_process_identity || { echo 'error: progress identity unavailable' >&2; exit 89; }
+process_start=$current_start
+if [ -n "$expected_start" ] && [ "$current_start_text" != "$expected_start" ]; then
   printf 'event=sample status=stale pid=%s expected_start=%s actual_start=%s\n' \
-    "$watch_pid" "$expected_start" "${process_start:-absent}" >>"$progress_log"
+    "$watch_pid" "$expected_start" "${current_start_text:-absent}" >>"$progress_log"
   exit 3
 fi
 
@@ -116,7 +169,7 @@ process_tree_metrics() {
   # An explicit snapshot command is dependency injection for the bounded
   # process-table regressions. It must select the matching backend even on a
   # Linux host with procfs; ordinary production runs leave it unset.
-  if [ -n "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ] || [ ! -r "/proc/$metrics_root/stat" ]; then
+  if [ "$watch_platform" = Darwin ] || [ -n "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ] || [ ! -r "/proc/$metrics_root/stat" ]; then
     process_tree_metrics_ps "$metrics_root" "$metrics_exclude"
     return
   fi
@@ -230,13 +283,24 @@ process_tree_metrics() {
 # using one process-table snapshot.  `time` is cumulative CPU time; differencing
 # it against the prior sample gives the same instantaneous tree CPU statistic as
 # the Linux tick backend.  RSS is already reported by ps in KiB on these hosts.
+process_table_snapshot() {
+  if [ "$watch_platform" = Darwin ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+    # Buffer until success: a failed/partial native scan must never look like
+    # a healthy, smaller tree to the progress/stall classifier.
+    native_rows=$(native_observe --progress "$metrics_root") || return 1
+    printf '%s\n' "$native_rows"
+  else
+    snapshot_ps=${BOOTSTRAP_WATCH_PS_COMMAND:-ps}
+    BOOTSTRAP_WATCH_METRICS_ROOT=$metrics_root \
+      BOOTSTRAP_WATCH_METRICS_EXCLUDE=$metrics_exclude \
+      "$snapshot_ps" -axo pid=,ppid=,pgid=,rss=,lstart=,time=,comm=
+  fi
+}
+
 process_tree_metrics_ps() {
   metrics_root=$1
   metrics_exclude=$2
-  snapshot_ps=${BOOTSTRAP_WATCH_PS_COMMAND:-ps}
-  BOOTSTRAP_WATCH_METRICS_ROOT=$metrics_root \
-    BOOTSTRAP_WATCH_METRICS_EXCLUDE=$metrics_exclude \
-    "$snapshot_ps" -axo pid=,ppid=,pgid=,rss=,lstart=,time=,comm= 2>/dev/null | awk \
+  process_table_snapshot 2>/dev/null | awk \
       -v root="$metrics_root" -v exclude="$metrics_exclude" \
       -v state="$cpu_state_file" -v now="$(date +%s)" '
     function cpu_seconds(value,   day_parts, clock, n, a, days) {
@@ -417,7 +481,7 @@ while :; do
     exit 0
   fi
 
-  current_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
+  read_process_identity || { current_start=; process_elapsed=unknown; }
   if [ -n "$process_start" ] && [ "$current_start" != "$process_start" ]; then
     printf 'event=sample timestamp=%s status=stale pid=%s elapsed_s=%s milestone=%s\n' \
       "$now" "$watch_pid" "$((now - started_at))" "$milestone" >>"$progress_log"
@@ -425,9 +489,6 @@ while :; do
     exit 3
   fi
 
-  metrics=$(ps -o etime= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1; exit}')
-  set -- $metrics
-  process_elapsed=${1:-unknown}
   # rss_kb is the ROOT process only, and for a wrapper shell that is ~3MB of
   # sleeping shell. Kept for continuity, but it is NOT the build's footprint --
   # tree_rss_kb is. Do not read rss_kb as "how big is the build".
