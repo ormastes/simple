@@ -1,0 +1,55 @@
+#!/bin/sh
+# Run the emitted test/fixtures/native/build_progress_optional_sink.spl binary.
+# Compilation is deliberately external: the caller must choose and record the
+# compiler generation, runtime authority, backend and private cache.
+set -eu
+
+if [ "$#" -ne 2 ] || [ ! -x "$1" ]; then
+    echo "usage: $0 <native-fixture-binary> <evidence-parent-directory>" >&2
+    exit 2
+fi
+native_fixture=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+mkdir -p "$2"
+evidence_parent=$(cd "$2" && pwd)
+run_dir=$(mktemp -d "$evidence_parent/progress-sink.XXXXXXXX")
+timeout_bin=$(command -v gtimeout || command -v timeout) || {
+    echo "timeout or gtimeout is required" >&2
+    exit 2
+}
+printf 'evidence=%s\n' "$run_dir"
+
+run_case() {
+    case_name=$1
+    shift
+    if [ "$(uname -s)" = Darwin ]; then
+        set -- "$@" /usr/bin/time -l "$native_fixture"
+    else
+        set -- "$@" "$native_fixture"
+    fi
+    if "$timeout_bin" 10 env -u SIMPLE_BUILD_PROGRESS_SNAPSHOT \
+        -u SIMPLE_EXECUTION_METRICS_FILE "$@" \
+        >"$run_dir/$case_name.stdout" 2>"$run_dir/$case_name.stderr"; then
+        :
+    else
+        child_status=$?
+        printf 'case=%s status=FAIL exit=%s\n' "$case_name" "$child_status" >&2
+        exit 1
+    fi
+    # Completion marker alone is insufficient: both real helper invocations
+    # must emit their counts, including stdout on the disabled/failed sink.
+    [ "$(wc -l <"$run_dir/$case_name.stdout" | tr -d ' ')" -eq 3 ]
+    grep -q '^\[build\] phase=load_sources state=running unit_kind=file done=0 total=1 remaining=1 succeeded=0 cached=0 failed=0 task_done=0 task_total=1 .* current=fixture.spl$' "$run_dir/$case_name.stdout"
+    grep -q '^\[build\] phase=complete state=complete unit_kind=file done=1 total=1 remaining=0 succeeded=1 cached=0 failed=0 task_done=1 task_total=1 .* current=fixture.spl$' "$run_dir/$case_name.stdout"
+    grep -qx 'build-progress-returned' "$run_dir/$case_name.stdout"
+    printf 'case=%s status=PASS\n' "$case_name"
+}
+
+run_case unset -u SIMPLE_BUILD_PROGRESS_EVENTS
+run_case empty SIMPLE_BUILD_PROGRESS_EVENTS=
+run_case writable "SIMPLE_BUILD_PROGRESS_EVENTS=$run_dir/progress.events"
+# A regular-file parent gives a deterministic append failure even as root.
+run_case unwritable "SIMPLE_BUILD_PROGRESS_EVENTS=$run_dir/progress.events/child"
+[ "$(wc -l <"$run_dir/progress.events" | tr -d ' ')" -eq 2 ]
+grep -q '^event=build_progress phase=load_sources unit_kind=file done=0 total=1 remaining=1 succeeded=0 tasks_done=0 tasks_total=1 tasks_remaining=1 failed=0 cached=0 .* current=fixture.spl terminal=running$' "$run_dir/progress.events"
+grep -q '^event=build_progress phase=complete unit_kind=file done=1 total=1 remaining=0 succeeded=1 tasks_done=1 tasks_total=1 tasks_remaining=0 failed=0 cached=0 .* current=fixture.spl terminal=complete$' "$run_dir/progress.events"
+echo 'STATUS: PASS (native optional progress sink)'
