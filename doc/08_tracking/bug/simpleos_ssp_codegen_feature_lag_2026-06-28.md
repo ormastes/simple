@@ -1,5 +1,24 @@
 # SimpleOS SSP (Stack-Smashing Protector) Codegen — Feature Lag
-## Closed 2026-09-16 — ...99-102), gated by an `ssp` flag resolved from `TargetPreset` (Hosted = on, Baremetal = off
+## Open — hosted source policy added 2026-09-22; guest evidence pending
+
+The old 2026-09-16 closure heading was a bookkeeping error. The bug database
+still marks this item open. Source changes now request Clang
+`-fstack-protector-strong` on hosted ELF builds, and emit LLVM `sspstrong` on
+hosted SimpleOS functions, excluding bare-metal and naked functions. The
+explicit LLVM target API admits hosted `*-simpleos` separately from the kernel
+path. The default SimpleOS native-build pipeline still uses Cranelift and maps
+its target to `*-unknown-none-elf`; that path needs its own SSP policy before
+this bug can close. Guest symbol, startup, and fault-path evidence is also
+outstanding.
+
+Source checks on 2026-09-22: focused compiler and app hardening specs passed
+(4/4 and 4/4). A Clang x86_64-unknown-simpleos C probe with a 64-byte local
+array and an escaping pointer emitted both `__stack_chk_guard` and
+`__stack_chk_fail` undefined references under `-fstack-protector-strong`.
+One-shot reciprocal compile measurements: baseline object 1200 bytes, SSP
+object 1384 bytes; both 0.01 s; peak Clang RSS 60668 KiB baseline and
+61244 KiB SSP. These small fixture measurements are a code-size and build
+resource signal, not a guest performance claim.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
@@ -52,4 +71,3 @@ as the explicit deferred feature lag.
 - A spec under `test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`
   asserts canary presence for the desktop preset and absence for an opted-out
   embedded preset.
-
