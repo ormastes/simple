@@ -20,7 +20,7 @@ cleanup() {
     case "$tmp" in "$fixture_tmp_parent"/stage3-consumer-test.*) ;; *) return 1 ;; esac
     # Unlink junction leaves before any recursive removal of the owned fixture.
     FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '
-      foreach ($name in @("dir-link","extra-junction")) {
+      foreach ($name in @("dir-link","extra-junction","src/compiler_rust/target/bootstrap","src/compiler_rust/target/unowned")) {
         $p=[IO.Path]::Combine($env:FIXTURE_ROOT,$name)
         if ([IO.Directory]::Exists($p)) { [IO.Directory]::Delete($p,$false) }
       }' >/dev/null 2>&1 || :
@@ -106,6 +106,73 @@ if [ "${1:-}" = --gitlink-root-only ]; then
     git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
     reject_wrong_gitlink_root
     echo 'bootstrap_stage3_same_head_wrong_gitlink_root=true'
+    exit 0
+fi
+
+if [ "${1:-}" = --generated-authority-only ]; then
+    generated_target="$repo/src/compiler_rust/target"
+    generated_inputs=$(printf '%064d' 1)
+    generated_hash=$(printf '%064d' 2)
+    generated_name="$generated_inputs-$generated_hash"
+    generated_dir="$generated_target/bootstrap.generations/$generated_name"
+    generated_marker="$generated_target/bootstrap.current.env"
+    mkdir -p "$generated_dir" "$generated_target/bootstrap.generations/wrong" "$tmp/outside"
+    printf '/src/compiler_rust/target/\n' >>"$repo/.git/info/exclude"
+    printf 'schema=simple-bootstrap-seed-artifact-stamp-v2\ninputs_fingerprint=%s\nseed_sha256=%s\nnative_all_sha256=%s\nbackfill_status=absent\nbackfill_sha256=absent\n' \
+        "$generated_inputs" "$generated_hash" "$generated_hash" >"$generated_dir/simple.exe.inputs.sha256"
+    generated_stamp=$(bootstrap_stage3_hash_file "$generated_dir/simple.exe.inputs.sha256")
+    printf 'schema=simple-bootstrap-authority-current-v1\ngeneration=%s\ninputs_fingerprint=%s\ngeneration_sha256=%s\nstamp_sha256=%s\n' \
+        "$generated_name" "$generated_inputs" "$generated_hash" "$generated_stamp" >"$generated_marker"
+    cp "$generated_marker" "$tmp/generated-marker.good"
+    remove_generated_link() {
+        GENERATED_LINK="$(cygpath -aw "$generated_target/bootstrap")" powershell -NoProfile -NonInteractive -Command \
+            '[IO.Directory]::Delete($env:GENERATED_LINK,$false)' >"$tmp/error" 2>&1
+    }
+    point_generated_link() {
+        MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" ln -s "$1" "$generated_target/bootstrap"
+    }
+    # Metadata here proves only the source-audit topology boundary. Full runtime
+    # byte admission belongs to resolve_committed_seed and is not simulated.
+    bootstrap_stage3_create_compatibility_link "bootstrap.generations/$generated_name" \
+        "$generated_target/bootstrap" >"$tmp/error" 2>&1
+    reject generated-authority-junction
+    grep -Fq 'authority.link-tag' "$tmp/error"
+    remove_generated_link
+    point_generated_link "bootstrap.generations/$generated_name"
+    accept generated-authority-symlink
+    cp "$tmp/generated-marker.good" "$generated_marker"
+    printf 'schema=forged\n' >"$generated_marker"
+    reject generated-forged-marker
+    grep -Fq 'authority.marker' "$tmp/error"
+    cp "$tmp/generated-marker.good" "$generated_marker"
+    printf 'generation=%s\n' "$generated_name" >>"$generated_marker"
+    reject generated-duplicate-marker
+    grep -Fq 'authority.fields' "$tmp/error"
+    cp "$tmp/generated-marker.good" "$generated_marker"
+    printf 'tampered\n' >>"$generated_dir/simple.exe.inputs.sha256"
+    reject generated-tampered-stamp
+    grep -Fq 'authority.stamp-hash' "$tmp/error"
+    sed '$d' "$generated_dir/simple.exe.inputs.sha256" >"$tmp/stamp.restored"
+    cp "$tmp/stamp.restored" "$generated_dir/simple.exe.inputs.sha256"
+    : >"$generated_marker.transaction"
+    reject generated-active-transaction
+    grep -Fq 'authority.transaction' "$tmp/error"
+    rm "$generated_marker.transaction"
+    remove_generated_link
+    point_generated_link bootstrap.generations/wrong
+    reject generated-wrong-generation
+    grep -Fq 'authority.link-target' "$tmp/error"
+    remove_generated_link
+    point_generated_link ../../../../outside
+    reject generated-escape-target
+    grep -Fq 'authority.link-target' "$tmp/error"
+    remove_generated_link
+    point_generated_link "bootstrap.generations/$generated_name"
+    bootstrap_stage3_create_compatibility_link "bootstrap.generations/$generated_name" \
+        "$generated_target/unowned" >"$tmp/error" 2>&1
+    reject generated-extra-reparse
+    grep -Fq 'path.unreceipted-reparse' "$tmp/error"
+    echo 'bootstrap_stage3_generated_authority_cases=9'
     exit 0
 fi
 
