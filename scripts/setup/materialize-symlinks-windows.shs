@@ -237,6 +237,8 @@ public static class MaterializerApi {
     static readonly Dictionary<string, byte[]> Blobs = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     static readonly HashSet<string> Tracked = new HashSet<string>(StringComparer.Ordinal);
     static System.Diagnostics.Process Git;
+    static readonly StringBuilder GitError = new StringBuilder();
+    static readonly System.Threading.ManualResetEvent GitErrorDone = new System.Threading.ManualResetEvent(false);
     static byte[] PolicyBytes;
     static string PolicyHash;
     public static void Initialize() {
@@ -261,7 +263,24 @@ public static class MaterializerApi {
         start.WorkingDirectory = Environment.GetEnvironmentVariable("MATERIALIZER_ROOT");
         start.UseShellExecute = false; start.CreateNoWindow = true;
         start.RedirectStandardInput = true; start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
         Git = System.Diagnostics.Process.Start(start);
+        Stream errorStream = Git.StandardError.BaseStream;
+        System.Threading.ThreadPool.QueueUserWorkItem(_ => DrainGitError(errorStream));
+    }
+    static void DrainGitError(Stream errorStream) {
+        var chunk = new byte[512];
+        try {
+            int n;
+            while ((n = errorStream.Read(chunk, 0, chunk.Length)) > 0) {
+                lock (GitError) {
+                    int remaining = 4096 - GitError.Length;
+                    if (remaining > 0) GitError.Append(Encoding.UTF8.GetString(chunk, 0, Math.Min(n, remaining)));
+                }
+            }
+        } catch (IOException) { }
+        catch (ObjectDisposedException) { }
+        finally { GitErrorDone.Set(); }
     }
     public static void Shutdown() {
         if (Git == null) return;
@@ -269,11 +288,18 @@ public static class MaterializerApi {
         finally { Git.Dispose(); }
     }
     public static string IsTracked(string path) { return Tracked.Contains(path) ? "tracked" : "untracked"; }
+    static IOException GitFailure(string reason) {
+        Git.WaitForExit(1000);
+        if (Git.HasExited) GitErrorDone.WaitOne(1000);
+        string stderr;
+        lock (GitError) stderr = GitError.ToString().Trim();
+        return new IOException(reason + ":exit=" + (Git.HasExited ? Git.ExitCode.ToString() : "pending") + ":stderr=" + stderr);
+    }
     static int GitRead(byte[] bytes, int offset, int count) {
         var read = Git.StandardOutput.BaseStream.ReadAsync(bytes, offset, count);
-        if (!read.Wait(30000)) throw new IOException("git.batch-timeout");
+        if (!read.Wait(30000)) throw GitFailure("git.batch-timeout");
         int n = read.Result;
-        if (n == 0) throw new IOException("git.batch-eof");
+        if (n == 0) throw GitFailure("git.batch-eof");
         return n;
     }
     public static void GitBlob(string oid) {
