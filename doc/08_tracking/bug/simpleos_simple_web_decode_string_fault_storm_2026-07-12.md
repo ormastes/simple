@@ -1,23 +1,24 @@
 # SimpleOS Simple Web `decode_string` Fault Storm
 ## Open 2026-09-16 — needs owner triage
 
-## 2026-09-22 — text-owner interpolation cleanup (offline)
+## 2026-09-22 — production-path text-owner cleanup (offline)
 
 The earlier live decode fault fix remains recorded below. The theme-package
 parser still used interpolation around `line.trim()` and `value.trim()` to
 force primitive text dispatch after array element type erasure. Those copies
 were replaced with typed text helpers, which request primitive-text method
 dispatch without an interpolation copy. The reciprocal source count is ten
-removed interpolation sites (eight trim copies and two line copies); runtime
-heap and latency profiling remains pending the guest gate. The compiled fixture
-exercises split elements, trimmed text, and unindented versus indented section
-boundaries beside a custom `Path.starts_with` method. Its executable verdict
-is the offline regression. Typed locals alone previously failed to rebind
-the method owner, so correctness of the helper-call shape remains unproven.
-In this isolated checkout,
-three bounded native attempts did not reach compilation: SCV reported missing
-compile-event or filesystem-event inventory, including when cold-init and
-freeze-fallback were requested. The regression remains unverified here.
+removed interpolation sites (eight trim copies and two line copies). The
+regression fixture now imports and executes the production
+`nogc_sync_mut.ui.theme_package` module instead of copying its parser helpers;
+a deliberately colliding `Path.starts_with` remains in the same compilation
+unit. It resolves the real registry alias and loads the real `aetheric_dark`
+package. The production-path fixture printed `DECODE_OWNER_OK` in 0.36 s
+(2.78 executions/s) with 177064 KiB max RSS. A stricter native-build attempt remained CPU-active but
+hit the test runner's 900 s timeout at 338436 KiB max RSS, so stage3-native and
+guest correctness remain unverified. The test deliberately keeps the fast
+production-path execution and does not make a 15-minute compiler timeout part
+of the regular suite.
 This change does not close
 the bug: the canonical SimpleOS guest zero-exception/three-content-frame gate
 has not been run in this session.
