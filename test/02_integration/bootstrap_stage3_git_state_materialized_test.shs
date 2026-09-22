@@ -24,6 +24,8 @@ cleanup() {
         $p=[IO.Path]::Combine($env:FIXTURE_ROOT,$name)
         if ([IO.Directory]::Exists($p)) { [IO.Directory]::Delete($p,$false) }
       }' >/dev/null 2>&1 || :
+    pointer="$repo/src/compiler_rust/target/bootstrap"
+    if [ -L "$pointer" ]; then rm -- "$pointer"; fi
     rm -rf -- "$tmp"
     rmdir -- "$fixture_tmp_parent" 2>/dev/null || :
 }
@@ -93,6 +95,35 @@ reject() {
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
 accept positive-file-dir-pending
+# The Rust authority publisher creates this ignored native symlink only after
+# checkout alias publication. Its marker and physical generation must match.
+case_name=rust-authority-pointer-setup
+mkdir -p "$repo/src/compiler_rust/target/bootstrap.generations"
+printf 'src/compiler_rust/target/\n' >>"$repo/.git/info/exclude"
+input_hash=$(printf 'a%.0s' $(seq 1 64))
+generation_hash=$(printf 'b%.0s' $(seq 1 64))
+stamp_hash=$(printf 'c%.0s' $(seq 1 64))
+generation="$input_hash-$generation_hash"
+mkdir "$repo/src/compiler_rust/target/bootstrap.generations/$generation"
+cat >"$repo/src/compiler_rust/target/bootstrap.current.env" <<EOF
+schema=simple-bootstrap-authority-current-v1
+generation=$generation
+inputs_fingerprint=$input_hash
+generation_sha256=$generation_hash
+stamp_sha256=$stamp_hash
+EOF
+MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" \
+    ln -s "bootstrap.generations/$generation" "$repo/src/compiler_rust/target/bootstrap"
+test -L "$repo/src/compiler_rust/target/bootstrap"
+accept rust-authority-pointer
+sed "s/generation=$generation/generation=$input_hash-$stamp_hash/" \
+    "$repo/src/compiler_rust/target/bootstrap.current.env" >"$tmp/wrong-marker"
+cp "$tmp/wrong-marker" "$repo/src/compiler_rust/target/bootstrap.current.env"
+reject rust-authority-marker-mismatch
+sed "s/generation=$input_hash-$stamp_hash/generation=$generation/" \
+    "$tmp/wrong-marker" >"$repo/src/compiler_rust/target/bootstrap.current.env"
+accept rust-authority-marker-restored
+rm -- "$repo/src/compiler_rust/target/bootstrap"
 # Native Add-Type uses TEMP/TMP, not MSYS TMPDIR. Exercise the public entry
 # with unusable inherited native temp and a writable POSIX temp containing spaces.
 case_name=native-temp-isolation
