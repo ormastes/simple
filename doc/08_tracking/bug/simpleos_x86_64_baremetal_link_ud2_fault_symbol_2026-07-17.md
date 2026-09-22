@@ -133,3 +133,24 @@ native kernel compilation at an unrelated unresolved `VirtioGpuDriver` symbol,
 before QEMU launch. A minimal Multiboot fixture linked successfully, but this
 host's QEMU `-kernel` path rejects the ELF64 image and the installed GRUB
 rescue flow lacks `mformat`; no guest-pass receipt is claimed. P1 remains OPEN.
+
+## Astra safety review follow-up (2026-09-22)
+
+Review found that a fixed eight-byte pad only reproduced the alignment of the
+earlier printer call; it did not guarantee the SysV ABI alignment when an
+interrupt arrived with the other stack residue. Because the fatal hook is
+`noreturn`, the handler now loads the saved RIP and dynamically aligns the
+abandoned interrupt stack with `andq $-16, %rsp` before calling C.
+
+The review also found that the two-byte opcode probe could cross into an
+unmapped page and recursively fault. The handler now rejects RIP at page offset
+`0xFFF` before loading the opcode. This deliberately leaves a rare cross-page
+`ud2` on the legacy recovery path rather than risking #PF/#DF while diagnosing
+an unrelated no-error-code exception.
+
+The focused contract now marks the extracted ISR as used and checks the emitted
+machine code, so its alignment/call assertions cannot pass merely because the
+compiler discarded the static function. It remains a link and code-generation
+contract, not QEMU fault-behavior evidence. On this host it passed in 0.15 s
+wall time with 57,092 KiB maximum RSS. The new instructions execute only on an
+exception path; no steady-state allocation or hot-path work was added.

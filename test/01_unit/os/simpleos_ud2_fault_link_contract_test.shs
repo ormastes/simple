@@ -20,13 +20,17 @@ handler = re.search(r'__attribute__\(\(naked\)\) static void _rich_fault_entry\(
 if weak is None or handler is None:
     raise SystemExit('missing weak fallback or rich fault handler')
 body = handler.group().split('/* _rich_fault_print')[0]
+body = body.replace('__attribute__((naked))', '__attribute__((naked, used))', 1)
 if 'cmpl $0x0B0F' not in body or 'callq spl_x86_on_kernel_ud2_fault' not in body:
     raise SystemExit('kernel ud2 detection or fatal call missing')
+probe = body.split('3:', 1)[1].split('6:', 1)[0]
+if 'andl $0xFFF, %%ecx' not in probe or 'cmpl $0xFFF, %%ecx' not in probe:
+    raise SystemExit('ud2 diagnostic probe lacks the cross-page load guard')
 fatal = body.split('6:', 1)[1].split('7:', 1)[0]
-if 'movq (%%rsp), %%rdi' not in fatal or 'subq $8, %%rsp' not in fatal:
-    raise SystemExit('fatal handler call lacks the post-restore SysV stack pad')
-if fatal.index('movq (%%rsp), %%rdi') > fatal.index('subq $8, %%rsp'):
-    raise SystemExit('fatal handler applies stack pad before loading the frame RIP')
+if 'movq (%%rsp), %%rdi' not in fatal or 'andq $-16, %%rsp' not in fatal:
+    raise SystemExit('fatal handler call lacks dynamic SysV stack alignment')
+if fatal.index('movq (%%rsp), %%rdi') > fatal.index('andq $-16, %%rsp'):
+    raise SystemExit('fatal handler aligns the stack before loading the frame RIP')
 fixture = '''#include <stdint.h>
 static void serial_puts(const char *s) {(void)s;}
 static void serial_put_hex(uint64_t value) {(void)value;}
@@ -43,6 +47,19 @@ clang -target x86_64-unknown-none -ffreestanding -fno-builtin \
 nm "$test_dir/fault.o" | grep -Eq ' W spl_x86_on_kernel_ud2_fault$'
 if nm -u "$test_dir/fault.o" | grep -q spl_x86_on_kernel_ud2_fault; then
     echo 'ud2_fault_link_contract=fail reason=undefined-symbol'
+    exit 1
+fi
+# Source-shape checks above make failures easy to diagnose; these disassembly
+# checks prove Clang retained the ABI pad and emitted a real handler call.
+disassembler=$(clang --print-prog-name=llvm-objdump)
+"$disassembler" -dr "$test_dir/fault.o" > "$test_dir/fault.dis"
+if ! grep -Eq 'andq?[[:space:]].*%rsp' "$test_dir/fault.dis"; then
+    echo 'ud2_fault_link_contract=fail reason=missing-machine-stack-alignment'
+    grep '%rsp' "$test_dir/fault.dis" || true
+    exit 1
+fi
+if ! grep -Eq 'spl_x86_on_kernel_ud2_fault' "$test_dir/fault.dis"; then
+    echo 'ud2_fault_link_contract=fail reason=missing-machine-fatal-call'
     exit 1
 fi
 cat >"$test_dir/strong.c" <<'C'
