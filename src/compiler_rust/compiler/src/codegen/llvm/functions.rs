@@ -2740,16 +2740,55 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // Scalar float methods are native operations, not unresolved
+                // user methods. The runtime math externs have a floating-point
+                // ABI, so they cannot use the i64 method-shim path below.
+                if args.is_empty()
+                    && matches!(method, "floor" | "ceil" | "round")
+                    && matches!(
+                        vreg_types.get(receiver).copied(),
+                        Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64)
+                    )
+                {
+                    let is_f32 = vreg_types.get(receiver) == Some(&crate::hir::TypeId::F32);
+                    let float_type = if is_f32 {
+                        self.context_ref().f32_type()
+                    } else {
+                        self.context_ref().f64_type()
+                    };
+                    let recv = self.get_vreg(receiver, vreg_map)?;
+                    let recv = self
+                        .coerce_value_to_type(recv, Some(float_type.into()), builder)?;
+                    let intrinsic = format!(
+                        "llvm.{}.{}",
+                        method,
+                        if is_f32 { "f32" } else { "f64" }
+                    );
+                    let fn_type = float_type.fn_type(&[float_type.into()], false);
+                    let func = module
+                        .get_function(&intrinsic)
+                        .unwrap_or_else(|| module.add_function(&intrinsic, fn_type, None));
+                    let call = builder
+                        .build_call(func, &[recv.into()], "scalar_float_method")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(value) = call.try_as_basic_value().left() {
+                            vreg_map.insert(*d, value);
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if matches!(method, "chr" | "to_char") {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     let rt_func = module
-                        .get_function("char_from_code")
-                        .unwrap_or_else(|| module.add_function("char_from_code", fn_type, None));
+                        .get_function("rt_char_from_code")
+                        .unwrap_or_else(|| module.add_function("rt_char_from_code", fn_type, None));
                     let call_site = builder
                         .build_call(rt_func, &[recv_casted.into()], "char_from_code")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("char_from_code call", &e))?;
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_char_from_code call", &e))?;
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().left() {
                             vreg_map.insert(*d, ret_val);
@@ -2875,6 +2914,7 @@ impl LlvmBackend {
                     "ends_with" => Some("rt_string_ends_with"),
                     "concat" => Some("rt_string_concat"),
                     "char_at" => Some("rt_string_char_at"),
+                    "char_count" => Some("rt_string_char_count"),
                     // Receiver-polymorphic; see emitter.rs. `at` on an array
                     // receiver must reach `rt_array_at` (a real `Option`), not
                     // the string-only `rt_string_char_at`, which answers `nil`
@@ -2885,6 +2925,7 @@ impl LlvmBackend {
                     "char_code_at" => Some("rt_string_char_code_at"),
                     "byte_at" => Some("rt_string_byte_at"),
                     "push" => Some("rt_array_push"),
+                    "write_span" => Some("rt_array_write_span"),
                     "pop" => Some("rt_array_pop"),
                     "clear" => Some("rt_array_clear"),
                     "join" => Some("rt_string_join"),
@@ -4101,6 +4142,123 @@ mod tests {
             assert!(!ir.contains(raw), "raw call {raw} leaked:\n{ir}");
         }
         backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_uses_bulk_and_text_runtime_entries() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_runtime_entries").unwrap();
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.blocks[0].instructions.push(MirInst::ConstString {
+            dest: VReg(0),
+            value: "hello".to_string(),
+        });
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "str.char_count".to_string(),
+            args: vec![],
+        });
+        for (dest, value) in [(VReg(2), 0), (VReg(3), 1), (VReg(4), 2), (VReg(5), 3), (VReg(6), 4)] {
+            func.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(7)),
+            receiver: VReg(2),
+            func_name: "Array.write_span".to_string(),
+            args: vec![VReg(3), VReg(4), VReg(5), VReg(6)],
+        });
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(8)),
+            receiver: VReg(2),
+            func_name: "i64.chr".to_string(),
+            args: vec![],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_char_count("), "{ir}");
+        assert!(ir.contains("call i64 @rt_array_write_span("), "{ir}");
+        assert!(ir.contains("call i64 @rt_char_from_code("), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_float_rounding_uses_float_intrinsics() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_float_rounding").unwrap();
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::F64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.blocks[0].instructions.push(MirInst::ConstFloat {
+            dest: VReg(0),
+            value: 1.25,
+        });
+        for (dest, method) in [(VReg(1), "floor"), (VReg(2), "ceil"), (VReg(3), "round")] {
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(dest),
+                receiver: VReg(0),
+                func_name: format!("f64.{method}"),
+                args: vec![],
+            });
+        }
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        for name in ["llvm.floor.f64", "llvm.ceil.f64", "llvm.round.f64"] {
+            assert!(ir.contains(name), "missing {name}:\n{ir}");
+        }
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_round_matches_interpreter_half_ties() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::host());
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_round_ties").unwrap();
+        let cases = [
+            ("round_pos_2_5", 2.5, 3.0),
+            ("round_pos_3_5", 3.5, 4.0),
+            ("round_neg_2_5", -2.5, -3.0),
+            ("round_neg_3_5", -3.5, -4.0),
+        ];
+        for (name, input, _) in cases {
+            let mut func = MirFunction::new(
+                name.to_string(),
+                crate::hir::TypeId::F64,
+                simple_parser::ast::Visibility::Public,
+            );
+            func.blocks[0].instructions.push(MirInst::ConstFloat {
+                dest: VReg(0),
+                value: input,
+            });
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)),
+                receiver: VReg(0),
+                func_name: "f64.round".to_string(),
+                args: vec![],
+            });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&func).unwrap();
+        }
+        backend.verify().unwrap();
+        let module = backend.take_module().unwrap();
+        let engine = module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        for (name, _, expected) in cases {
+            let addr = engine.get_function_address(name).unwrap();
+            let compiled: unsafe extern "C" fn() -> f64 = unsafe { std::mem::transmute(addr) };
+            assert_eq!(unsafe { compiled() }, expected, "{name}");
+        }
     }
 
     #[test]
