@@ -75,8 +75,10 @@ SPL
     while :; do
     KERNEL_BUILD_ATTEMPTS=$((KERNEL_BUILD_ATTEMPTS + 1))
     rm -f "$KERNEL_CANDIDATE"
+    printf '[WM-BUILD] %s native-build attempt=%s log=%s\n' "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" "$BUILD_DIR/native-build.out" >&2
     set +e
     SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_COMPILER_PHASE_PROFILE=1 \
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
     SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1 \
     PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
@@ -89,8 +91,24 @@ SPL
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_CANDIDATE" \
         --linker-script "$LINKER_SCRIPT" \
-        >"$BUILD_DIR/native-build.out" 2>&1
+        >"$BUILD_DIR/native-build.out" 2>&1 &
+    build_pid=$!
+    # The compiler's stdout can be fully buffered under redirect. Keep the
+    # parent harness visibly alive even when no phase line reaches this log.
+    (
+        while kill -0 "$build_pid" 2>/dev/null; do
+            sleep 60
+            kill -0 "$build_pid" 2>/dev/null || break
+            printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
+                "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
+                "$(wc -c <"$BUILD_DIR/native-build.out")" >&2
+        done
+    ) &
+    heartbeat_pid=$!
+    wait "$build_pid"
     build_code=$?
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
     set -e
     if [ "$build_code" -eq 124 ] || [ "$build_code" -eq 137 ]; then
         rm -f "$KERNEL_CANDIDATE"
