@@ -19,33 +19,48 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
-wm_native_build_with_progress "$TEST_TMP/$1.log" sh -c 'echo $$ > "$TEST_TMP/worker.pid"; exec sleep "$1"' sh "$2"
+wm_native_build_with_progress "$TEST_TMP/$1.log" sh -c 'echo $$ > "$TEST_TMP/worker.pid"; exec /bin/sleep "$1"' sh "$2"
 SH
 chmod +x "$tmp/runner.sh"
+mkdir "$tmp/bin"
+cat >"$tmp/bin/sleep" <<'SH'
+#!/bin/sh
+echo $$ >"$TEST_TMP/heartbeat-sleep.pid"
+exec /bin/sleep "$@"
+SH
+chmod +x "$tmp/bin/sleep"
 export TEST_TMP="$tmp"
+PATH="$tmp/bin:$PATH"
+export PATH
+
+assert_descendants_gone() {
+    ! kill -0 "$(cat "$tmp/worker.pid")" 2>/dev/null
+    ! kill -0 "$(cat "$tmp/heartbeat-sleep.pid")" 2>/dev/null
+}
 
 unset SIMPLEOS_WM_PROGRESS_POLL_SECONDS SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS
 start_ns=$(date +%s%N)
-"$tmp/runner.sh" quick 0 >"$tmp/quick.out" 2>&1
+"$tmp/runner.sh" quick 0.05 >"$tmp/quick.out" 2>&1
 elapsed_ns=$(($(date +%s%N) - start_ns))
 [ "$elapsed_ns" -lt 1000000000 ] || {
     printf 'quick command waited for progress poll: %s ns\n' "$elapsed_ns" >&2
     exit 1
 }
+assert_descendants_gone
 
 SIMPLEOS_WM_PROGRESS_POLL_SECONDS=1
 SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS=1
 export SIMPLEOS_WM_PROGRESS_POLL_SECONDS SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS
 "$tmp/runner.sh" complete 2 >"$tmp/complete.out" 2>&1
 grep -q 'native-build active attempt=1 log_bytes=' "$tmp/complete.out"
-! kill -0 "$(cat "$tmp/worker.pid")" 2>/dev/null
+assert_descendants_gone
 
 set +e
 "$tmp/runner.sh" failure invalid >"$tmp/failure.out" 2>&1
 failure_code=$?
 set -e
 [ "$failure_code" -ne 0 ]
-! kill -0 "$(cat "$tmp/worker.pid")" 2>/dev/null
+assert_descendants_gone
 
 rm -f "$tmp/worker.pid"
 "$tmp/runner.sh" signal 30 >"$tmp/signal.out" 2>&1 &
@@ -55,4 +70,5 @@ worker_pid=$(cat "$tmp/worker.pid")
 kill -TERM "$runner_pid"
 wait "$runner_pid" 2>/dev/null || true
 ! kill -0 "$worker_pid" 2>/dev/null
-printf 'PASS: WM native-build progress latency, completion, failure, and signal cleanup\n'
+assert_descendants_gone
+printf 'PASS: WM native-build progress latency and descendant cleanup after completion, failure, and signal\n'
