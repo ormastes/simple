@@ -1853,6 +1853,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_device_name", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_name", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_device_type", &[I64], &[I64]),
+    // Raw C-string result: registration selects the shared decoding path in
+    // calls.rs instead of the generic external-call path.
+    RuntimeFuncSpec::new("rt_vulkan_get_last_error", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity_hash", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_type", &[], &[I64]),

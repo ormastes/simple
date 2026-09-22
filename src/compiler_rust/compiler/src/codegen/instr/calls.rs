@@ -2458,7 +2458,7 @@ fn needs_runtime_value_result_tagging<M: Module>(ctx: &InstrContext<'_, M>, func
 /// Every other `rt_*` text return is already a `RuntimeValue` (e.g.
 /// `rt_env_cwd`, which is why it was always correct on this lane) and must NOT
 /// be double-decoded — hence an explicit list rather than a prefix rule.
-const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
+pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_cuda_device_name",
     "rt_cuda_get_error_string",
     "rt_metal_device_name",
