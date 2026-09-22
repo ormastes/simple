@@ -42,11 +42,35 @@ for my $call (@main::signals) {
 $identity_lost = 0;
 {
     no warnings 'redefine';
-    *snapshot = sub { return { 100 => $table->{100} } };
+    *snapshot = sub { $_[0] or die 'cleanup requested detail sampling'; return { 100 => $table->{100} } };
     *reap = sub { die 'root reaped before signaling finished' };
 }
 quiesce() == 1 or die 'empty anchored group did not quiesce';
-print "PASS: PID/PGID reuse, failed identity sampling, unreaped root sentinel\n";
+@main::signals = ();
+%known = (100 => 'root', 200 => 'child', 201 => 'grandchild');
+%groups = (100 => 'root', 200 => 'child');
+$identity_lost = 0;
+# A departed group leader can be retained through a fresh known member; its
+# descendants are individually checked, never signaled using a cached PGID.
+signal_verified('KILL', {
+    100 => $table->{100},
+    201 => { parent => 1, group => 200, zombie => 0, identity => 'grandchild' },
+    202 => { parent => 1, group => 200, zombie => 0, identity => 'new-descendant' },
+});
+my %targets = map { $_ => 1 } map { @$_[1..$#$_] } @main::signals;
+$targets{201} && $targets{202} && !$targets{-200} && !$targets{200}
+    or die 'retained orphan group did not use fresh member identities';
+@main::signals = ();
+signal_verified('KILL', {
+    100 => $table->{100},
+    201 => { parent => 1, group => 200, zombie => 0, identity => 'reused-grandchild' },
+    202 => { parent => 1, group => 200, zombie => 0, identity => 'reused-descendant' },
+});
+for my $call (@main::signals) {
+    die 'reused orphan group member was signaled' if grep { abs($_) != 100 } @$call[1..$#$call];
+}
+$identity_lost or die 'lost orphan group identity not recorded';
+print "PASS: PID/PGID reuse, failed identity sampling, metadata-only cleanup, retained orphan group, unreaped root sentinel\n";
 PROBE
 eval $source . $probe;
 die $@ if $@;

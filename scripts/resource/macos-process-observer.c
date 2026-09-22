@@ -13,9 +13,32 @@
 #include <string.h>
 #include <unistd.h>
 
-static int detail_failure(const char *operation, int pid, int bytes) {
+static int detail_failure(const char *operation, int pid, int bytes,
+                          unsigned long long sec, unsigned long long usec) {
+    int error = errno;
+    if (error == EPERM || error == EACCES) {
+        /* A libproc permission error is not evidence of exit. Independently
+         * check kernel PID metadata: only a missing PID or the exact expected
+         * zombie can be omitted. Live/reused/unknown state still fails closed. */
+        struct kinfo_proc proof;
+        size_t size = sizeof(proof);
+        int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+        int result = sysctl(mib, 4, &proof, &size, NULL, 0);
+        if (!result && !size) return printf("R %d gone\n", pid) < 0;
+        if (!result && size == sizeof(proof) && proof.kp_proc.p_pid == pid &&
+            (unsigned long long)proof.kp_proc.p_starttime.tv_sec == sec &&
+            (unsigned long long)proof.kp_proc.p_starttime.tv_usec == usec &&
+            proof.kp_proc.p_stat == SZOMB) return printf("R %d gone\n", pid) < 0;
+        if (!result && size == sizeof(proof))
+            fprintf(stderr, "macos-process-observer: denial-state pid=%d observed_pid=%d state=%d expected=%llu:%llu actual=%llu:%llu\n",
+                    pid, proof.kp_proc.p_pid, proof.kp_proc.p_stat, sec, usec,
+                    (unsigned long long)proof.kp_proc.p_starttime.tv_sec,
+                    (unsigned long long)proof.kp_proc.p_starttime.tv_usec);
+        fprintf(stderr, "macos-process-observer: denial-proof pid=%d result=%d bytes=%zu errno=%d\n",
+                pid, result, size, result ? errno : 0);
+    }
     fprintf(stderr, "macos-process-observer: %s pid=%d bytes=%d errno=%d\n",
-            operation, pid, bytes, errno);
+            operation, pid, bytes, error);
     return 1;
 }
 
@@ -65,22 +88,22 @@ static int detail(int pid, unsigned long long sec, unsigned long long usec) {
     errno = 0;
     int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &before, sizeof(before));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (n != sizeof(before)) return detail_failure("bsd-before", pid, n);
+    if (n != sizeof(before)) return detail_failure("bsd-before", pid, n, sec, usec);
     if (before.pbi_start_tvsec != sec || before.pbi_start_tvusec != usec)
         return identity_failure("identity-before", pid, sec, usec, &before);
     if (before.pbi_status == SZOMB) return printf("R %d gone\n", pid) < 0;
     errno = 0;
     n = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (n != sizeof(task)) return detail_failure("task", pid, n);
+    if (n != sizeof(task)) return detail_failure("task", pid, n, sec, usec);
     errno = 0;
     pid_t sid = getsid(pid);
     if (sid < 0 && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (sid < 0) return detail_failure("session", pid, sid);
+    if (sid < 0) return detail_failure("session", pid, sid, sec, usec);
     errno = 0;
     n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (n != sizeof(after)) return detail_failure("bsd-after", pid, n);
+    if (n != sizeof(after)) return detail_failure("bsd-after", pid, n, sec, usec);
     if (after.pbi_start_tvsec != sec || after.pbi_start_tvusec != usec)
         return identity_failure("identity-after", pid, sec, usec, &after);
     return printf("R %d %llu %d\n", pid,
