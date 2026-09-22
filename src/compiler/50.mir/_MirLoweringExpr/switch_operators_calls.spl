@@ -1463,11 +1463,18 @@ impl MirLowering:
         # pointer-typed call bits as an integer; a named local only hid this by
         # inserting a type-recovering Copy.
         val resolved_symbol = self.symbols.get_symbol_raw(symbol.id)
-        if val found_symbol = resolved_symbol:
-            if val found_type = found_symbol.type_:
-                match found_type.kind:
-                    case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
-                    case _: ()
+        if val found_symbol_value = resolved_symbol:
+            val found_symbol: HirSymbol = found_symbol_value
+            var symbol_matches_name = name == "" or found_symbol.name == name
+            if not symbol_matches_name:
+                if val owner = found_symbol.defining_module:
+                    if owner != "":
+                        symbol_matches_name = name == owner + "." + found_symbol.name
+            if symbol_matches_name:
+                if val found_type = found_symbol.type_:
+                    match found_type.kind:
+                        case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
+                        case _: ()
         var call_name = name
         if call_name == "":
             call_name = self.bootstrap_resolved_call_name(symbol)
@@ -5155,7 +5162,24 @@ impl MirLowering:
 
         if is_direct:
             val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
-            val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
+            # A scalar signature attached by the owning HIR pass can recover
+            # the erased i64 fallback without consulting a foreign symbol id.
+            # Aggregate returns still need their existing owner/shape path.
+            var declared_return: HirType? = nil
+            if callee.has_type_ and callee.type_ != nil:
+                match callee.type_.kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        match ret.kind:
+                            case Int(_, _) | Float(_) | Bool | Char | Str | Unit:
+                                declared_return = ret
+                            case _: ()
+                    case _: ()
+            # Preserve the runtime-specific return shapes selected by the
+            # existing resolver (e.g. get_args uses Ptr(Array(Str))).
+            var return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
+            if return_type.kind == MirTypeKind.I64:
+                if val declared = declared_return:
+                    return_type = self.lower_type(declared)
             val func_operand = if resolved_name != "":
                 MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(resolved_name),
@@ -5164,7 +5188,20 @@ impl MirLowering:
             else:
                 self.symbol_to_operand(direct_symbol)
             val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
-            self.remember_call_hir_return(result, direct_symbol)
+            # Do not reintroduce a foreign symbol's Bool/shape sidecar after
+            # selecting the callee-bound return type above.
+            var remember_symbol_return = false
+            if val return_symbol = self.symbols.get_symbol_raw(direct_symbol.id):
+                if return_symbol != nil:
+                    remember_symbol_return = resolved_name == "" or return_symbol.name == resolved_name
+                    if not remember_symbol_return:
+                        if val owner = return_symbol.defining_module:
+                            if owner != "":
+                                remember_symbol_return = resolved_name == owner + "." + return_symbol.name
+            if remember_symbol_return:
+                self.remember_call_hir_return(result, direct_symbol)
+            if val declared = declared_return:
+                self.remember_local_hir_type(result.id, declared, 0, 0)
             return result
 
         val callee_local = self.lower_expr(callee)

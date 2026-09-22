@@ -6,6 +6,16 @@ the production compiler.common.module_path_naming module directly. Exit0 and
 `module-path-normalization-26-pass` are both mandatory; output-only success or
 the existence of an object is insufficient.
 
+The fixture also prints each actual path result. Require exact stdout equality
+with `module_path_normalization.expected`, including the empty-path blank line,
+after requiring process exit 0. Value equality alone missed an imported callee
+whose text return was mislabeled Bool or i64, rendering true or pointer numbers.
+
+The 2026-09-23 imported scalar-return metadata repair is verified in
+`doc/08_tracking/bug/imported_scalar_call_return_metadata_2026-09-23.md`.
+The older capsule/independent-link observations below are historical; they do
+not replace this strict stdout oracle or admit a bootstrap compiler.
+
 Recorded compiler arguments, from an isolated worktree:
 
 ```text
