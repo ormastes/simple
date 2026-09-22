@@ -13,4 +13,109 @@ done
 grep -F 'rustc --version --verbose' "$pin" >/dev/null
 grep -F '"$llvm_config" --version' "$pin" >/dev/null
 grep -F '"$ld" --version' "$pin" >/dev/null
+install_line=$(grep -n 'run: brew install llvm lld' "$workflow" | head -1 | cut -d: -f1)
+pin_line=$(grep -n 'run: sh scripts/check/pin-macos-phase23-llvm23.shs' "$workflow" | head -1 | cut -d: -f1)
+bootstrap_line=$(grep -n 'run: sh scripts/check/run-macos-phase23-evidence.shs' "$workflow" | head -1 | cut -d: -f1)
+[ "$install_line" -lt "$pin_line" ] && [ "$pin_line" -lt "$bootstrap_line" ] || {
+    echo 'FAIL: LLVM install, pin, bootstrap order' >&2
+    exit 1
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/path" "$tmp/llvm/bin" "$tmp/lld/bin"
+cat >"$tmp/path/uname" <<'EOF'
+#!/bin/sh
+echo Darwin
+EOF
+cat >"$tmp/path/brew" <<EOF
+#!/bin/sh
+case \$2 in
+    llvm) echo '$tmp/llvm' ;;
+    lld) echo '$tmp/lld' ;;
+    *) exit 1 ;;
+esac
+EOF
+cat >"$tmp/path/rustc" <<'EOF'
+#!/bin/sh
+printf 'release: 1.100.0-nightly\nLLVM version: 23.1.1\n'
+EOF
+for name in clang clang++ llvm-ar llvm-config; do
+    cat >"$tmp/llvm/bin/$name" <<'EOF'
+#!/bin/sh
+printf 'Homebrew clang version 23.1.1\n'
+EOF
+done
+cat >"$tmp/llvm/bin/llvm-config" <<'EOF'
+#!/bin/sh
+echo 23.1.1
+EOF
+cat >"$tmp/lld/bin/ld64.lld" <<'EOF'
+#!/bin/sh
+echo 'Homebrew LLD 23.1.1'
+EOF
+chmod +x "$tmp/path/"* "$tmp/llvm/bin/"* "$tmp/lld/bin/"*
+PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/env" sh "$pin" >"$tmp/out"
+grep -F 'SIMPLE_LLVM_REQUIRED_VERSION=23.1.1' "$tmp/env" >/dev/null
+grep -F "CC=$tmp/llvm/bin/clang" "$tmp/env" >/dev/null
+grep -F "LD=$tmp/lld/bin/ld64.lld" "$tmp/env" >/dev/null
+
+cat >"$tmp/llvm/bin/llvm-config" <<'EOF'
+#!/bin/sh
+echo 22.1.0
+EOF
+if PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/rejected" sh "$pin" >"$tmp/out" 2>&1; then
+    echo 'FAIL: wrong LLVM version admitted' >&2
+    exit 1
+fi
+[ ! -e "$tmp/rejected" ] || { echo 'FAIL: bad LLVM wrote CI environment' >&2; exit 1; }
+cat >"$tmp/llvm/bin/llvm-config" <<'EOF'
+#!/bin/sh
+echo 23.1.1
+EOF
+cat >"$tmp/llvm/bin/clang" <<'EOF'
+#!/bin/sh
+echo 'Homebrew clang version 23.1.10'
+EOF
+if PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/rejected" sh "$pin" >"$tmp/out" 2>&1; then
+    echo 'FAIL: 23.1.10 Clang admitted as 23.1.1' >&2
+    exit 1
+fi
+cat >"$tmp/llvm/bin/clang" <<'EOF'
+#!/bin/sh
+echo 'Homebrew clang version 23.1.1'
+EOF
+cat >"$tmp/lld/bin/ld64.lld" <<'EOF'
+#!/bin/sh
+echo 'Homebrew LLD 23.1.10'
+EOF
+if PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/rejected" sh "$pin" >"$tmp/out" 2>&1; then
+    echo 'FAIL: 23.1.10 LLD admitted as 23.1.1' >&2
+    exit 1
+fi
+cat >"$tmp/lld/bin/ld64.lld" <<'EOF'
+#!/bin/sh
+echo 'Homebrew LLD 23.1.1'
+EOF
+cat >"$tmp/path/rustc" <<'EOF'
+#!/bin/sh
+printf 'release: 1.100.0-nightly\nLLVM version: 22.1.0\n'
+EOF
+if PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/rejected" sh "$pin" >"$tmp/out" 2>&1; then
+    echo 'FAIL: wrong rustc LLVM version admitted' >&2
+    exit 1
+fi
+cat >"$tmp/path/rustc" <<'EOF'
+#!/bin/sh
+exit 37
+EOF
+if PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/rejected" sh "$pin" >"$tmp/out" 2>&1; then
+    echo 'FAIL: failed rustc command admitted' >&2
+    exit 1
+fi
+rm "$tmp/lld/bin/ld64.lld"
+if PATH="$tmp/path:$PATH" GITHUB_ENV="$tmp/rejected" sh "$pin" >"$tmp/out" 2>&1; then
+    echo 'FAIL: missing linker admitted' >&2
+    exit 1
+fi
 echo 'PASS: macOS Phase 2/3 installs and pins exact LLVM 23.1.1 before bootstrap'
