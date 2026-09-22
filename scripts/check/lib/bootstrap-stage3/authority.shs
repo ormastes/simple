@@ -3912,8 +3912,66 @@ public static class Stage3MaterializedConsumer {
         }
         return true;
     }
+    static Dictionary<string,string> AuthorityFields(byte[] data) {
+        string text = Text(data);
+        if (!text.EndsWith("\n") || text.IndexOf('\r') >= 0) throw new IOException("authority.format");
+        var fields = new Dictionary<string,string>(StringComparer.Ordinal);
+        foreach (string row in text.Substring(0, text.Length - 1).Split('\n')) {
+            int equal = row.IndexOf('=');
+            if (equal <= 0 || fields.ContainsKey(row.Substring(0, equal))) throw new IOException("authority.fields");
+            fields.Add(row.Substring(0, equal), row.Substring(equal + 1));
+        }
+        return fields;
+    }
+    static string AuthorityHash(Dictionary<string,string> fields, string key) {
+        string value;
+        if (!fields.TryGetValue(key, out value) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(value, "\\A[0-9a-f]{64}\\z")) throw new IOException("authority.hash:" + key);
+        return value;
+    }
+    static void AuthorityAbsent(string path) {
+        uint attrs = GetFileAttributesW(path); int error = Marshal.GetLastWin32Error();
+        if (attrs != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("authority.transaction");
+    }
+    static void CheckGeneratedAuthority(string root, string link, List<SafeFileHandle> held) {
+        string parent = Path.Combine(root, "src", "compiler_rust", "target");
+        if (link != Path.Combine(parent, "bootstrap")) throw new IOException("authority.link-path");
+        string marker = Path.Combine(parent, "bootstrap.current.env");
+        AuthorityAbsent(marker + ".transaction"); AuthorityAbsent(link + ".migration.env");
+        var fields = AuthorityFields(ReadHeld(marker, held, 4096));
+        string schema, generation;
+        if (fields.Count != 5 || !fields.TryGetValue("schema", out schema) || schema != "simple-bootstrap-authority-current-v1" ||
+            !fields.TryGetValue("generation", out generation)) throw new IOException("authority.marker");
+        string inputs = AuthorityHash(fields, "inputs_fingerprint");
+        string generationHash = AuthorityHash(fields, "generation_sha256");
+        string stampHash = AuthorityHash(fields, "stamp_sha256");
+        if (generation != inputs + "-" + generationHash) throw new IOException("authority.generation-name");
+        string target = Path.Combine(parent, "bootstrap.generations", generation);
+        Parents(target, false, held);
+        var expected = Open(target, true, 0); held.Add(expected);
+        if ((Tag(expected).Attributes & 0x450) != 0x10) throw new IOException("authority.generation-kind");
+        var raw = Open(link, true, 0); held.Add(raw);
+        var tag = Tag(raw);
+        if ((tag.Attributes & 0x450) != 0x410 || tag.Tag != 0xA000000Cu)
+            throw new IOException("authority.link-tag");
+        var actual = Open(link, false, 0); held.Add(actual);
+        var x = Identity(actual); var y = Identity(expected);
+        if (x.Volume != y.Volume || x.IndexHigh != y.IndexHigh || x.IndexLow != y.IndexLow)
+            throw new IOException("authority.link-target");
+        byte[] stamp = ReadHeld(Path.Combine(target, "simple.exe.inputs.sha256"), held, 4096);
+        if (Hash(stamp) != stampHash) throw new IOException("authority.stamp-hash");
+        var stampFields = AuthorityFields(stamp);
+        string stampSchema, stampInputs;
+        if (!stampFields.TryGetValue("schema", out stampSchema) || stampSchema != "simple-bootstrap-seed-artifact-stamp-v2" ||
+            !stampFields.TryGetValue("inputs_fingerprint", out stampInputs) || stampInputs != inputs)
+            throw new IOException("authority.stamp-inputs");
+        // This proves the generated link's topology, with all proof handles held.
+        // Runtime bytes remain the committed-seed owner's content-admission job;
+        // hashing them here would consume the source audit's bounded byte budget.
+    }
     static void AuditTree(string root, Dictionary<string,string> aliases, Dictionary<string,string> gitlinks,
-        HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks, List<SafeFileHandle> held) {
+        HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks,
+        List<string> generatedAuthorities, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3936,6 +3994,11 @@ public static class Stage3MaterializedConsumer {
                 {
                     var tag = Tag(raw);
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
+                    if ((tag.Attributes & 0x400) != 0 && relative == "src/compiler_rust/target/bootstrap") {
+                        CheckGeneratedAuthority(root, item, held);
+                        generatedAuthorities.Add(item);
+                        continue;
+                    }
                     if ((tag.Attributes & 0x400) != 0) throw new IOException("path.unreceipted-reparse");
                     if ((tag.Attributes & 0x40) != 0) throw new IOException("path.special");
                     string oid;
@@ -4151,7 +4214,8 @@ public static class Stage3MaterializedConsumer {
             // nested canonical target paths here.
             var inspectedGitlinks = new HashSet<string>(StringComparer.Ordinal);
             var initializedGitlinks = new HashSet<string>(StringComparer.Ordinal);
-            AuditTree(root, aliases, gitlinks, inspectedGitlinks, initializedGitlinks, held);
+            var generatedAuthorities = new List<string>();
+            AuditTree(root, aliases, gitlinks, inspectedGitlinks, initializedGitlinks, generatedAuthorities, held);
             // Held policy/placeholder bytes are authoritative until Git returns.
             // Absence itself cannot be locked: check at use and again at finish.
             CheckPending(pendingLinks, pending, policyRows, held);
@@ -4172,6 +4236,7 @@ public static class Stage3MaterializedConsumer {
                     throw new IOException("path.gitlink-initialization-changed");
             }
             if (Text(Git(root, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != head) throw new IOException("head.changed");
+            foreach (string generated in generatedAuthorities) CheckGeneratedAuthority(root, generated, held);
             if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("policy.changed");
             Tick();
             File.WriteAllText(Environment.GetEnvironmentVariable("STAGE3_RESULT"), result, new UTF8Encoding(false));
