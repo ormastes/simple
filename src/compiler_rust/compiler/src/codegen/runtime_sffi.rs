@@ -2296,6 +2296,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_clear", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_collection_set", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset_d32", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_drop", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_is_char_device", &[I64, I64], &[I8]), // path_ptr, path_len -> bool

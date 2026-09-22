@@ -1891,6 +1891,55 @@ pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue
     crate::value::dict::rt_dict_remove(receiver, key)
 }
 
+/// `set`: receiver-dispatched for erased collection receivers.
+///
+/// Only Dict owns this method in the language. An erased Dict retains the
+/// fluent result of `Dict.set`, while Array and Tuple take the same loud
+/// method-not-found path as statically typed receivers. Do not route this
+/// through `rt_index_set` or `rt_tuple_set`: those implement index assignment
+/// and tuple construction, not the `.set()` method.
+#[no_mangle]
+pub extern "C" fn rt_collection_set(receiver: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<crate::value::dict::RuntimeDict>(receiver, HeapObjectType::Dict).is_some() {
+        let _ = crate::value::dict::rt_dict_set(receiver, key, value);
+        return receiver;
+    }
+
+    let type_name = collection_set_missing_type(receiver);
+    unsafe { crate::value::rt_method_not_found(type_name.as_ptr(), type_name.len() as u64, b"set".as_ptr(), 3) }
+}
+
+fn collection_set_missing_type(receiver: RuntimeValue) -> &'static [u8] {
+    match receiver.heap_type() {
+        Some(HeapObjectType::Array) => b"Array",
+        Some(HeapObjectType::Tuple) => b"Tuple",
+        _ => b"<unknown type>",
+    }
+}
+
+#[cfg(test)]
+mod collection_set_tests {
+    use super::{collection_set_missing_type, rt_array_new, rt_collection_set, rt_tuple_new};
+    use crate::value::dict::{rt_dict_get, rt_dict_new};
+    use crate::value::RuntimeValue;
+
+    #[test]
+    fn erased_dict_set_mutates_and_returns_the_receiver() {
+        let dict = rt_dict_new(0);
+        let key = RuntimeValue::from_int(7);
+        let value = RuntimeValue::from_int(99);
+
+        assert_eq!(rt_collection_set(dict, key, value), dict);
+        assert_eq!(rt_dict_get(dict, key), value);
+    }
+
+    #[test]
+    fn array_and_tuple_set_keep_their_method_not_found_identity() {
+        assert_eq!(collection_set_missing_type(rt_array_new(3)), b"Array");
+        assert_eq!(collection_set_missing_type(rt_tuple_new(3)), b"Tuple");
+    }
+}
+
 /// Clear all elements from an array
 #[no_mangle]
 pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
