@@ -1153,6 +1153,8 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
+/* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
+int64_t  rt_process_spawn_inherit(void);
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 int64_t  rt_process_start_identity(int64_t pid);
