@@ -360,7 +360,7 @@ public static class MaterializerApi {
     [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle h, uint access,
         ref ObjectAttributes attrs, out IoStatus status, IntPtr size, uint attributes,
         uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
-    static SafeFileHandle CreateDirectoryHeld(string path) {
+    static SafeFileHandle CreateDirectoryHeld(string path, bool junction = false) {
         string native = @"\??\" + Path.GetFullPath(path);
         IntPtr buffer = Marshal.StringToHGlobalUni(native), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
         try {
@@ -372,8 +372,11 @@ public static class MaterializerApi {
             // the access requested on this new directory. Retain only
             // READ_ATTRIBUTES | SYNCHRONIZE: a GENERIC_WRITE handle conflicts
             // with Windows' destination-directory open during receipt rename.
+            // Junction creation additionally needs GENERIC_WRITE for
+            // FSCTL_SET_REPARSE_POINT. Receipt parents stay read-only.
             // Keep share=READ, so ancestor write/delete protection never drops.
-            int status = NtCreateFile(out h, 0x00100080, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
+            uint access = junction ? 0x40100080u : 0x00100080u;
+            int status = NtCreateFile(out h, access, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
             if (status < 0) { if (h != null) h.Dispose(); throw new IOException("directory.create-exclusive:ntstatus=" + status); }
             return h;
         } finally { Marshal.FreeHGlobal(name); Marshal.FreeHGlobal(buffer); }
@@ -518,7 +521,7 @@ public static class MaterializerApi {
         Buffer.BlockCopy(BitConverter.GetBytes((ushort)print.Length), 0, data, 14, 2);
         Buffer.BlockCopy(substitute, 0, data, 16, substitute.Length);
         Buffer.BlockCopy(print, 0, data, 18 + substitute.Length, print.Length);
-        using (var h = CreateDirectoryHeld(link)) {
+        using (var h = CreateDirectoryHeld(link, true)) {
             int returned;
             if (!DeviceIoControl(h, 0x000900A4, data, data.Length, null, 0, out returned, IntPtr.Zero))
                 throw Error("api.set-junction-tag");
