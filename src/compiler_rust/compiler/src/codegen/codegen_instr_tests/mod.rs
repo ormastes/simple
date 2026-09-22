@@ -53,6 +53,7 @@ mod coverage_units;
 mod enum_union;
 mod collections;
 mod calls;
+mod cstring_returns;
 mod simd;
 mod gpu;
 mod inline_asm;
