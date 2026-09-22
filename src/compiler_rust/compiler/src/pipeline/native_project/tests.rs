@@ -1637,10 +1637,21 @@ fn test_collect_spl_files() {
     std::fs::write(dir.join("b.txt"), "not spl").unwrap();
     std::fs::create_dir(dir.join("sub")).unwrap();
     std::fs::write(dir.join("sub/c.spl"), "# test").unwrap();
+    std::fs::create_dir_all(dir.join("cli")).unwrap();
+    std::fs::write(dir.join("cli/check.spl"), "# production check command").unwrap();
+    std::fs::write(dir.join("cli/arch_check.spl"), "# production check command").unwrap();
+    std::fs::create_dir_all(dir.join("check.spl.assets")).unwrap();
+    std::fs::write(dir.join("check.spl.assets/ordinary.spl"), "# nested production module").unwrap();
 
     let mut files = Vec::new();
     collect_spl_files_recursive(dir, &mut files);
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 5);
+    assert!(files.contains(&dir.join("a.spl")));
+    assert!(files.contains(&dir.join("sub/c.spl")));
+    assert!(files.contains(&dir.join("cli/check.spl")));
+    assert!(files.contains(&dir.join("cli/arch_check.spl")));
+    assert!(files.contains(&dir.join("check.spl.assets/ordinary.spl")));
+    assert!(!files.contains(&dir.join("b.txt")));
 }
 
 #[test]
