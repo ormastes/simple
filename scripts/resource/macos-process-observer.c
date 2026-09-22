@@ -13,6 +13,21 @@
 #include <string.h>
 #include <unistd.h>
 
+static int detail_failure(const char *operation, int pid, int bytes) {
+    fprintf(stderr, "macos-process-observer: %s pid=%d bytes=%d errno=%d\n",
+            operation, pid, bytes, errno);
+    return 1;
+}
+
+static int identity_failure(const char *operation, int pid,
+                            unsigned long long sec, unsigned long long usec,
+                            const struct proc_bsdinfo *actual) {
+    fprintf(stderr, "macos-process-observer: %s pid=%d expected=%llu:%llu actual=%llu:%llu\n",
+            operation, pid, sec, usec, (unsigned long long)actual->pbi_start_tvsec,
+            (unsigned long long)actual->pbi_start_tvusec);
+    return 1;
+}
+
 static int metadata(void) {
     int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
     struct kinfo_proc *rows = NULL;
@@ -47,22 +62,27 @@ static int metadata(void) {
 static int detail(int pid, unsigned long long sec, unsigned long long usec) {
     struct proc_bsdinfo before, after;
     struct proc_taskinfo task;
+    errno = 0;
     int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &before, sizeof(before));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (n != sizeof(before)) return 1;
+    if (n != sizeof(before)) return detail_failure("bsd-before", pid, n);
     if (before.pbi_start_tvsec != sec || before.pbi_start_tvusec != usec)
-        return 1; /* PID reuse is not an empty measurement. */
+        return identity_failure("identity-before", pid, sec, usec, &before);
     if (before.pbi_status == SZOMB) return printf("R %d gone\n", pid) < 0;
+    errno = 0;
     n = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (n != sizeof(task)) return 1;
+    if (n != sizeof(task)) return detail_failure("task", pid, n);
+    errno = 0;
     pid_t sid = getsid(pid);
     if (sid < 0 && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (sid < 0) return 1;
+    if (sid < 0) return detail_failure("session", pid, sid);
+    errno = 0;
     n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after));
     if (!n && errno == ESRCH) return printf("R %d gone\n", pid) < 0;
-    if (n != sizeof(after) || after.pbi_start_tvsec != sec ||
-        after.pbi_start_tvusec != usec) return 1;
+    if (n != sizeof(after)) return detail_failure("bsd-after", pid, n);
+    if (after.pbi_start_tvsec != sec || after.pbi_start_tvusec != usec)
+        return identity_failure("identity-after", pid, sec, usec, &after);
     return printf("R %d %llu %d\n", pid,
                   (unsigned long long)((task.pti_resident_size + 1023) / 1024), sid) < 0;
 }
