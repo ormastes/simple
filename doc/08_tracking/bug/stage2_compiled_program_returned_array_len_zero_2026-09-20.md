@@ -65,3 +65,57 @@ phase-1-compiled sort on another target and is not explained by this record.
   struct Option from a `{i64: Sym}` dict field builds, but the program SIGSEGVs
   before its first `print` (`[simple-runtime] Fatal: SIGSEGV at address
   0x157bb9bffd88`). Not attributed to a specific construct.
+
+## Candidate repair 2026-09-22: returned struct-array element provenance
+
+Static inspection located a missing metadata edge: `emit_resolved_direct_call`
+marked Array/Slice returns as runtime arrays but omitted their element layout
+name. `lower_index_expr` needs that name in `array_element_struct_syms` to
+register a decoded element in `struct_value_syms`; field projection otherwise
+loses both field offsets and text representation information.
+
+The candidate records the element name during the defining module's prescan,
+then propagates it through direct calls and `remember_call_hir_return`. It does
+not dereference foreign module SymbolIds. The registry participates in transient
+heap promotion and disables ambiguous names, including scalar/struct array
+collisions. The change adds no runtime ABI or OS dependency.
+
+`test/01_unit/compiler/mir/returned_struct_array_native_spec.spl` requires an
+explicit `SIMPLE_NATIVE_COMPILER`, builds the standalone insertion-sort fixture,
+and executes its native binary. It checks exact stdout at fixed indices as well
+as exit status, length, text fields, and a second integer field. Consequently a
+zero length cannot skip the field oracle, and miscompiled equality cannot turn
+pointer output into success.
+
+Validation so far: whitespace validation and both direct-env-runtime guards
+passed. Native compilation/execution of the candidate compiler remains pending;
+neither the returned-array length defect nor FreeBSD Stage 3 admission is claimed
+fixed by this static finding.
+
+### Review revision: identities, imports, length routing
+
+The admitted FreeBSD Stage 2 compiler reproduced the standalone candidate's
+original same-module fixture: `count=0`, pointer-like field output, exit 91.
+This is a red baseline, not validation of the repaired compiler.
+
+Element collision detection now retains the defining module's qualified
+identity separately from the bare layout name consumed by field projection.
+Same-named structs from different modules therefore disable an ambiguous call
+alias. The prescan registers raw, sanitized, and dotted call aliases, including
+bare function names. The fixture now obtains its rows from an imported module;
+registry tests cover same-name/different-owner and scalar/struct collisions.
+
+The zero length also has a separate lowering hazard: the length dispatcher
+rewrote `rt_len` to `rt_string_len` using only `runtime_array_locals`. That map
+can omit returned locals whose MIR type already says Array/Slice. The candidate
+now uses `local_is_runtime_array`, which consults both the map and MIR type.
+Alias registration additionally lets HIR return recovery mark imported arrays.
+This gives a concrete repair path for a real array handle reaching the string
+length accessor, but without inspecting the red binary's generated MIR or
+running a rebuilt compiler it does not prove that this was its precise cause.
+
+Native test compilation is bounded to 360 seconds and execution to 10 seconds,
+with output under a process-id/time-specific directory. Array and Slice share
+the same repaired prescan/direct-call branches. A separately executed native
+Slice fixture and rebuilt compiler validation remain pending; neither is
+claimed covered by the array fixture.
