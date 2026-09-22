@@ -1553,7 +1553,7 @@ bootstrap_stage2_sanity_output_preflight() (
   bssop_base=$1
   [ -n "${bssop_base}" ] || return 0
   for bssop_suffix in \
-    '' .frontend-driver.log \
+    '' .frontend-driver.log .frontend-failure.log \
     .frontend-bootstrap-0.log .frontend-bootstrap-0.log.bounded.env \
     .frontend-bootstrap-0.log.stage2-mir-retention .frontend-bootstrap-0.log.stage2-mir-retention.bounded.env \
     .frontend-bootstrap-0.log.stage2-module-path-naming .frontend-bootstrap-0.log.stage2-module-path-naming.bounded.env \
