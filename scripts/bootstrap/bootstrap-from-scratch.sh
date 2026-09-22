@@ -2408,6 +2408,10 @@ run_rust_authority_cargo() {
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
+        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
+        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2428,6 +2432,10 @@ run_rust_authority_cargo() {
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
+        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
+        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2449,6 +2457,10 @@ run_rust_authority_cargo() {
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
+        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
+        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2465,6 +2477,10 @@ run_rust_authority_cargo() {
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
+        CXX="${CXX:-clang++}" AR="${AR:-ar}" LD="${LD:-ld}" \
+        LLVM_CONFIG="${LLVM_CONFIG:-llvm-config}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
+        CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-${cc_abs}}" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
