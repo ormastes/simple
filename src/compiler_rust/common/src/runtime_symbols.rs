@@ -251,6 +251,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
 
     // Tier 2: Sys
     if name.starts_with("rt_print_")
+        || name.starts_with("rt_cocoa_")
         || name.starts_with("rt_println_")
         || name.starts_with("rt_eprint_")
         || name.starts_with("rt_eprintln_")
@@ -383,6 +384,20 @@ pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
 /// These are the extern "C" functions exported by the runtime library
 /// that can be called from compiled Simple code.
 pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
+    // macOS-only dynamic runtime provider. DynamicSymbolProvider resolves
+    // these through dlsym; the static runtime registry excludes them.
+    "rt_cocoa_window_new",
+    "rt_cocoa_window_resize",
+    "rt_cocoa_window_close",
+    "rt_cocoa_layer_create",
+    "rt_cocoa_layer_fill_rect",
+    "rt_cocoa_layer_present",
+    "rt_cocoa_layer_free",
+    "rt_cocoa_layer_read_pixel",
+    "rt_cocoa_layer_blend_rect",
+    "rt_cocoa_layer_blur",
+    "rt_cocoa_layer_gradient_v",
+    "rt_cocoa_event_pump",
     // Core-required symbols that used to live ONLY in
     // CORE_REQUIRED_RUNTIME_SYMBOLS: without entries here the generated
     // runtime-symbol table never contained them, so the seed JIT's static
@@ -2501,6 +2516,19 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cocoa_provider_is_hosted_only_and_excluded_from_baremetal() {
+        let cocoa: Vec<_> = RUNTIME_SYMBOL_NAMES.iter()
+            .filter(|name| name.starts_with("rt_cocoa_")).collect();
+        assert_eq!(cocoa.len(), 12);
+        let baremetal = runtime_symbols_for_baremetal(true);
+        for name in cocoa {
+            assert_eq!(symbol_tier_of(name), RuntimeSymbolTier::Sys);
+            assert_eq!(symbol_class_of(name), RuntimeSymbolClass::HostedOnly);
+            assert!(!baremetal.contains(name));
+        }
+    }
 
     #[test]
     fn struct_allocator_pair_is_present_in_core_and_full_manifests() {

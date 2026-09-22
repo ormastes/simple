@@ -474,18 +474,35 @@ fn compile_c_runtime_sources() {
     }
     build.compile("runtime_sffi_c");
 
-    // hosted_cocoa.c is Objective-C behind a .c extension (real NSWindow path
-    // on __APPLE__). Compile it separately with the ObjC language flag so the
-    // staticlib carries real rt_cocoa_* providers on macOS; AppKit/Foundation
-    // are already in the platform framework link set.
-    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
+    // Cocoa belongs to the standalone runtime dylib, never the aggregate
+    // native-all archive. The Rust hosted crate also excludes Cocoa on macOS.
+    // Use cdylib-only linker arguments: rustc-link-lib would also embed these
+    // definitions in the rlib/staticlib built by this same Cargo invocation.
+    // DynamicSymbolProvider resolves the exported ABI through dlsym; the
+    // static runtime table deliberately has no Cocoa function pointers.
+    if target_os == "macos" && !native_all_provider {
         let cocoa = runtime_c_dir.join("hosted_cocoa.c");
         if cocoa.exists() {
             let mut objc = cc::Build::new();
             objc.opt_level(2).warnings(false).cargo_metadata(false);
+            // Clang 23's class-selector stubs require linker support absent
+            // from pinned ld64.lld 23. Emit ordinary supported message sends.
+            objc.flag_if_supported("-fno-objc-msgsend-class-selector-stubs");
             objc.flag("-xobjective-c").file(cocoa);
             objc.compile("runtime_sffi_objc");
-            println!("cargo:rustc-link-lib=static=runtime_sffi_objc");
+            let cocoa_archive = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+                .join("libruntime_sffi_objc.a");
+            println!("cargo:rustc-cdylib-link-arg={}", cocoa_archive.display());
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-framework,Cocoa");
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-framework,CoreFoundation");
+            println!("cargo:rustc-cdylib-link-arg=-lobjc");
+            for symbol in runtime_export_scan::c_function_definitions(
+                &fs::read_to_string(runtime_c_dir.join("hosted_cocoa.c")).expect("read Cocoa provider"),
+            ) {
+                if symbol.starts_with("rt_cocoa_") {
+                    println!("cargo:rustc-cdylib-link-arg=-Wl,-exported_symbol,_{symbol}");
+                }
+            }
         }
     }
 

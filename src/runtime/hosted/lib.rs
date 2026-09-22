@@ -31,6 +31,10 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+// macOS Cocoa is owned by the dynamically loaded runtime's Objective-C
+// provider. Exporting even the Rust fallback here duplicates its ABI in
+// libsimple_native_all.a (and can interpose a stub over the real provider).
+#[cfg(not(target_os = "macos"))]
 pub mod cocoa;
 pub mod js_test262;
 pub mod select;
