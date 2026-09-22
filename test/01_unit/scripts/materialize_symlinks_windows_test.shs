@@ -379,6 +379,49 @@ if grep -Fq 'mkdir -p "${materialized_receipt_dir}"' "$root/scripts/bootstrap/bo
 fi
 grep -Fq 'native_action prepare' "$root/scripts/setup/materialize-symlinks-windows.shs"
 
+# The strict materializer encounters tracked links into .spipe/spipe.  The
+# wrapper must first populate precisely the gitlink recorded by HEAD; a remote
+# update would make bootstrap input depend on mutable network state.
+windows_bootstrap="$root/scripts/bootstrap/bootstrap-windows.sh"
+grep -Fqx 'git -C "${repo_root}" submodule update --init -- .spipe/spipe || {' "$windows_bootstrap"
+if grep -Eq 'submodule[[:space:]]+update.*--remote' "$windows_bootstrap"; then
+    echo 'wrapper must not resolve the SPipe gitlink from a remote branch' >&2
+    false
+fi
+awk '
+  /git -C "\$\{repo_root\}" submodule update --init -- \.spipe\/spipe/ && !submodule { submodule=NR }
+  /materialize-symlinks-windows\.shs/ && !materializer { materializer=NR }
+  END { exit !(submodule && materializer && submodule < materializer) }
+' "$windows_bootstrap" || {
+    echo 'wrapper must initialize the recorded SPipe gitlink before materialization' >&2
+    false
+}
+
+# Git itself owns the only permitted update operation. A dirty checkout that
+# already matches the recorded gitlink remains intact, even from outside the
+# parent repository.
+submodule_source="$tmp/recorded-spipe-source"
+submodule_parent="$tmp/recorded-spipe-parent"
+mkdir "$submodule_source" "$submodule_parent"
+git -C "$submodule_source" init -q
+git -C "$submodule_source" config user.email test@example.invalid
+git -C "$submodule_source" config user.name materializer-test
+printf 'recorded\n' >"$submodule_source/held.txt"
+git -C "$submodule_source" add held.txt
+git -C "$submodule_source" commit -qm recorded
+git -C "$submodule_parent" init -q
+git -C "$submodule_parent" config user.email test@example.invalid
+git -C "$submodule_parent" config user.name materializer-test
+git -C "$submodule_parent" -c protocol.file.allow=always submodule add -q "$submodule_source" .spipe/spipe
+git -C "$submodule_parent" commit -qm parent
+printf 'dirty but preserved\n' >"$submodule_parent/.spipe/spipe/held.txt"
+mkdir "$tmp/unrelated-cwd"
+(
+    cd "$tmp/unrelated-cwd"
+    git -C "$submodule_parent" submodule update --init -- .spipe/spipe
+)
+test "$(cat "$submodule_parent/.spipe/spipe/held.txt")" = 'dirty but preserved'
+
 # Replace the target after link validation, immediately before metadata capture.
 # A pathname-only metadata reader would certify the replacement as the target.
 new_repo metadata-replacement
