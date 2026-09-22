@@ -133,8 +133,13 @@ macos_gpu_trusted_manifest_admit \
   "$PWD/build/macos_gpu_2d_live_native/metal/trusted-build.env" metal "$PWD"
 metal_evidence_dir=$(mktemp -d "$PWD/build/metal-glass-evidence.XXXXXX")
 metal_entry=test/02_integration/rendering/macos_metal_glass_receipts_native.spl
-perl scripts/resource/process-tree-rss-watchdog.pl \
-  --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=240 \
+# This branch does not contain the resource guard. Use the reviewed external
+# supervisor without changing or importing the compiler/Metal source snapshot.
+METAL_RSS_GUARD=/Users/ormastes/simple-tmp/macos-bootstrap-restart-20260922/scripts/resource/process-tree-rss-watchdog.pl
+test -f "$METAL_RSS_GUARD"
+shasum -a 256 "$METAL_RSS_GUARD" >"$metal_evidence_dir/guard.sha256"
+perl "$METAL_RSS_GUARD" \
+  --max-rss-kib=5859375 --rss-cap-mode=enforce --interval-ms=100 --timeout-seconds=240 \
   --receipt="$metal_evidence_dir/build.rss.env" -- \
   /usr/bin/time -l env SIMPLE_LIB="$PWD/src" SIMPLE_NO_STUB_FALLBACK=1 \
   SIMPLE_LINK_OBJECTS="$MACOS_GPU_ADMISSION_PROVIDER:$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER" \
@@ -143,8 +148,8 @@ perl scripts/resource/process-tree-rss-watchdog.pl \
   --source src/lib --source test/02_integration/rendering --entry-closure \
   --entry "$metal_entry" --strip --output "$metal_evidence_dir/probe" \
   >"$metal_evidence_dir/build.stdout" 2>"$metal_evidence_dir/build.stderr"
-perl scripts/resource/process-tree-rss-watchdog.pl \
-  --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=30 \
+perl "$METAL_RSS_GUARD" \
+  --max-rss-kib=5859375 --rss-cap-mode=enforce --interval-ms=100 --timeout-seconds=30 \
   --receipt="$metal_evidence_dir/run.rss.env" -- \
   /usr/bin/time -l env DYLD_PRINT_LIBRARIES=1 \
   DYLD_LIBRARY_PATH="$(dirname "$MACOS_GPU_ADMISSION_PROVIDER"):$(dirname "$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER")" \
@@ -164,3 +169,42 @@ facade implementation. It calls existing Engine2D APIs and prints evidence;
 the recipe uses existing admission and resource-guard owners. No SoSIX API or
 ABI changes. Native compile/syntax and runtime checks remain UNRUN until the
 admitted producer is available; source review cannot replace them.
+
+## Restored agent lane — 2026-09-22 08:22 UTC
+
+The deleted worktree was reconstructed from preserved branch
+`docs/mac-metal-runtime-evidence-20260922` at
+`0f2a6e4d0178e8e313890b9790994b19291cd8d1` into
+`/Users/ormastes/simple-tmp/mac-metal-runtime-20260922`. The checkout was clean
+before the following admission probe. Existing native fixture SHA-256:
+`9558895da9724a67098d790c50596fa7ae30c40a8ba2ed701b727499d99ebb19`.
+
+One fresh `build-macos-gpu-2d-live-native.shs --build metal` admission probe,
+wrapped by the external process-tree watchdog with explicit enforcement at
+5,859,375 KiB and a 30-second timeout, returned **exit 1**:
+`canonical-stage3-compiler-missing`. Evidence is retained in
+`build/metal-glass-evidence-20260922-restored/{admission.stdout,admission.stderr,admission.rss.env}`.
+This is an admission failure before compilation, not a Metal test failure.
+
+- Host: macOS 26.5 (25F71), arm64, 10 logical CPUs, 25,769,803,776 bytes RAM.
+- Wall time: 0.06 seconds; `time -l` maximum RSS: 7,143,424 bytes.
+- Sampled process-tree peak: 2,464 KiB across five samples; receipt reports
+  `status=complete`, `exit_status=1`, `quiescent=1`, `rss_cap_enforced=1`, and
+  `hard_memory_limit=0`. The short probe's sampled peak does not replace the
+  child lifetime maximum and is not a GPU or compiler memory measurement.
+- External watchdog SHA-256:
+  `69349c788f20f2f4052ae7e852baea59ce836c71fa65fad3b6c4226700e1c64f`.
+
+The canonical builder requires an executable **and root-bound provenance** at
+`build/wm-to-i64-bootstrap/stage3/aarch64-apple-darwin/{simple,provenance.env}`.
+The coordinated bootstrap owner must provide a legitimately admitted producer
+through that ownership path before native execution. Copying a binary alone,
+using Stage 2, or using the seed does not satisfy admission. No provider,
+device, native regression, performance, or memory claim is made from this
+preflight. No production source change or bug closure was justified by it.
+
+The strict fixture remains the positive native regression and the opacity-930
+zero-dispatch/unchanged-pixels negative control. The focused host compositor
+spec separately rejects a mismatched **first** receipt even when the last one
+matches, plus missing, duplicate, reordered, extra and unfulfilled receipts.
+Both still require admitted execution; source assertions are not PASS evidence.
