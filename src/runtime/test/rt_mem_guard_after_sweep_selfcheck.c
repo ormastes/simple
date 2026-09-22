@@ -65,7 +65,13 @@ static int child_segfaults(rt_mem_guard_touch_fn touch, volatile uint8_t* ptr) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) != pid) return -1;
-    return (WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV) ? 1 : 0;
+    if (!WIFSIGNALED(status)) return 0;
+    /* Darwin PROT_NONE protection faults use SIGBUS; keep Linux SIGSEGV. */
+#if defined(__APPLE__)
+    return WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS;
+#else
+    return WTERMSIG(status) == SIGSEGV;
+#endif
 }
 
 static void touch_read(volatile uint8_t* ptr) {
