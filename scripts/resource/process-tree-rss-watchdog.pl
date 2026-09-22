@@ -155,6 +155,24 @@ sub install_observer {
     verify_observer();
 }
 
+sub detail_eof {
+    my ($pid, $all) = @_;
+    my $group = $all->{$pid}{group};
+    my $anchor = $groups{$group} // 'none';
+    my $current = exists($all->{$group}) ? $all->{$group}{identity} : 'absent';
+    warn "rss-guard: selection pid=$pid root=$leader session=$session_id group=$group retained_anchor=$anchor current_anchor=$current\n";
+    my %seen;
+    my $ancestor = $pid;
+    for (1..32) {
+        last if $seen{$ancestor}++ || !exists($all->{$ancestor});
+        my $row = $all->{$ancestor};
+        warn "rss-guard: ancestry pid=$ancestor ppid=$row->{parent} pgid=$row->{group} identity=$row->{identity}\n";
+        last if $ancestor == $leader;
+        $ancestor = $row->{parent};
+    }
+    die "incomplete process detail for PID $pid identity=$all->{$pid}{identity}";
+}
+
 sub native_snapshot {
     my ($metadata_only) = @_;
     verify_session_helper() unless $helper_failed || $metadata_only;
@@ -180,7 +198,7 @@ sub native_snapshot {
     for my $pid ($metadata_only ? () : members(\%all)) {
         print {$observer_write} "R $pid $all{$pid}{identity}\n" or die "process observer write failed";
         my $line = observer_line();
-        defined($line) or die "incomplete process detail for PID $pid identity=$all{$pid}{identity}";
+        detail_eof($pid, \%all) unless defined($line);
         if ($line eq "R $pid gone\n") { $all{$pid}{zombie} = 1; next }
         $line =~ /\AR $pid ([0-9]+) ([1-9][0-9]*)\n\z/ or die "malformed process detail";
         $all{$pid}{rss} = 0+$1;
