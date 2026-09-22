@@ -55,6 +55,28 @@ static int measure_allocator_latency(size_t live_count, LatencySample *sample)
     return rt_baremetal_heap_test_high_water() == 0;
 }
 
+static int measure_fragmented_allocator_latency(LatencySample *sample)
+{
+    static uint8_t *live[4096];
+    uint8_t *small_hole = (uint8_t *)malloc(16);
+    if (!small_hole) return 0;
+    for (size_t i = 0; i < 4096; ++i) {
+        live[i] = (uint8_t *)malloc(64);
+        if (!live[i]) return 0;
+    }
+    free(small_hole);
+    clock_t start = clock();
+    for (size_t i = 0; i < 20000; ++i) {
+        void *block = malloc(128);
+        if (!block) return 0;
+        free(block);
+    }
+    sample->ticks = (long)(clock() - start);
+    sample->retained_committed = rt_baremetal_heap_test_high_water();
+    for (size_t i = 0; i < 4096; ++i) free(live[i]);
+    return rt_baremetal_heap_test_high_water() == 0;
+}
+
 static void *concurrent_allocator_worker(void *arg)
 {
     uintptr_t seed = (uintptr_t)arg;
@@ -79,8 +101,10 @@ int main(void)
     rt_baremetal_heap_test_reset();
     LatencySample latency_8;
     LatencySample latency_4096;
+    LatencySample latency_fragmented;
     if (!measure_allocator_latency(8, &latency_8) ||
-        !measure_allocator_latency(4096, &latency_4096)) return 19;
+        !measure_allocator_latency(4096, &latency_4096) ||
+        !measure_fragmented_allocator_latency(&latency_fragmented)) return 19;
     /* The retired first-fit implementation scanned every live block while
      * IRQs were masked. A 4096-block session must keep churn latency bounded,
      * not scale linearly with the retained object count. */
@@ -88,6 +112,11 @@ int main(void)
         fprintf(stderr, "allocator_latency_regression live8_ticks=%ld live4096_ticks=%ld\n",
                 latency_8.ticks, latency_4096.ticks);
         return 20;
+    }
+    if (latency_fragmented.ticks > (latency_8.ticks + 100) * 8) {
+        fprintf(stderr, "allocator_fragmentation_latency_regression live8_ticks=%ld fragmented_ticks=%ld\n",
+                latency_8.ticks, latency_fragmented.ticks);
+        return 28;
     }
 
     for (size_t i = 0; i < LIVE_COUNT; ++i) {
@@ -147,6 +176,16 @@ int main(void)
     free(left_grown);
     free(right);
 
+    uint8_t *dirty = (uint8_t *)malloc(4096);
+    if (!dirty) return 25;
+    fill(dirty, 4096, 73);
+    free(dirty);
+    uint8_t *fresh = (uint8_t *)malloc(4096);
+    if (!fresh) return 26;
+    for (size_t i = 0; i < 4096; ++i)
+        if (fresh[i] != 0) return 27;
+    free(fresh);
+
     uint8_t *zeroed = (uint8_t *)calloc(4096, 4);
     if (!zeroed) return 23;
     for (size_t i = 0; i < 4096 * 4; ++i)
@@ -174,6 +213,8 @@ int main(void)
            latency_8.ticks, latency_8.retained_committed);
     printf("allocator_latency live_blocks=4096 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
            latency_4096.ticks, latency_4096.retained_committed);
+    printf("allocator_latency fragmented_live_blocks=4096 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
+           latency_fragmented.ticks, latency_fragmented.retained_committed);
     printf("churn_live_blocks=%u peak_committed_bytes=%zu live_bytes=%u\n",
            (unsigned)LIVE_COUNT, peak_high_water, (unsigned)(LIVE_COUNT * LIVE_BYTES));
     return final_status;

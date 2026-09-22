@@ -570,12 +570,15 @@ typedef struct {
     uint32_t magic;
     uint32_t is_free;
     uint64_t reserved;
+    size_t free_next;
+    size_t free_previous;
 } SimpleOSHeapBlock;
 
 static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(SIMPLEOS_HEAP_ALIGNMENT)));
 static size_t _heap_off = 0; /* high-water boundary; retained for existing boot diagnostics */
 static size_t _heap_tail_span = 0;
 static size_t _heap_free_blocks = 0;
+static size_t _heap_free_head = (size_t)-1;
 static volatile uint32_t _heap_lock = 0;
 
 void *malloc(size_t sz);
@@ -604,6 +607,35 @@ static inline void simpleos_heap_set_following_previous_span(size_t offset, size
     } else {
         _heap_tail_span = span;
     }
+}
+
+static void simpleos_heap_free_list_insert(SimpleOSHeapBlock *block, size_t offset)
+{
+    block->free_previous = (size_t)-1;
+    block->free_next = _heap_free_head;
+    if (_heap_free_head != (size_t)-1) {
+        SimpleOSHeapBlock *head = (SimpleOSHeapBlock *)((uint8_t *)_heap + _heap_free_head);
+        head->free_previous = offset;
+    }
+    _heap_free_head = offset;
+    _heap_free_blocks++;
+}
+
+static void simpleos_heap_free_list_remove(SimpleOSHeapBlock *block)
+{
+    if (block->free_previous != (size_t)-1) {
+        SimpleOSHeapBlock *previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + block->free_previous);
+        previous->free_next = block->free_next;
+    } else {
+        _heap_free_head = block->free_next;
+    }
+    if (block->free_next != (size_t)-1) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + block->free_next);
+        next->free_previous = block->free_previous;
+    }
+    block->free_next = (size_t)-1;
+    block->free_previous = (size_t)-1;
+    _heap_free_blocks--;
 }
 
 /* Allocation may run on an IRQ path as well as task context.  Mask local IRQs
@@ -661,9 +693,9 @@ static void simpleos_heap_release_tail(void)
         size_t last_offset = _heap_off - _heap_tail_span;
         SimpleOSHeapBlock *last = (SimpleOSHeapBlock *)((uint8_t *)_heap + last_offset);
         if (!simpleos_heap_block_valid(last, last_offset) || !last->is_free) return;
+        simpleos_heap_free_list_remove(last);
         _heap_off = last_offset;
         _heap_tail_span = last->previous_span;
-        _heap_free_blocks--;
     }
 }
 
@@ -675,12 +707,13 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
     if (!simpleos_heap_align(size, &aligned) || aligned > (size_t)-1 - sizeof(SimpleOSHeapBlock)) return NULL;
     needed = sizeof(SimpleOSHeapBlock) + aligned;
 
-    offset = 0;
-    while (_heap_free_blocks != 0 && offset < _heap_off) {
+    offset = _heap_free_head;
+    while (offset != (size_t)-1) {
         SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
         if (!simpleos_heap_block_valid(block, offset)) return NULL;
         if (block->is_free && block->span >= needed) {
             size_t remainder = block->span - needed;
+            simpleos_heap_free_list_remove(block);
             if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
                 SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
                 next->span = remainder;
@@ -690,13 +723,18 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
                 next->reserved = 0;
                 block->span = needed;
                 simpleos_heap_set_following_previous_span(offset + needed, remainder);
-            } else {
-                _heap_free_blocks--;
+                simpleos_heap_free_list_insert(next, offset + needed);
             }
             block->is_free = 0;
-            return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
+            void *result = (uint8_t *)block + sizeof(SimpleOSHeapBlock);
+            /* The retired bump arena returned untouched BSS. Runtime object
+             * constructors consequently rely on fresh allocations being zero,
+             * including fields not present in every historical HeapHeader
+             * projection. Preserve that contract when recycling dirty storage. */
+            __builtin_memset(result, 0, aligned);
+            return result;
         }
-        offset += block->span;
+        offset = block->free_next;
     }
 
     if (needed > sizeof(_heap) - _heap_off) return NULL;
@@ -706,9 +744,13 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
     block->magic = SIMPLEOS_HEAP_MAGIC;
     block->is_free = 0;
     block->reserved = 0;
+    block->free_next = (size_t)-1;
+    block->free_previous = (size_t)-1;
     _heap_off += needed;
     _heap_tail_span = needed;
-    return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
+    void *result = (uint8_t *)block + sizeof(SimpleOSHeapBlock);
+    __builtin_memset(result, 0, aligned);
+    return result;
 }
 
 static void simpleos_heap_free_unlocked(void *ptr)
@@ -717,14 +759,13 @@ static void simpleos_heap_free_unlocked(void *ptr)
     SimpleOSHeapBlock *block = simpleos_heap_block_for_ptr(ptr, &offset);
     if (!block || block->is_free) return; /* invalid and double free are harmless */
     block->is_free = 1;
-    _heap_free_blocks++;
 
     size_t next_offset = offset + block->span;
     if (next_offset < _heap_off) {
         SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
         if (simpleos_heap_block_valid(next, next_offset) && next->is_free) {
+            simpleos_heap_free_list_remove(next);
             block->span += next->span;
-            _heap_free_blocks--;
             simpleos_heap_set_following_previous_span(offset, block->span);
         }
     }
@@ -734,11 +775,14 @@ static void simpleos_heap_free_unlocked(void *ptr)
         size_t previous_offset = offset - block->previous_span;
         previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + previous_offset);
         if (simpleos_heap_block_valid(previous, previous_offset) && previous->is_free) {
+            simpleos_heap_free_list_remove(previous);
             previous->span += block->span;
-            _heap_free_blocks--;
             simpleos_heap_set_following_previous_span(previous_offset, previous->span);
+            block = previous;
+            offset = previous_offset;
         }
     }
+    simpleos_heap_free_list_insert(block, offset);
     simpleos_heap_release_tail();
 }
 
@@ -795,6 +839,7 @@ void *realloc(void *ptr, size_t size)
         SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
         if (simpleos_heap_block_valid(next, next_offset) && next->is_free && block->span + next->span >= needed) {
             size_t remainder = block->span + next->span - needed;
+            simpleos_heap_free_list_remove(next);
             block->span = needed;
             if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
                 SimpleOSHeapBlock *tail = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
@@ -804,11 +849,12 @@ void *realloc(void *ptr, size_t size)
                 tail->is_free = 1;
                 tail->reserved = 0;
                 simpleos_heap_set_following_previous_span(offset + needed, remainder);
+                simpleos_heap_free_list_insert(tail, offset + needed);
             } else {
                 block->span += remainder;
                 simpleos_heap_set_following_previous_span(offset, block->span);
-                _heap_free_blocks--;
             }
+            __builtin_memset((uint8_t *)ptr + old_size, 0, aligned - old_size);
             simpleos_heap_lock_release(flags);
             return ptr;
         }
@@ -816,6 +862,7 @@ void *realloc(void *ptr, size_t size)
         block->span = needed;
         _heap_off = offset + needed;
         _heap_tail_span = needed;
+        __builtin_memset((uint8_t *)ptr + old_size, 0, aligned - old_size);
         simpleos_heap_lock_release(flags);
         return ptr;
     }
@@ -851,7 +898,7 @@ void *calloc(size_t count, size_t size)
 }
 
 #ifdef SIMPLEOS_HEAP_TEST
-void rt_baremetal_heap_test_reset(void) { _heap_off = 0; _heap_tail_span = 0; _heap_free_blocks = 0; }
+void rt_baremetal_heap_test_reset(void) { _heap_off = 0; _heap_tail_span = 0; _heap_free_blocks = 0; _heap_free_head = (size_t)-1; }
 size_t rt_baremetal_heap_test_capacity(void) { return sizeof(_heap); }
 size_t rt_baremetal_heap_test_high_water(void) { return _heap_off; }
 #endif
