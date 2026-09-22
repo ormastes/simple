@@ -457,10 +457,12 @@ job_sweep_shard() {
     # whose resource envelope the gate already sets, and an aborted shard is
     # never silently tolerated — a non-zero shard rc is still an offender, now
     # labelled `shard-aborted` (see the classifier).
+    # Verdicts and classification precede persistence in the canonical runner.
+    # Shards must not contend on the shared repository test database/report.
     if [ -n "$TIMEOUT_BIN" ]; then
-        "$TIMEOUT_BIN" "$SWEEP_TIMEOUT" "$_s_runner" run "$_s_entry" "$_s_dir" --no-self-protect > "$_s_job/out" 2>&1
+        "$TIMEOUT_BIN" "$SWEEP_TIMEOUT" "$_s_runner" run "$_s_entry" "$_s_dir" --no-self-protect --no-db > "$_s_job/out" 2>&1
     else
-        "$_s_runner" run "$_s_entry" "$_s_dir" --no-self-protect > "$_s_job/out" 2>&1
+        "$_s_runner" run "$_s_entry" "$_s_dir" --no-self-protect --no-db > "$_s_job/out" 2>&1
     fi
     echo $? > "$_s_job/rc"
 }
@@ -872,6 +874,45 @@ run_selftest() {
         ST_FAILURES=$((ST_FAILURES + 1))
     fi
 
+    # (o) Copied specs retain project imports and sweep jobs skip only DB writes.
+    # Exercise the real scanner; the fixture refuses missing context/flags.
+    _mk_runner_neutr "$_wd/runner_context_delegate.sh"
+    cat > "$_wd/runner_context.sh" <<'CONTEXT_EOF'
+#!/bin/sh
+case "$2" in
+    */test_runner_new/main.spl)
+        _root=${2%/src/app/test_runner_new/main.spl}
+        case "$3" in
+            "$_root"/build/plan-acceptance-sweep.*/shard.*/specs) ;;
+            *) echo 'E1034: copied spec lost its project root'; exit 2 ;;
+        esac
+        for _module in os/qemu_systest_contract.spl app/wm_compare/graphical_backend_equality.spl; do
+            [ -f "$_root/src/$_module" ] || { echo "E1034: missing $_module"; exit 2; }
+        done
+        case " $* " in
+            *' --no-db '*) ;;
+            *) echo 'fixture: shard would write shared test database'; exit 2 ;;
+        esac
+        ;;
+esac
+exec "$(dirname "$0")/runner_context_delegate.sh" "$@"
+CONTEXT_EOF
+    chmod +x "$_wd/runner_context.sh"
+    ST_ASSERTS=$((ST_ASSERTS + 1))
+    _o=$(PLAN_ACCEPTANCE_SELFTEST_RUNNING=1 sh "$0" \
+        --manifest "$_wd/manifest_wired.sdn" --dispatcher "$_wd/dispatcher_wired.shs" \
+        --spec-dir "$_wd/specs_sp" --runner "$_wd/runner_context.sh" --jobs 2 2>&1)
+    _rc=$?
+    _verdict=$(printf '%s\n' "$_o" | tail -1)
+    if [ "$_rc" = 0 ] &&
+       printf '%s' "$_verdict" | grep -q 'PASS — 2 spec(s) executed' &&
+       printf '%s' "$_verdict" | grep -q '2 neutralised as genuine assertion failures'; then
+        echo "selftest ok   [copied specs retain project context and shards disable DB persistence]"
+    else
+        echo "selftest FAIL [copied specs retain project context and shards disable DB persistence]: exit $_rc — $_verdict"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+
     rm -rf "$_wd"
     if [ "$ST_FAILURES" -ne 0 ]; then
         echo "selftest: $ST_FAILURES of $ST_ASSERTS assertion(s) FAILED — scan not attempted"
@@ -925,7 +966,12 @@ TAGGED_LIST=$(grep -l '@tag:in-development' $SPECS 2>/dev/null)
 N_TAGGED=0
 [ -z "$TAGGED_LIST" ] || N_TAGGED=$(printf '%s\n' "$TAGGED_LIST" | grep -c .)
 
-WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+# Keep copied specs below the real project root: compiler/interpreter project
+# detection climbs source ancestors to locate src/ and the project manifest.
+# An OS-temp shard loses all non-stdlib imports (os.*, app.*, compiler.*).
+# Unique directories preserve concurrent-run isolation without copying source.
+mkdir -p "$ROOT/build" || { echo "ERROR — nothing was checked (cannot create build directory)"; exit 2; }
+WORK=$(mktemp -d "$ROOT/build/plan-acceptance-sweep.XXXXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 pool_init "$WORK/done" || { echo "ERROR — nothing was checked (cannot create pool marker dir)"; exit 2; }
 
