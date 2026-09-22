@@ -100,3 +100,67 @@ unfulfilled receipts. Profile the actual admitted execution under the shared
 6 GB resource guard, retain its timeout/exit/RSS receipt and capture, and keep
 sub-opaque Metal explicitly unsupported. These checks remain pending; this
 admission failure does not demonstrate a new Metal defect or a resolved row.
+
+## Strict native fixture candidate (runtime UNRUN)
+
+`test/02_integration/rendering/macos_metal_glass_receipts_native.spl` is a
+standalone native executable entry. Unlike the portable unit spec, it exits
+nonzero when the selected backend is not Metal. It requires two ordered,
+fulfilled opaque material receipts bound to the rendered framebuffer and
+device, compares the captured pixels with independent white/black region
+oracles, and compares the receipts' checksums with a second device readback.
+The inactive opacity-930/alpha-500 pass requires zero dispatch, two ordered
+unfulfilled receipts, and unchanged framebuffer pixels and identity.
+
+Related open TODOs 8 and 9 need actual Metal provider evidence, which this
+fixture can contribute only after native admission and execution. TODOs
+10–12 and 173 concerning lifecycle/fence/timestamp evidence are not established
+by synchronous readback; neither receipt checksums nor wall-clock timing are
+GPU timestamps. No TODO or bug row is closed by this source candidate.
+
+### Bounded execution and profiling recipe
+
+Run only after the canonical Metal trusted-build manifest has been produced
+by the coordinated Stage3 owner. These commands intentionally fail on missing
+or invalid admission; do not substitute the seed. The first guard covers the
+native build and the second covers execution. Use a fresh evidence directory
+for each authorized attempt; do not rerun a passing check.
+
+```sh
+set -eu
+. scripts/check/lib/macos-gpu-trusted-build-admission.shs
+macos_gpu_trusted_manifest_admit \
+  "$PWD/build/macos_gpu_2d_live_native/metal/trusted-build.env" metal "$PWD"
+metal_evidence_dir=$(mktemp -d "$PWD/build/metal-glass-evidence.XXXXXX")
+metal_entry=test/02_integration/rendering/macos_metal_glass_receipts_native.spl
+perl scripts/resource/process-tree-rss-watchdog.pl \
+  --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=240 \
+  --receipt="$metal_evidence_dir/build.rss.env" -- \
+  /usr/bin/time -l env SIMPLE_LIB="$PWD/src" SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_LINK_OBJECTS="$MACOS_GPU_ADMISSION_PROVIDER:$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER" \
+  "$MACOS_GPU_ADMISSION_COMPILER" native-build --backend cranelift --threads 4 \
+  --cache-dir "$metal_evidence_dir/cache" --runtime-bundle core-c-bootstrap \
+  --source src/lib --source test/02_integration/rendering --entry-closure \
+  --entry "$metal_entry" --strip --output "$metal_evidence_dir/probe" \
+  >"$metal_evidence_dir/build.stdout" 2>"$metal_evidence_dir/build.stderr"
+perl scripts/resource/process-tree-rss-watchdog.pl \
+  --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=30 \
+  --receipt="$metal_evidence_dir/run.rss.env" -- \
+  /usr/bin/time -l env DYLD_PRINT_LIBRARIES=1 \
+  DYLD_LIBRARY_PATH="$(dirname "$MACOS_GPU_ADMISSION_PROVIDER"):$(dirname "$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER")" \
+  "$metal_evidence_dir/probe" \
+  >"$metal_evidence_dir/run.stdout" 2>"$metal_evidence_dir/run.stderr"
+```
+
+Retain exit status, both guard receipts, timing stderr, loaded-provider paths,
+all four material receipt lines, and the final PASS/FAIL line. Require expected
+provider resolution and guard quiescence before accepting evidence. The RSS
+guard monitors a sampled process tree under decimal 6 GB; it is not a kernel
+hard limit. This 4x4 correctness probe's wall time/RSS does not qualify realistic
+WM frame latency, blur throughput, or GPU memory use.
+
+SoSIX review: the fixture adds no extern, environment, process-launch, or IO
+facade implementation. It calls existing Engine2D APIs and prints evidence;
+the recipe uses existing admission and resource-guard owners. No SoSIX API or
+ABI changes. Native compile/syntax and runtime checks remain UNRUN until the
+admitted producer is available; source review cannot replace them.
