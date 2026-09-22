@@ -338,3 +338,6 @@ tail -c 2000 build/simpleos_wm_visible_display_evidence/serial.log
 objdump -dr build/os/simpleos_wm_simple_web_check_32.elf | grep rt_process_run
 ```
 
+TODO(deferred-environment): after Linux bootstrap admits the runtime, run the
+visible-display evidence command above in SimpleOS QEMU and retain serial output
+plus elapsed-time and max-RSS evidence.
