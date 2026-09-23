@@ -11471,8 +11471,7 @@ int64_t rt_file_read_regular_no_follow_bounded(
  * content is returned as a [u8] SplArray instead of being UTF-8 decoded,
  * which the text form must reject. Binary image admission
  * (image_to_markdown) reads PNG/JPEG bytes through this form. */
-int64_t rt_file_read_regular_no_follow_bounded_bytes(
-        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+int64_t rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
     if (max_bytes < 0 || path_len == 0 ||
