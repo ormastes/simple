@@ -24,14 +24,35 @@ val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_ca
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_set(key: text, value: text)
+extern fn rt_env_get(key: text) -> text?
 
 fn run_build(cache_dir: text, fe_dir: text, output: text, sharding: text, fe_cache: text) -> (text, i64):
     rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
     rt_env_set("SIMPLE_PARSE_SHARDING", sharding)
     rt_env_set("SIMPLE_FRONTEND_CACHE", fe_cache)
+    val old_max = rt_env_get("SIMPLE_PARSE_SHARD_MAX") ?? ""
+    rt_env_set("SIMPLE_PARSE_SHARD_MAX", "2")
     val (out, err, code) = rt_process_run("bin/simple",
         ["native-build", "--source", FIXTURE_ROOT, "--entry-closure", "--threads", "2",
          "--cache-dir", cache_dir, "--entry", "{FIXTURE_ROOT}/main.spl", "--output", output])
+    rt_env_set("SIMPLE_PARSE_SHARD_MAX", old_max)
+    (out + "\n" + err, code)
+
+fn run_env_thread_build(cache_dir: text, fe_dir: text, output: text) -> (text, i64):
+    # The original P2 report used this environment-only request. Keep its
+    # contract separate from the command-line override exercised above.
+    rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
+    rt_env_set("SIMPLE_PARSE_SHARDING", "1")
+    rt_env_set("SIMPLE_FRONTEND_CACHE", "1")
+    val old_threads = rt_env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
+    val old_max = rt_env_get("SIMPLE_PARSE_SHARD_MAX") ?? ""
+    rt_env_set("SIMPLE_NATIVE_BUILD_THREADS", "2")
+    rt_env_set("SIMPLE_PARSE_SHARD_MAX", "2")
+    val (out, err, code) = rt_process_run("bin/simple",
+        ["native-build", "--source", FIXTURE_ROOT, "--entry-closure",
+         "--cache-dir", cache_dir, "--entry", "{FIXTURE_ROOT}/main.spl", "--output", output])
+    rt_env_set("SIMPLE_NATIVE_BUILD_THREADS", old_threads)
+    rt_env_set("SIMPLE_PARSE_SHARD_MAX", old_max)
     (out + "\n" + err, code)
 
 fn last_summary(blob: text) -> text:
@@ -57,6 +78,19 @@ describe "native-build parse sharding":
         expect(count_of(blob, "[parse-shard] done shard=")).to_equal(2)
         expect(blob.contains("[parse-shard] 2/2 shard(s) completed")).to_equal(true)
         # The REAL build's summary is the last one: every module already cached.
+        val summary = last_summary(blob)
+        expect(summary.contains("hits=3")).to_equal(true)
+        expect(summary.contains("misses=0")).to_equal(true)
+        expect(summary.contains("parses=0")).to_equal(true)
+
+    slow_it "honours the environment worker request that originally bypassed Phase 2":
+        val run_id = getpid()
+        val root = "build/tmp/parse_shard_env_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val (blob, code) = run_env_thread_build("{root}/cache", "{root}/fe", "{root}/out")
+        expect(code).to_equal(0)
+        expect(count_of(blob, "[parse-shard] done shard=")).to_equal(2)
+        expect(blob.contains("[parse-shard] 2/2 shard(s) completed")).to_equal(true)
         val summary = last_summary(blob)
         expect(summary.contains("hits=3")).to_equal(true)
         expect(summary.contains("misses=0")).to_equal(true)

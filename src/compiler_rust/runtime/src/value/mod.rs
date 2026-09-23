@@ -90,7 +90,6 @@ pub use heap::{HeapHeader, HeapObjectType};
 
 // Re-export collection types
 pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
-pub use collections::rt_collection_set;
 pub use dict::RuntimeDict;
 pub use aes::{
     rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_into, rt_aes128_encrypt_block_pure,
