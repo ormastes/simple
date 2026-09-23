@@ -1,0 +1,160 @@
+#!/bin/sh
+# Verify that a live strict compatibility alias does not extract an archive
+# member for an unreachable sibling alias on the COFF/MSVC link path.
+set -eu
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) echo "SKIP: requires a Windows POSIX shell"; exit 0 ;;
+esac
+
+clang_cl=${CLANG_CL:-clang-cl.exe}
+lld_link=${LLD_LINK:-lld-link.exe}
+llvm_lib=${LLVM_LIB:-llvm-lib.exe}
+llvm_readobj=${LLVM_READOBJ:-llvm-readobj.exe}
+kernel32=${KERNEL32_LIB:-}
+for tool in "$clang_cl" "$lld_link" "$llvm_lib" "$llvm_readobj"; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "error: required tool not found: $tool" >&2
+        exit 2
+    }
+done
+if [ -z "$kernel32" ]; then
+    kernel32=$(find '/c/Program Files (x86)/Windows Kits/10/Lib' -iname kernel32.lib -path '*/um/x64/*' 2>/dev/null | head -n 1 || true)
+fi
+[ -f "$kernel32" ] || { echo "error: set KERNEL32_LIB to the x64 kernel32.lib" >&2; exit 2; }
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-coff-compat-alias.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+win_path() { cygpath -w "$1"; }
+compile() { "$clang_cl" -nologo -c "$(win_path "$1")" "-Fo$(win_path "$2")"; }
+link() {
+    "$lld_link" -nologo -nodefaultlib -entry:mainCRTStartup -subsystem:console -opt:ref \
+        "-out:$(win_path "$1")" "$(win_path "$2")" "$(win_path "$3")" \
+        "$(win_path "$4")" "$(win_path "$kernel32")"
+}
+alias_asm() {
+    cat >"$1" <<EOF
+.section .text\$$2,"xr"
+.globl $2
+$2:
+  jmp $3
+EOF
+}
+
+cat >"$fixture/live.c" <<'EOF'
+long long target_live(void) { return 7; }
+EOF
+cat >"$fixture/main.c" <<'EOF'
+__declspec(dllimport) void __stdcall ExitProcess(unsigned int);
+long long compat_chain(void);
+void mainCRTStartup(void) { ExitProcess(compat_chain() == 7 ? 0 : 1); }
+EOF
+cat >"$fixture/dllmain.c" <<'EOF'
+int __stdcall DllMain(void *module, unsigned reason, void *reserved) { return 1; }
+EOF
+compile "$fixture/live.c" "$fixture/live.obj"
+compile "$fixture/main.c" "$fixture/main.obj"
+compile "$fixture/dllmain.c" "$fixture/dllmain.obj"
+alias_asm "$fixture/chain.s" compat_chain compat_live
+alias_asm "$fixture/live_alias.s" compat_live target_live
+alias_asm "$fixture/dead.s" compat_dead target_dead
+compile "$fixture/chain.s" "$fixture/chain.obj"
+compile "$fixture/live_alias.s" "$fixture/live_alias.obj"
+compile "$fixture/dead.s" "$fixture/dead.obj"
+"$llvm_lib" -nologo "-out:$(win_path "$fixture/aliases.lib")" \
+    "$(win_path "$fixture/chain.obj")" "$(win_path "$fixture/live_alias.obj")" "$(win_path "$fixture/dead.obj")"
+
+start_ms=$(date +%s%3N)
+/usr/bin/time -f 'coff_compat_alias_peak_rss_kib=%M' \
+    "$lld_link" -nologo -nodefaultlib -entry:mainCRTStartup -subsystem:console -opt:ref \
+    "-out:$(win_path "$fixture/live.exe")" "$(win_path "$fixture/main.obj")" \
+    "$(win_path "$fixture/live.obj")" "$(win_path "$fixture/aliases.lib")" \
+    "$(win_path "$kernel32")"
+elapsed_ms=$(( $(date +%s%3N) - start_ms ))
+"$fixture/live.exe"
+echo "coff_compat_alias_link_elapsed_ms=$elapsed_ms"
+
+# A single archive member reproduces the old failure: extracting compat_chain
+# also introduces compat_dead's relocation to target_dead.
+"$llvm_lib" -nologo "-out:$(win_path "$fixture/flat.lib")" \
+    "$(win_path "$fixture/chain.obj")" "$(win_path "$fixture/live_alias.obj")" "$(win_path "$fixture/dead.obj")" >/dev/null
+# llvm-lib preserves each input object, so make the old flattened object here.
+cat >"$fixture/flat.c" <<'EOF'
+long long target_live(void); long long target_dead(void); long long compat_live(void);
+long long compat_chain(void) { return compat_live(); }
+long long compat_live(void) { return target_live(); }
+long long compat_dead(void) { return target_dead(); }
+EOF
+compile "$fixture/flat.c" "$fixture/flat.obj"
+"$llvm_lib" -nologo "-out:$(win_path "$fixture/flat.lib")" "$(win_path "$fixture/flat.obj")"
+if link "$fixture/flat.exe" "$fixture/main.obj" "$fixture/live.obj" "$fixture/flat.lib" 2>"$fixture/flat.log"; then
+    echo "error: flattened COFF compatibility aliases unexpectedly linked" >&2
+    exit 1
+fi
+grep -q 'target_dead' "$fixture/flat.log" || { cat "$fixture/flat.log" >&2; exit 1; }
+
+# An explicitly referenced unresolved alias must still diagnose its target.
+cat >"$fixture/dead_main.c" <<'EOF'
+long long compat_dead(void); void mainCRTStartup(void) { (void)compat_dead(); }
+EOF
+compile "$fixture/dead_main.c" "$fixture/dead_main.obj"
+if link "$fixture/unresolved.exe" "$fixture/dead_main.obj" "$fixture/live.obj" "$fixture/aliases.lib" 2>"$fixture/unresolved.log"; then
+    echo "error: unresolved compatibility alias unexpectedly linked" >&2
+    exit 1
+fi
+grep -q 'target_dead' "$fixture/unresolved.log" || { cat "$fixture/unresolved.log" >&2; exit 1; }
+
+# The public root is explicitly included, matching a DLL/export root.
+"$lld_link" -nologo -dll -nodefaultlib -entry:DllMain -opt:ref -include:compat_chain -export:compat_chain \
+    "-out:$(win_path "$fixture/public.dll")" "$(win_path "$fixture/dllmain.obj")" \
+    "$(win_path "$fixture/live.obj")" "$(win_path "$fixture/aliases.lib")"
+
+# Object count scales linearly.  Build the archive in two explicit calls and
+# link aliases from both batches, matching the bounded append behavior.
+scale_dir="$fixture/scale"; mkdir "$scale_dir"
+i=0
+while [ "$i" -lt 129 ]; do
+    padded=$(printf '%03d' "$i")
+    alias_asm "$scale_dir/a$padded.s" "scale_alias_$i" target_live
+    compile "$scale_dir/a$padded.s" "$scale_dir/a$padded.obj"
+    i=$((i + 1))
+done
+set --
+i=0
+for object in "$scale_dir"/*.obj; do
+    if [ "$i" -lt 128 ]; then
+        set -- "$@" "$(win_path "$object")"
+    else
+        scale_last=$object
+    fi
+    i=$((i + 1))
+done
+"$llvm_lib" -nologo "-out:$(win_path "$fixture/scale.lib")" "$@"
+"$llvm_lib" -nologo "-out:$(win_path "$fixture/scale.lib")" \
+    "$(win_path "$fixture/scale.lib")" "$(win_path "$scale_last")"
+member_count=$("$llvm_lib" -list "$(win_path "$fixture/scale.lib")" | wc -l | tr -d ' ')
+[ "$member_count" -eq 129 ] || { echo "error: expected 129 COFF alias members, got $member_count" >&2; exit 1; }
+echo "coff_compat_alias_member_count=$member_count"
+cat >"$fixture/scale_main.c" <<'EOF'
+__declspec(dllimport) void __stdcall ExitProcess(unsigned int);
+long long scale_alias_0(void); long long scale_alias_128(void);
+void mainCRTStartup(void) { ExitProcess(scale_alias_0() == 7 && scale_alias_128() == 7 ? 0 : 1); }
+EOF
+compile "$fixture/scale_main.c" "$fixture/scale_main.obj"
+link "$fixture/scale.exe" "$fixture/scale_main.obj" "$fixture/live.obj" "$fixture/scale.lib"
+"$fixture/scale.exe"
+
+# clang-cl must honour the requested target rather than its x64 host default.
+cat >"$fixture/arm64.s" <<'EOF'
+.section .text$arm_alias,"xr"
+.globl arm_alias
+arm_alias:
+  b target_live
+EOF
+"$clang_cl" -nologo -c --target=aarch64-pc-windows-msvc "$(win_path "$fixture/arm64.s")" \
+    "-Fo$(win_path "$fixture/arm64.obj")"
+"$llvm_readobj" --file-headers "$(win_path "$fixture/arm64.obj")" | grep -qi 'Machine:.*ARM64' || {
+    echo "error: clang-cl did not emit an ARM64 COFF compatibility object" >&2; exit 1;
+}
+echo "windows_coff_compat_alias_gc=PASS"

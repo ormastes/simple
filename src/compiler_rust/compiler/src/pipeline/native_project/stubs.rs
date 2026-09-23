@@ -6,8 +6,8 @@ use simple_common::target::TargetOS;
 
 use super::{effective_target, ModuleImports};
 use super::tools::{
-    find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command,
-    target_c_compiler,
+    archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
+    is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -1265,8 +1265,133 @@ the old fabricating behaviour.",
         }
     }
 
-    #[cfg(target_os = "windows")]
     {
+        let target = effective_target();
+        if target.os == TargetOS::Windows {
+        // COFF archive extraction is object-granular.  Putting every strict
+        // compatibility trampoline in `_stubs.o` means that selecting one
+        // live alias also selects siblings whose targets may be unreachable.
+        // `/OPT:REF` then sees their relocations before it can discard them.
+        // Emit one real trampoline per archive member so the archive index is
+        // the liveness boundary.  This is deliberately strict-only: ordinary
+        // unresolved fallback keeps its historical C return-3 bodies.
+        if strict_no_stub_fallback {
+            let asm_cc = target_c_compiler(target);
+            let asm_cc_name = std::path::Path::new(&asm_cc)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&asm_cc)
+                .to_ascii_lowercase();
+            if asm_cc_name == "cl" {
+                return Err("strict Windows compatibility aliases require clang or clang-cl; cl.exe cannot assemble GAS trampoline sources".to_string());
+            }
+            let clang_driver = asm_cc_name.contains("clang");
+            let msvc_driver = asm_cc_name.contains("clang-cl");
+            let jmp = simple_common::platform::asm_helpers::asm_jmp_instruction(&target);
+            let mut members = Vec::with_capacity(needs_stub.len());
+
+            for (index, sym) in needs_stub.iter().enumerate() {
+                if !plat_config.is_valid_asm_label(sym) {
+                    continue;
+                }
+                let real_fn = resolve_defined_suffix_alias(sym, &defined).ok_or_else(|| {
+                    format!("strict Windows compatibility alias '{sym}' has no resolved target")
+                })?;
+                if !plat_config.is_valid_asm_label(&real_fn) {
+                    return Err(format!(
+                        "strict Windows compatibility alias target '{real_fn}' is not a valid assembly label"
+                    ));
+                }
+
+                let source = temp_dir.join(format!("_compat_alias_{index}.s"));
+                let object = temp_dir.join(format!("_compat_alias_{index}.obj"));
+                let section = format!(".text$compat_alias_{index}");
+                // The one-member-per-alias archive is the COFF liveness
+                // boundary.  Do not use the GAS `one_only` COMDAT spelling:
+                // clang-cl's COFF integrated assembler rejects it.
+                let asm = format!(
+                    ".section {section},\"xr\"\n.globl {sym}\n{sym}:\n  {jmp} {real_fn}\n"
+                );
+                std::fs::write(&source, asm)
+                    .map_err(|e| format!("write Windows compatibility alias assembly: {e}"))?;
+
+                let mut command = std::process::Command::new(&asm_cc);
+                command.arg("-c");
+                // clang/clang-cl need the requested target to prevent an x64
+                // host from silently emitting x64 COFF for an ARM64 target.
+                // A GNU cross compiler carries its target in its executable
+                // name and rejects clang's --target spelling.
+                if clang_driver {
+                    command.arg(format!("--target={}", target.triple_str()));
+                }
+                command.arg(&source);
+                if msvc_driver {
+                    command.arg(format!("-Fo{}", object.display()));
+                } else {
+                    command.arg("-o").arg(&object);
+                }
+                let output = command.output()
+                    .map_err(|e| format!("assemble Windows compatibility alias ({asm_cc}): {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "assemble Windows compatibility alias '{sym}' ({asm_cc}): {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                members.push(object);
+            }
+            if members.is_empty() {
+                return Err("strict Windows compatibility aliases produced no COFF members".to_string());
+            }
+            let archive = temp_dir.join("_compat_aliases.lib");
+            let archive_tool = find_archive_tool();
+            // `lib.exe`/`llvm-lib` receive object paths directly.  Bound each
+            // invocation by its encoded Windows command-line length, not a
+            // member count: 128 generated paths can exceed CreateProcess'
+            // 32,767 UTF-16 code-unit limit in a deep build directory.  Keep
+            // a conservative reserve for tool, archive, and quoting overhead.
+            const ARCHIVE_COMMAND_LIMIT: usize = 24_000;
+            let archive_path_len = archive.as_os_str().to_string_lossy().encode_utf16().count() + 3;
+            let mut start = 0;
+            while start < members.len() {
+                // Append commands carry the archive both as `/OUT:` and as
+                // an input member, so account for two encoded path copies.
+                let mut batch_len = 512 + archive_path_len * if start == 0 { 1 } else { 2 };
+                let mut end = start;
+                while end < members.len() {
+                    let member_len = members[end].as_os_str().to_string_lossy().encode_utf16().count() + 3;
+                    if batch_len + member_len > ARCHIVE_COMMAND_LIMIT {
+                        if end == start {
+                            return Err(format!(
+                                "Windows compatibility alias object path exceeds archive command budget: {}",
+                                members[end].display()
+                            ));
+                        }
+                        break;
+                    }
+                    batch_len += member_len;
+                    end += 1;
+                }
+                let output = archive_create_command(
+                    &archive_tool,
+                    &archive,
+                    &members[start..end],
+                    start != 0,
+                    true,
+                )
+                    .output()
+                    .map_err(|e| format!("archive Windows compatibility aliases ({archive_tool}): {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "archive Windows compatibility aliases ({archive_tool}): {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                start = end;
+            }
+            return Ok(archive);
+        }
+
         let mut c_code = String::with_capacity(needs_stub.len() * 120);
         c_code.push_str("/* Auto-generated stubs for bootstrap linking (Windows) */\n");
         c_code.push_str("#include <stdint.h>\n\n");
@@ -1304,8 +1429,8 @@ the old fabricating behaviour.",
 
         return Ok(stub_o);
     }
+    }
 
-    #[cfg(not(target_os = "windows"))]
     {
         let mut asm_code = String::with_capacity(needs_stub.len() * 100);
         asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
