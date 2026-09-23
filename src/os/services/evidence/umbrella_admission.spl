@@ -10,11 +10,13 @@ use std.common.structural.receipt.simpleos_evidence_receipt_v1_codec.{
     decode_simpleos_evidence_receipt_v1
 }
 use os.services.evidence.artifact_snapshot.{SimpleOsEvidenceArtifactSnapshotV1}
-use os.services.evidence.verifier_owner.{
-    SimpleOsTrustedEvidenceSignerV1, simpleos_evidence_verifier_start,
-    simpleos_evidence_verify_detached_candidate_with_snapshot,
-    simpleos_evidence_consume_verified, simpleos_evidence_release_verified,
-    simpleos_evidence_row_admitted
+use os.services.evidence._verifier_owner.verifier_transactions.{
+    SimpleOsTrustedEvidenceSignerV1,
+    simpleos_evidence_verifier_start_authoritative,
+    simpleos_evidence_verify_detached_candidate_with_snapshot_authoritative,
+    simpleos_evidence_consume_verified_authoritative,
+    simpleos_evidence_release_verified,
+    simpleos_evidence_row_admitted_authoritative
 }
 use os.services.evidence.authority_owner.{
     SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1,
@@ -175,7 +177,7 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
     if now_unix_us - receipt.finished_unix_us >
         SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1:
         return _reject("receipt-expired")
-    val started = simpleos_evidence_verifier_start(authoritative_roots)
+    val started = simpleos_evidence_verifier_start_authoritative()
     if not started.ok: return _reject("verifier:" + started.reason)
     # Keep replay exclusion live until either no state changed or both the
     # admitted row and its durable nonce record exist. A retryable pending
@@ -192,7 +194,7 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
         return _reject("nonce-replay-persistent")
     val row_key = simpleos_capability_row_key(candidate.row)
     if _nonce_pending(nonce_ledger, receipt.nonce) and
-        simpleos_evidence_row_admitted(row_key, now_unix_us):
+        simpleos_evidence_row_admitted_authoritative(row_key):
         val recovered = _persist_admitted_nonce_locked(
             nonce_path, nonce_ledger, receipt.nonce)
         if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
@@ -205,8 +207,9 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
         return _reject(pending)
     val pending_ledger = _without_pending_nonce(nonce_ledger, receipt.nonce) +
         "P " + receipt.nonce + "\n"
-    val verified = simpleos_evidence_verify_detached_candidate_with_snapshot(
-        candidate, consumer, snapshot, now_unix_us)
+    val verified =
+        simpleos_evidence_verify_detached_candidate_with_snapshot_authoritative(
+            candidate, consumer, snapshot)
     if not verified.ok:
         if not _rollback_pending_nonce_locked(
             nonce_path, pending_ledger, receipt.nonce):
@@ -214,8 +217,8 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
             return _reject("serialization-indeterminate")
         if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
         return _reject("verification:" + verified.reason)
-    val committed = simpleos_evidence_consume_verified(
-        verified.handle, candidate, consumer, now_unix_us)
+    val committed = simpleos_evidence_consume_verified_authoritative(
+        verified.handle, candidate, consumer)
     if not committed.ok:
         val released = simpleos_evidence_release_verified(verified.handle, consumer)
         val rolled_back = _rollback_pending_nonce_locked(
@@ -224,7 +227,7 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
         if not released or not rolled_back or not unlocked:
             return _reject("serialization-indeterminate")
         return _reject("commit:" + committed.reason)
-    if not simpleos_evidence_row_admitted(row_key, now_unix_us):
+    if not simpleos_evidence_row_admitted_authoritative(row_key):
         if not file_unlock(nonce_lock): return _reject("nonce-ledger-unlock")
         return _reject("row-not-admitted")
     val persistence = _persist_admitted_nonce_locked(

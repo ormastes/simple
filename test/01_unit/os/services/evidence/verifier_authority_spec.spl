@@ -1,0 +1,54 @@
+# @cover src/os/services/evidence/verifier_owner.spl 85%
+# @cover src/os/services/evidence/_verifier_owner/verifier_core.spl 85%
+# @cover src/os/services/evidence/_verifier_owner/verifier_transactions.spl 85%
+# @req REQ-001
+
+use std.spec.*
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize
+}
+use os.services.evidence.authority_owner.{
+    simpleos_evidence_authority_start_v1,
+    simpleos_evidence_authority_roots_v1
+}
+use os.services.evidence.trusted_signer.{SimpleOsTrustedEvidenceSignerV1}
+use os.services.evidence.verifier_owner.{
+    simpleos_evidence_verifier_start as mono_start,
+    simpleos_evidence_verifier_start_authoritative as mono_start_authoritative,
+    simpleos_evidence_issue_challenge as mono_issue,
+    simpleos_evidence_issue_challenge_authoritative as mono_issue_authoritative,
+    simpleos_evidence_pass_admission_available as mono_pass_available
+}
+use os.services.evidence._verifier_owner.verifier_transactions.{
+    simpleos_evidence_verifier_start as split_start,
+    simpleos_evidence_verifier_start_authoritative as split_start_authoritative,
+    simpleos_evidence_issue_challenge as split_issue,
+    simpleos_evidence_issue_challenge_authoritative as split_issue_authoritative,
+    simpleos_evidence_pass_admission_available as split_pass_available
+}
+
+describe "SimpleOS verifier authority boundary":
+    it "rejects caller roots and caller time in both verifier implementations":
+        expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(
+                key_id: "evidence-root-1", public_key: [7u8; 32])
+        ])).to_be(true)
+        expect(simpleos_evidence_authority_start_v1().ok).to_be(true)
+        val roots = simpleos_evidence_authority_roots_v1()
+        expect(roots.len()).to_equal(1)
+        val attacker = [SimpleOsTrustedEvidenceSignerV1(
+            key_id: "attacker-root", public_key: [9u8; 32])]
+        expect(mono_start(attacker).reason).to_equal(
+            "trust-root-assertion-mismatch")
+        expect(split_start(attacker).reason).to_equal(
+            "trust-root-assertion-mismatch")
+        expect(mono_start_authoritative().ok).to_be(true)
+        expect(split_start_authoritative().ok).to_be(true)
+        expect(mono_issue("caller-clock-mono", 1, 10).reason).to_equal(
+            "caller-time-untrusted")
+        expect(split_issue("caller-clock-split", 1, 10).reason).to_equal(
+            "caller-time-untrusted")
+        expect(mono_issue_authoritative("owner-clock-mono", 10).ok).to_be(true)
+        expect(split_issue_authoritative("owner-clock-split", 10).ok).to_be(true)
+        expect(mono_pass_available()).to_be(false)
+        expect(split_pass_available()).to_be(false)

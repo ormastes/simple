@@ -69,13 +69,14 @@ legacy roots parameter is only an exact assertion and cannot select authority.
 Partial initialization, root-generation change, clock failure, rollback, lock
 failure, and unlock failure reject the operation.
 
-This deliberately does not admit any release gate. Astra review found that the
-loader's public first-writer initializer is not yet privileged, the legacy
-verifier APIs still accept caller roots/timestamps, and performance campaign
-policy remains caller-provided. Trust/policy/time therefore stay false and the
-first blocker remains `trust-root-owner-unavailable`; crypto and serialization
-also remain false. No caller-provided boolean or timestamp is promoted to
-authority.
+This deliberately does not admit any release gate. The loader's public
+first-writer initializer is not yet privileged, so trust/policy/time stay false
+and the first blocker remains `trust-root-owner-unavailable`; crypto and
+serialization also remain false. The verifier now has root-free and time-free
+authority entrypoints. Its legacy caller-root/time entrypoints remain
+diagnostic: mismatched roots reject after authority startup, caller timestamps
+reject once the verifier is authority-initialized, and a diagnostic
+initialization cannot be upgraded to PASS authority.
 
 The owner keeps at most 16 copied 32-byte public keys and performs bounded
 O(root-count) work only at initialization/root projection. Steady-state time
@@ -85,18 +86,19 @@ does not alter receipt signature verification or ledger hot loops.
 TODO(environment): once an admitted Phase-2 test-capable runtime exists, run
 `test/01_unit/os/services/evidence/authority_owner_spec.spl`,
 `artifact_snapshot_spec.spl`, `verifier_owner_spec.spl`, and
+`verifier_authority_spec.spl`, `performance_policy_owner_spec.spl`, and
 `umbrella_admission_spec.spl`; then run SimpleOS QEMU root-absence,
 root-replacement, clock-failure, and clock-rollback cases. Keep PASS blocked
 until executable Ed25519 KAT/native constant-work evidence and authoritative
 mutex concurrency evidence independently admit their remaining gates.
-Before admitting trust/policy/time, route every exported verifier entrypoint
-through this owner (or reject mismatched assertions), require a privileged boot
-token for loader root initialization, move performance campaign policy out of
-the copyable admission context, and add deterministic clock failure/rollback
-and lock-failure injection coverage.
+Before admitting trust/policy/time, require a privileged boot token for loader
+root initialization, preregister immutable performance campaign baselines,
+and add deterministic clock failure/rollback and lock-failure injection
+coverage.
 
-Static review is complete. Executable status remains unverified because only a
-Stage-2 compile/native-build lane is admitted; it is not SSpec/test authority.
+This verifier wiring has source-level checks only. Executable status remains
+unverified because only a Stage-2 compile/native-build lane is admitted; it is
+not SSpec/test authority.
 
 ## Performance campaign policy checkpoint (2026-09-23)
 
@@ -111,12 +113,12 @@ catalog is empty because no reviewed fixture and baseline artifact set is
 preregistered; a performance row therefore fails with
 `performance-policy-unavailable`. This does not enable the policy gate.
 
-TODO(integration): the serialized verifier must call
+The authoritative verifier now calls
 `simpleos_evidence_performance_policy_check_v1(candidate, snapshot)` after
-rehashing the snapshot and before creating a verified handle, then again on
-commit if the catalog ever becomes mutable. Preregister reviewed native
-campaign fixture/baseline values in the private catalog only after an exact
-baseline artifact is available. Run
-`test/01_unit/os/services/evidence/performance_policy_owner_spec.spl` with an
-admitted test-capable self-hosted runtime and the corresponding native/QEMU
-campaign when the phase environment is ready.
+rehashing the snapshot and before creating a verified handle. The catalog is
+immutable for the process lifetime, so the handle cannot outlive a policy
+mutation. TODO(environment): preregister reviewed native campaign fixture and
+baseline values only after an exact baseline artifact is available. Run the
+focused policy and verifier authority specs with an admitted test-capable
+self-hosted runtime and the native/QEMU campaign when the phase environment is
+ready.
