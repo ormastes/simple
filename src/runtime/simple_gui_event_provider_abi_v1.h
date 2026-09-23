@@ -17,7 +17,8 @@ extern "C" {
  * the packet byte length. Packet: 1..31 lowercase ASCII/hyphen kind bytes,
  * '\n', UTF-8 payload (which may contain '\n'); no embedded NUL. Do not write
  * beyond capacity. Pump AppKit while waiting up to wait_ms. Bound the provider
- * queue and preserve close events. Shutdown releases session UI resources;
+ * queue and preserve close events. Shutdown returns 1 on success and any
+ * other value on failure. It releases session UI resources;
  * the library itself remains loaded. A later present starts a new session.
  * Standalone HTML calls must not overlap an event session. */
 int64_t simple_gui_event_provider_abi_v1(void);
