@@ -77,6 +77,24 @@ describe "provider query canonical wire codec":
     it "rejects invalid status versions handles and result bounds":
         expect(decode_provider_query_result_v1([0u8; 60]).diagnostic).to_equal("result-wire-size-invalid")
         expect(decode_provider_query_result_v1([0u8; 83]).diagnostic).to_equal("result-wire-size-invalid")
+        val canonical = encode_provider_query_result_v1(SimpleProviderQueryResultV1(
+            status: SIMPLE_PROVIDER_OK, provided_major: 1, provided_minor: 0,
+            descriptor_size: 28, interface_handle: 1, provider_context: 0,
+            provider_identity_digest: 2, implementation_digest: 3,
+            abi_digest: simple_provider_digest_from_hex_v1(
+                "112233445566778899aabbccddeeff00010203040506070890abcdefdeadbeef")))
+        # Model a legacy writer touching exactly its 60-byte view inside an
+        # 84-byte poison-filled host result plus four guard bytes.
+        var legacy_partial = [165u8; 88]
+        var legacy_index = 0
+        while legacy_index < 60:
+            legacy_partial[legacy_index] = canonical.bytes[legacy_index]
+            legacy_index = legacy_index + 1
+        expect(legacy_partial[60]).to_equal(165u8)
+        expect(legacy_partial[80]).to_equal(165u8)
+        expect(legacy_partial[84]).to_equal(165u8)
+        expect(legacy_partial[87]).to_equal(165u8)
+        expect(decode_provider_query_result_v1(legacy_partial[0..84]).diagnostic).to_equal("result-reserved-not-zero")
         var invalid = [0u8; 84]
         invalid[0] = 99
         expect(decode_provider_query_result_v1(invalid).diagnostic).to_equal("result-status-invalid")
