@@ -1,7 +1,7 @@
-/* Absolute-oracle parity probe for the six core-C-only lane twins added to
- * runtime_native.c on 2026-09-13: rt_math_sqrt, rt_utf8_validate,
+/* Absolute-oracle parity probe for core-C-only lane twins in
+ * runtime_native.c: rt_math_sqrt, rt_utf8_validate,
  * rt_utf8_find_invalid, rt_utf8_count_codepoints, rt_numeric_dot_f64 and
- * rt_array_remove.
+ * rt_array_remove, plus rt_numeric_sum_f64 and rt_array_sorted.
  *
  * WHY ABSOLUTE ORACLES, NOT A DIFF AGAINST THE RUST RUNTIME
  * The two lanes are never linked into one process -- that is the whole point
@@ -16,9 +16,11 @@
  * Build (links against the standalone-compiled runtime_native.o, i.e. the exact
  * TU the core-C bootstrap archive is made from -- same recipe as the
  * rt_bootstrap_c_lane_* selfchecks beside this file):
- *   cc -c -std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1 \
+ *   cc -c -std=gnu11 -ffunction-sections -fdata-sections \
+ *      -DSIMPLE_CORE_C_STANDALONE=1 \
  *      -Isrc/runtime -Isrc/runtime/platform src/runtime/runtime_native.c -o rn.o
- *   cc -std=gnu11 src/runtime/test/rt_core_c_utf8_math_array_twin_parity_selfcheck.c \
+ *   cc -Wl,-dead_strip -std=gnu11 -Isrc/runtime -Isrc/runtime/platform \
+ *      src/runtime/test/rt_core_c_utf8_math_array_twin_parity_selfcheck.c \
  *      rn.o -lpthread -lm -o selfcheck && ./selfcheck
  *
  * Exit status is the number of failures, and every failure prints its expected
@@ -215,6 +217,73 @@ static void check_dot(void) {
                rt_numeric_dot_f64(RT_NIL_VALUE, make_f64_array(b3, 3)), RT_NIL_VALUE);
 }
 
+static void check_sum_and_sorted(void) {
+    static const double floats[] = {1.25, 2.0, -0.25};
+    static const int64_t ints[] = {3, 1, 2};
+    expect_f64_exact("sum([1.25,2,-0.25])",
+                     rt_value_as_float(rt_numeric_sum_f64(make_f64_array(floats, 3))), 3.0);
+    expect_f64_exact("sum([])",
+                     rt_value_as_float(rt_numeric_sum_f64(make_f64_array(floats, 0))), 0.0);
+    expect_f64_exact("sum([3,1,2] int)",
+                     rt_value_as_float(rt_numeric_sum_f64(make_int_array(ints, 3))), 6.0);
+    expect_i64("sum(nil) is nil", rt_numeric_sum_f64(RT_NIL_VALUE), RT_NIL_VALUE);
+    SplArray* bad = rt_array_new(1);
+    rt_array_push(bad, rt_string_new((const uint8_t*)"x", 1));
+    expect_i64("sum([text]) is nil", rt_numeric_sum_f64((int64_t)(uintptr_t)bad), RT_NIL_VALUE);
+
+    int64_t original = make_int_array(ints, 3);
+    int64_t sorted = rt_array_sorted(original);
+    checks++;
+    if (sorted == original || sorted == RT_NIL_VALUE) {
+        failures++;
+        printf("FAIL sorted returns a distinct valid array\n");
+        return;
+    }
+    expect_i64("sorted[0]", rt_array_get((SplArray*)(uintptr_t)sorted, 0), rt_value_int(1));
+    expect_i64("sorted[1]", rt_array_get((SplArray*)(uintptr_t)sorted, 1), rt_value_int(2));
+    expect_i64("sorted[2]", rt_array_get((SplArray*)(uintptr_t)sorted, 2), rt_value_int(3));
+    expect_i64("original[0] unchanged", rt_array_get((SplArray*)(uintptr_t)original, 0), rt_value_int(3));
+    expect_i64("original[1] unchanged", rt_array_get((SplArray*)(uintptr_t)original, 1), rt_value_int(1));
+
+    SplArray* bytes = rt_byte_array_new(3);
+    rt_array_push(bytes, 3);
+    rt_array_push(bytes, 1);
+    rt_array_push(bytes, 2);
+    int64_t sorted_bytes = rt_array_sorted((int64_t)(uintptr_t)bytes);
+    checks++;
+    if (!rt_array_is_byte_packed((SplArray*)(uintptr_t)sorted_bytes)) {
+        failures++;
+        printf("FAIL sorted packed bytes retain byte storage\n");
+    }
+    expect_i64("sorted packed byte[0]", rt_array_get((SplArray*)(uintptr_t)sorted_bytes, 0), 1);
+    expect_i64("sorted packed byte[1]", rt_array_get((SplArray*)(uintptr_t)sorted_bytes, 1), 2);
+    expect_i64("sorted packed byte[2]", rt_array_get((SplArray*)(uintptr_t)sorted_bytes, 2), 3);
+    expect_i64("original packed byte[0] unchanged", rt_array_get(bytes, 0), 3);
+
+    SplArray* u64s = rt_array_new_with_cap_u64(3);
+    rt_array_push(u64s, (int64_t)UINT64_MAX);
+    rt_array_push(u64s, 1);
+    rt_array_push(u64s, 2);
+    int64_t sorted_u64s = rt_array_sorted((int64_t)(uintptr_t)u64s);
+    expect_i64("sorted packed u64[0]", rt_array_get((SplArray*)(uintptr_t)sorted_u64s, 0), 1);
+    expect_i64("sorted packed u64[1]", rt_array_get((SplArray*)(uintptr_t)sorted_u64s, 1), 2);
+    expect_i64("sorted packed u64[2]", rt_array_get((SplArray*)(uintptr_t)sorted_u64s, 2), (int64_t)UINT64_MAX);
+    expect_i64("original packed u64[0] unchanged", rt_array_get(u64s, 0), (int64_t)UINT64_MAX);
+
+    int64_t text_b = rt_string_new((const uint8_t*)"b", 1);
+    int64_t text_a1 = rt_string_new((const uint8_t*)"a", 1);
+    int64_t text_a2 = rt_string_new((const uint8_t*)"a", 1);
+    SplArray* texts = rt_array_new(3);
+    rt_array_push(texts, text_b);
+    rt_array_push(texts, text_a1);
+    rt_array_push(texts, text_a2);
+    int64_t sorted_texts = rt_array_sorted((int64_t)(uintptr_t)texts);
+    expect_i64("sorted text stable first equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 0), text_a1);
+    expect_i64("sorted text stable second equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 1), text_a2);
+    expect_i64("sorted text last", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 2), text_b);
+    expect_i64("sorted(nil) is nil", rt_array_sorted(RT_NIL_VALUE), RT_NIL_VALUE);
+}
+
 static void check_array_remove(void) {
     static const int64_t src[] = {10, 20, 30, 40};
 
@@ -259,6 +328,7 @@ int main(void) {
     check_sqrt();
     check_utf8();
     check_dot();
+    check_sum_and_sorted();
     check_array_remove();
 
     if (checks == 0) {
