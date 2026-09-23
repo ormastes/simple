@@ -1,0 +1,70 @@
+#!/bin/sh
+# Focused Windows journal control. Files and PowerShell replacement are real;
+# pointer CAS and fsync are test boundaries, not host durability evidence.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-deploy-transaction.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/stable journal control.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/bin/release" "$work/scripts/bootstrap"
+cp "$repo/scripts/bootstrap/publish-windows-stable-entrypoint.ps1" "$work/scripts/bootstrap/"
+release="$work/bin/release"
+pointer=none
+bootstrap_deploy_tx_pointer_value() { printf '%s\n' "$pointer"; }
+bootstrap_deploy_tx_pointer_swap() { [ "$pointer" = "$1" ] || return 1; pointer=$2; }
+bootstrap_deploy_tx_sync() { return 0; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+reject() { if "$@" >/dev/null 2>&1; then fail "unexpected success: $*"; fi; }
+printf old >"$work/bin/simple.exe"
+printf prior-receipt >"$work/bin/.simple-windows-stable-entrypoint.env"
+old=$(bootstrap_deploy_tx_hash_file "$work/bin/simple.exe")
+receipt_old=$(bootstrap_deploy_tx_hash_file "$work/bin/.simple-windows-stable-entrypoint.env")
+printf new >"$work/candidate.exe"
+new=$(bootstrap_deploy_tx_hash_file "$work/candidate.exe")
+bootstrap_deploy_tx_begin "$release" windows-control crash-control
+bootstrap_deploy_tx_stable_prepare "$new"
+backup=$bootstrap_deploy_tx_stable_backup
+receipt_backup=$bootstrap_deploy_tx_stable_receipt_backup
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+  -File "$repo/scripts/bootstrap/publish-windows-stable-entrypoint.ps1" \
+  -Candidate "$work/candidate.exe" -Destination "$work/bin/simple.exe" \
+  -ExpectedSha256 "$new" -Receipt "$work/bin/.simple-windows-stable-entrypoint.env"
+# Missing/corrupt backups must retain journal and leave both surfaces alone.
+mv "$backup" "$backup.saved"
+reject bootstrap_deploy_tx_recover "$release" windows-control
+[ -f "$bootstrap_deploy_tx_control" ] || fail missing_backup_removed_journal
+[ "$(bootstrap_deploy_tx_hash_file "$work/bin/simple.exe")" = "$new" ] || fail missing_backup_changed_binary
+mv "$backup.saved" "$backup"
+printf corrupt >"$receipt_backup"
+reject bootstrap_deploy_tx_recover "$release" windows-control
+[ "$(bootstrap_deploy_tx_hash_file "$work/bin/simple.exe")" = "$new" ] || fail corrupt_receipt_changed_binary
+printf prior-receipt >"$receipt_backup"
+bootstrap_deploy_tx_recover "$release" windows-control
+[ "$(bootstrap_deploy_tx_hash_file "$work/bin/simple.exe")" = "$old" ] || fail recovery_binary
+[ "$(bootstrap_deploy_tx_hash_file "$work/bin/.simple-windows-stable-entrypoint.env")" = "$receipt_old" ] || fail recovery_receipt
+[ ! -e "$bootstrap_deploy_tx_control" ] || fail recovery_journal
+[ -f "$backup" ] || fail consumed_durable_backup
+# Explicit abort after a simulated smoke failure removes a newly added receipt.
+rm "$work/bin/.simple-windows-stable-entrypoint.env"
+bootstrap_deploy_tx_begin "$release" windows-control smoke-control
+bootstrap_deploy_tx_stable_prepare "$new"
+cp "$work/candidate.exe" "$work/bin/simple.exe"
+printf new-receipt >"$work/bin/.simple-windows-stable-entrypoint.env"
+bootstrap_deploy_tx_abort
+[ "$(bootstrap_deploy_tx_hash_file "$work/bin/simple.exe")" = "$old" ] || fail smoke_abort_binary
+[ ! -e "$work/bin/.simple-windows-stable-entrypoint.env" ] || fail smoke_abort_receipt
+# A failed durable commit remains abortable; no commit success is reported.
+bootstrap_deploy_tx_begin "$release" windows-control commit-control
+bootstrap_deploy_tx_stable_prepare "$new"
+cp "$work/candidate.exe" "$work/bin/simple.exe"
+printf 'schema=simple-windows-stable-entrypoint-receipt-v1\nstatus=pass\ncandidate_sha256=%s\nstable_sha256=%s\n' "$new" "$new" >"$work/bin/.simple-windows-stable-entrypoint.env"
+bootstrap_deploy_tx_state=published
+pointer=$bootstrap_deploy_tx_pointer_target
+bootstrap_deploy_tx_sync() { return 1; }
+reject bootstrap_deploy_tx_commit
+[ "$bootstrap_deploy_tx_active" = 1 ] || fail commit_disabled_rollback
+bootstrap_deploy_tx_sync() { return 0; }
+pointer=none
+bootstrap_deploy_tx_abort
+[ "$(bootstrap_deploy_tx_hash_file "$work/bin/simple.exe")" = "$old" ] || fail commit_abort_binary
+echo 'PASS Windows journal missing/corrupt backup, recovery, receipt restore/removal, smoke abort, commit failure'
