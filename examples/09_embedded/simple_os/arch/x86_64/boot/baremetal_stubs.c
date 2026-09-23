@@ -262,9 +262,28 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define FALSE_VALUE    ENCODE_INT(0)
 
 typedef struct {
-    uint32_t type;
+    uint8_t  type;
+    uint8_t  gc_flags;
+    uint16_t reserved;
     uint32_t size;
 } HeapHeader;
+
+_Static_assert(sizeof(HeapHeader) == 8,
+               "HeapHeader must match the compiler/runtime eight-byte ABI");
+
+/* Object metadata must be initialized even when an arena reuses dirty bytes.
+ * Keep this at object construction: raw/DMA malloc callers need no header. */
+static inline void runtime_heap_header_init(HeapHeader *header, uint8_t type)
+{
+    header->type = type;
+    header->gc_flags = 0;
+    header->reserved = 0;
+}
+
+/* Native [u8] arrays use one-byte elements.  The compiler reads this flag at
+ * byte offset one; keeping a uint32_t `type` here made the packed producers
+ * below overwrite the object type and silently changed the element stride. */
+#define BYTE_PACKED 0x08u
 
 typedef struct {
     HeapHeader hdr;
@@ -298,6 +317,16 @@ static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
     return a->items ? a->items : runtime_array_inline_items(a);
 }
 
+static inline RuntimeArray *runtime_array_from_abi(RuntimeValue value)
+{
+    uintptr_t raw = (uintptr_t)(uint64_t)value;
+    if ((raw & TAG_MASK) == TAG_HEAP) raw &= ~(uintptr_t)TAG_MASK;
+    else if ((raw & TAG_MASK) != 0) return NULL;
+    if (raw < 0x1000u) return NULL;
+    RuntimeArray *array = (RuntimeArray *)raw;
+    return array->hdr.type == HEAP_ARRAY ? array : NULL;
+}
+
 void *malloc(size_t sz);
 
 /* ---- byte-array (packed [u8]) helpers, native-contract compliant ----
@@ -310,7 +339,7 @@ static RuntimeValue _rt_bytes_new(const uint8_t *buf, uint32_t len)
     size_t bytes = sizeof(RuntimeArray) + (size_t)len;
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return (RuntimeValue)3 /* NIL */;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)bytes;
@@ -400,7 +429,7 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
     size_t bytes = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)bytes;
     a->len = len;
     a->cap = len;
@@ -924,6 +953,20 @@ size_t rt_baremetal_heap_test_high_water(void) { return _heap_off; }
 #endif
 /* SIMPLEOS_HEAP_ALLOCATOR_END */
 
+/* Reuse a poisoned compact header through the current free-list allocator. */
+uint64_t rt_abi_probe_heap_header_reuse(void)
+{
+    HeapHeader *first = (HeapHeader *)malloc(sizeof(RuntimeArray) + sizeof(RuntimeValue));
+    if (!first) return 0;
+    first->gc_flags = 0xffu;
+    first->reserved = 0xffffu;
+    free(first);
+    RuntimeArray *reused = runtime_array_from_abi(rt_u32_alloc_filled(1, 0x53));
+    return reused == (RuntimeArray *)first && reused->hdr.gc_flags == 0
+        && reused->hdr.reserved == 0 && reused->len == 1
+        && _rt_bytes_get(reused, 0) == 0x53 ? 1u : 0u;
+}
+
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
     /* compile_struct_init passes RAW size (not tagged): iconst.i64 16
@@ -1051,7 +1094,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
        by compile_fstring_format which calls rt_string_new(NULL, 0)) */
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
     /* data is a raw pointer cast to i64 */
@@ -1067,7 +1110,7 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     size_t len = strlen(cstr);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = (uint32_t)len;
     __builtin_memcpy(s->data, cstr, len);
@@ -1137,7 +1180,7 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
 
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + total + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + total + 1);
     r->len = total;
     if (sa) __builtin_memcpy(r->data, sa->data, la);
@@ -1181,7 +1224,7 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
         /* empty string */
         RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + 1);
         if (!r) return NIL_VALUE;
-        r->hdr.type = HEAP_STRING;
+        runtime_heap_header_init(&r->hdr, HEAP_STRING);
         r->hdr.size = (uint32_t)(sizeof(RuntimeString) + 1);
         r->len = 0;
         r->data[0] = '\0';
@@ -1190,7 +1233,7 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     uint32_t len = (uint32_t)(b - a);
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     __builtin_memcpy(r->data, s->data + a, len);
@@ -1218,7 +1261,7 @@ static RuntimeValue _int_to_string(int64_t n)
     uint32_t len = (uint32_t)(pos + neg);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     int out = 0;
@@ -1238,7 +1281,7 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
     uint32_t len = (uint32_t)pos;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     int out = 0;
@@ -3043,7 +3086,7 @@ RuntimeValue simpleos_fat32_read_known_app_array(RuntimeValue app_id_val)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     if (!a)
         return rt_array_new((RuntimeValue)0);
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     a->len = file_size;
     a->cap = file_size;
@@ -3111,7 +3154,7 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     if (!a)
         return rt_array_new((RuntimeValue)0);
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     a->len = file_size;
     a->cap = file_size;
@@ -5393,7 +5436,7 @@ static RuntimeValue rt_bytes_from_rodata(const uint8_t *data, size_t len)
 {
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -6579,7 +6622,7 @@ RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue msg_rv)
     if (msg) free(msg);
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY); a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
     a->len = 64; a->cap = 64;
     a->items = runtime_array_inline_items(a);
     for (int i = 0; i < 64; i++) a->items[i] = ENCODE_INT(sig[i]);
@@ -6695,7 +6738,7 @@ RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
     RuntimeValue *items = runtime_array_items(a);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     for (uint32_t i = 0; i < len; i++) {
@@ -6725,7 +6768,7 @@ RuntimeValue rt_string_to_byte_array(RuntimeValue str)
     uint32_t len = s->len;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = len;
     a->cap = len;
@@ -6836,7 +6879,7 @@ RuntimeValue rt_tls13_build_client_hello(RuntimeValue host_rv)
 
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
     a->len = hoff;
     a->cap = hoff;
@@ -6856,7 +6899,7 @@ RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
     uint32_t rec_len = hs->len + 5;
     RuntimeArray *rec = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     if (!rec) return NIL_VALUE;
-    rec->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&rec->hdr, HEAP_ARRAY);
     rec->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     rec->len = rec_len;
     rec->cap = rec_len;
@@ -6897,7 +6940,7 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     if (count < 0 || count > 65536) count = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
@@ -7060,7 +7103,7 @@ RuntimeValue rt_ed25519_keypair_pk(RuntimeValue seed_rv)
     free(seed);
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY); a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
     a->len = 32; a->cap = 32;
     a->items = runtime_array_inline_items(a);
     for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(pk[i]);
@@ -7075,7 +7118,7 @@ RuntimeValue rt_ed25519_keypair_sk(RuntimeValue seed_rv)
     if (!seed || slen != 32) { if (seed) free(seed); return NIL_VALUE; }
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
     if (!a) { free(seed); return NIL_VALUE; }
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY); a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
     a->len = 32; a->cap = 32;
     a->items = runtime_array_inline_items(a);
     for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(seed[i]);
@@ -7150,7 +7193,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
     if (max_len <= 0) {
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
-        a->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -7164,7 +7207,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         free(buf);
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
-        a->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -7177,7 +7220,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         free(buf);
         return NIL_VALUE;
     }
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = sizeof(RuntimeArray) + len * sizeof(RuntimeValue);
     a->len = len;
     a->cap = len;
@@ -7473,7 +7516,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
         /* Return empty array */
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
-        a->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -7486,7 +7529,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     /* Read data from socket rx buffer */
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue);
     a->len = read_len;
     a->cap = read_len;
@@ -7570,7 +7613,7 @@ RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
     if (avail < 5U) {
         RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!empty) return NIL_VALUE;
-        empty->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&empty->hdr, HEAP_ARRAY);
         empty->hdr.size = sizeof(RuntimeArray);
         empty->len = 0;
         empty->cap = 0;
@@ -9092,7 +9135,7 @@ RuntimeValue rt_string_to_upper(RuntimeValue str)
     if (!s) return str;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
     r->len = s->len;
     for (uint32_t i = 0; i < s->len; i++) {
@@ -9109,7 +9152,7 @@ RuntimeValue rt_string_to_lower(RuntimeValue str)
     if (!s) return str;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
     r->len = s->len;
     for (uint32_t i = 0; i < s->len; i++) {
@@ -9142,7 +9185,7 @@ RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeVa
             uint32_t result_len = s->len - o->len + nlen;
             RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
             if (!r) return str;
-            r->hdr.type = HEAP_STRING;
+            runtime_heap_header_init(&r->hdr, HEAP_STRING);
             r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
             r->len = result_len;
             /* Copy: prefix + replacement + suffix */
@@ -9181,7 +9224,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     uint32_t result_len = s->len - count * o->len + count * nlen;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
 
@@ -9220,7 +9263,7 @@ RuntimeValue rt_string_repeat(RuntimeValue str, RuntimeValue count_val)
     uint32_t result_len = s->len * (uint32_t)count;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
     for (int64_t i = 0; i < count; i++) {
@@ -9241,7 +9284,7 @@ RuntimeValue rt_string_pad_start(RuntimeValue str, RuntimeValue width_val)
     uint32_t result_len = (uint32_t)width;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
     __builtin_memset(r->data, ' ', pad);
@@ -9261,7 +9304,7 @@ RuntimeValue rt_string_pad_end(RuntimeValue str, RuntimeValue width_val)
     uint32_t result_len = (uint32_t)width;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
     __builtin_memcpy(r->data, s->data, s->len);
@@ -9277,7 +9320,7 @@ RuntimeValue rt_string_reverse(RuntimeValue str)
     if (!s || s->len <= 1) return str;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
     r->len = s->len;
     for (uint32_t i = 0; i < s->len; i++) {
@@ -9674,7 +9717,7 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -9898,7 +9941,7 @@ RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
     uint32_t len = a->len + b->len;
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     out->len = len;
     out->cap = len;
@@ -9922,7 +9965,7 @@ RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
     if (ulen > arr->len - ustart) ulen = arr->len - ustart;
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
     out->len = ulen;
     out->cap = ulen;
@@ -9937,7 +9980,36 @@ int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)idx >= arr->len) return 0;
-    return (int64_t)_rv_byte(runtime_array_items(arr)[idx]);
+    return (int64_t)_rt_bytes_get(arr, (uint32_t)idx);
+}
+
+RuntimeValue rt_abi_probe_bytes(void)
+{
+    static const uint8_t bytes[8] = {65, 66, 67, 68, 69, 70, 71, 72};
+    return _rt_bytes_new(bytes, 8);
+}
+
+uint64_t rt_abi_probe_handle(RuntimeValue value) { return (uint64_t)value; }
+
+uint64_t rt_abi_probe_len(RuntimeValue value)
+{
+    RuntimeArray *array = runtime_array_from_abi(value);
+    return array ? array->len : 0;
+}
+
+uint64_t rt_abi_probe_items_ptr(RuntimeValue value)
+{
+    RuntimeArray *array = runtime_array_from_abi(value);
+    return array ? (uint64_t)(uintptr_t)runtime_array_items(array) : 0;
+}
+
+uint64_t rt_abi_probe_raw(RuntimeValue value, int64_t index)
+{
+    RuntimeArray *array = runtime_array_from_abi(value);
+    if (!array || index < 0 || (uint64_t)index >= array->len) return 0;
+    if (array->hdr.gc_flags & BYTE_PACKED)
+        return ((uint8_t *)runtime_array_items(array))[index];
+    return (uint64_t)runtime_array_items(array)[index];
 }
 
 int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
@@ -10001,7 +10073,7 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
             _rv_byte(items[scan + 7U]) == 0x20) {
             RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             if (!out) return NIL_VALUE;
-            out->hdr.type = HEAP_ARRAY;
+            runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
             out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             out->len = 32U;
             out->cap = 32U;
@@ -10049,7 +10121,7 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
                 uint32_t out_len = key_end - key_off;
                 RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)out_len * sizeof(RuntimeValue));
                 if (!out) return NIL_VALUE;
-                out->hdr.type = HEAP_ARRAY;
+                runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
                 out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)out_len * sizeof(RuntimeValue));
                 out->len = out_len;
                 out->cap = out_len;
@@ -10066,7 +10138,7 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
 
     RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
     if (!empty) return NIL_VALUE;
-    empty->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&empty->hdr, HEAP_ARRAY);
     empty->hdr.size = (uint32_t)sizeof(RuntimeArray);
     empty->len = 0;
     empty->cap = 0;
@@ -10637,7 +10709,7 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
 {
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     out->len = len;
     out->cap = len;
@@ -13007,7 +13079,7 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv)
     if (len <= 0) len = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -13226,7 +13298,7 @@ RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeV
 {
     RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
     if (!e) return NIL_VALUE;
-    e->hdr.type = HEAP_ENUM;
+    runtime_heap_header_init(&e->hdr, HEAP_ENUM);
     e->hdr.size = (uint32_t)sizeof(RuntimeEnum);
     e->enum_id = (uint32_t)(int32_t)enum_id_rv;
     e->discriminant = (uint32_t)(int32_t)disc_rv;
@@ -13410,7 +13482,7 @@ RuntimeValue rt_map_new(void)
     uint32_t cap = 16;
     RuntimeMap *m = (RuntimeMap *)malloc(sizeof(RuntimeMap));
     if (!m) return NIL_VALUE;
-    m->hdr.type = HEAP_MAP;
+    runtime_heap_header_init(&m->hdr, HEAP_MAP);
     m->hdr.size = (uint32_t)sizeof(RuntimeMap);
     m->len = 0;
     m->cap = cap;
@@ -13967,7 +14039,7 @@ TRAP_STUB_RET(rt_thread_join, 1)
 /* Safe no-ops on single-threaded bare metal */
 RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
 RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
-RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
+/* rt_thread_sleep is the elapsed-time implementation below. */
 TRAP_STUB_RET(rt_mutex_new, 0)
 TRAP_STUB_RET(rt_mutex_lock, 1)
 TRAP_STUB_RET(rt_mutex_unlock, 1)
@@ -14451,7 +14523,7 @@ RuntimeValue rt_random_bytes(RuntimeValue count_rv)
 
     RuntimeArray *arr = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!arr) return NIL_VALUE;
-    arr->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&arr->hdr, HEAP_ARRAY);
     arr->hdr.size = (uint32_t)(sizeof(RuntimeArray) + count * sizeof(RuntimeValue));
     arr->len = (uint32_t)count;
     arr->cap = (uint32_t)count;
@@ -15025,7 +15097,7 @@ RuntimeValue rt_build_byte_range(RuntimeValue count_rv)
     size_t alloc = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)alloc;
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
@@ -15042,7 +15114,7 @@ RuntimeValue rt_array_new_with_cap(int64_t cap)
     if (cap < 0) cap = 16;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -15451,6 +15523,8 @@ void rt_bare_spawn_leave(void) {
 }
 
 int64_t rt_bare_spawn_depth(void) { return _bare_spawn_depth; }
+
+static void _bare_exec_reset_files(void);
 
 void rt_user_heap_init(uint64_t base, uint64_t size) {
     _user_heap_base = base;
@@ -17386,7 +17460,7 @@ RuntimeValue rt_u32s_from_raw(RuntimeValue data_ptr, RuntimeValue count_val)
     size_t bytes = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.gc_flags = 0;         /* tagged 8-byte slots, NOT byte-packed */
     a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)bytes;
