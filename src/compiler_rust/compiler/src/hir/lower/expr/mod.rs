@@ -468,6 +468,19 @@ impl Lowerer {
             .copied()
             .or_else(|| self.globals.get(name).copied())
             .or_else(|| {
+                // A selective import resolves a bare name to one exact owner.
+                // The bare return metadata is intentionally absent when two
+                // imported declarations disagree, so follow that same owner.
+                self.qualified_import_functions.as_ref().and_then(|functions| {
+                    functions.get(name).and_then(|target| {
+                        self.method_return_types
+                            .get(target)
+                            .copied()
+                            .or_else(|| self.globals.get(target).copied())
+                    })
+                })
+            })
+            .or_else(|| {
                 self.resolve_function_alias(name).and_then(|target| {
                     self.method_return_types
                         .get(target)
@@ -832,6 +845,29 @@ impl Lowerer {
 
         // Check for SIMD vector instance methods
         let receiver_hir = self.lower_expr(receiver, ctx)?;
+
+        // `Result.ok()`/`.err()` lowers to its raw payload, matching MIR's
+        // existing runtime path. A following `.unwrap()` must retain that
+        // payload type; suffix-based method lookup can otherwise borrow an
+        // unrelated `unwrap` return and erase the next field's owner.
+        if args.is_empty() && method == "unwrap" {
+            if matches!(
+                (&receiver_hir.kind, receiver),
+                (HirExprKind::BuiltinCall { name, .. }, Expr::MethodCall { method, .. })
+                    if name == "rt_enum_payload" && (method == "ok" || method == "err")
+            ) {
+                let payload_ty = receiver_hir.ty;
+                return Ok(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver_hir),
+                        method: method.to_string(),
+                        args: vec![],
+                        dispatch: DispatchMode::Dynamic,
+                    },
+                    ty: payload_ty,
+                });
+            }
+        }
 
         // Stage 1 census hook: placed immediately after the receiver is
         // lowered, BEFORE the builtin/string-method dispatch below
@@ -1307,7 +1343,30 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         let mut receiver = receiver.clone();
-        let hir_args = self.lower_call_args(args, ctx)?;
+        let element_ty = match self.module.types.get(receiver.ty) {
+            Some(HirType::Array { element, .. }) => Some(*element),
+            _ => None,
+        };
+        let hir_args = match (method, element_ty, args) {
+            ("map", Some(element_ty), [arg]) => {
+                if let Expr::Lambda { params, body, capture_all, .. } = &arg.value {
+                    if params.len() == 1 && params[0].ty.is_none() && element_ty != TypeId::ANY {
+                        vec![self.lower_lambda_with_first_param_type(
+                            params,
+                            body,
+                            *capture_all,
+                            ctx,
+                            Some(element_ty),
+                        )?]
+                    } else {
+                        self.lower_call_args(args, ctx)?
+                    }
+                } else {
+                    self.lower_call_args(args, ctx)?
+                }
+            }
+            _ => self.lower_call_args(args, ctx)?,
+        };
 
         if matches!(method, "push" | "append") && hir_args.len() == 1 {
             if let HirExprKind::Local(local_index) = receiver.kind {
@@ -1335,6 +1394,20 @@ impl Lowerer {
 
         if args.is_empty() {
             match method {
+                "ok" | "err"
+                    if matches!(self.module.types.get(receiver.ty), Some(HirType::Enum { name, .. }) if name == "Result") =>
+                {
+                    let variant = if method == "ok" { "Ok" } else { "Err" };
+                    if let Some(payload_ty) = self.enum_variant_payload_type_for_builtin_method(receiver.ty, variant) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: payload_ty,
+                        }));
+                    }
+                }
                 "unwrap" => {
                     // `.unwrap()` on an optional over a BoxInt-family scalar
                     // (`i64?`): the JIT-lane value is a TAGGED word (raw
