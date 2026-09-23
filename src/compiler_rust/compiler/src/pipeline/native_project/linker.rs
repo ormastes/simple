@@ -35,16 +35,21 @@ fn generated_c_source_compiler(target: simple_common::target::Target) -> String 
 }
 
 pub(super) fn is_boot_c_translation_unit(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("c")
-        && !path.file_name().and_then(|name| name.to_str())
-            .map(|name| name.ends_with(".inc.c"))
-            .unwrap_or(false)
+    if path.extension().and_then(|extension| extension.to_str()) != Some("c") {
+        return false;
+    }
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    // The core has an .inc.c name for historical reasons but is still compiled
+    // directly and owns definitions not supplied by any wrapper TU. Keep that
+    // exception until a real .c owner includes it.
+    !name.ends_with(".inc.c") || name == "baremetal_runtime_core.inc.c"
 }
 
 pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bool {
     stem == "baremetal_stubs"
         || stem == "freestanding_runtime"
         || stem == "boot_entry"
+        || stem == "baremetal_runtime_core.inc"
         || stem == "rv64_display_backend"
         || (ssh_live_boot && stem == "full_networking_runtime")
         || stem == "curve25519_ring_helper"

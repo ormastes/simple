@@ -9,8 +9,8 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{
-    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed,
-    split_extra_link_objects, validate_extra_link_objects,
+    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
+    validate_extra_link_objects,
 };
 use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
@@ -38,8 +38,11 @@ fn source_defines_callable(path: &Path, name: &str) -> bool {
 }
 
 #[test]
-fn boot_source_discovery_skips_include_fragments() {
+fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
     assert!(is_boot_c_translation_unit(Path::new("boot_entry.c")));
+    // This legacy file is intentionally still a standalone TU: it owns unique
+    // runtime definitions until it is wrapped by a real .c source.
+    assert!(is_boot_c_translation_unit(Path::new("baremetal_runtime_core.inc.c")));
     assert!(!is_boot_c_translation_unit(Path::new("runtime_tail.inc.c")));
     assert!(!is_boot_c_translation_unit(Path::new("crt0.S")));
 }
@@ -47,6 +50,7 @@ fn boot_source_discovery_skips_include_fragments() {
 #[test]
 fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(minimal_boot_source_allowed("boot_entry", false));
+    assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
     assert!(minimal_boot_source_allowed("freestanding_runtime", false));
     assert!(minimal_boot_source_allowed("baremetal_stubs", false));
     assert!(minimal_boot_source_allowed("rv64_display_backend", false));
