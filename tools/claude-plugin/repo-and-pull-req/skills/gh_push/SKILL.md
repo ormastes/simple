@@ -19,6 +19,21 @@ then clean up after merge.
 - Local changes committed via `jj commit`
 - /sync file-count safety protocol
 
+## Optional signed local-CI fast path
+
+When the base branch already trusts the operator's dedicated receipt key,
+read `doc/07_guide/infra/local_ci_receipt/operator_guide.md` before using it.
+After pushing the exact PR head, run the manifest's `ci` tier locally and use
+`scripts/check/sign-local-ci-receipt.shs` with `--tier ci`, `--run`, the exact
+head/base scope, the base-trusted allowlist, `--note`, and `--push-note` to
+publish a signed note. The signer already owns note creation
+and push; do not hand-build a note with `git notes -F` or force-push the shared
+notes ref. If a platform cannot run all rows, use `--results` only from real
+recorded checks, never invented PASSes. A key added by the same PR is not yet
+trusted: CI reads the allowlist from the base and refuses receipts on PRs that
+edit check policy. The local signature only lets CI skip verified rows; wait
+for GitHub's actual required check result before merging.
+
 ## Procedure
 
 ### Step 1 — Pre-flight Safety

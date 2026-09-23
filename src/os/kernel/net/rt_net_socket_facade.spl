@@ -38,6 +38,8 @@ var _rt_net_bound_listener_fd: i64 = -1
 var _rt_net_bound_listener_port: u16 = 0u16
 
 val RT_NET_READ_EXACT_MAX: u64 = 35016u64
+val RT_NET_SSH_IDENTIFICATION_WIRE_MAX: u64 = 255u64
+val RT_NET_SSH_IDENTIFICATION_TEXT_MAX: u64 = 253u64
 
 val RT_NET_SSH_ENCRYPTED_BODY_MAX: u32 = 35000u32
 val RT_NET_SSH_GCM_TAG_BYTES: u64 = 16u64
@@ -51,6 +53,20 @@ pub struct RtNetSshEncryptedReadPlan:
 pub struct RtNetSocketReadOwner:
     socket_fd: i64
     os_fd: i64
+
+pub fn rt_net_ssh_identification_poll_action(line_len: u64, empty_reads: u64, byte: i64) -> i64:
+    """Return -1 reject, 0 wait, 1 append, or 2 append final LF; -1 byte means idle."""
+    if line_len >= RT_NET_SSH_IDENTIFICATION_WIRE_MAX:
+        return -1
+    if byte < 0:
+        if empty_reads >= 1000u64:
+            return -1
+        return 0
+    if byte == 10:
+        return 2
+    if line_len == RT_NET_SSH_IDENTIFICATION_WIRE_MAX - 1:
+        return -1
+    1
 
 pub fn rt_net_resolve_socket_read_owner(requested_fd: i64, owner: RtNetSocketReadOwner) -> i64?:
     """Resolve only the requested logical socket to its bound transport owner."""
@@ -263,7 +279,7 @@ fn _rt_net_byte_u32(data: [u8], idx: u64) -> u32:
 fn _rt_net_trim_crlf(data: [u8]) -> [u8]:
     var end = data.len()
     while end > 0:
-        val ch = data[end - 1]
+        val ch = _rt_net_byte_u32(data, end - 1)
         if ch == '\n' or ch == '\r':
             end = end - 1
         else:
@@ -274,7 +290,7 @@ fn _rt_net_ascii_bytes_to_text(data: [u8]) -> text:
     var out = ""
     var i: u64 = 0
     while i < data.len():
-        out = out + char_from_code(data[i].to_i64())
+        out = out + char_from_code(_rt_net_byte_u32(data, i).to_i64())
         i = i + 1
     out
 
@@ -282,9 +298,47 @@ fn _rt_net_bytes_to_text(data: [u8]) -> text:
     var out = ""
     var i: u64 = 0
     while i < data.len():
-        out = out + char_from_code(data[i].to_i64())
+        out = out + char_from_code(_rt_net_byte_u32(data, i).to_i64())
         i = i + 1
     out
+
+fn _rt_net_read_identification_wire(os_fd: i64) -> [u8]:
+    """Consume exactly one bounded SSH identification line from one owner."""
+    var line: [u8] = []
+    var empty_reads: u64 = 0
+    while line.len() < RT_NET_SSH_IDENTIFICATION_WIRE_MAX:
+        val chunk = _rt_net_transport_read(os_fd, 1)
+        var byte: i64 = -1
+        if chunk.len() > 0:
+            byte = _rt_net_byte_u32(chunk, 0).to_i64()
+        val action = rt_net_ssh_identification_poll_action(line.len(), empty_reads, byte)
+        if action < 0:
+            return []
+        if action == 0:
+            empty_reads = empty_reads + 1
+            rt_thread_sleep(1)
+        else:
+            line.push(byte.to_u8())
+            if action == 2:
+                return line
+    []
+
+pub fn rt_net_ssh_identification_line_allowed(data: [u8]) -> bool:
+    """Validate one CRLF-trimmed RFC 4253 identification line."""
+    if data.len() < 8u64 or data.len() > RT_NET_SSH_IDENTIFICATION_TEXT_MAX:
+        return false
+    val prefix: [u32] = [83u32, 83u32, 72u32, 45u32, 50u32, 46u32, 48u32, 45u32]
+    var i: u64 = 0
+    while i < prefix.len():
+        if _rt_net_byte_u32(data, i) != prefix[i]:
+            return false
+        i = i + 1
+    while i < data.len():
+        val ch = _rt_net_byte_u32(data, i)
+        if ch < 0x20u32 or ch > 0x7Eu32:
+            return false
+        i = i + 1
+    true
 
 @export("C", name: "rt_net_socket")
 fn rt_net_socket(proto: i64) -> i64:
@@ -443,43 +497,38 @@ fn rt_net_recv_version_text(sock_fd: i64) -> text:
         val text = rt_boot_tcp_take_version_text(sock_fd)
         serial_println("[rt-net] version recv raw-fast done text={text}")
         return text
-    val entry = _rt_net_find(sock_fd)
-    if entry == nil:
-        serial_println("[rt-net] version recv branch=nil")
-        if sock_fd != 200:
+    val current = match _rt_net_find(sock_fd):
+        Some(found):
+            found
+        nil:
+            serial_println("[rt-net] version recv branch=nil")
             return ""
-        serial_println("[rt-net] version raw recv start")
-        val text = rt_boot_tcp_take_version_text(sock_fd)
-        serial_println("[rt-net] version raw recv done text={text}")
-        return text
-    else:
-        val current = match entry:
-            Some(found):
-                found
-            nil:
-                return ""
-        serial_println("[rt-net] version recv branch=entry os_fd={current.os_fd}")
-        if current.os_fd < 0:
-            return ""
-        if not _rt_net_ensure_ready():
-            return ""
-    var line: [u8] = []
-    while true:
-        val chunk = rt_boot_tcp_read_bytes(1)
-        if chunk.len() == 0:
-            break
-        line.push(chunk[0])
-        if chunk[0] == '\n':
-            break
+    if current.os_fd < 0:
+        return ""
+    if not _rt_net_ensure_ready():
+        return ""
+    serial_println("[rt-net] version recv branch=entry os_fd={current.os_fd}")
+    val line = _rt_net_read_identification_wire(current.os_fd)
     if line.len() == 0:
         return ""
-    _rt_net_ascii_bytes_to_text(_rt_net_trim_crlf(line))
+    val trimmed = _rt_net_trim_crlf(line)
+    if not rt_net_ssh_identification_line_allowed(trimmed):
+        return ""
+    _rt_net_ascii_bytes_to_text(trimmed)
 
 @export("C", name: "rt_net_recv_version_bytes")
 fn rt_net_recv_version_bytes(sock_fd: i64) -> [u8]:
     if sock_fd == 200:
         return rt_boot_tcp_take_version_bytes(sock_fd)
-    []
+    val entry = _rt_net_find(sock_fd)
+    val current = match entry:
+        Some(found):
+            found
+        nil:
+            return []
+    if current.os_fd < 0 or not _rt_net_ensure_ready():
+        return []
+    _rt_net_read_identification_wire(current.os_fd)
 
 @export("C", name: "rt_net_recv_ssh_plain_packet_payload")
 fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:

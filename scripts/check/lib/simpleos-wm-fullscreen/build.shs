@@ -243,13 +243,31 @@ browser_demo_build_status=pass
 rm -f "$QMP_SOCKET" "$SERIAL_LOG"
 
 DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
+RENDER_BOOT_NONCE=""
+RENDER_RUN_ADMISSION=""
 if [ -n "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
     disk_image_provenance=external-unvalidated
 fi
 if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    if [ -n "$KERNEL_ADMISSION" ]; then
+        # One nonce per launch even when the admitted kernel cache is reused.
+        # Keep it out of the immutable compiler admission/cache fingerprint.
+        RENDER_BOOT_NONCE="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+        case "$RENDER_BOOT_NONCE" in
+            ''|*[!0-9a-f]*|0000000000000000)
+                emit_failure "render-boot-nonce-unavailable"; exit 1 ;;
+        esac
+        if [ "${#RENDER_BOOT_NONCE}" -ne 16 ]; then
+            emit_failure "render-boot-nonce-invalid"; exit 1
+        fi
+        RENDER_RUN_ADMISSION="$BUILD_DIR/render-run.admission"
+        awk '!/^capture_boot_nonce=/' "$KERNEL_ADMISSION" >"$RENDER_RUN_ADMISSION"
+        printf 'capture_boot_nonce=%s\n' "$RENDER_BOOT_NONCE" >>"$RENDER_RUN_ADMISSION"
+    fi
     set +e
     SIMPLEOS_FONT_ASSET="$FONT_ASSET" \
     SIMPLEOS_BROWSER_DEMO_BINARY="$BROWSER_DEMO_BINARY" \
+    SIMPLEOS_KERNEL_ADMISSION="$RENDER_RUN_ADMISSION" \
     scripts/os/make_os_disk.shs \
         256 "$DISK_IMAGE" "$KERNEL_OUTPUT" x86_64 \
         >"$BUILD_DIR/make-os-disk.out" 2>&1

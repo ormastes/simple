@@ -1,0 +1,37 @@
+use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_default_font_asset_candidate, selected_font_asset_candidate_for_path}
+use std.io_runtime.{time_now_monotonic_ms, exit}
+
+fn require(condition: bool, message: text):
+    if not condition:
+        print("font_catalog_pointer_release FAIL {message}")
+        exit(1)
+
+# Host regression probe for the catalog work associated with the SimpleOS WM
+# pointer-release stall. The tracked evidence localizes the missed deadline at
+# the 76th font-metric resolve but does not prove the catalog was its sole cause.
+# Exercise that boundary plus headroom while checking pinned fallback fields.
+fn main():
+    val started_ms = time_now_monotonic_ms()
+    val first = selected_font_asset_candidates()
+    require(first.len() == 16, "catalog-size")
+
+    var iteration: i64 = 0
+    var checksum: i64 = 0
+    while iteration < 152:
+        val assets = selected_font_asset_candidates()
+        require(assets.len() == 16, "catalog-size-drift")
+        val fallback = simpleos_default_font_asset_candidate()
+        require(fallback.family == "Noto Sans Mono", "fallback-family")
+        require(fallback.local_path == "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf", "fallback-path")
+        require(fallback.sha256 == "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081", "fallback-sha256")
+        require(fallback.upstream_revision == "ec0464b978de222073645d6d3366f3fdf03376d8", "fallback-revision")
+        val by_path = selected_font_asset_candidate_for_path(fallback.local_path)
+        require(by_path != nil, "path-lookup")
+        if by_path != nil:
+            checksum = checksum + by_path.?.byte_len
+        iteration = iteration + 1
+
+    val elapsed_ms = time_now_monotonic_ms() - started_ms
+    require(elapsed_ms < 5000, "latency-budget")
+    require(checksum == 259678016, "work-checksum")
+    print("font_catalog_pointer_release iterations={iteration} elapsed_ms={elapsed_ms} checksum={checksum}")

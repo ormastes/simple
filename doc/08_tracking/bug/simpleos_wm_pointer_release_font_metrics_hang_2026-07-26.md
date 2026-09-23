@@ -36,6 +36,22 @@ enough in that run; it does not establish a canonical lane PASS.** The moving
 stall point across builds remains evidence against a fixed infinite loop and
 supports pathological slowness as the working diagnosis.
 
+Host regression coverage now exercises twice the observed 76-call boundary in
+`test/05_perf/graphics_2d/font_catalog_pointer_release_perf_probe.spl`. Its
+wrapper applies both a kill-after wall clock and a hard inherited address-space
+limit to the identity probe and workload, positively requires a self-hosted
+runtime marker plus a hash-bound passing Stage4 full-CLI provenance receipt,
+and rejects latency, RSS, iteration-count, pinned fallback-field, or
+memoization source-owner drift. The source-owner check detects removal of
+`cf09420b88e`; the host timing by itself does not. This remains scoped host
+structural/behavioral evidence, not a QEMU hang-resolution receipt.
+
+TODO(SimpleOS-QEMU): after the Linux bootstrap environment is admitted, rerun
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs` for x86 and ARM and
+retain the canonical pointer-release frame, font-provider, SIMD, provenance,
+elapsed-time, and maximum-RSS receipts. Do not close this bug from the host
+probe alone.
+
 ### Still open, and NOT fixed by this
 
 `has_ttf=0` on **117 of 118** metric resolves, including on cache hits. Nearly

@@ -29,6 +29,25 @@ Three sibling methods from the SAME module (`src/lib/common/bytes/span.spl`)
 ARE present as real `T` definitions, so the module was compiled — only
 `starts_with` and `equals` were dropped from its object.
 
+## Source fix update (2026-09-21)
+
+The freestanding seed stub boundary now rejects every unresolved pure-Simple
+`lib__*` or `os__*` module symbol before either deferred-link or weak-stub
+handling. This closes the exact `ByteSpan_dot_starts_with` shape even when no
+same-named provider survived under another module prefix. Runtime ABI symbols
+such as `rt_*` remain outside this check.
+
+`stubs::tests::unresolved_bytespan_method_is_refused_before_weak_stub_fallback`
+now compiles a focused object that defines `ByteSpan.len` but leaves
+`ByteSpan.starts_with` undefined, enables the legacy freestanding weak-stub
+mode, and drives the real stub generator. It verifies the diagnostic names the
+missing method and that neither `_stubs_freestanding.c` nor
+`_stubs_freestanding.o` is created. On 2026-09-22 the exact warm test passed in
+1.59 s with 182,700 KiB maximum RSS (`CARGO_BUILD_JOBS=12 /usr/bin/time -v`);
+the production path is unchanged by this test hardening, so binary-size impact
+is zero. A rebuilt seed/compiler and a SimpleOS kernel closure run are still
+required before this record can close.
+
 ## It is reached (PROVEN)
 
 21 references, all `movabs $0x8844960,%reg` (there is no relative
@@ -224,3 +243,6 @@ change regresses. `rt_*` symbols are excluded by construction
 untouched. Unit test:
 `stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
 
+TODO(deferred-environment): once the Phase-2 compiler is admitted, run the full
+SimpleOS entry-closure build and confirm the real ByteSpan provider is retained
+and no weak nil stub is emitted.
