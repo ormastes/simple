@@ -89,4 +89,5 @@ $spec->{total_pending} == $pending or reject(91, 'decoded pending count differs'
 $spec->{total_duration_ms} == $duration or reject(91, 'decoded duration differs');
 print "$passed\t$failed\t$skipped\n";
 exit 93 if $outer_success eq 'false' || $spec_success eq 'false' || $failed != 0;
+exit 93 if $pending != 0;
 exit 92 if $passed + $failed == 0;

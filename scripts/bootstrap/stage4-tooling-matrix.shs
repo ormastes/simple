@@ -325,6 +325,8 @@ frozen_identity_snapshot() {
 }
 
 frozen_identity_stable() {
+  [ "$(hash_file "$config")" = "$config_hash" ] &&
+    [ "$(hash_file "$matrix")" = "$matrix_hash" ] || return 1
   if [ "${matrix_worker:-0}" = 1 ]; then
     [ -f "$work_root/scheduler/identity-before" ] && [ ! -L "$work_root/scheduler/identity-before" ]
     return $?
@@ -732,8 +734,8 @@ write_task_receipt() {
     echo "identity_after_hash=$receipt_identity_after_hash"
     echo "input_fingerprint_before=$receipt_input_before"
     echo "input_fingerprint_after=$receipt_input_after"
-  } >"$receipt_tmp"
-  mv "$receipt_tmp" "$receipt_file"
+  } >"$receipt_tmp" || die "cannot write task receipt"
+  mv "$receipt_tmp" "$receipt_file" || die "cannot publish task receipt"
 }
 
 task_is_test() {
@@ -823,7 +825,7 @@ tool_receipt_valid() {
 receipt_reusable() {
   reusable_task=$1
   reusable_input=$2
-  reusable_receipt="$state/$reusable_task.env"
+  reusable_receipt=${3:-"$state/$reusable_task.env"}
   [ -f "$reusable_receipt" ] && [ ! -L "$reusable_receipt" ] || return 1
   [ "$(field schema "$reusable_receipt")" = Stage4MatrixTaskReceiptV1 ] || return 1
   [ "$(field task_id "$reusable_receipt")" = "$reusable_task" ] || return 1
@@ -840,6 +842,7 @@ receipt_reusable() {
     [ "$(field command_path "$reusable_receipt")" = - ] || return 1
   fi
   if [ "$reusable_result" = PASS ]; then
+    [ "$(field status "$reusable_receipt")" = 0 ] || return 1
     [ "$(field command_executed "$reusable_receipt")" = true ] || return 1
     reusable_command=$(field command_path "$reusable_receipt")
     [ -f "$reusable_command" ] && [ ! -L "$reusable_command" ] || return 1
@@ -899,7 +902,7 @@ receipt_reusable() {
 receipt_envelope_valid() {
   envelope_task=$1
   envelope_required=$2
-  envelope_receipt="$state/$envelope_task.env"
+  envelope_receipt=${3:-"$state/$envelope_task.env"}
   [ -f "$envelope_receipt" ] && [ ! -L "$envelope_receipt" ] || return 1
   exact_env_schema "$envelope_receipt" \
     schema task_id required result status input_fingerprint log_path log_hash output_path output_hash \
@@ -914,6 +917,10 @@ receipt_envelope_valid() {
   [ "$(field required "$envelope_receipt")" = "$envelope_required" ] || return 1
   [ "$(field matrix_hash "$envelope_receipt")" = "$matrix_hash" ] || return 1
   [ "$(field config_hash "$envelope_receipt")" = "$config_hash" ] || return 1
+  for envelope_key in compiler_manifest_path compiler_manifest_hash compiler_identity compiler_abi runtime_abi \
+      compiler_tree_hash application_tree_hash library_tree_hash mcp_tree_hash lsp_tree_hash all_tests_hash; do
+    [ "$(field "$envelope_key" "$envelope_receipt")" = "$(field "$envelope_key" "$config")" ] || return 1
+  done
   envelope_input=$(task_input_fingerprint "$envelope_task")
   [ "$(field input_fingerprint "$envelope_receipt")" = "$envelope_input" ] || return 1
   envelope_input_before="$state/$envelope_task.input-before"
@@ -930,15 +937,22 @@ receipt_envelope_valid() {
     [ -f "$envelope_after" ] && [ ! -L "$envelope_after" ] || return 1
   [ "$(hash_file "$envelope_before")" = "$(field identity_before_hash "$envelope_receipt")" ] || return 1
   [ "$(hash_file "$envelope_after")" = "$(field identity_after_hash "$envelope_receipt")" ] || return 1
+  scheduler_identity_matches_config "$envelope_before" &&
+    scheduler_identity_matches_config "$envelope_after" || return 1
   envelope_log=$(field log_path "$envelope_receipt")
   [ -f "$envelope_log" ] && [ ! -L "$envelope_log" ] || return 1
   [ "$(hash_file "$envelope_log")" = "$(field log_hash "$envelope_receipt")" ] || return 1
   envelope_result=$(field result "$envelope_receipt")
   case "$envelope_result" in
     PASS|UNSUPPORTED)
-      receipt_reusable "$envelope_task" "$envelope_input" || return 1
+      receipt_reusable "$envelope_task" "$envelope_input" "$envelope_receipt" || return 1
       ;;
     FAIL|CRASH|TIMEOUT)
+      [ "$(field status "$envelope_receipt")" != 0 ] || return 1
+      case "$envelope_result:$(field status "$envelope_receipt")" in
+        TIMEOUT:124|CRASH:134|CRASH:136|CRASH:137|CRASH:139|FAIL:*) ;;
+        *) return 1 ;;
+      esac
       [ "$(field command_executed "$envelope_receipt")" = true ] || return 1
       envelope_command=$(field command_path "$envelope_receipt")
       [ -f "$envelope_command" ] && [ ! -L "$envelope_command" ] || return 1
@@ -1086,7 +1100,7 @@ run_logged() {
   if command -v timeout >/dev/null 2>&1; then
     (cd "$source_root" && env HOME="$homes/$run_task" TMPDIR="$tmps/$run_task" \
       XDG_CACHE_HOME="$homes/$run_task/xdg-cache" XDG_CONFIG_HOME="$homes/$run_task/xdg-config" XDG_DATA_HOME="$homes/$run_task/xdg-data" \
-      SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15s "${timeout_seconds}s" "$@") \
+      SIMPLE_NO_STUB_FALLBACK=1 timeout --foreground -k 15s "${timeout_seconds}s" "$@") \
       >"$run_log" 2>&1 || run_status=$?
   else
     (cd "$source_root" && env HOME="$homes/$run_task" TMPDIR="$tmps/$run_task" \
@@ -1114,7 +1128,7 @@ run_logged_append() {
   if command -v timeout >/dev/null 2>&1; then
     (cd "$source_root" && env HOME="$homes/$append_task" TMPDIR="$tmps/$append_task" \
       XDG_CACHE_HOME="$homes/$append_task/xdg-cache" XDG_CONFIG_HOME="$homes/$append_task/xdg-config" XDG_DATA_HOME="$homes/$append_task/xdg-data" \
-      SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15s "${timeout_seconds}s" "$@") \
+      SIMPLE_NO_STUB_FALLBACK=1 timeout --foreground -k 15s "${timeout_seconds}s" "$@") \
       >>"$append_log" 2>&1 || append_status=$?
   else
     (cd "$source_root" && env HOME="$homes/$append_task" TMPDIR="$tmps/$append_task" \
@@ -1162,7 +1176,7 @@ run_logged_with_input() {
   if command -v timeout >/dev/null 2>&1; then
     (cd "$source_root" && env HOME="$homes/$input_task" TMPDIR="$tmps/$input_task" \
       XDG_CACHE_HOME="$homes/$input_task/xdg-cache" XDG_CONFIG_HOME="$homes/$input_task/xdg-config" XDG_DATA_HOME="$homes/$input_task/xdg-data" \
-      SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15s "${timeout_seconds}s" "$@" <"$input_file") \
+      SIMPLE_NO_STUB_FALLBACK=1 timeout --foreground -k 15s "${timeout_seconds}s" "$@" <"$input_file") \
       >"$input_log" 2>&1 || input_status=$?
   else
     (cd "$source_root" && env HOME="$homes/$input_task" TMPDIR="$tmps/$input_task" \
@@ -1806,6 +1820,9 @@ scheduler_capture_identity() {
 
 scheduler_identity_matches_config() {
   scheduler_identity_path=$1
+  exact_env_schema "$scheduler_identity_path" compiler_manifest_hash compiler_tree_hash application_tree_hash \
+    cli_tree_hash library_tree_hash mcp_tree_hash lsp_tree_hash all_tests_hash check_scripts_hash mcp_config_hash \
+    runner_hash link_wrapper_hash git_head git_tracked_dirty_hash || return 1
   while IFS='=' read -r scheduler_key scheduler_value; do
     [ "$(field "$scheduler_key" "$config")" = "$scheduler_value" ] || return 1
   done <"$scheduler_identity_path"
@@ -1839,7 +1856,7 @@ scheduler_run_worker() {
   scheduler_run_dir=$2
   scheduler_meta="$scheduler_run_dir/worker-meta/$scheduler_run_task.env"
   scheduler_active="$scheduler_run_dir/active/$scheduler_run_task.env"
-scheduler_args="$scheduler_run_dir/worker-$scheduler_run_task.args"
+  scheduler_args="$scheduler_run_dir/worker-$scheduler_run_task.args"
   scheduler_launcher="$runner"
   scheduler_supervisor="$source_root/scripts/bootstrap/run-process-group-timeout.shs"
   [ -x "$scheduler_supervisor" ] || die "process-group supervisor is unavailable"
@@ -1899,7 +1916,7 @@ scheduler_write_manifest() {
         "$scheduler_task" "$scheduler_required" "$scheduler_deps" "$scheduler_result" >>"$scheduler_tmp"
     fi
   done <"$matrix"
-  mv "$scheduler_tmp" "$scheduler_schedule"
+  mv "$scheduler_tmp" "$scheduler_schedule" || die "cannot publish scheduler manifest"
 }
 
 scheduler_cancel_all() {
