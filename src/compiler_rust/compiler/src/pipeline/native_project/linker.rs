@@ -22,6 +22,49 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+// CreateProcessW rejects command lines over 32,767 UTF-16 code units. The
+// native object cache uses long absolute paths, so a fixed 200-object archive
+// batch can exceed that limit before the archiver is even started. Keep a
+// conservative 16K budget for the tool, archive arguments, and object paths.
+pub(super) const ARCHIVE_BATCH_ARG_LIMIT: usize = 16 * 1024;
+
+pub(super) fn archive_arg_budget(arg: &OsStr) -> usize {
+    // Allow space for Windows quoting and escaped backslashes as well as the
+    // separator. This deliberately overestimates ordinary absolute paths.
+    arg.to_string_lossy().encode_utf16().count() * 2 + 3
+}
+
+pub(super) fn archive_object_batches<'a>(
+    tool: &str,
+    archive: &Path,
+    objects: &'a [PathBuf],
+) -> Result<Vec<&'a [PathBuf]>, String> {
+    const MAX_OBJECTS_PER_BATCH: usize = 200;
+    // Appending repeats the archive path for lib.exe and is the largest form.
+    let command = archive_create_command(tool, archive, &[], true, false);
+    let base_budget = archive_arg_budget(command.get_program())
+        + command.get_args().map(archive_arg_budget).sum::<usize>();
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut budget = base_budget;
+    for (index, object) in objects.iter().enumerate() {
+        let object_budget = archive_arg_budget(object.as_os_str());
+        if base_budget + object_budget > ARCHIVE_BATCH_ARG_LIMIT {
+            return Err(format!("archive object path exceeds Windows command-line budget: {}", object.display()));
+        }
+        if index - start == MAX_OBJECTS_PER_BATCH || budget + object_budget > ARCHIVE_BATCH_ARG_LIMIT {
+            batches.push(&objects[start..index]);
+            start = index;
+            budget = base_budget;
+        }
+        budget += object_budget;
+    }
+    if start < objects.len() {
+        batches.push(&objects[start..]);
+    }
+    Ok(batches)
+}
+
 fn is_windows_gnu_target(target: simple_common::target::Target) -> bool {
     target.os == simple_common::target::TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu
 }
@@ -1588,9 +1631,9 @@ int main(int argc, char** argv) {
                 let archive_path = temp_dir.join("libspl_objects.a");
                 let ar_tool = find_archive_tool();
 
-                const BATCH_SIZE: usize = 200;
+                let batches = archive_object_batches(&ar_tool, &archive_path, object_paths)?;
                 let mut ar_ok = true;
-                for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                for (i, &chunk) in batches.iter().enumerate() {
                     let status = archive_create_command(&ar_tool, &archive_path, chunk, i > 0, false)
                         .status()
                         .map_err(|e| format!("archive batch {i}: {e}"))?;
@@ -1604,7 +1647,7 @@ int main(int argc, char** argv) {
                     #[cfg(target_os = "macos")]
                     {
                         let mut sub_archives = Vec::new();
-                        for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                        for (i, &chunk) in batches.iter().enumerate() {
                             let sub = temp_dir.join(format!("_batch_{}.a", i));
                             let s = std::process::Command::new("libtool")
                                 .arg("-static")
