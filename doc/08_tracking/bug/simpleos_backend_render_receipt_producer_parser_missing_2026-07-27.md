@@ -9,7 +9,7 @@ verification remains open (2026-09-22).
 
 The guest producer is now `os.compositor.backend_render_receipt_producer`.
 The x86 production entry calls it only after the presentation owner admits the
-first frame, using the exact scanout object, a per-boot monotonic identity, and
+first frame, using the exact scanout object, a host-generated launch nonce, and
 the admitted kernel SHA-256 read from `/SYS/KERNEL.ADM`. Pixels are streamed
 from the committed framebuffer through 256 bytes of scratch instead of copying
 the 4K scanout into bump-allocated pixel and canonical-byte arrays. Fixed-width
@@ -21,6 +21,30 @@ reused with another scanout. The production framebuffer reader also compares
 the presented address with `FramebufferDriver.front_addr` before any MMIO read,
 validates bounded geometry, and rejects duplicate/prefixed admission digests.
 The address remains outside the presentation owner and the wire protocol.
+
+The canonical fullscreen wrapper now generates eight random bytes for every
+launch and stages `capture_boot_nonce` in a separate run admission record,
+including cached-kernel launches. Guest parsing requires exactly one nonzero
+16-digit nonce and a valid kernel admission; it has no guest-clock fallback.
+Before host capture, the wrapper requires exactly one receipt header matching
+that nonce and records identity status in the report. External disk images do
+not acquire a fabricated identity claim. The regression feeds a prior-boot ACK
+to a new boot with the same frame/scanout IDs; it must reject despite equal
+guest elapsed time. The new host header comparison uses string comparison to
+avoid loss of precision for decimal-only hexadecimal values.
+
+Lightweight host validation passed: the exact AWK program extracted from the
+runtime wrapper accepts one matching header and rejects missing/duplicate
+headers and nonces `9007199254740992` versus `9007199254740993` (which would
+alias under floating-point numeric comparison). Shell syntax checks passed for
+the build/runtime/report fragments. The 14-example Simple producer spec,
+including prior-boot ACK rejection, remains deferred to the admitted runtime.
+
+This draft is scoped to the x86 receipt producer and per-launch identity
+boundary. W/A/K transport and frozen-pixel capture are NOT implemented or
+verified here; the report explicitly records `render_capture_ack_status` as
+`not-implemented`. This bug stays OPEN, and receipt identity alone cannot admit
+the aggregate correlated-render evidence gate.
 
 Memory/performance boundary: SHA state/schedule/block arrays and the 256-byte
 scratch buffer are fixed size, with at most one bounded tail copy. Hash work is

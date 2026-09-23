@@ -22,7 +22,8 @@ use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.compositor.backend_render_receipt_producer.{
     produce_backend_render_receipt_after_present_v1,
     produce_backend_render_receipt_from_scanout_v1,
-    simpleos_build_identity_from_admission_v1
+    simpleos_build_identity_from_admission_v1,
+    simpleos_boot_identity_from_admission_v1
 }
 use os.kernel.arch.x86.render_capture_ack.{
     RenderCaptureAckV1,
@@ -106,6 +107,36 @@ describe "SimpleOS backend render receipt producer":
         expect(simpleos_build_identity_from_admission_v1(schema + digest + digest) == nil).to_be(true)
         expect(simpleos_build_identity_from_admission_v1(schema + "wrong_" + digest) == nil).to_be(true)
         expect(simpleos_build_identity_from_admission_v1(digest) == nil).to_be(true)
+
+    it "rejects a prior boot ACK even when clocks frame and scanout repeat":
+        val admission = "schema=simpleos-wm-kernel-admission-v3\n" +
+            "kernel_sha256=0000000000000001000000000000000200000000000000030000000000000004\n"
+        val previous_boot = simpleos_boot_identity_from_admission_v1(
+            admission + "capture_boot_nonce=1122334455667788\n")
+        val current_boot = simpleos_boot_identity_from_admission_v1(
+            admission + "capture_boot_nonce=1122334455667789\n")
+        expect(previous_boot == nil).to_be(false)
+        expect(current_boot == nil).to_be(false)
+        # The API consumes no clock. Identical elapsed time cannot alias these
+        # identities, even though both boots present frame 1 on scanout 29.
+        expect(current_boot! == previous_boot!).to_be(false)
+        var ack = RenderCaptureAckV1.create(current_boot!, 1u64)
+        var index = 0
+        while index < render_capture_control_wire_byte_count():
+            ack.feed(render_capture_control_wire_byte_at(65u8, previous_boot!, 1u64, index))
+            index = index + 1
+        expect(ack.ack_accepted()).to_be(false)
+        expect(ack.failed()).to_be(true)
+
+    it "requires exactly one nonzero fixed-width launch nonce":
+        val admission = "schema=simpleos-wm-kernel-admission-v3\n" +
+            "kernel_sha256=0000000000000001000000000000000200000000000000030000000000000004\n"
+        val nonce = "capture_boot_nonce=1122334455667788\n"
+        expect(simpleos_boot_identity_from_admission_v1(admission) == nil).to_be(true)
+        expect(simpleos_boot_identity_from_admission_v1(admission + nonce + nonce) == nil).to_be(true)
+        expect(simpleos_boot_identity_from_admission_v1(admission + "capture_boot_nonce=0000000000000000\n") == nil).to_be(true)
+        expect(simpleos_boot_identity_from_admission_v1(admission + "capture_boot_nonce=1122\n") == nil).to_be(true)
+        expect(simpleos_boot_identity_from_admission_v1(admission + "capture_boot_nonce=112233445566778Z\n") == nil).to_be(true)
 
     it "rejects an admitted presentation reused for a different scanout":
         var owner = BaremetalWmPresentOwnerV1.create(scanout())
