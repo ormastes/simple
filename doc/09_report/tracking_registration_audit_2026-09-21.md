@@ -1,6 +1,28 @@
 # Bug and TODO registration audit — 2026-09-21
 
-## Scope and result
+## Current candidate verification — 2026-09-23
+
+The linear candidate `48337a7a4618973da90c035a951207aab01b1380` is based on
+`daa9dc619a8ee2498cd08339183393282f8ab524`. The documentation-only correction
+containing this section preserves that candidate's database and checker bytes.
+Its bug database CRC32 is `2046825929`; the 15 added TODO rows are IDs 323–337.
+All main bug and TODO rows are preserved, no duplicate bug/TODO IDs were found,
+and all 846 added bug IDs have exact documents. The fixture suite passed all
+25 fixtures; both direct-env working and staged guards passed, and tracked
+executable specs under `doc/06_spec` remain zero.
+
+The current read-only production audit reports **FAIL: 2,559 rows, 4,623
+non-index documents, 1,554 explicit unresolved records, and 92 findings**:
+48 bug rows without exact documents, 19 malformed rows, one TODO status
+mismatch, 19 unregistered bug documents, and five unregistered TODO documents.
+Registration therefore remains incomplete. The gate stays advisory; these
+results do not establish acceptance of the tracked implementations.
+
+All counts, CRCs, TODO IDs, attachment-completion claims, timings, and local
+evidence paths in the historical sections below describe their stated baseline
+or earlier intermediate snapshot, not this current candidate.
+
+## Historical scope and result
 
 Baseline: `e0dd873da1b7828389db4eb60e82972cc8245313`. The audit reads all
 4,492 bug Markdown files, all 61 TODO Markdown files, 1,367 bug rows, and
@@ -102,11 +124,12 @@ with the three rows above, this attaches all 864 unresolved documents identified
 by the baseline audit without shadowing the older P1/P2 lifecycle records. An
 authored P0-P3 value is retained when present. Where the document has no
 priority, P3 is an explicit schema placeholder marked `untriaged`; it is not a
-severity or closure decision. TODOs 322, 323, 324, 327, 328, and 330 are restored
+severity or closure decision. At that historical snapshot, TODOs 322, 323, 324,
+327, 328, and 330 were restored
 to `blocked` with nonempty blockers matching their source records. The unrelated
 pre-existing `sffi_v2_provider_admission` status mismatch remains for owner
-triage. Other lifecycle values remain unchanged. The final bug database CRC32
-is `1764979789`.
+triage. Other lifecycle values remained unchanged. That intermediate bug
+database CRC32 was `1764979789`; the current CRC appears above.
 
 ## Executable regression and evidence
 
@@ -123,15 +146,15 @@ semantic duplicate rejection, blocked TODO status/blocker consistency, the five
 additional exact generated-row lifecycle repairs, malformed fields, cross-table
 duplicate IDs, and missing database errors. Twenty-five executable fixtures pass.
 
-The post-repair production audit remains intentionally FAIL: 2,547 rows, 4,550
-non-index documents, and 64 findings. All document-to-database attachment gaps
-are closed. The remaining findings are 43 database rows without an exact
+The historical post-repair production audit reported FAIL: 2,547 rows, 4,550
+non-index documents, and 64 findings. Document-to-database attachment gaps
+identified in that snapshot were closed. Its remaining findings were 43 database rows without an exact
 document, 20 malformed pre-existing rows, and one pre-existing blocked TODO
 document whose database row still says open. That status conflict predates this
 registration change and remains for owner triage. This audit is not enabled as a
 new CI merge gate over that backlog.
 
-The final MSYS audit took 14.41 seconds and reported maximum
+That historical MSYS audit took 14.41 seconds and reported maximum
 RSS 125,496 KiB through `/usr/bin/time -v`, while independent fixture/DB checks
 were running on the same host. This is a local side-effect bound,
 not a before/after improvement or a Windows Job Object process-tree measurement.
@@ -141,8 +164,8 @@ fixture results do not establish acceptance of any tracked implementation.
 Retained local evidence is under `build/tracking-audit/`: original inventory,
 related-platform inventory, registration fixture log, the prior guard's orphan
 log, full audit output, resource measurement, unique-ID gate, and CRC reseal log.
-The earlier unique-ID check passed over 3,039 rows in six SDN tables. The final
-audit parses 2,547 bug/TODO rows without exact or semantic duplicate-ID findings.
+The earlier unique-ID check passed over 3,039 rows in six SDN tables. That
+historical audit parsed 2,547 bug/TODO rows without exact or semantic duplicate-ID findings.
 The direct-env guard passes; tracked executable specs under `doc/06_spec` remain
 zero.
 Independent admission review and CI gates remain required before merge.
