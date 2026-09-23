@@ -4,6 +4,9 @@
 # route through the typed boxed-byte runtime bridge rather than this raw address.
 
 use std.sffi.dynamic.{DynLib}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
+    dynlib_symbol_address_v1
+}
 use std.nogc_sync_mut.io_runtime.{
     file_copy, file_hash_sha256_or_empty, dir_remove_all
 }
@@ -151,18 +154,20 @@ fn load_dynamic_backend_plugin_lease(
         return Err(DynamicBackendPluginLoadError.LoadFailed(
             "dynamic backend staged provider changed while loading"))
 
-    val resolved = unsafe(capabilities: [ffi, raw_ptr]):
-        library.sym_checked(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
-    val entry_symbol = match resolved:
-        case Ok(value): value
-        case Err(detail):
-            unsafe(capabilities: [ffi]):
-                library.close()
-            staged.close()
-            return Err(DynamicBackendPluginLoadError.MissingSymbol(
-                "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
-                    + " in staged provider: " + detail
-            ))
+    # The checked `*mut i64` resolver loses out-parameter writeback on older
+    # bootstrap seeds and its direct fallback raises on a normal symbol miss.
+    # This owner returns 0 for a miss, so rejection can close both resources.
+    val entry_symbol = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_symbol_address_v1(
+            library.handle, DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+    if entry_symbol <= 0:
+        unsafe(capabilities: [ffi]):
+            library.close()
+        staged.close()
+        return Err(DynamicBackendPluginLoadError.MissingSymbol(
+            "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+                + " in staged provider"
+        ))
 
     Ok(DynamicBackendPluginLease(
         library: library,
