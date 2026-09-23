@@ -391,6 +391,17 @@ bootstrap_stage3_hash_worker_count() {
     case "$bootstrap_stage3_hash_wc" in ''|*[!0-9]*) bootstrap_stage3_hash_wc=1 ;; esac
     [ "$bootstrap_stage3_hash_wc" -ge 1 ] 2>/dev/null || bootstrap_stage3_hash_wc=1
     [ "$1" -ge 4096 ] 2>/dev/null || bootstrap_stage3_hash_wc=1
+    bootstrap_stage3_hash_cpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null ||
+        sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || :)
+    case "$bootstrap_stage3_hash_cpu" in
+        ''|*[!0-9]*) bootstrap_stage3_hash_cpu=1 ;;
+    esac
+    [ "$bootstrap_stage3_hash_cpu" -ge 1 ] 2>/dev/null ||
+        bootstrap_stage3_hash_cpu=1
+    [ "$bootstrap_stage3_hash_wc" -le "$bootstrap_stage3_hash_cpu" ] ||
+        bootstrap_stage3_hash_wc=$bootstrap_stage3_hash_cpu
+    [ "$bootstrap_stage3_hash_wc" -le 64 ] ||
+        bootstrap_stage3_hash_wc=64
     while [ "$bootstrap_stage3_hash_wc" -gt 1 ] &&
         [ $(( $1 / bootstrap_stage3_hash_wc )) -lt 1024 ]; do
         bootstrap_stage3_hash_wc=$(( bootstrap_stage3_hash_wc - 1 ))
@@ -431,7 +442,7 @@ bootstrap_stage3_hash_path_list() {
         ))
         awk -v per="$bootstrap_stage3_hash_per" \
             -v dir="$bootstrap_stage3_hash_dir" '
-            { print > sprintf("%s/in.%04d", dir, int((NR - 1) / per)) }
+            { print > sprintf("%s/in.%08d", dir, int((NR - 1) / per)) }
         ' "$bootstrap_stage3_hash_paths" || {
             rm -rf -- "$bootstrap_stage3_hash_dir"
             return 1
@@ -2012,17 +2023,267 @@ bootstrap_stage3_tool_authority_snapshot() (
     mv "$bootstrap_stage3_tool_tmp" "$bootstrap_stage3_tool_output"
 )
 
-bootstrap_stage3_directory_snapshot() {
+# Hash a NUL-delimited path manifest retaining the scanner's regular-file identity.
+# Each child verifies lstat(dev, ino, mode, size, high-resolution mtime/ctime),
+# opens the leaf, verifies the same fstat tuple, hashes the opened descriptor,
+# and verifies both descriptor and pathname again. Subsecond timestamps reject
+# same-length, same-second mutation without a second hashing pass on the
+# performance-sensitive path.
+# A replacement symlink or outside target therefore fails closed before its
+# bytes can become an authority record. Children emit indexed hashes; the
+# owner reconstructs the original input order and rejects missing/duplicate
+# worker results.
+bootstrap_stage3_hash_bound_path_list() (
+    [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || return 64
+    bootstrap_stage3_hash_bound_paths=$1
+    bootstrap_stage3_hash_bound_meta=$2
+    bootstrap_stage3_hash_bound_output=$3
+    bootstrap_stage3_hash_bound_workers=$4
+    if [ "$#" -eq 5 ]; then
+        bootstrap_stage3_hash_bound_root=$5
+    fi
+    [ -n "${bootstrap_stage3_hash_bound_root:-}" ] || return 64
+    [ -f "$bootstrap_stage3_hash_bound_paths" ] || return 1
+    [ -f "$bootstrap_stage3_hash_bound_meta" ] || return 1
+    [ "$bootstrap_stage3_hash_bound_workers" -ge 1 ] 2>/dev/null || return 1
+    [ "$bootstrap_stage3_hash_bound_workers" -le 64 ] 2>/dev/null ||
+        bootstrap_stage3_hash_bound_workers=64
+    bootstrap_stage3_hash_bound_work=$(mktemp -d \
+        "${bootstrap_stage3_hash_bound_output}.workers.XXXXXX") || return 1
+    bootstrap_stage3_hash_bound_result=$(mktemp \
+        "${bootstrap_stage3_hash_bound_output}.tmp.XXXXXX") || {
+        rm -rf "$bootstrap_stage3_hash_bound_work"
+        return 1
+    }
+    trap 'rm -rf "$bootstrap_stage3_hash_bound_work"; \
+        rm -f "$bootstrap_stage3_hash_bound_result"' EXIT
+    trap 'exit 1' HUP INT TERM
+    perl -MDigest::SHA -MTime::HiRes=stat,lstat -e '
+        use strict;
+        use warnings;
+        my ($paths_path, $meta_path, $work, $workers, $root) = @ARGV;
+        open my $paths_fh, "<:raw", $paths_path or die "open paths\n";
+        open my $meta_fh, "<:raw", $meta_path or die "open metadata\n";
+        my @paths;
+        {
+            local $/ = "\0";
+            @paths = <$paths_fh>;
+            chomp @paths;
+        }
+        my @meta = <$meta_fh>;
+        close $paths_fh or die "close paths\n";
+        close $meta_fh or die "close metadata\n";
+        chomp @meta;
+        @paths == @meta && @paths or die "manifest count\n";
+        $workers = @paths if $workers > @paths;
+        my $root_base = $root;
+        $root_base =~ s{/\./}{/}g;
+        $root_base =~ s{/\.$}{};
+        sub stable_time { sprintf "%.9f", $_[0] }
+        sub ancestors_are_bound {
+            my ($path) = @_;
+            my $normalized = $path;
+            $normalized =~ s{/\./}{/}g;
+            index($normalized, "$root_base/") == 0 or return 0;
+            my $relative = substr($normalized, length($root_base) + 1);
+            my @parts = split m{/}, $relative;
+            @parts or return 0;
+            my $prefix = $root_base;
+            # The procfd root is the explicitly admitted magic-link anchor;
+            # every descendant component remains lstat-bound and may not be
+            # a symlink. Ordinary roots must themselves stay directories.
+            if ($root_base !~ m{^/proc/[0-9]+/fd/[1-9][0-9]*$}) {
+                my @root_stat = lstat($root_base);
+                return 0 unless @root_stat &&
+                    (($root_stat[2] & 0170000) == 0040000);
+            }
+            for my $part (@parts[0 .. $#parts - 1]) {
+                $prefix .= "/$part";
+                my @ancestor = lstat($prefix);
+                return 0 unless @ancestor &&
+                    (($ancestor[2] & 0170000) == 0040000);
+            }
+            return 1;
+        }
+        my $test_fork_fail_at =
+            $ENV{BOOTSTRAP_STAGE3_TEST_FORK_FAIL_AT};
+        defined $test_fork_fail_at &&
+            $test_fork_fail_at !~ /^[0-9]+$/ and
+            die "invalid fork failure fixture\n";
+        my @pids;
+        my $failed = 0;
+        for my $worker (0 .. $workers - 1) {
+            my $pid = defined $test_fork_fail_at &&
+                $worker == $test_fork_fail_at ? undef : fork;
+            if (!defined $pid) {
+                $failed = 1;
+                # A partial fork is a failed transaction. Stop every child
+                # already admitted before reaping them; do not let abandoned
+                # workers continue reading authority files in the background.
+                kill "TERM", @pids if @pids;
+                last;
+            }
+            if ($pid == 0) {
+                my $worker_output = "$work/$worker";
+                open my $out, ">:raw", $worker_output or exit 71;
+                my $status = 0;
+                for (my $index = $worker; $index < @paths;
+                     $index += $workers) {
+                    my $path = $paths[$index];
+                    my ($relative_hex, $executable, $expected_mode,
+                        $expected_dev, $expected_ino, $expected_size,
+                        $expected_mtime, $expected_ctime) =
+                        split /\t/, $meta[$index], 8;
+                    if (!defined $expected_ctime || $path =~ /\0/ ||
+                        $expected_size !~ /^[0-9]+$/ ||
+                        $expected_mtime !~ /^[0-9]+\.[0-9]{9}$/ ||
+                        $expected_ctime !~ /^[0-9]+\.[0-9]{9}$/) {
+                        $status = 72;
+                        last;
+                    }
+                    if (!ancestors_are_bound($path)) {
+                        $status = 70;
+                        last;
+                    }
+                    my @before = lstat($path);
+                    my $before_executable = -x $path ? 1 : 0;
+                    if (!@before || (($before[2] & 0170000) != 0100000) ||
+                        (($before[2] & 07777) != $expected_mode) ||
+                        $before_executable != $executable ||
+                        "$before[0]" ne $expected_dev ||
+                        "$before[1]" ne $expected_ino ||
+                        "$before[7]" ne $expected_size ||
+                        stable_time($before[9]) ne $expected_mtime ||
+                        stable_time($before[10]) ne $expected_ctime) {
+                        $status = 73;
+                        last;
+                    }
+                    open my $leaf, "<:raw", $path or
+                        do { $status = 74; last; };
+                    my @opened = stat($leaf);
+                    my $opened_executable = -x $leaf ? 1 : 0;
+                    if (!@opened || (($opened[2] & 0170000) != 0100000) ||
+                        (($opened[2] & 07777) != $expected_mode) ||
+                        $opened_executable != $executable ||
+                        "$opened[0]" ne $expected_dev ||
+                        "$opened[1]" ne $expected_ino ||
+                        "$opened[7]" ne $expected_size ||
+                        stable_time($opened[9]) ne $expected_mtime ||
+                        stable_time($opened[10]) ne $expected_ctime) {
+                        close $leaf;
+                        $status = 75;
+                        last;
+                    }
+                    my $sha = Digest::SHA->new(256);
+                    if (!$sha->addfile($leaf, "b")) {
+                        close $leaf;
+                        $status = 76;
+                        last;
+                    }
+                    # Deterministic regression hook: mutate only the explicitly
+                    # named fixture after hashing so the post-hash stat gate is
+                    # exercised without timing-dependent background races.
+                    if (defined $ENV{BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_HASH} &&
+                        $path eq
+                            $ENV{BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_HASH}) {
+                        open my $mutation, ">>:raw", $path or
+                            do { close $leaf; $status = 76; last; };
+                        print {$mutation} "post-hash mutation\n" or
+                            do { close $mutation; close $leaf;
+                                $status = 76; last; };
+                        close $mutation or
+                            do { close $leaf; $status = 76; last; };
+                    }
+                    my @after = stat($leaf);
+                    my @path_after = lstat($path);
+                    my $path_after_executable = -x $path ? 1 : 0;
+                    close $leaf or do { $status = 77; last; };
+                    if (!ancestors_are_bound($path) ||
+                        !@after || !@path_after ||
+                        (($after[2] & 0170000) != 0100000) ||
+                        (($path_after[2] & 0170000) != 0100000) ||
+                        (($after[2] & 07777) != $expected_mode) ||
+                        (($path_after[2] & 07777) != $expected_mode) ||
+                        $path_after_executable != $executable ||
+                        "$after[0]" ne $expected_dev ||
+                        "$after[1]" ne $expected_ino ||
+                        "$after[7]" ne $expected_size ||
+                        stable_time($after[9]) ne $expected_mtime ||
+                        stable_time($after[10]) ne $expected_ctime ||
+                        "$path_after[0]" ne $expected_dev ||
+                        "$path_after[1]" ne $expected_ino ||
+                        "$path_after[7]" ne $expected_size ||
+                        stable_time($path_after[9]) ne $expected_mtime ||
+                        stable_time($path_after[10]) ne $expected_ctime) {
+                        $status = 78;
+                        last;
+                    }
+                    print {$out} $index, "\t", $sha->hexdigest, "\n" or
+                        do { $status = 79; last; };
+                }
+                close $out or $status = 80 if !$status;
+                exit $status;
+            }
+            push @pids, $pid;
+        }
+        for my $pid (@pids) {
+            waitpid($pid, 0) == $pid or $failed = 1;
+            $failed = 1 if $? != 0;
+        }
+        $failed and die "hash worker failed\n";
+        my @hashes;
+        my @seen;
+        for my $worker (0 .. $workers - 1) {
+            open my $in, "<:raw", "$work/$worker" or die "open worker\n";
+            while (my $line = <$in>) {
+                chomp $line;
+                my ($index, $sha) = split /\t/, $line, 2;
+                defined $sha && $index =~ /^[0-9]+$/ &&
+                    $sha =~ /^[0-9a-f]{64}$/ or die "worker result\n";
+                $index < @paths && !$seen[$index]++ or die "worker order\n";
+                $hashes[$index] = $sha;
+            }
+            close $in or die "close worker\n";
+        }
+        for my $index (0 .. $#paths) {
+            defined $hashes[$index] or die "worker count\n";
+            print $hashes[$index], "\n";
+        }
+        for my $worker (0 .. $workers - 1) {
+            unlink "$work/$worker" or die "remove worker\n";
+        }
+        rmdir $work or die "remove workers\n";
+    ' "$bootstrap_stage3_hash_bound_paths" \
+        "$bootstrap_stage3_hash_bound_meta" \
+        "$bootstrap_stage3_hash_bound_work" \
+        "$bootstrap_stage3_hash_bound_workers" \
+        "$bootstrap_stage3_hash_bound_root" \
+        >"$bootstrap_stage3_hash_bound_result" || return 1
+    mv -f "$bootstrap_stage3_hash_bound_result" \
+        "$bootstrap_stage3_hash_bound_output" || return 1
+    trap - EXIT HUP INT TERM
+    rm -rf "$bootstrap_stage3_hash_bound_work"
+)
+
+bootstrap_stage3_directory_snapshot() (
+    [ "$#" -eq 2 ] || exit 64
     bootstrap_stage3_directory_snapshot_output=$1
     bootstrap_stage3_directory_snapshot_root=$2
+    # A directory or symlink output is never a valid atomic authority target.
+    # In particular, mv(1) may otherwise place the temporary file inside an
+    # existing directory and report success against the wrong path.
+    [ ! -d "$bootstrap_stage3_directory_snapshot_output" ] || exit 1
+    [ ! -L "$bootstrap_stage3_directory_snapshot_output" ] || exit 1
     # The pid is used only to pin the trusted /proc/<pid>/fd magic-link arm
-    # below. A host without procfs can never present such a root, so leave the
-    # pid empty there: the arm cannot match and the "/proc/*) return 1" arm
-    # still rejects every other /proc path, keeping this fail-closed.
-    if [ -r /proc/self/stat ]; then
+    # below. The snapshot body is a subshell so its temporary cleanup cannot
+    # alter caller state; $$ still names the caller that owns the fd. A host
+    # without procfs can never present such a root, so leave the pid empty
+    # there: the arm cannot match and the "/proc/*) return 1" arm still
+    # rejects every other /proc path, keeping this fail-closed.
+    if [ -r "/proc/$$/stat" ]; then
         IFS=' ' read -r bootstrap_stage3_directory_snapshot_pid \
-            bootstrap_stage3_directory_snapshot_stat_rest </proc/self/stat ||
-            return 1
+            bootstrap_stage3_directory_snapshot_stat_rest <"/proc/$$/stat" ||
+            exit 1
         case "$bootstrap_stage3_directory_snapshot_pid" in
             ''|0|*[!0-9]*) return 1 ;;
         esac
@@ -2034,31 +2295,63 @@ bootstrap_stage3_directory_snapshot() {
             expr "$bootstrap_stage3_directory_snapshot_root" : \
                 "/proc/$bootstrap_stage3_directory_snapshot_pid/fd/[1-9][0-9]*$" \
                 >/dev/null || return 1
-            [ -d "$bootstrap_stage3_directory_snapshot_root" ] || return 1
+            [ -d "$bootstrap_stage3_directory_snapshot_root" ] || exit 1
             # The exact local procfd component is the trusted magic-link
             # anchor.  Resolve only that anchor; File::Find still lstats and
             # rejects every descendant symlink.
             bootstrap_stage3_directory_snapshot_scan=\
 "$bootstrap_stage3_directory_snapshot_root/."
             ;;
-        /proc/*) return 1 ;;
+        /proc/*) exit 1 ;;
         *)
             [ -d "$bootstrap_stage3_directory_snapshot_root" ] &&
-                [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || return 1
+                [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || exit 1
             bootstrap_stage3_directory_snapshot_scan=\
 "$bootstrap_stage3_directory_snapshot_root"
             ;;
     esac
-    # Digest::SHA::addfile streams in binary mode. Authority archives can be
-    # hundreds of MiB, so retaining a whole file here is both unnecessary and
-    # capable of exhausting a constrained bootstrap host.
-    perl -MDigest::SHA -MFile::Find -e '
+    # Capture the complete path and executable-bit manifest first. Hashing is
+    # intentionally a separate phase so the existing bounded hash worker pool
+    # can consume all files concurrently. Relative paths are hex encoded in
+    # the metadata stream, preserving the exact authority record format while
+    # keeping spaces and shell metacharacters opaque to the worker helper.
+    bootstrap_stage3_directory_snapshot_tmp=$(mktemp \
+        "${bootstrap_stage3_directory_snapshot_output}.tmp.XXXXXX") || exit 1
+    bootstrap_stage3_directory_snapshot_work=$(mktemp -d \
+        "${TMPDIR:-/tmp}/bootstrap-stage3-directory.XXXXXX") || {
+        rm -f "$bootstrap_stage3_directory_snapshot_tmp"
+        exit 1
+    }
+    bootstrap_stage3_directory_snapshot_paths="$bootstrap_stage3_directory_snapshot_work/paths"
+    bootstrap_stage3_directory_snapshot_meta="$bootstrap_stage3_directory_snapshot_work/meta"
+    bootstrap_stage3_directory_snapshot_hashes="$bootstrap_stage3_directory_snapshot_work/hashes"
+    bootstrap_stage3_directory_snapshot_umask=$(umask)
+    bootstrap_stage3_directory_snapshot_umask_decimal=$(printf '%d' \
+        "0$bootstrap_stage3_directory_snapshot_umask") || exit 1
+    bootstrap_stage3_directory_snapshot_new_mode=$((0666 & \
+        ~bootstrap_stage3_directory_snapshot_umask_decimal))
+    bootstrap_stage3_directory_snapshot_new_mode=$(printf '%o' \
+        "$bootstrap_stage3_directory_snapshot_new_mode")
+    bootstrap_stage3_directory_snapshot_existing_mode=
+    if [ -f "$bootstrap_stage3_directory_snapshot_output" ]; then
+        bootstrap_stage3_directory_snapshot_existing_mode=$(stat -c '%a' \
+            "$bootstrap_stage3_directory_snapshot_output" 2>/dev/null ||
+            stat -f '%Lp' "$bootstrap_stage3_directory_snapshot_output" 2>/dev/null || :)
+    fi
+    # Install cleanup before any scan/hash work. Worker count is derived below
+    # with redirected files so no command substitution can fire this trap.
+    trap 'rm -rf "$bootstrap_stage3_directory_snapshot_work"; \
+        rm -f "$bootstrap_stage3_directory_snapshot_tmp"' EXIT HUP INT TERM
+    # NUL-delimited paths support every POSIX filename through the same bound
+    # worker path; hex-encoded metadata remains newline-delimited and countable.
+    perl -MFile::Find -MTime::HiRes=stat,lstat -e '
         use strict;
         use warnings;
-        my ($root) = @ARGV;
+        my ($root, $paths_path, $meta_path) = @ARGV;
+        open my $paths, ">:raw", $paths_path or die "open paths\n";
+        open my $meta, ">:raw", $meta_path or die "open metadata\n";
         my $relative_root = $root;
         $relative_root =~ s{/\.$}{};
-        my @records;
         find(
             {
                 no_chdir => 1,
@@ -2068,8 +2361,6 @@ bootstrap_stage3_directory_snapshot() {
                         $absolute eq $relative_root;
                     -l $absolute and die "authority symlink rejected\n";
                     return unless -f $absolute;
-                    my $sha = Digest::SHA->new(256);
-                    $sha->addfile($absolute, "b") or die "hash\n";
                     my $relative;
                     if (index($absolute, "$root/") == 0) {
                         $relative = substr($absolute, length($root) + 1);
@@ -2080,19 +2371,100 @@ bootstrap_stage3_directory_snapshot() {
                     } else {
                         die "authority path escaped root\n";
                     }
-                    push @records, join(
-                        ":", "file-hex", unpack("H*", $relative),
-                        (-x $absolute ? 1 : 0), $sha->hexdigest
-                    );
+                    print {$paths} $absolute, "\0" or die "write paths\n";
+                    my @stat = lstat($absolute);
+                    @stat && (($stat[2] & 0170000) == 0100000) or
+                        die "authority non-regular leaf\n";
+                    print {$meta} unpack("H*", $relative), "\t",
+                        (-x $absolute ? 1 : 0), "\t",
+                        ($stat[2] & 07777), "\t", $stat[0], "\t",
+                        $stat[1], "\t", $stat[7], "\t",
+                        sprintf("%.9f", $stat[9]), "\t",
+                        sprintf("%.9f", $stat[10]), "\n" or
+                        die "write metadata\n";
                 },
             },
             $root
         );
+        close $paths or die "close paths\n";
+        close $meta or die "close metadata\n";
+    ' "$bootstrap_stage3_directory_snapshot_scan" \
+        "$bootstrap_stage3_directory_snapshot_paths" \
+        "$bootstrap_stage3_directory_snapshot_meta" || exit 1
+    wc -l <"$bootstrap_stage3_directory_snapshot_meta" \
+        >"$bootstrap_stage3_directory_snapshot_work/line-count" || exit 1
+    IFS=' ' read -r bootstrap_stage3_directory_snapshot_lines \
+        <"$bootstrap_stage3_directory_snapshot_work/line-count" || exit 1
+    bootstrap_stage3_directory_snapshot_lines=${bootstrap_stage3_directory_snapshot_lines# }
+    bootstrap_stage3_hash_worker_count \
+        "$bootstrap_stage3_directory_snapshot_lines" \
+        >"$bootstrap_stage3_directory_snapshot_work/worker-count" || exit 1
+    IFS=' ' read -r bootstrap_stage3_directory_snapshot_workers \
+        <"$bootstrap_stage3_directory_snapshot_work/worker-count" || exit 1
+    [ -s "$bootstrap_stage3_directory_snapshot_paths" ] &&
+        [ -s "$bootstrap_stage3_directory_snapshot_meta" ] || {
+        exit 1
+    }
+    bootstrap_stage3_hash_bound_path_list \
+        "$bootstrap_stage3_directory_snapshot_paths" \
+        "$bootstrap_stage3_directory_snapshot_meta" \
+        "$bootstrap_stage3_directory_snapshot_hashes" \
+        "$bootstrap_stage3_directory_snapshot_workers" \
+        "$bootstrap_stage3_directory_snapshot_scan" || exit 1
+    awk 'NR == FNR { hashes++; next } { metadata++ }
+        END { exit hashes != metadata }' \
+        "$bootstrap_stage3_directory_snapshot_hashes" \
+        "$bootstrap_stage3_directory_snapshot_meta" || {
+        exit 1
+    }
+    # Merge by position, then sort exactly as the original single Perl pass
+    # did. Hash workers may complete in any order, but publication is owned by
+    # this process and cannot observe partial or out-of-order authority bytes.
+    trap 'rm -rf "$bootstrap_stage3_directory_snapshot_work"; \
+        rm -f "$bootstrap_stage3_directory_snapshot_tmp"' EXIT HUP INT TERM
+    perl -e '
+        use strict;
+        use warnings;
+        my ($meta_path, $hash_path) = @ARGV;
+        open my $meta, "<:raw", $meta_path or die "open metadata\n";
+        open my $hashes, "<:raw", $hash_path or die "open hashes\n";
+        my @records;
+        while (my $meta_line = <$meta>) {
+            my $hash_line = <$hashes>;
+            defined $hash_line or die "hash count\n";
+            chomp $meta_line;
+            chomp $hash_line;
+            my ($relative_hex, $executable, $mode, $dev, $ino) =
+                split /\t/, $meta_line, 5;
+            $relative_hex =~ /^[0-9a-f]*$/ &&
+                length($relative_hex) % 2 == 0 or die "metadata\n";
+            $executable =~ /^[01]$/ or die "metadata mode\n";
+            $mode =~ /^[0-9]+$/ or die "metadata permissions\n";
+            my ($sha) = split /[[:space:]]+/, $hash_line, 2;
+            $sha =~ /^[0-9a-f]{64}$/ or die "hash\n";
+            push @records, join(":", "file-hex", $relative_hex,
+                $executable, $sha);
+        }
+        defined <$hashes> and die "hash count\n";
+        close $meta or die "close metadata\n";
+        close $hashes or die "close hashes\n";
         @records or die "empty authority\n";
         print join("\n", sort @records), "\n";
-    ' "$bootstrap_stage3_directory_snapshot_scan" \
-        >"$bootstrap_stage3_directory_snapshot_output"
-}
+    ' "$bootstrap_stage3_directory_snapshot_meta" \
+        "$bootstrap_stage3_directory_snapshot_hashes" \
+        >"$bootstrap_stage3_directory_snapshot_tmp" || exit 1
+    if [ -n "$bootstrap_stage3_directory_snapshot_existing_mode" ]; then
+        chmod "$bootstrap_stage3_directory_snapshot_existing_mode" \
+            "$bootstrap_stage3_directory_snapshot_tmp" || exit 1
+    else
+        chmod "$bootstrap_stage3_directory_snapshot_new_mode" \
+            "$bootstrap_stage3_directory_snapshot_tmp" || exit 1
+    fi
+    mv -f "$bootstrap_stage3_directory_snapshot_tmp" \
+        "$bootstrap_stage3_directory_snapshot_output" || exit 1
+    trap - EXIT HUP INT TERM
+    rm -rf "$bootstrap_stage3_directory_snapshot_work"
+)
 
 bootstrap_stage3_copy_authority() {
     bootstrap_stage3_copy_source=$1

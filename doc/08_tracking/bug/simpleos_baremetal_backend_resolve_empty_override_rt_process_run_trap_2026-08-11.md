@@ -25,6 +25,33 @@ which is now blocked by (c) instead of (b). Root cause (b)'s fix is real
 forward progress even though the gate verdict string is unchanged — see
 "Root cause (b) — FIXED" below for the encoding of that progress.
 
+## Root cause (c) — SOURCE FIX, RUNTIME RECHECK PENDING (2026-09-22)
+
+The backend immediately after ROCm is Qualcomm. `QualcommBackend.create()`
+hard-coded `_target_arch: "arm64"` and `_target_bits: 64`, including in an
+x86_64 SimpleOS kernel. Consequently its capability guard always passed and
+the nominal Qualcomm probe entered `VulkanBackend.init()` on x86_64 instead
+of rejecting the unsupported target. This matches why the first fault appeared
+after the ROCm rejection and before a Qualcomm rejection, but runtime evidence
+is still required to prove that it is the exact faulting instruction path.
+
+The constructor now derives its target profile from compile-time `@cfg`
+architecture selection, with no environment read or process launch.
+Unsupported architectures receive zero target bits, so
+`QualcommBackend.init()` returns false before invoking the Vulkan delegate. A
+bounded regression spec drives the same target-profile constructor helper with
+`x86_64`, proves the profile is unsupported, and proves `init(1, 1)` returns
+false. ARM builds retain the existing supported ARM32 and ARM64 profiles;
+explicit `create_for_target` behavior is unchanged. This is the leading
+source-level explanation for the observed transition, not yet serial proof
+that the Qualcomm delegate was the exact faulting instruction path.
+
+This does not mark the boot bug fixed yet. The current isolated worktree has
+no admitted full Simple CLI, and the active Linux bootstrap has not produced
+Stage 4. Re-run the focused spec and the SimpleOS visible-display gate once
+that artifact exists, then record serial progress past the Qualcomm probe,
+wall latency, and max RSS before changing this bug's OPEN state.
+
 ## Original status (root cause (a) only, superseded by (b) above)
 PARTIAL FIX LANDED. Root cause (a) fixed and verified by serial evidence.
 Gate marker state did NOT advance (still `web:false backend:false ...`) — a
@@ -311,3 +338,6 @@ tail -c 2000 build/simpleos_wm_visible_display_evidence/serial.log
 objdump -dr build/os/simpleos_wm_simple_web_check_32.elf | grep rt_process_run
 ```
 
+TODO(deferred-environment): after Linux bootstrap admits the runtime, run the
+visible-display evidence command above in SimpleOS QEMU and retain serial output
+plus elapsed-time and max-RSS evidence.

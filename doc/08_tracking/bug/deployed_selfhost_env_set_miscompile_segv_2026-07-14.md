@@ -624,3 +624,90 @@ rather than fixed. Status remains OPEN (P1).
 correct four-argument `rt_env_set` call sequence. That claim needs the redeploy
 this lane could not perform, and must not be assumed from the source-side
 `rt_env_set` signature alone.
+
+## 2026-09-21 ARM-host follow-up — source gate repaired, deployment still open
+
+The currently tracked `release/x86_64-unknown-linux-gnu/simple` is no longer
+the reported `04a38e21…` artifact: it hashes to `d0976e84…` and contains a
+four-argument `rt_env_set` provider by x86-64 disassembly. This is a Rust-built
+binary, so it is not proof of the required pure-Simple full CLI deployment.
+The ARM64 host cannot run it directly, and QEMU user mode lacks the x86-64
+dynamic loader on this host. The P1 therefore remains OPEN.
+
+The source ABI gate initially failed on stale assertions for the old MIR
+semantic-arity helper. Its current lowering uses text operand splitting and
+the existing unit spec covers both the semantic two-text call and raw four-word
+bridge. After the gate was updated, it exposed a real mismatch: the system
+SFFI generator specified `rt_env_set` as `void`, unlike the canonical `bool`
+provider and other generator specs. That declaration was corrected to `bool`.
+The source ABI gate now passes. An interpreter unit run attempted with the
+available ARM Rust bootstrap seed exited 1 amid unrelated repository warnings;
+it is not accepted as pure-Simple verification or deployment evidence.
+
+Follow-up review narrowed the gate's MIR assertions to the body of
+`expand_text_abi_args`: it now requires operand inspection, a successful split
+guard, and preservation of an unsplit operand there. The gate reports
+`env_runtime_abi_runtime=not_checked` unless its optional binary probe runs.
+Its check for the unit spec is source-presence evidence only; the failed seed
+test above remains failed, and this gate does not prove native behavior.
+
+SOSIX compatibility was checked separately. `src/os/sosix` has no public
+`env_set` or `rt_env_set` declaration, provider, or caller. Its only process
+environment use is the host configuration adapter's `rt_env_get(key: text) ->
+text?` read. The SFFI generator's setter result change therefore does not
+alter a SOSIX public signature or provider contract; SOSIX has no setter
+callers requiring adaptation.
+
+## GitHub issue #497 closure TODO (2026-09-22)
+
+The exact tagged `v1.0.1-beta.1` `bin/simple_native` hashes to
+`7fc570189e1d689c8c99988981a4766b0a42ba9a70dc97571c71d2a75c46823b`.
+Its x86-64 disassembly proves the mismatch: callers load the key pointer/length
+and value pointer/length into `rdi`, `rsi`, `rdx`, and `rcx`, but the linked
+`rt_env_set` forwards only `rdi` and `rsi` to `setenv`. Consequently the key
+length is interpreted as the value pointer, explaining the pre-SSpec SIGSEGV.
+The tagged bytes therefore reproduce the stale two-word provider defect; the
+source correction still requires a clean Phase 4 rebuild and deployment.
+
+The source repair is not release closure. Complete every item below with the
+same admitted Linux x86-64 Phase 4 full CLI that will be packaged; a Rust seed,
+another architecture, or a source-only gate is not substitute evidence:
+
+- **Linux x86-64 Phase 4 / candidate admission:** run
+  `scripts/check/check-env-runtime-abi.shs --binary <candidate>` and require the
+  environment set/get round trip to pass without a signal.
+- **Linux x86-64 Phase 4 / focused compiler regression:** run
+  `test/01_unit/compiler/backend/text_extern_abi_ptr_len_registry_spec.spl`
+  in interpreter mode and require all three examples, including semantic
+  two-text to raw four-word `rt_env_set`, to pass.
+- **Linux x86-64 Phase 4 / CLI surface:** run `<candidate> --version` and
+  `<candidate> test --help`; both must exit zero and identify a pure-Simple
+  runtime.
+- **Linux x86-64 Phase 4 / consumer boundary:** run the external Simply
+  project-proof SSpec from issue #497 through `<candidate> test`; require a
+  non-vacuous `Results:` line and zero failed examples.
+- **Tagged release asset / clean Ubuntu runner:** download the immutable asset,
+  verify its recorded SHA-256 matches the admitted candidate, then repeat the
+  version, help, and consumer-SSpec commands against the downloaded bytes.
+
+Until all five receipts exist, issue #497 and this P1 remain OPEN even though
+the focused source ABI gate passes.
+
+### 2026-09-23 review correction — raw bridge discrimination restored
+
+Independent review rejected the first source-gate result: the then-current
+`expand_text_abi_args` still applied the text split to arguments 0 and 1 of a
+raw four-word `rt_env_set(i64, i64, i64, i64)` bridge. That produced six call
+operands and attempted `rt_string_data`/`rt_string_len` extraction from integer
+words. Merely checking that the split body preserved an operand on helper
+failure was therefore a false-green contract.
+
+The lowering now consults `text_extern_semantic_arity` before allocating the
+expanded argument array. `rt_env_set`/`rt_set_env` expand only at their
+two-operand semantic facade; an already-lowered four-word bridge returns its
+original argument array unchanged. This guard is constant-time and
+allocation-free. The focused source gate pins both the registry value and its
+use in the expansion function; source review confirms the guard precedes the
+split loop. The existing MIR regression remains the
+behavioral oracle once the admitted Phase 4 test runner is available. The five
+release-closure receipts above remain required.

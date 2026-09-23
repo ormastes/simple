@@ -1894,11 +1894,6 @@ pub(crate) fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
                 out.push(path);
             }
         } else if path.extension().is_some_and(|e| e == "spl") {
-            if let Some(p) = path.to_str() {
-                if p.contains("check.spl") {
-                    continue;
-                }
-            }
             if path.is_file() {
                 out.push(path);
             }

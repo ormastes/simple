@@ -22,6 +22,119 @@ bootstrap_deploy_tx_pointer_target=
 bootstrap_deploy_tx_state=inactive
 bootstrap_deploy_tx_rollback_receipt_pending=none
 bootstrap_deploy_tx_rollback_receipt_final=none
+bootstrap_deploy_tx_rollback_receipt_sha=none
+bootstrap_deploy_tx_stable_path=none
+bootstrap_deploy_tx_stable_backup=none
+bootstrap_deploy_tx_stable_previous_sha=none
+bootstrap_deploy_tx_stable_candidate_sha=none
+bootstrap_deploy_tx_stable_receipt_backup=none
+bootstrap_deploy_tx_stable_receipt_sha=none
+bootstrap_deploy_tx_sealed_receipt_sha=none
+
+# Windows has a second publication surface. Every replacement is atomic, but
+# the two paths cannot change in one filesystem operation. The durable journal
+# rolls an interrupted deployment back before admitting another deployment.
+bootstrap_deploy_tx_stable_fields() {
+  echo "stable_launcher_path=$bootstrap_deploy_tx_stable_path"
+  echo "stable_launcher_backup_path=$bootstrap_deploy_tx_stable_backup"
+  echo "stable_launcher_previous_sha256=$bootstrap_deploy_tx_stable_previous_sha"
+  echo "stable_launcher_candidate_sha256=$bootstrap_deploy_tx_stable_candidate_sha"
+  echo "stable_launcher_receipt_backup=$bootstrap_deploy_tx_stable_receipt_backup"
+  echo "stable_launcher_receipt_sha256=$bootstrap_deploy_tx_stable_receipt_sha"
+}
+
+bootstrap_deploy_tx_stable_load() {
+  bootstrap_deploy_tx_stable_path=$(bootstrap_deploy_tx_value "$1" stable_launcher_path) || return 1
+  bootstrap_deploy_tx_stable_backup=$(bootstrap_deploy_tx_value "$1" stable_launcher_backup_path) || return 1
+  bootstrap_deploy_tx_stable_previous_sha=$(bootstrap_deploy_tx_value "$1" stable_launcher_previous_sha256) || return 1
+  bootstrap_deploy_tx_stable_candidate_sha=$(bootstrap_deploy_tx_value "$1" stable_launcher_candidate_sha256) || return 1
+  bootstrap_deploy_tx_stable_receipt_backup=$(bootstrap_deploy_tx_value "$1" stable_launcher_receipt_backup) || return 1
+  bootstrap_deploy_tx_stable_receipt_sha=$(bootstrap_deploy_tx_value "$1" stable_launcher_receipt_sha256) || return 1
+}
+
+bootstrap_deploy_tx_stable_prepare() {
+  [ "$#" -eq 1 ] && [ "$bootstrap_deploy_tx_state" = staging ] || return 1
+  bootstrap_deploy_tx_stable_path="$(dirname -- "$bootstrap_deploy_tx_release_root")/simple.exe"
+  bootstrap_deploy_tx_stable_backup="$bootstrap_deploy_tx_control_root/stable-${bootstrap_deploy_tx_id}.exe"
+  bootstrap_deploy_tx_stable_receipt_backup="$bootstrap_deploy_tx_control_root/stable-${bootstrap_deploy_tx_id}.env"
+  bootstrap_deploy_tx_stable_candidate_sha=$1
+  bootstrap_deploy_tx_stable_previous_sha=none
+  bootstrap_deploy_tx_stable_receipt_sha=none
+  for bootstrap_deploy_tx_stable_pair in executable receipt; do
+    if [ "$bootstrap_deploy_tx_stable_pair" = executable ]; then
+      bootstrap_deploy_tx_stable_source=$bootstrap_deploy_tx_stable_path
+      bootstrap_deploy_tx_stable_copy=$bootstrap_deploy_tx_stable_backup
+    else
+      bootstrap_deploy_tx_stable_source="$(dirname -- "$bootstrap_deploy_tx_stable_path")/.simple-windows-stable-entrypoint.env"
+      bootstrap_deploy_tx_stable_copy=$bootstrap_deploy_tx_stable_receipt_backup
+    fi
+    [ ! -L "$bootstrap_deploy_tx_stable_source" ] &&
+      [ ! -e "$bootstrap_deploy_tx_stable_copy" ] && [ ! -L "$bootstrap_deploy_tx_stable_copy" ] || return 1
+    if [ -e "$bootstrap_deploy_tx_stable_source" ]; then
+      bootstrap_deploy_tx_stable_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_source") || return 1
+      cp -p "$bootstrap_deploy_tx_stable_source" "$bootstrap_deploy_tx_stable_copy" || return 1
+      [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_copy")" = "$bootstrap_deploy_tx_stable_sha" ] || return 1
+      bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_stable_copy" || return 1
+      if [ "$bootstrap_deploy_tx_stable_pair" = executable ]; then
+        bootstrap_deploy_tx_stable_previous_sha=$bootstrap_deploy_tx_stable_sha
+      else
+        bootstrap_deploy_tx_stable_receipt_sha=$bootstrap_deploy_tx_stable_sha
+      fi
+    fi
+  done
+  bootstrap_deploy_tx_write_control deploy staging "$bootstrap_deploy_tx_id"
+}
+
+bootstrap_deploy_tx_stable_restore() {
+  [ "$bootstrap_deploy_tx_stable_path" != none ] || return 0
+  [ "$bootstrap_deploy_tx_stable_path" = "$(dirname -- "$bootstrap_deploy_tx_release_root")/simple.exe" ] || return 1
+  case "$bootstrap_deploy_tx_stable_backup" in "$bootstrap_deploy_tx_control_root"/stable-*.exe) ;; *) return 1 ;; esac
+  bootstrap_deploy_tx_stable_basename=$(basename -- "$bootstrap_deploy_tx_stable_backup")
+  bootstrap_deploy_tx_safe_name "$bootstrap_deploy_tx_stable_basename" || return 1
+  [ "$bootstrap_deploy_tx_stable_backup" = "$bootstrap_deploy_tx_control_root/$bootstrap_deploy_tx_stable_basename" ] || return 1
+  [ "$bootstrap_deploy_tx_stable_receipt_backup" = "${bootstrap_deploy_tx_stable_backup%.exe}.env" ] || return 1
+  # Validate BOTH backups before touching either publication surface.
+  if [ "$bootstrap_deploy_tx_stable_previous_sha" != none ]; then
+    [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_backup")" = "$bootstrap_deploy_tx_stable_previous_sha" ] || return 1
+  fi
+  if [ "$bootstrap_deploy_tx_stable_receipt_sha" != none ]; then
+    [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_receipt_backup")" = "$bootstrap_deploy_tx_stable_receipt_sha" ] || return 1
+  fi
+  bootstrap_deploy_tx_stable_helper="$(dirname -- "$(dirname -- "$bootstrap_deploy_tx_release_root")")/scripts/bootstrap/publish-windows-stable-entrypoint.ps1"
+  bootstrap_deploy_tx_stable_receipt="$(dirname -- "$bootstrap_deploy_tx_stable_path")/.simple-windows-stable-entrypoint.env"
+  if [ "$bootstrap_deploy_tx_stable_previous_sha" = none ]; then
+    [ ! -L "$bootstrap_deploy_tx_stable_path" ] || return 1
+    rm -f "$bootstrap_deploy_tx_stable_path" || return 1
+  elif [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_path")" != "$bootstrap_deploy_tx_stable_previous_sha" ]; then
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$bootstrap_deploy_tx_stable_helper" \
+      -Restore -Destination "$bootstrap_deploy_tx_stable_path" -Backup "$bootstrap_deploy_tx_stable_backup" \
+      -ExpectedSha256 "$bootstrap_deploy_tx_stable_previous_sha" || return 1
+  fi
+  if [ "$bootstrap_deploy_tx_stable_receipt_sha" = none ]; then
+    [ ! -L "$bootstrap_deploy_tx_stable_receipt" ] || return 1
+    rm -f "$bootstrap_deploy_tx_stable_receipt" || return 1
+  elif [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_receipt")" != "$bootstrap_deploy_tx_stable_receipt_sha" ]; then
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$bootstrap_deploy_tx_stable_helper" \
+      -Restore -Destination "$bootstrap_deploy_tx_stable_receipt" -Backup "$bootstrap_deploy_tx_stable_receipt_backup" \
+      -ExpectedSha256 "$bootstrap_deploy_tx_stable_receipt_sha" || return 1
+  fi
+  for bootstrap_deploy_tx_restored_file in "$bootstrap_deploy_tx_stable_path" "$bootstrap_deploy_tx_stable_receipt"; do
+    if [ -f "$bootstrap_deploy_tx_restored_file" ]; then
+      bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_restored_file" || return 1
+    fi
+  done
+  bootstrap_deploy_tx_sync "$(dirname -- "$bootstrap_deploy_tx_stable_path")"
+}
+
+bootstrap_deploy_tx_stable_verify_published() {
+  [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stable_path")" = "$bootstrap_deploy_tx_stable_candidate_sha" ] || return 1
+  bootstrap_deploy_tx_commit_receipt="$(dirname -- "$bootstrap_deploy_tx_stable_path")/.simple-windows-stable-entrypoint.env"
+  [ -f "$bootstrap_deploy_tx_commit_receipt" ] && [ ! -L "$bootstrap_deploy_tx_commit_receipt" ] || return 1
+  [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_commit_receipt" schema)" = simple-windows-stable-entrypoint-receipt-v1 ] &&
+    [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_commit_receipt" status)" = pass ] &&
+    [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_commit_receipt" candidate_sha256)" = "$bootstrap_deploy_tx_stable_candidate_sha" ] &&
+    [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_commit_receipt" stable_sha256)" = "$bootstrap_deploy_tx_stable_candidate_sha" ]
+}
 
 bootstrap_deploy_tx_hash_file() {
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
@@ -134,6 +247,7 @@ bootstrap_deploy_tx_sync() {
 bootstrap_deploy_tx_value() {
   [ "$#" -eq 2 ] || return 1
   awk -F= -v key="$2" '
+    { sub(/\r$/, "") }
     $1 == key { count++; value = substr($0, length(key) + 2) }
     END { if (count != 1 || value == "") exit 1; print value }
   ' "$1"
@@ -143,7 +257,7 @@ bootstrap_deploy_tx_write_control() {
   [ "$#" -eq 3 ] || return 1
   bootstrap_deploy_tx_control_tmp="${bootstrap_deploy_tx_control}.tmp.$$"
   {
-    echo 'schema=bootstrap-deploy-journal-v3'
+    echo 'schema=bootstrap-deploy-journal-v4'
     echo "operation=$1"
     echo "state=$2"
     echo "platform=${bootstrap_deploy_tx_platform}"
@@ -152,6 +266,10 @@ bootstrap_deploy_tx_write_control() {
     echo "candidate_pointer_target=${bootstrap_deploy_tx_pointer_target}"
     echo "rollback_receipt_pending=${bootstrap_deploy_tx_rollback_receipt_pending}"
     echo "rollback_receipt_final=${bootstrap_deploy_tx_rollback_receipt_final}"
+    echo "rollback_receipt_sha256=${bootstrap_deploy_tx_rollback_receipt_sha}"
+    bootstrap_deploy_tx_stable_fields
+    echo "previous_generation_manifest_sha256=$bootstrap_deploy_tx_previous_manifest_sha256"
+    echo "sealed_receipt_sha256=$bootstrap_deploy_tx_sealed_receipt_sha"
   } >"$bootstrap_deploy_tx_control_tmp" || return 1
   chmod 600 "$bootstrap_deploy_tx_control_tmp" || return 1
   mv "$bootstrap_deploy_tx_control_tmp" "$bootstrap_deploy_tx_control" || return 1
@@ -217,9 +335,20 @@ bootstrap_deploy_tx_recover() {
   [ "$(bootstrap_deploy_tx_canonical_dir "$bootstrap_deploy_tx_generation_root")" = "$bootstrap_deploy_tx_generation_root" ] || return 1
   [ "$(bootstrap_deploy_tx_canonical_dir "$bootstrap_deploy_tx_control_root")" = "$bootstrap_deploy_tx_control_root" ] || return 1
   bootstrap_deploy_tx_control="$bootstrap_deploy_tx_control_root/${bootstrap_deploy_tx_platform}.pending.env"
+  bootstrap_deploy_tx_stable_path=none
   [ -e "$bootstrap_deploy_tx_control" ] || return 0
   [ -f "$bootstrap_deploy_tx_control" ] && [ ! -L "$bootstrap_deploy_tx_control" ] || return 1
-  [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" schema)" = bootstrap-deploy-journal-v3 ] || return 1
+  bootstrap_deploy_tx_stable_path=none
+  case "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" schema)" in
+    bootstrap-deploy-journal-v3) ;;
+    bootstrap-deploy-journal-v4)
+      bootstrap_deploy_tx_stable_load "$bootstrap_deploy_tx_control" || return 1
+      bootstrap_deploy_tx_previous_manifest_sha256=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" previous_generation_manifest_sha256) || return 1
+      bootstrap_deploy_tx_sealed_receipt_sha=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" sealed_receipt_sha256) || return 1
+      bootstrap_deploy_tx_rollback_receipt_sha=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" rollback_receipt_sha256) || return 1
+      ;;
+    *) return 1 ;;
+  esac
   [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" platform)" = "$bootstrap_deploy_tx_platform" ] || return 1
   bootstrap_deploy_tx_recovery_operation=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" operation) || return 1
   bootstrap_deploy_tx_recovery_state=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_control" state) || return 1
@@ -232,6 +361,7 @@ bootstrap_deploy_tx_recover() {
   case "$bootstrap_deploy_tx_pointer_target" in
     ".bootstrap-deploy-generations/${bootstrap_deploy_tx_platform}/"*)
       bootstrap_deploy_tx_safe_name "${bootstrap_deploy_tx_pointer_target##*/}" || return 1
+      [ "$bootstrap_deploy_tx_pointer_target" = ".bootstrap-deploy-generations/${bootstrap_deploy_tx_platform}/${bootstrap_deploy_tx_pointer_target##*/}" ] || return 1
       ;;
     *) return 1 ;;
   esac
@@ -246,12 +376,61 @@ bootstrap_deploy_tx_recover() {
     none) ;;
     ".bootstrap-deploy-generations/${bootstrap_deploy_tx_platform}/"*)
       bootstrap_deploy_tx_safe_name "${bootstrap_deploy_tx_previous_target##*/}" || return 1
+      [ "$bootstrap_deploy_tx_previous_target" = ".bootstrap-deploy-generations/${bootstrap_deploy_tx_platform}/${bootstrap_deploy_tx_previous_target##*/}" ] || return 1
       ;;
     *) return 1 ;;
   esac
   bootstrap_deploy_tx_recovery_pending="$bootstrap_deploy_tx_generation_root/${bootstrap_deploy_tx_recovery_id}.pending"
   bootstrap_deploy_tx_recovery_final="$bootstrap_deploy_tx_generation_root/${bootstrap_deploy_tx_recovery_id}"
   bootstrap_deploy_tx_recovery_current=$(bootstrap_deploy_tx_pointer_value 2>/dev/null || echo invalid)
+  if [ "$bootstrap_deploy_tx_stable_path" != none ]; then
+    case "$bootstrap_deploy_tx_recovery_operation:$bootstrap_deploy_tx_recovery_state" in
+      deploy:staging|deploy:sealed|deploy:published|deploy:committed|rollback:prepared|rollback:published) ;;
+      *) return 1 ;;
+    esac
+    if [ "$bootstrap_deploy_tx_recovery_operation" = deploy ] && [ "$bootstrap_deploy_tx_sealed_receipt_sha" != none ]; then
+      [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_recovery_final/bootstrap-deploy-receipt.env")" = "$bootstrap_deploy_tx_sealed_receipt_sha" ] || return 1
+      bootstrap_deploy_tx_verify_authority "$bootstrap_deploy_tx_recovery_final" publication || return 1
+    fi
+    case "$bootstrap_deploy_tx_recovery_current" in
+      "$bootstrap_deploy_tx_pointer_target"|"$bootstrap_deploy_tx_previous_target") ;;
+      *) return 1 ;;
+    esac
+    if [ "$bootstrap_deploy_tx_recovery_operation" = deploy ]; then
+      if [ "$bootstrap_deploy_tx_recovery_state" = committed ]; then
+        [ "$bootstrap_deploy_tx_recovery_current" = "$bootstrap_deploy_tx_pointer_target" ] &&
+          bootstrap_deploy_tx_stable_verify_published || return 1
+      else
+        bootstrap_deploy_tx_id=$bootstrap_deploy_tx_recovery_id
+        bootstrap_deploy_tx_dir=$bootstrap_deploy_tx_recovery_pending
+        bootstrap_deploy_tx_final_dir=$bootstrap_deploy_tx_recovery_final
+        bootstrap_deploy_tx_active=1
+        bootstrap_deploy_tx_abort
+        return $?
+      fi
+    elif [ "$bootstrap_deploy_tx_recovery_operation" = rollback ]; then
+      bootstrap_deploy_tx_recovery_source="$bootstrap_deploy_tx_release_root/$bootstrap_deploy_tx_previous_target"
+      bootstrap_deploy_tx_recovery_destination="$bootstrap_deploy_tx_release_root/$bootstrap_deploy_tx_pointer_target"
+      bootstrap_deploy_tx_recovery_deploy_receipt="$bootstrap_deploy_tx_recovery_source/bootstrap-deploy-receipt.env"
+      [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_recovery_deploy_receipt")" = "$bootstrap_deploy_tx_sealed_receipt_sha" ] || return 1
+      bootstrap_deploy_tx_recovery_manifest_sha=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_recovery_deploy_receipt" previous_generation_manifest_sha256) || return 1
+      bootstrap_deploy_tx_validate_generation "$bootstrap_deploy_tx_recovery_destination" \
+        "$bootstrap_deploy_tx_recovery_destination/bootstrap-generation.env" "$bootstrap_deploy_tx_recovery_manifest_sha" || return 1
+      bootstrap_deploy_tx_verify_authority "$bootstrap_deploy_tx_recovery_destination" rollback || return 1
+      if [ -e "$bootstrap_deploy_tx_rollback_receipt_pending" ]; then
+        [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_rollback_receipt_pending")" = "$bootstrap_deploy_tx_rollback_receipt_sha" ] || return 1
+      else
+        [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_rollback_receipt_final")" = "$bootstrap_deploy_tx_rollback_receipt_sha" ] || return 1
+      fi
+      bootstrap_deploy_tx_stable_restore || return 1
+      if [ "$bootstrap_deploy_tx_recovery_current" = "$bootstrap_deploy_tx_previous_target" ]; then
+        bootstrap_deploy_tx_pointer_swap "$bootstrap_deploy_tx_previous_target" "$bootstrap_deploy_tx_pointer_target" || return 1
+        bootstrap_deploy_tx_recovery_current=$bootstrap_deploy_tx_pointer_target
+      fi
+    else
+      return 1
+    fi
+  fi
   if [ "$bootstrap_deploy_tx_recovery_operation" = legacy-migration ] &&
      [ "$bootstrap_deploy_tx_recovery_state" = prepared ] &&
      [ "$bootstrap_deploy_tx_recovery_current" = invalid ] &&
@@ -285,6 +464,14 @@ bootstrap_deploy_tx_recover() {
         "$bootstrap_deploy_tx_control_root"/*:"$bootstrap_deploy_tx_control_root"/*) ;;
         *) return 1 ;;
       esac
+      if [ ! -e "$bootstrap_deploy_tx_rollback_receipt_pending" ] &&
+         [ -f "$bootstrap_deploy_tx_rollback_receipt_final" ] &&
+         [ ! -L "$bootstrap_deploy_tx_rollback_receipt_final" ] &&
+         [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_rollback_receipt_final" restored_pointer_target)" = "$bootstrap_deploy_tx_pointer_target" ]; then
+        rm "$bootstrap_deploy_tx_control" || return 1
+        bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_control_root"
+        return $?
+      fi
       [ -f "$bootstrap_deploy_tx_rollback_receipt_pending" ] &&
         [ ! -L "$bootstrap_deploy_tx_rollback_receipt_pending" ] &&
         [ ! -e "$bootstrap_deploy_tx_rollback_receipt_final" ] &&
@@ -367,6 +554,13 @@ bootstrap_deploy_tx_begin() {
     bootstrap_deploy_tx_migrate_legacy || return 1
   fi
   bootstrap_deploy_tx_id=$bootstrap_deploy_tx_requested_id
+  bootstrap_deploy_tx_sealed_receipt_sha=none
+  bootstrap_deploy_tx_stable_path=none
+  bootstrap_deploy_tx_stable_backup=none
+  bootstrap_deploy_tx_stable_previous_sha=none
+  bootstrap_deploy_tx_stable_candidate_sha=none
+  bootstrap_deploy_tx_stable_receipt_backup=none
+  bootstrap_deploy_tx_stable_receipt_sha=none
   bootstrap_deploy_tx_previous_target=$(bootstrap_deploy_tx_pointer_value) || return 1
   if [ "$bootstrap_deploy_tx_previous_target" != none ]; then
     bootstrap_deploy_tx_previous_generation=${bootstrap_deploy_tx_previous_target##*/}
@@ -506,6 +700,7 @@ bootstrap_deploy_tx_seal() {
   bootstrap_deploy_tx_dir=$bootstrap_deploy_tx_final_dir
   bootstrap_deploy_tx_journal="$bootstrap_deploy_tx_dir/entries.tsv"
   chmod 555 "$bootstrap_deploy_tx_final_dir" || return 1
+  bootstrap_deploy_tx_sealed_receipt_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_final_dir/bootstrap-deploy-receipt.env") || return 1
   bootstrap_deploy_tx_write_control deploy sealed "$bootstrap_deploy_tx_id" || return 1
   bootstrap_deploy_tx_state=sealed
   bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_final_dir" "$bootstrap_deploy_tx_generation_root"
@@ -527,11 +722,21 @@ bootstrap_deploy_tx_restore_applied() {
 bootstrap_deploy_tx_abort() {
   [ "$bootstrap_deploy_tx_active" -eq 1 ] || return 0
   bootstrap_deploy_tx_current=$(bootstrap_deploy_tx_pointer_value 2>/dev/null || echo invalid)
+  case "$bootstrap_deploy_tx_current" in
+    "$bootstrap_deploy_tx_pointer_target"|"$bootstrap_deploy_tx_previous_target") ;;
+    *) return 1 ;;
+  esac
+  if [ "$bootstrap_deploy_tx_stable_path" != none ] && [ "$bootstrap_deploy_tx_previous_target" != none ]; then
+    bootstrap_deploy_tx_restore_dir="$bootstrap_deploy_tx_release_root/$bootstrap_deploy_tx_previous_target"
+    bootstrap_deploy_tx_validate_generation "$bootstrap_deploy_tx_restore_dir" \
+      "$bootstrap_deploy_tx_restore_dir/bootstrap-generation.env" "$bootstrap_deploy_tx_previous_manifest_sha256" || return 1
+  fi
+  bootstrap_deploy_tx_stable_restore || return 1
   if [ "$bootstrap_deploy_tx_current" = "$bootstrap_deploy_tx_pointer_target" ]; then
     if [ "$bootstrap_deploy_tx_previous_target" = none ]; then
       [ -L "$bootstrap_deploy_tx_platform_path" ] || return 1
       rm "$bootstrap_deploy_tx_platform_path" || return 1
-      bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_release_root"
+      bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_release_root" || return 1
     else
       bootstrap_deploy_tx_pointer_swap "$bootstrap_deploy_tx_pointer_target" \
         "$bootstrap_deploy_tx_previous_target" || return 1
@@ -539,9 +744,11 @@ bootstrap_deploy_tx_abort() {
   elif [ "$bootstrap_deploy_tx_current" != "$bootstrap_deploy_tx_previous_target" ]; then
     return 1
   fi
-  bootstrap_deploy_tx_quarantine "$bootstrap_deploy_tx_dir" || return 1
-  if [ "$bootstrap_deploy_tx_dir" != "$bootstrap_deploy_tx_final_dir" ]; then
-    bootstrap_deploy_tx_quarantine "$bootstrap_deploy_tx_final_dir" || return 1
+  if [ "$bootstrap_deploy_tx_stable_path" = none ]; then
+    bootstrap_deploy_tx_quarantine "$bootstrap_deploy_tx_dir" || return 1
+    if [ "$bootstrap_deploy_tx_dir" != "$bootstrap_deploy_tx_final_dir" ]; then
+      bootstrap_deploy_tx_quarantine "$bootstrap_deploy_tx_final_dir" || return 1
+    fi
   fi
   rm -f "$bootstrap_deploy_tx_control" || return 1
   bootstrap_deploy_tx_active=0
@@ -552,10 +759,18 @@ bootstrap_deploy_tx_abort() {
 bootstrap_deploy_tx_commit() {
   [ "$bootstrap_deploy_tx_active" -eq 1 ] && [ "$bootstrap_deploy_tx_state" = published ] || return 1
   [ "$(bootstrap_deploy_tx_pointer_value)" = "$bootstrap_deploy_tx_pointer_target" ] || return 1
-  rm "$bootstrap_deploy_tx_control" || return 1
+  if [ "$bootstrap_deploy_tx_stable_path" != none ]; then
+    bootstrap_deploy_tx_stable_verify_published || return 1
+    bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_stable_path" "$bootstrap_deploy_tx_commit_receipt" \
+      "$(dirname -- "$bootstrap_deploy_tx_stable_path")" || return 1
+  fi
+  # Commit is the durable journal transition. Cleanup failure afterward must
+  # never return a failure that causes callers to roll back a committed deploy.
+  bootstrap_deploy_tx_write_control deploy committed "$bootstrap_deploy_tx_id" || return 1
   bootstrap_deploy_tx_active=0
   bootstrap_deploy_tx_state=committed
-  bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_control_root"
+  rm "$bootstrap_deploy_tx_control" && bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_control_root" || :
+  return 0
 }
 
 bootstrap_deploy_tx_known_generation_entry() {
@@ -714,6 +929,12 @@ bootstrap_deploy_tx_rollback_generation() {
     "$bootstrap_deploy_tx_rollback_previous_manifest" \
     "$bootstrap_deploy_tx_rollback_previous_manifest_sha" || return 1
   bootstrap_deploy_tx_verify_authority "$bootstrap_deploy_tx_rollback_previous_dir" rollback || return 1
+  bootstrap_deploy_tx_stable_path=none
+  if bootstrap_deploy_tx_value "$bootstrap_deploy_tx_rollback_deploy_receipt" stable_launcher_path >/dev/null 2>&1; then
+    bootstrap_deploy_tx_stable_load "$bootstrap_deploy_tx_rollback_deploy_receipt" || return 1
+  else
+    case "$bootstrap_deploy_tx_platform" in *windows*) return 1 ;; esac
+  fi
   bootstrap_deploy_tx_rollback_receipt_pending="$bootstrap_deploy_tx_control_root/.rollback-${bootstrap_deploy_tx_rollback_expected}.$$.env"
   [ ! -e "$bootstrap_deploy_tx_rollback_receipt_pending" ] && [ ! -L "$bootstrap_deploy_tx_rollback_receipt_pending" ] || return 1
   {
@@ -731,11 +952,15 @@ bootstrap_deploy_tx_rollback_generation() {
     echo 'rollback_status=pass'
   } >"$bootstrap_deploy_tx_rollback_receipt_pending" || return 1
   chmod 444 "$bootstrap_deploy_tx_rollback_receipt_pending" || return 1
+  bootstrap_deploy_tx_rollback_receipt_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_rollback_receipt_pending") || return 1
   bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_rollback_receipt_pending" "$bootstrap_deploy_tx_control_root"
   bootstrap_deploy_tx_previous_target=$bootstrap_deploy_tx_rollback_current
   bootstrap_deploy_tx_pointer_target=$bootstrap_deploy_tx_rollback_target
+  bootstrap_deploy_tx_previous_manifest_sha256=$bootstrap_deploy_tx_rollback_current_manifest_sha
+  bootstrap_deploy_tx_sealed_receipt_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_rollback_deploy_receipt") || return 1
   bootstrap_deploy_tx_id="rollback-$bootstrap_deploy_tx_rollback_expected-$$"
   bootstrap_deploy_tx_write_control rollback prepared "$bootstrap_deploy_tx_id" || return 1
+  bootstrap_deploy_tx_stable_restore || return 1
   bootstrap_deploy_tx_pointer_swap "$bootstrap_deploy_tx_rollback_current" "$bootstrap_deploy_tx_rollback_target" || return 1
   bootstrap_deploy_tx_write_control rollback published "$bootstrap_deploy_tx_id" || return 1
   [ ! -e "$bootstrap_deploy_tx_rollback_receipt_final" ] && [ ! -L "$bootstrap_deploy_tx_rollback_receipt_final" ] || return 1

@@ -297,7 +297,7 @@ step("heap after destroy returns fallback with pre-built slots")
 val _record = mimalloc_thread_init()
 mimalloc_thread_destroy()
 val heap = mimalloc_thread_heap()
-# After destroy the TLS slot is reset to sentinel (-1); the lookup
+# After destroy the TLS slot is reset to the unset sentinel (0); the lookup
 # falls back to mi_heap_new() which always returns a heap with slots.
 expect(heap.pages_by_class.len()).to_be_greater_than(0)
 ```

@@ -15,6 +15,12 @@ related: build/bootstrap/stage2/aarch64-apple-darwin/simple
 
 # Stage-2 Bootstrap: All function bodies empty (ret-0 stubs)
 
+> Latest audit (2026-09-22): the builtin `is_empty` dispatch root fix
+> `3edcb8c2605` is already in current main. A receipt-validated older Windows
+> Stage 2 preserves finalized MIR instructions in return and method-call
+> controls; native builds still fail later. Current-main Stage 2 and other
+> platform verification remain open. See the [audit and retained evidence](../../09_report/bootstrap_stage2_empty_mir_audit_2026-09-22.md).
+
 ## Summary
 
 The stage-2 bootstrap binary compiled and linked but contained zero real
@@ -1751,3 +1757,29 @@ codegen/runtime root cause and not grounds to close this record.  The next bound
 Stage 3 run must show that all twelve `disc=-1` diagnostics disappear, check
 whether the missing-return cascade disappears, and compare peak RSS because the
 local may introduce one additional value-semantic `HirParam` copy per parameter.
+
+## 2026-09-22 — recover the landed root fix; retain current-source verification gap
+
+The chronology above ends before the actual fix. Commit
+`3edcb8c2605d4d9c52e371c16923054d18236a57` (2026-08-25), an ancestor of
+`origin/main` `e0dd873da1b7828389db4eb60e82972cc8245313`, prevents builtin receiver
+methods from resolving through a bare user-method name and supplies their real
+LLVM lowerings. `Array.is_empty` had resolved to an imported user `Sp.is_empty`,
+causing the empty pending array to overwrite finalized MIR. Both fix components
+remain in current source. The one-statement hypothesis above was subsequently
+settled; it is no longer the next unknown.
+
+The available admitted Windows x86_64 Stage 2, SHA256
+`4a8dd3eb3887b9cb61608dd6cc668dafa18bbd75bd0d98326328df48c6d54db5`, takes the
+empty-pending early return and retains one instruction for `return 7` and two
+for `"abc".len()`. LLVM and Cranelift requests both preserve nonempty MIR,
+then fail later with an AOT `<invalid-heap:...>` diagnostic. No resulting native
+executable passed in this audit.
+
+The candidate and retained receipt/manifest hashes validate, but its source
+snapshot differs from current main. This record remains **IN_PROGRESS** pending
+a fresh current-source Stage 2 and the collision/native/platform controls.
+The [audit report](../../09_report/bootstrap_stage2_empty_mir_audit_2026-09-22.md)
+contains exact identities, raw evidence, elapsed times, peak working sets,
+historical adjacent regression coverage, and untested targets. No compiler
+workaround or implementation change was made.

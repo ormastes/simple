@@ -182,6 +182,14 @@ expect(result.bytes).to_equal([0u8, 0u8, 11u8, 22u8])
 
 </details>
 
+#### local route success does not install the live positioned shim
+
+- Reset the production shim, then mount an NVFS test root.
+- The private SOSIX route oracle completes a positioned round-trip.
+- A subsequent call through the shim's retained state still returns `-95`
+  because no authenticated production owner was installed. This is a
+  fail-closed regression, not live C-ABI/QEMU verification.
+
 #### does not infer a DBFS route from an NVFS virtual object identity
 
 - does not infer a DBFS route from an NVFS virtual object identity

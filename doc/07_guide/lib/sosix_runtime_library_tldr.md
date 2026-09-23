@@ -23,3 +23,4 @@ gate:
 Full guide: `sosix_runtime_library.md`.
 - File mapping (`sosix.file_map`, the only mapping path): `sosix_file_map`/`sosix_file_unmap` = ACTUAL access (POSIX `mmap`, Windows `MapViewOfFile`); `sosix_file_map_prefetch` = CACHING warm-up (POSIX `mmap`+`madvise(WILLNEED)`+`munmap`; Windows no-op `true`). Gate: `scripts/check/check-file-map-c.shs`.
 - Real files: `SosixHostedFileDriver` (`open_path`, `buffer_from`, `buffer_bytes`) + the sync leg; sync calls release their slot on return. Perf: one ring hop per op, ~38× a direct read on the seed interpreter (report in `doc/10_metrics/runtime/`).
+- Windows/macOS native providers (TODO 306, OPEN): backend C source exists but is absent from runtime source lists; the bridge conflicts with the public runtime header. The portable file driver services requests synchronously. [Evidence and reproduction](../../08_tracking/todo/sosix_c5_native_provider_runtime_blockers_2026-09-21.md).

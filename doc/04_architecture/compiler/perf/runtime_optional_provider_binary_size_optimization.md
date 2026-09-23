@@ -47,3 +47,10 @@ Transitions are single-flight and generation-bound. Rejection is cached for the 
 ## Feature Preservation
 
 Optimization changes admission and loading time, never feature semantics. Any feature omitted from the base closure remains available through a sealed provider. Any uncertain dependency stays retained and is named in the receipt; the compiler never guesses it away.
+
+## 2026-09-22 integration addendum
+
+The [dynamic runtime/kernel provider composition design](../dynamic_runtime_kernel_provider_composition_2026-09-22.md)
+joins this selected policy to bootstrap cdylib authority, sole-owner Cocoa
+exports, existing SCI/KPF interfaces and aspect mapping/lifecycle evidence.
+It preserves the requirements above and adds no completion claim.

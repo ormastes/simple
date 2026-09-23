@@ -40,6 +40,93 @@ fn test_aot_emits_discardable_function_sections() {
     assert!(text_sections >= 2, "expected one discardable text section per function");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn test_aot_function_sections_allow_strict_dead_reference_gc() {
+    use crate::hir::TypeId;
+    use crate::mir::{CallTarget, MirFunction, MirInst, MirModule, Terminator, VReg};
+    use object::{Object, ObjectSection};
+    use simple_parser::ast::Visibility;
+
+    let mut live = MirFunction::new("live".to_string(), TypeId::I64, Visibility::Public);
+    live.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: VReg(0),
+        value: 7,
+    });
+    live.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+    let mut dead = MirFunction::new("dead".to_string(), TypeId::I64, Visibility::Public);
+    dead.blocks[0].instructions.push(MirInst::Call {
+        dest: Some(VReg(0)),
+        target: CallTarget::Pure("missing_dead_symbol".to_string()),
+        args: vec![],
+    });
+    dead.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+    let mut mir = MirModule::new();
+    mir.functions = vec![live, dead];
+    let object_bytes = Codegen::new().unwrap().compile_module(&mir).unwrap();
+    let file = object::File::parse(object_bytes.as_slice()).unwrap();
+    let text_sections = file
+        .sections()
+        .filter(|section| section.name().unwrap_or("").starts_with(".text"))
+        .filter_map(|section| section.name().ok())
+        .collect::<Vec<_>>();
+    assert!(
+        text_sections.len() >= 2,
+        "expected one discardable text section per function, got {text_sections:?}"
+    );
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let cc_probe = std::process::Command::new(&cc)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("strict dead-reference GC regression requires a C linker via CC={cc:?}: {error}")
+        });
+    assert!(
+        cc_probe.status.success(),
+        "strict dead-reference GC regression requires a working C linker via CC={cc:?}: status={} stderr={}",
+        cc_probe.status,
+        String::from_utf8_lossy(&cc_probe.stderr)
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cranelift_object = temp.path().join("functions.o");
+    std::fs::write(&cranelift_object, object_bytes).unwrap();
+
+    for (entry, should_link) in [("live", true), ("dead", false)] {
+        let main_source = temp.path().join(format!("main_{entry}.c"));
+        let output = temp.path().join(format!("probe_{entry}"));
+        std::fs::write(
+            &main_source,
+            format!("extern long {entry}(void); int main(void) {{ return (int){entry}(); }}\n"),
+        )
+        .unwrap();
+        let link = std::process::Command::new(&cc)
+            .arg(&main_source)
+            .arg(&cranelift_object)
+            .arg("-Wl,--gc-sections")
+            .arg("-o")
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert_eq!(
+            link.status.success(),
+            should_link,
+            "entry={entry} status={} stderr={}",
+            link.status,
+            String::from_utf8_lossy(&link.stderr)
+        );
+        if !should_link {
+            let stderr = String::from_utf8_lossy(&link.stderr);
+            assert!(
+                stderr.contains("missing_dead_symbol"),
+                "dead entry must fail for its retained undefined reference, not an unrelated linker error: {stderr}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_compile_comparison() {
     let obj = compile_to_object("fn is_positive(x: i64) -> bool:\n    return x > 0\n").unwrap();

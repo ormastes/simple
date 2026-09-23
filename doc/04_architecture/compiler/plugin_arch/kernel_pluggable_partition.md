@@ -168,3 +168,14 @@ reads one manifest (`simple.sdn` `provides:`) and defers pack I/O to first
 facet use (`apk_try_facet` resident-only `module_loader_compat.spl:442` before
 `_apk_load_facet_indexed_v1 :560`); negotiation compares digests, never
 re-hashes source at startup. Plan Phase 7 pins this with a startup-time gate.
+
+## 2026-09-22 dynamic artifact clarification
+
+The historical table observation that a runtime shared library does not exist
+is not a current packaging constraint: `src/compiler_rust/runtime/Cargo.toml`
+declares `rlib`, `staticlib` and `cdylib`. Preserve K0/K1 ownership and the
+selected backend composition while extracting optional platform implementations.
+The [integration architecture](../dynamic_runtime_kernel_provider_composition_2026-09-22.md)
+defines exact cdylib authority, Cocoa artifact-only ownership, provider ABI,
+admission/cache/lifecycle and pending aspect-policy boundaries. It is additive
+design, not evidence that any implementation or bootstrap gate has passed.

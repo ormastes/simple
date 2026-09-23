@@ -47,8 +47,19 @@ impl HirLowering:
         val class_doc_comment: text = class_.doc_comment
         val class_span: Span = class_.span
 
-        val symbol = self.symbols.lookup_or_invalid(class_name)
+        # A preceding import may own the bare name.  The declaration's own
+        # module-qualified binding is authoritative for class lowering, Self,
+        # constructors, and method ownership.
+        val local_class_id = self.symbols.lookup_qualified_type_raw(
+            self.module_filename, class_name)
+        val symbol = if local_class_id >= 0:
+            SymbolId(id: local_class_id)
+        else:
+            self.symbols.lookup_or_invalid(class_name)
         self.symbols.push_scope(ScopeKind.Class)
+        # A same-spelled import in the outer scope must not redirect an
+        # owning class's constructor references inside its own methods.
+        self.symbols.bind_local_type_if_free(class_name, symbol)
 
         var type_params: [HirTypeParam] = []
         for tp in class_type_params:

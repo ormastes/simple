@@ -46,6 +46,13 @@ SECTIONS {
         _ebss = .;
     } > RAM
 
+    /* Every hart updates this before hart 0 clears BSS.  Keeping the word in
+     * its own NOLOAD section prevents that clear from losing early check-ins. */
+    .smp (NOLOAD) : ALIGN(4) {
+        _smp_online_count = .;
+        . += 4;
+    } > RAM
+
     .stack (NOLOAD) : ALIGN(16) {
         _stack_bottom = .;
         . += 32K;

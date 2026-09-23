@@ -16,14 +16,53 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SEED="src/compiler_rust/target/release/simple"
+if [ "${1:-}" = --host-only ]; then
+    ABI_SOURCE=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+    ABI_SIBLINGS="examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c
+examples/09_embedded/simple_os/arch/x86_64/boot/primitives.c
+examples/09_embedded/simple_os/arch/x86_64/boot/collections.c
+examples/09_embedded/simple_os/arch/x86_64/boot/hashmap.c"
+    ABI_TEST=test/01_unit/os/kernel/net/x64_ssh_heap_header_test.c
+    ABI_OUTPUT=build/os/abi_probe_host
+    mkdir -p build/os
+    # Constructors must initialize the compact header as a whole. A lone type
+    # assignment leaves dirty gc_flags/reserved bytes when arena memory recurs.
+    for header_source in "$ABI_SOURCE" $ABI_SIBLINGS; do
+        if grep -Eq -- '->hdr\.type[[:space:]]*=[[:space:]]*HEAP_' "$header_source"; then
+            echo "[abi-probe] uninitialized object header constructor: $header_source" >&2
+            exit 1
+        fi
+    done
+    awk '
+        FNR == NR {
+            if ($0 ~ /^#define TAG_MASK/) copying = 1
+            if (copying && $0 ~ /^#if defined\(__x86_64__\)/) copying = 0
+            if (copying) runtime = runtime $0 "\n"
+            next
+        }
+        /\/\* PRODUCTION_RUNTIME_SLICE \*\// { printf "%s", runtime; next }
+        { print }
+    ' "$ABI_SOURCE" "$ABI_TEST" |
+        "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -x c - -o "$ABI_OUTPUT"
+    /usr/bin/time -f 'abi_host_wall_s=%e abi_host_max_rss_kib=%M' "$ABI_OUTPUT"
+    exit 0
+fi
+
+HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
+DEFAULT_RUNTIME="$ROOT_DIR/bin/release/$HOST_TRIPLE/simple"
+[ -x "$DEFAULT_RUNTIME" ] || DEFAULT_RUNTIME="$ROOT_DIR/bin/release/simple"
+SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$DEFAULT_RUNTIME}"
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/abi_probe_entry.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 OUT_ELF="build/os/abi_probe.elf"
 SERIAL_LOG="build/os/abi_probe.serial.log"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-20}"
 
-[ -x "$SEED" ] || { echo "[abi-probe] missing seed binary $SEED"; exit 1; }
+[ -x "$SIMPLE_RUNTIME" ] || {
+    echo "[abi-probe] missing self-hosted runtime $SIMPLE_RUNTIME" >&2
+    echo "[abi-probe] set SIMPLE_RUNTIME to an admitted self-hosted executable" >&2
+    exit 1
+}
 
 mkdir -p build/os
 
@@ -34,8 +73,9 @@ done
 
 echo "[abi-probe] 1/2 native-build $ENTRY"
 SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
-SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_TRACE_STUBS=1 SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1 PATH="$LLVM_PATH:$PATH" \
-"$SEED" native-build \
+SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 \
+SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1 PATH="$LLVM_PATH:$PATH" \
+"$SIMPLE_RUNTIME" native-build \
     --source build/os/generated --source src/os --source src/lib \
     --source examples/09_embedded/simple_os/arch/x86_64 \
     --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
@@ -47,6 +87,7 @@ SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_TRACE_STUBS=1 SIMPLE_FREESTANDING_ELF32
 
 echo "[abi-probe] 2/2 boot under QEMU (timeout ${QEMU_TIMEOUT}s)"
 rm -f "$SERIAL_LOG"
+/usr/bin/time -f 'abi_probe_wall_s=%e abi_probe_max_rss_kib=%M' \
 timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
     -no-user-config -monitor none -net none -machine q35 -cpu qemu64 \
     -m 256M -serial file:"$SERIAL_LOG" -display none -no-reboot \
@@ -60,3 +101,25 @@ else
     echo "[abi-probe] no serial log produced"
     exit 1
 fi
+
+grep -aFq 'P3 L=0x8 l=8' "$SERIAL_LOG" || {
+    echo '[abi-probe] corrupt extern [u8] length' >&2
+    exit 1
+}
+index=0
+for expected in 65 66 67 68 69 70 71 72; do
+    grep -aEq "^P5\\[$index\\].*s=${expected} c=${expected}" "$SERIAL_LOG" || {
+        echo "[abi-probe] corrupt extern [u8] payload: missing byte $expected" >&2
+        exit 1
+    }
+    index=$((index + 1))
+done
+grep -aFq 'PD' "$SERIAL_LOG" || {
+    echo '[abi-probe] target did not complete before timeout' >&2
+    exit 1
+}
+grep -aFq 'P14 R=1' "$SERIAL_LOG" || {
+    echo '[abi-probe] compact heap header metadata survived allocator reuse' >&2
+    exit 1
+}
+echo '[abi-probe] PASS runtime=SELF_HOSTED target=x86_64-unknown-none bytes=8'

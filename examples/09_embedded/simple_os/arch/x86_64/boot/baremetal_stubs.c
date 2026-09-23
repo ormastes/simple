@@ -179,6 +179,18 @@ static void serial_put_hex(uint64_t v)
     }
 }
 
+/* Entry-closure probes can omit interrupt.spl. Keep a real fatal handler in
+ * this C object so a C-only reference never becomes an undefined link symbol.
+ * The pure-Simple export overrides this weak fallback in complete images. */
+__attribute__((weak, noreturn))
+void spl_x86_on_kernel_ud2_fault(uint64_t rip)
+{
+    serial_puts("\n[fault] FATAL: kernel #UD (ud2) trap at rip=");
+    serial_put_hex(rip);
+    serial_puts(" vector=6 (#UD)\n");
+    for (;;) __asm__ volatile("cli; hlt");
+}
+
 static void serial_put_dec(int64_t v)
 {
     if (v < 0) {
@@ -262,9 +274,28 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define FALSE_VALUE    ENCODE_INT(0)
 
 typedef struct {
-    uint32_t type;
+    uint8_t  type;
+    uint8_t  gc_flags;
+    uint16_t reserved;
     uint32_t size;
 } HeapHeader;
+
+_Static_assert(sizeof(HeapHeader) == 8,
+               "HeapHeader must match the compiler/runtime eight-byte ABI");
+
+/* Object metadata must be initialized even when an arena reuses dirty bytes.
+ * Keep this at object construction: raw/DMA malloc callers need no header. */
+static inline void runtime_heap_header_init(HeapHeader *header, uint8_t type)
+{
+    header->type = type;
+    header->gc_flags = 0;
+    header->reserved = 0;
+}
+
+/* Native [u8] arrays use one-byte elements.  The compiler reads this flag at
+ * byte offset one; keeping a uint32_t `type` here made the packed producers
+ * below overwrite the object type and silently changed the element stride. */
+#define BYTE_PACKED 0x08u
 
 typedef struct {
     HeapHeader hdr;
@@ -298,6 +329,16 @@ static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
     return a->items ? a->items : runtime_array_inline_items(a);
 }
 
+static inline RuntimeArray *runtime_array_from_abi(RuntimeValue value)
+{
+    uintptr_t raw = (uintptr_t)(uint64_t)value;
+    if ((raw & TAG_MASK) == TAG_HEAP) raw &= ~(uintptr_t)TAG_MASK;
+    else if ((raw & TAG_MASK) != 0) return NULL;
+    if (raw < 0x1000u) return NULL;
+    RuntimeArray *array = (RuntimeArray *)raw;
+    return array->hdr.type == HEAP_ARRAY ? array : NULL;
+}
+
 void *malloc(size_t sz);
 
 /* ---- byte-array (packed [u8]) helpers, native-contract compliant ----
@@ -310,7 +351,7 @@ static RuntimeValue _rt_bytes_new(const uint8_t *buf, uint32_t len)
     size_t bytes = sizeof(RuntimeArray) + (size_t)len;
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return (RuntimeValue)3 /* NIL */;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.gc_flags = BYTE_PACKED;
     a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)bytes;
@@ -362,8 +403,8 @@ RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val)
  * importantly _vfs_boot_read_file_chain_raw, which knows the FAT32 file size
  * before it reads a byte -- was therefore forced through the doubling growth
  * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On this
- * BUMP-ONLY heap free() is a no-op, so every intermediate buffer is leaked
- * permanently -- a 24 MiB boot asset burns ~63 MiB. That is what drove
+ * The former bump-only heap made free() a no-op, so every intermediate buffer
+ * was leaked permanently -- a 24 MiB boot asset burned ~63 MiB. That drove
  * heap_off to 0xbf12660 during vfs-init, before any render code ran.
  * Honouring the reservation makes that one exact allocation instead.
  *
@@ -400,7 +441,7 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
     size_t bytes = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)bytes;
     a->len = len;
     a->cap = len;
@@ -553,108 +594,389 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, Runt
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
+/* SIMPLEOS_HEAP_ALLOCATOR_BEGIN: host regression extracts this exact block. */
 static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
 
-static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
-static size_t _heap_off = 0;
+/* A small first-fit allocator for the static baremetal arena.  The preceding
+ * bump allocator made every interactive allocation permanent: a session could
+ * exhaust the arena even when only a few live buffers remained.  Blocks retain
+ * their size in-band so free can validate, reuse, and coalesce them without a
+ * second metadata allocation. */
+#define SIMPLEOS_HEAP_ALIGNMENT 16U
+#define SIMPLEOS_HEAP_MAGIC 0x53484D50U
+
+typedef struct {
+    size_t span;
+    size_t previous_span;
+    uint32_t magic;
+    uint32_t is_free;
+    uint64_t reserved;
+    size_t free_next;
+    size_t free_previous;
+} SimpleOSHeapBlock;
+
+static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(SIMPLEOS_HEAP_ALIGNMENT)));
+static size_t _heap_off = 0; /* high-water boundary; retained for existing boot diagnostics */
+static size_t _heap_tail_span = 0;
+static size_t _heap_free_blocks = 0;
+static size_t _heap_free_head = (size_t)-1;
+static volatile uint32_t _heap_lock = 0;
+#ifdef SIMPLEOS_HEAP_TEST
+static _Thread_local unsigned int _heap_test_lock_owned;
+extern void rt_baremetal_heap_test_payload_clear(size_t size, unsigned int lock_owned);
+#endif
 
 void *malloc(size_t sz);
 
-static inline size_t simpleos_heap_align(size_t sz)
+static inline int simpleos_heap_align(size_t size, size_t *aligned)
 {
-    return (sz + 15U) & ~(size_t)15U;
+    if (size == 0 || size > (size_t)-1 - (SIMPLEOS_HEAP_ALIGNMENT - 1U)) return 0;
+    *aligned = (size + SIMPLEOS_HEAP_ALIGNMENT - 1U) & ~(size_t)(SIMPLEOS_HEAP_ALIGNMENT - 1U);
+    return 1;
 }
 
-static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
+static inline int simpleos_heap_block_valid(const SimpleOSHeapBlock *block, size_t offset)
 {
-    size_t old_aligned = simpleos_heap_align(old_sz);
-    size_t new_aligned = simpleos_heap_align(new_sz);
-    if (!p) return malloc(new_sz);
+    return block->magic == SIMPLEOS_HEAP_MAGIC &&
+           block->span >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT &&
+           (block->span & (SIMPLEOS_HEAP_ALIGNMENT - 1U)) == 0 &&
+           block->span <= _heap_off - offset;
+}
 
-    uint8_t *base = (uint8_t *)p;
-    if (base >= (uint8_t *)_heap &&
-        base + old_aligned == (uint8_t *)&_heap[_heap_off]) {
-        if (new_aligned > old_aligned) {
-            size_t grow = new_aligned - old_aligned;
-            if (_heap_off + grow > sizeof(_heap)) {
-                serial_puts("[PANIC] heap exhausted\r\n");
-                serial_puts("[PANIC] heap_off=");
-                serial_put_hex((uint64_t)_heap_off);
-                serial_puts(" req=");
-                serial_put_hex((uint64_t)grow);
-                serial_puts(" limit=");
-                serial_put_hex((uint64_t)sizeof(_heap));
-                serial_puts("\r\n");
-                for (;;) outb(0xF4, 0);
+static inline void simpleos_heap_set_following_previous_span(size_t offset, size_t span)
+{
+    size_t next_offset = offset + span;
+    if (next_offset < _heap_off) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
+        next->previous_span = span;
+    } else {
+        _heap_tail_span = span;
+    }
+}
+
+static void simpleos_heap_free_list_insert(SimpleOSHeapBlock *block, size_t offset)
+{
+    block->free_previous = (size_t)-1;
+    block->free_next = _heap_free_head;
+    if (_heap_free_head != (size_t)-1) {
+        SimpleOSHeapBlock *head = (SimpleOSHeapBlock *)((uint8_t *)_heap + _heap_free_head);
+        head->free_previous = offset;
+    }
+    _heap_free_head = offset;
+    _heap_free_blocks++;
+}
+
+static void simpleos_heap_free_list_remove(SimpleOSHeapBlock *block)
+{
+    if (block->free_previous != (size_t)-1) {
+        SimpleOSHeapBlock *previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + block->free_previous);
+        previous->free_next = block->free_next;
+    } else {
+        _heap_free_head = block->free_next;
+    }
+    if (block->free_next != (size_t)-1) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + block->free_next);
+        next->free_previous = block->free_previous;
+    }
+    block->free_next = (size_t)-1;
+    block->free_previous = (size_t)-1;
+    _heap_free_blocks--;
+}
+
+/* Allocation may run on an IRQ path as well as task context.  Mask local IRQs
+ * before taking the inter-core lock so an interrupt on this CPU cannot spin on
+ * a lock held by the code it interrupted. */
+static inline uint64_t simpleos_heap_lock_acquire(void)
+{
+#ifdef SIMPLEOS_HEAP_TEST
+    while (__atomic_exchange_n(&_heap_lock, 1U, __ATOMIC_ACQUIRE)) {}
+    _heap_test_lock_owned = 1;
+    return 0;
+#else
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory", "cc");
+    while (__atomic_exchange_n(&_heap_lock, 1U, __ATOMIC_ACQUIRE)) {}
+    return flags;
+#endif
+}
+
+static inline void simpleos_heap_lock_release(uint64_t flags)
+{
+#ifdef SIMPLEOS_HEAP_TEST
+    (void)flags;
+    _heap_test_lock_owned = 0;
+    __atomic_store_n(&_heap_lock, 0U, __ATOMIC_RELEASE);
+#else
+    __atomic_store_n(&_heap_lock, 0U, __ATOMIC_RELEASE);
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+#endif
+}
+
+static SimpleOSHeapBlock *simpleos_heap_block_for_ptr(void *ptr, size_t *offset_out)
+{
+    uintptr_t wanted = (uintptr_t)ptr;
+    uintptr_t heap_begin = (uintptr_t)_heap;
+    if (!ptr || wanted < heap_begin + sizeof(SimpleOSHeapBlock) || wanted >= heap_begin + _heap_off)
+        return NULL;
+    uintptr_t header_address = wanted - sizeof(SimpleOSHeapBlock);
+    if ((header_address - heap_begin) & (SIMPLEOS_HEAP_ALIGNMENT - 1U)) return NULL;
+    size_t offset = (size_t)(header_address - heap_begin);
+    SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)header_address;
+    if (!simpleos_heap_block_valid(block, offset)) return NULL;
+    if (offset == 0 ? block->previous_span != 0 :
+        block->previous_span > offset) return NULL;
+    if (offset != 0) {
+        SimpleOSHeapBlock *previous = (SimpleOSHeapBlock *)((uint8_t *)block - block->previous_span);
+        if (!simpleos_heap_block_valid(previous, offset - block->previous_span) ||
+            previous->span != block->previous_span) return NULL;
+    }
+    if (offset_out) *offset_out = offset;
+    return block;
+}
+
+static void simpleos_heap_release_tail(void)
+{
+    while (_heap_off != 0 && _heap_tail_span != 0) {
+        size_t last_offset = _heap_off - _heap_tail_span;
+        SimpleOSHeapBlock *last = (SimpleOSHeapBlock *)((uint8_t *)_heap + last_offset);
+        if (!simpleos_heap_block_valid(last, last_offset) || !last->is_free) return;
+        simpleos_heap_free_list_remove(last);
+        _heap_off = last_offset;
+        _heap_tail_span = last->previous_span;
+    }
+}
+
+static void *simpleos_heap_alloc_unlocked(size_t size)
+{
+    size_t aligned;
+    size_t needed;
+    size_t offset;
+    if (!simpleos_heap_align(size, &aligned) || aligned > (size_t)-1 - sizeof(SimpleOSHeapBlock)) return NULL;
+    needed = sizeof(SimpleOSHeapBlock) + aligned;
+
+    offset = _heap_free_head;
+    while (offset != (size_t)-1) {
+        SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + offset);
+        if (!simpleos_heap_block_valid(block, offset)) return NULL;
+        if (block->is_free && block->span >= needed) {
+            size_t remainder = block->span - needed;
+            simpleos_heap_free_list_remove(block);
+            if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
+                SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
+                next->span = remainder;
+                next->previous_span = needed;
+                next->magic = SIMPLEOS_HEAP_MAGIC;
+                next->is_free = 1;
+                next->reserved = 0;
+                block->span = needed;
+                simpleos_heap_set_following_previous_span(offset + needed, remainder);
+                simpleos_heap_free_list_insert(next, offset + needed);
             }
-            _heap_off += grow;
-        } else {
-            _heap_off -= (old_aligned - new_aligned);
+            block->is_free = 0;
+            return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
         }
-        return p;
+        offset = block->free_next;
     }
 
-    void *n = malloc(new_sz);
-    if (p && n) {
-        size_t copy_sz = old_sz < new_sz ? old_sz : new_sz;
-        __builtin_memcpy(n, p, copy_sz);
-    }
-    return n;
+    if (needed > sizeof(_heap) - _heap_off) return NULL;
+    SimpleOSHeapBlock *block = (SimpleOSHeapBlock *)((uint8_t *)_heap + _heap_off);
+    block->span = needed;
+    block->previous_span = _heap_tail_span;
+    block->magic = SIMPLEOS_HEAP_MAGIC;
+    block->is_free = 0;
+    block->reserved = 0;
+    block->free_next = (size_t)-1;
+    block->free_previous = (size_t)-1;
+    _heap_off += needed;
+    _heap_tail_span = needed;
+    return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
 }
 
-void *malloc(size_t sz)
+/* The caller exclusively owns a reserved block until it publishes the return
+ * value. Preserve that contract when recycling dirty storage: clear payload
+ * only after releasing the metadata lock and restoring the caller's IRQ state.
+ * Other allocators cannot reuse this live block while it is being cleared. */
+static void simpleos_heap_zero_owned(void *ptr, size_t size)
 {
-    void *caller = __builtin_return_address(0);
-    sz = simpleos_heap_align(sz);
-    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
-        serial_puts("[heap] alloc sz=");
-        serial_put_hex((uint64_t)sz);
-        serial_puts(" off_before=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts(" caller=");
-        serial_put_hex((uint64_t)(uintptr_t)caller);
-        serial_puts("\r\n");
-    }
-    if (_heap_off + sz > sizeof(_heap)) {
-        serial_puts("[PANIC] heap exhausted\r\n");
-        serial_puts("[PANIC] heap_off=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts(" req=");
-        serial_put_hex((uint64_t)sz);
-        serial_puts(" limit=");
-        serial_put_hex((uint64_t)sizeof(_heap));
-        serial_puts("\r\n");
-        for(;;) outb(0xF4, 0);
-    }
-    void *p = &_heap[_heap_off];
-    _heap_off += sz;
-    if (sz >= 0x100000 || _heap_off >= BAREMETAL_HEAP_WARN_SIZE) {
-        serial_puts("[heap] alloc off_after=");
-        serial_put_hex((uint64_t)_heap_off);
-        serial_puts("\r\n");
-    }
-    return p;
+    if (!ptr || size == 0) return;
+#ifdef SIMPLEOS_HEAP_TEST
+    rt_baremetal_heap_test_payload_clear(size, _heap_test_lock_owned);
+#endif
+    __builtin_memset(ptr, 0, size);
 }
 
-void free(void *p)
+static void simpleos_heap_free_unlocked(void *ptr)
 {
-    (void)p; /* bump allocator: no-op */
+    size_t offset;
+    SimpleOSHeapBlock *block = simpleos_heap_block_for_ptr(ptr, &offset);
+    if (!block || block->is_free) return; /* invalid and double free are harmless */
+    block->is_free = 1;
+
+    size_t next_offset = offset + block->span;
+    if (next_offset < _heap_off) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
+        if (simpleos_heap_block_valid(next, next_offset) && next->is_free) {
+            simpleos_heap_free_list_remove(next);
+            block->span += next->span;
+            simpleos_heap_set_following_previous_span(offset, block->span);
+        }
+    }
+
+    SimpleOSHeapBlock *previous = NULL;
+    if (block->previous_span != 0) {
+        size_t previous_offset = offset - block->previous_span;
+        previous = (SimpleOSHeapBlock *)((uint8_t *)_heap + previous_offset);
+        if (simpleos_heap_block_valid(previous, previous_offset) && previous->is_free) {
+            simpleos_heap_free_list_remove(previous);
+            previous->span += block->span;
+            simpleos_heap_set_following_previous_span(previous_offset, previous->span);
+            block = previous;
+            offset = previous_offset;
+        }
+    }
+    simpleos_heap_free_list_insert(block, offset);
+    simpleos_heap_release_tail();
 }
 
-void *realloc(void *p, size_t sz)
+void *malloc(size_t size)
 {
-    void *n = malloc(sz);
-    if (p && n) __builtin_memcpy(n, p, sz);
-    return n;
+    uint64_t flags = simpleos_heap_lock_acquire();
+    void *result = simpleos_heap_alloc_unlocked(size);
+    simpleos_heap_lock_release(flags);
+    if (result) {
+        size_t aligned = 0;
+        simpleos_heap_align(size, &aligned);
+        simpleos_heap_zero_owned(result, aligned);
+    }
+    return result;
 }
 
-void *calloc(size_t n, size_t sz)
+void free(void *ptr)
 {
-    size_t total = n * sz;
-    void *p = malloc(total);
-    if (p) __builtin_memset(p, 0, total);
-    return p;
+    uint64_t flags = simpleos_heap_lock_acquire();
+    simpleos_heap_free_unlocked(ptr);
+    simpleos_heap_lock_release(flags);
+}
+
+void *realloc(void *ptr, size_t size)
+{
+    SimpleOSHeapBlock *block;
+    size_t old_size;
+    size_t offset;
+    size_t aligned;
+    size_t needed;
+    uint64_t flags = simpleos_heap_lock_acquire();
+    if (!ptr) {
+        void *result = simpleos_heap_alloc_unlocked(size);
+        simpleos_heap_lock_release(flags);
+        if (result) {
+            size_t allocation_size = 0;
+            simpleos_heap_align(size, &allocation_size);
+            simpleos_heap_zero_owned(result, allocation_size);
+        }
+        return result;
+    }
+    if (size == 0) {
+        simpleos_heap_free_unlocked(ptr);
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    block = simpleos_heap_block_for_ptr(ptr, &offset);
+    if (!block || block->is_free) {
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    old_size = block->span - sizeof(SimpleOSHeapBlock);
+    if (!simpleos_heap_align(size, &aligned) || aligned > (size_t)-1 - sizeof(SimpleOSHeapBlock)) {
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    needed = sizeof(SimpleOSHeapBlock) + aligned;
+    if (needed <= block->span) {
+        simpleos_heap_lock_release(flags);
+        return ptr;
+    }
+    size_t next_offset = offset + block->span;
+    if (next_offset < _heap_off) {
+        SimpleOSHeapBlock *next = (SimpleOSHeapBlock *)((uint8_t *)_heap + next_offset);
+        if (simpleos_heap_block_valid(next, next_offset) && next->is_free && block->span + next->span >= needed) {
+            size_t remainder = block->span + next->span - needed;
+            simpleos_heap_free_list_remove(next);
+            block->span = needed;
+            if (remainder >= sizeof(SimpleOSHeapBlock) + SIMPLEOS_HEAP_ALIGNMENT) {
+                SimpleOSHeapBlock *tail = (SimpleOSHeapBlock *)((uint8_t *)block + needed);
+                tail->span = remainder;
+                tail->previous_span = needed;
+                tail->magic = SIMPLEOS_HEAP_MAGIC;
+                tail->is_free = 1;
+                tail->reserved = 0;
+                simpleos_heap_set_following_previous_span(offset + needed, remainder);
+                simpleos_heap_free_list_insert(tail, offset + needed);
+            } else {
+                block->span += remainder;
+                simpleos_heap_set_following_previous_span(offset, block->span);
+            }
+            simpleos_heap_lock_release(flags);
+            simpleos_heap_zero_owned((uint8_t *)ptr + old_size, aligned - old_size);
+            return ptr;
+        }
+    } else if (needed <= sizeof(_heap) - offset) {
+        block->span = needed;
+        _heap_off = offset + needed;
+        _heap_tail_span = needed;
+        simpleos_heap_lock_release(flags);
+        simpleos_heap_zero_owned((uint8_t *)ptr + old_size, aligned - old_size);
+        return ptr;
+    }
+    void *replacement = simpleos_heap_alloc_unlocked(size);
+    if (!replacement) {
+        simpleos_heap_lock_release(flags);
+        return NULL;
+    }
+    /* The caller retains exclusive ownership of ptr throughout realloc.  Keep
+     * the IRQ-masked section to metadata changes; copying a large buffer with
+     * interrupts disabled would delay device service unnecessarily. */
+    simpleos_heap_lock_release(flags);
+    __builtin_memcpy(replacement, ptr, old_size);
+    simpleos_heap_zero_owned((uint8_t *)replacement + old_size, aligned - old_size);
+    flags = simpleos_heap_lock_acquire();
+    simpleos_heap_free_unlocked(ptr);
+    simpleos_heap_lock_release(flags);
+    return replacement;
+}
+
+static void *simpleos_heap_realloc_last(void *ptr, size_t old_size, size_t new_size)
+{
+    (void)old_size;
+    return realloc(ptr, new_size);
+}
+
+void *calloc(size_t count, size_t size)
+{
+    if (count != 0 && size > (size_t)-1 / count) return NULL;
+    size_t total = count * size;
+    return malloc(total); /* malloc already clears the complete requested span. */
+}
+
+#ifdef SIMPLEOS_HEAP_TEST
+void rt_baremetal_heap_test_reset(void) { _heap_off = 0; _heap_tail_span = 0; _heap_free_blocks = 0; _heap_free_head = (size_t)-1; }
+size_t rt_baremetal_heap_test_capacity(void) { return sizeof(_heap); }
+size_t rt_baremetal_heap_test_high_water(void) { return _heap_off; }
+#endif
+/* SIMPLEOS_HEAP_ALLOCATOR_END */
+
+/* Reuse a poisoned compact header through the current free-list allocator. */
+uint64_t rt_abi_probe_heap_header_reuse(void)
+{
+    HeapHeader *first = (HeapHeader *)malloc(sizeof(RuntimeArray) + sizeof(RuntimeValue));
+    if (!first) return 0;
+    first->gc_flags = 0xffu;
+    first->reserved = 0xffffu;
+    free(first);
+    RuntimeArray *reused = runtime_array_from_abi(rt_u32_alloc_filled(1, 0x53));
+    return reused == (RuntimeArray *)first && reused->hdr.gc_flags == 0
+        && reused->hdr.reserved == 0 && reused->len == 1
+        && _rt_bytes_get(reused, 0) == 0x53 ? 1u : 0u;
 }
 
 RuntimeValue rt_alloc(RuntimeValue sz)
@@ -685,7 +1007,10 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
 {
-    (void)ptr;
+    /* rt_alloc returns a raw pointer on this ABI.  Managed collection remains
+     * intentionally unavailable here because heap objects have no ownership
+     * metadata; explicit runtime deallocation must still reclaim raw buffers. */
+    if (ptr != 0) free((void *)(uintptr_t)ptr);
     return NIL_VALUE;
 }
 
@@ -781,7 +1106,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
        by compile_fstring_format which calls rt_string_new(NULL, 0)) */
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
     /* data is a raw pointer cast to i64 */
@@ -797,7 +1122,7 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
     size_t len = strlen(cstr);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = (uint32_t)len;
     __builtin_memcpy(s->data, cstr, len);
@@ -867,7 +1192,7 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
 
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + total + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + total + 1);
     r->len = total;
     if (sa) __builtin_memcpy(r->data, sa->data, la);
@@ -911,7 +1236,7 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
         /* empty string */
         RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + 1);
         if (!r) return NIL_VALUE;
-        r->hdr.type = HEAP_STRING;
+        runtime_heap_header_init(&r->hdr, HEAP_STRING);
         r->hdr.size = (uint32_t)(sizeof(RuntimeString) + 1);
         r->len = 0;
         r->data[0] = '\0';
@@ -920,7 +1245,7 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     uint32_t len = (uint32_t)(b - a);
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     __builtin_memcpy(r->data, s->data + a, len);
@@ -948,7 +1273,7 @@ static RuntimeValue _int_to_string(int64_t n)
     uint32_t len = (uint32_t)(pos + neg);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     int out = 0;
@@ -968,7 +1293,7 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
     uint32_t len = (uint32_t)pos;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     int out = 0;
@@ -1476,8 +1801,7 @@ static struct {
 } _nvme;
 
 typedef struct {
-    size_t prev_heap_off;
-    size_t alloc_end_off;
+    void *raw;
 } nvme_aligned_alloc_header_t;
 
 /* Allocate page-aligned memory from the bump allocator.
@@ -1487,8 +1811,9 @@ static void *nvme_alloc_aligned(size_t size, size_t alignment)
 {
     if (alignment == 0) return (void *)0;
     /* Allocate extra space so we can align within it */
+    if (alignment > (size_t)-1 - sizeof(nvme_aligned_alloc_header_t) ||
+        size > (size_t)-1 - alignment - sizeof(nvme_aligned_alloc_header_t)) return (void *)0;
     size_t total = size + alignment + sizeof(nvme_aligned_alloc_header_t);
-    size_t prev_heap_off = _heap_off;
     void *raw = malloc(total);
     if (!raw) return (void *)0;
     /* Align the pointer within the allocated region */
@@ -1496,8 +1821,7 @@ static void *nvme_alloc_aligned(size_t size, size_t alignment)
     uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)(aligned - sizeof(nvme_aligned_alloc_header_t));
-    hdr->prev_heap_off = prev_heap_off;
-    hdr->alloc_end_off = _heap_off;
+    hdr->raw = raw;
     return (void *)aligned;
 }
 
@@ -1506,8 +1830,7 @@ static void nvme_free_aligned(void *ptr)
     if (!ptr) return;
     nvme_aligned_alloc_header_t *hdr =
         (nvme_aligned_alloc_header_t *)((uintptr_t)ptr - sizeof(nvme_aligned_alloc_header_t));
-    if (_heap_off == hdr->alloc_end_off && hdr->prev_heap_off <= hdr->alloc_end_off)
-        _heap_off = hdr->prev_heap_off;
+    free(hdr->raw);
 }
 
 /* Ring a doorbell: SQ tail doorbell = BAR0 + 0x1000 + (2*qid) * stride
@@ -2775,7 +3098,7 @@ RuntimeValue simpleos_fat32_read_known_app_array(RuntimeValue app_id_val)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     if (!a)
         return rt_array_new((RuntimeValue)0);
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     a->len = file_size;
     a->cap = file_size;
@@ -2843,7 +3166,7 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     if (!a)
         return rt_array_new((RuntimeValue)0);
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue));
     a->len = file_size;
     a->cap = file_size;
@@ -5125,7 +5448,7 @@ static RuntimeValue rt_bytes_from_rodata(const uint8_t *data, size_t len)
 {
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -6311,7 +6634,7 @@ RuntimeValue rt_ed25519_sign_seed(RuntimeValue seed_rv, RuntimeValue msg_rv)
     if (msg) free(msg);
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY); a->hdr.size = sizeof(RuntimeArray) + 64 * sizeof(RuntimeValue);
     a->len = 64; a->cap = 64;
     a->items = runtime_array_inline_items(a);
     for (int i = 0; i < 64; i++) a->items[i] = ENCODE_INT(sig[i]);
@@ -6427,7 +6750,7 @@ RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
     RuntimeValue *items = runtime_array_items(a);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     for (uint32_t i = 0; i < len; i++) {
@@ -6457,7 +6780,7 @@ RuntimeValue rt_string_to_byte_array(RuntimeValue str)
     uint32_t len = s->len;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = len;
     a->cap = len;
@@ -6568,7 +6891,7 @@ RuntimeValue rt_tls13_build_client_hello(RuntimeValue host_rv)
 
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)hoff * sizeof(RuntimeValue));
     a->len = hoff;
     a->cap = hoff;
@@ -6588,7 +6911,7 @@ RuntimeValue rt_tls13_build_client_hello_record(RuntimeValue host_rv)
     uint32_t rec_len = hs->len + 5;
     RuntimeArray *rec = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     if (!rec) return NIL_VALUE;
-    rec->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&rec->hdr, HEAP_ARRAY);
     rec->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)rec_len * sizeof(RuntimeValue));
     rec->len = rec_len;
     rec->cap = rec_len;
@@ -6629,7 +6952,7 @@ RuntimeValue rt_random_bytes_c(int64_t count)
     if (count < 0 || count > 65536) count = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
@@ -6792,7 +7115,7 @@ RuntimeValue rt_ed25519_keypair_pk(RuntimeValue seed_rv)
     free(seed);
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY); a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
     a->len = 32; a->cap = 32;
     a->items = runtime_array_inline_items(a);
     for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(pk[i]);
@@ -6807,7 +7130,7 @@ RuntimeValue rt_ed25519_keypair_sk(RuntimeValue seed_rv)
     if (!seed || slen != 32) { if (seed) free(seed); return NIL_VALUE; }
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
     if (!a) { free(seed); return NIL_VALUE; }
-    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY); a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
     a->len = 32; a->cap = 32;
     a->items = runtime_array_inline_items(a);
     for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(seed[i]);
@@ -6882,7 +7205,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
     if (max_len <= 0) {
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
-        a->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -6896,7 +7219,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         free(buf);
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
-        a->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -6909,7 +7232,7 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         free(buf);
         return NIL_VALUE;
     }
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = sizeof(RuntimeArray) + len * sizeof(RuntimeValue);
     a->len = len;
     a->cap = len;
@@ -7205,7 +7528,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
         /* Return empty array */
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
-        a->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -7218,7 +7541,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     /* Read data from socket rx buffer */
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue);
     a->len = read_len;
     a->cap = read_len;
@@ -7302,7 +7625,7 @@ RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
     if (avail < 5U) {
         RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!empty) return NIL_VALUE;
-        empty->hdr.type = HEAP_ARRAY;
+        runtime_heap_header_init(&empty->hdr, HEAP_ARRAY);
         empty->hdr.size = sizeof(RuntimeArray);
         empty->len = 0;
         empty->cap = 0;
@@ -8824,7 +9147,7 @@ RuntimeValue rt_string_to_upper(RuntimeValue str)
     if (!s) return str;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
     r->len = s->len;
     for (uint32_t i = 0; i < s->len; i++) {
@@ -8841,7 +9164,7 @@ RuntimeValue rt_string_to_lower(RuntimeValue str)
     if (!s) return str;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
     r->len = s->len;
     for (uint32_t i = 0; i < s->len; i++) {
@@ -8874,7 +9197,7 @@ RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeVa
             uint32_t result_len = s->len - o->len + nlen;
             RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
             if (!r) return str;
-            r->hdr.type = HEAP_STRING;
+            runtime_heap_header_init(&r->hdr, HEAP_STRING);
             r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
             r->len = result_len;
             /* Copy: prefix + replacement + suffix */
@@ -8913,7 +9236,7 @@ RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, Runti
     uint32_t result_len = s->len - count * o->len + count * nlen;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
 
@@ -8952,7 +9275,7 @@ RuntimeValue rt_string_repeat(RuntimeValue str, RuntimeValue count_val)
     uint32_t result_len = s->len * (uint32_t)count;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
     for (int64_t i = 0; i < count; i++) {
@@ -8973,7 +9296,7 @@ RuntimeValue rt_string_pad_start(RuntimeValue str, RuntimeValue width_val)
     uint32_t result_len = (uint32_t)width;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
     __builtin_memset(r->data, ' ', pad);
@@ -8993,7 +9316,7 @@ RuntimeValue rt_string_pad_end(RuntimeValue str, RuntimeValue width_val)
     uint32_t result_len = (uint32_t)width;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
     r->len = result_len;
     __builtin_memcpy(r->data, s->data, s->len);
@@ -9009,7 +9332,7 @@ RuntimeValue rt_string_reverse(RuntimeValue str)
     if (!s || s->len <= 1) return str;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
     if (!r) return str;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
     r->len = s->len;
     for (uint32_t i = 0; i < s->len; i++) {
@@ -9406,7 +9729,7 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -9439,11 +9762,10 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
                 if (!new_data) return ENCODE_PTR(a);
                 for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
             } else {
-                /* REUSE rather than reallocate: free() is a no-op on the bump
-                 * heap, so an unconditional fresh malloc+copy leaks the entire
-                 * old buffer on every doubling. simpleos_heap_realloc_last
-                 * extends in place when this is the most recent allocation (the
-                 * common append-loop case) and copies only when it is not. The
+                /* Reallocate instead of unconditional fresh malloc+copy.
+                 * simpleos_heap_realloc_last extends in place when this is the
+                 * most recent allocation (the common append-loop case) and
+                 * otherwise copies and reclaims the old buffer. The
                  * value-array branch below has always done this; the packed byte
                  * branch did not. Same realloc-instead-of-reuse defect fixed in
                  * _reset_font_atlas (font_renderer.spl). */
@@ -9631,7 +9953,7 @@ RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
     uint32_t len = a->len + b->len;
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     out->len = len;
     out->cap = len;
@@ -9655,7 +9977,7 @@ RuntimeValue rt_bytes_slice(RuntimeValue arr_rv, int64_t start, int64_t length)
     if (ulen > arr->len - ustart) ulen = arr->len - ustart;
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)ulen * sizeof(RuntimeValue));
     out->len = ulen;
     out->cap = ulen;
@@ -9670,7 +9992,36 @@ int64_t rt_bytes_u8_at(RuntimeValue arr_rv, int64_t idx)
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(arr_rv);
     if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
     if (idx < 0 || (uint32_t)idx >= arr->len) return 0;
-    return (int64_t)_rv_byte(runtime_array_items(arr)[idx]);
+    return (int64_t)_rt_bytes_get(arr, (uint32_t)idx);
+}
+
+RuntimeValue rt_abi_probe_bytes(void)
+{
+    static const uint8_t bytes[8] = {65, 66, 67, 68, 69, 70, 71, 72};
+    return _rt_bytes_new(bytes, 8);
+}
+
+uint64_t rt_abi_probe_handle(RuntimeValue value) { return (uint64_t)value; }
+
+uint64_t rt_abi_probe_len(RuntimeValue value)
+{
+    RuntimeArray *array = runtime_array_from_abi(value);
+    return array ? array->len : 0;
+}
+
+uint64_t rt_abi_probe_items_ptr(RuntimeValue value)
+{
+    RuntimeArray *array = runtime_array_from_abi(value);
+    return array ? (uint64_t)(uintptr_t)runtime_array_items(array) : 0;
+}
+
+uint64_t rt_abi_probe_raw(RuntimeValue value, int64_t index)
+{
+    RuntimeArray *array = runtime_array_from_abi(value);
+    if (!array || index < 0 || (uint64_t)index >= array->len) return 0;
+    if (array->hdr.gc_flags & BYTE_PACKED)
+        return ((uint8_t *)runtime_array_items(array))[index];
+    return (uint64_t)runtime_array_items(array)[index];
 }
 
 int64_t rt_bytes_u16_be_at(RuntimeValue arr_rv, int64_t idx)
@@ -9734,7 +10085,7 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
             _rv_byte(items[scan + 7U]) == 0x20) {
             RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             if (!out) return NIL_VALUE;
-            out->hdr.type = HEAP_ARRAY;
+            runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
             out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + 32U * sizeof(RuntimeValue));
             out->len = 32U;
             out->cap = 32U;
@@ -9782,7 +10133,7 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
                 uint32_t out_len = key_end - key_off;
                 RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)out_len * sizeof(RuntimeValue));
                 if (!out) return NIL_VALUE;
-                out->hdr.type = HEAP_ARRAY;
+                runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
                 out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)out_len * sizeof(RuntimeValue));
                 out->len = out_len;
                 out->cap = out_len;
@@ -9799,7 +10150,7 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
 
     RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
     if (!empty) return NIL_VALUE;
-    empty->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&empty->hdr, HEAP_ARRAY);
     empty->hdr.size = (uint32_t)sizeof(RuntimeArray);
     empty->len = 0;
     empty->cap = 0;
@@ -10370,7 +10721,7 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
 {
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
-    out->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&out->hdr, HEAP_ARRAY);
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     out->len = len;
     out->cap = len;
@@ -12740,7 +13091,7 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv)
     if (len <= 0) len = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -12959,7 +13310,7 @@ RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeV
 {
     RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
     if (!e) return NIL_VALUE;
-    e->hdr.type = HEAP_ENUM;
+    runtime_heap_header_init(&e->hdr, HEAP_ENUM);
     e->hdr.size = (uint32_t)sizeof(RuntimeEnum);
     e->enum_id = (uint32_t)(int32_t)enum_id_rv;
     e->discriminant = (uint32_t)(int32_t)disc_rv;
@@ -13143,7 +13494,7 @@ RuntimeValue rt_map_new(void)
     uint32_t cap = 16;
     RuntimeMap *m = (RuntimeMap *)malloc(sizeof(RuntimeMap));
     if (!m) return NIL_VALUE;
-    m->hdr.type = HEAP_MAP;
+    runtime_heap_header_init(&m->hdr, HEAP_MAP);
     m->hdr.size = (uint32_t)sizeof(RuntimeMap);
     m->len = 0;
     m->cap = cap;
@@ -13686,7 +14037,8 @@ RuntimeValue rt_abort(RuntimeValue msg)
     return NIL_VALUE;
 }
 
-/* GC: safe no-ops on bare metal (bump allocator, no GC) */
+/* GC has no tracing metadata in this freestanding ABI. Explicit rt_dealloc
+ * reclaims raw buffers; rt_gc_collect must not guess at live heap objects. */
 RuntimeValue rt_gc_collect(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
 RuntimeValue rt_gc_enable(void)  { return NIL_VALUE; }
@@ -13699,7 +14051,7 @@ TRAP_STUB_RET(rt_thread_join, 1)
 /* Safe no-ops on single-threaded bare metal */
 RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
 RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
-RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
+/* rt_thread_sleep is the elapsed-time implementation below. */
 TRAP_STUB_RET(rt_mutex_new, 0)
 TRAP_STUB_RET(rt_mutex_lock, 1)
 TRAP_STUB_RET(rt_mutex_unlock, 1)
@@ -14183,7 +14535,7 @@ RuntimeValue rt_random_bytes(RuntimeValue count_rv)
 
     RuntimeArray *arr = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
     if (!arr) return NIL_VALUE;
-    arr->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&arr->hdr, HEAP_ARRAY);
     arr->hdr.size = (uint32_t)(sizeof(RuntimeArray) + count * sizeof(RuntimeValue));
     arr->len = (uint32_t)count;
     arr->cap = (uint32_t)count;
@@ -14393,10 +14745,43 @@ __attribute__((naked)) static void _rich_fault_entry(void)
         "addq $8, %%rsp\n\t"
         "iretq\n\t"
         "3:\n\t"
-        /* No error code: advance RIP (at [rsp]), iretq */
+        /* A kernel ud2 is an intentional trap. Diagnose and halt rather
+         * than turning it into a silent RIP+=2 recovery. */
+        "pushq %%rax\n\t"
+        "pushq %%rcx\n\t"
+        "movq 16(%%rsp), %%rax\n\t"
+        /* Do not let the diagnostic probe cross a page boundary while already
+         * handling an exception: an unmapped following page would recurse
+         * into #PF/#DF. The shared ISR has no vector number, so the boundary
+         * case is ambiguous; fail closed as a fatal ud2 candidate rather than
+         * ever advancing past an intentional cross-page ud2. */
+        "movq %%rax, %%rcx\n\t"
+        "andl $0xFFF, %%ecx\n\t"
+        "cmpl $0xFFF, %%ecx\n\t"
+        "jne 4f\n\t"
+        "movl $0x0B0F, %%ecx\n\t"
+        "jmp 5f\n\t"
+        "4:\n\t"
+        "movzwl (%%rax), %%ecx\n\t"
+        "5:\n\t"
+        "cmpl $0x0B0F, %%ecx\n\t"
+        "popq %%rcx\n\t"
+        "popq %%rax\n\t"
+        "je 6f\n\t"
+        /* Other no-error-code faults retain the legacy recovery. */
         "addq $2, (%%rsp)\n\t"
         "movq $0x3, %%rax\n\t"
         "iretq\n\t"
+        "6:\n\t"
+        /* Interrupts can arrive with either stack residue. The hook is
+         * noreturn, so align the abandoned interrupt stack dynamically. */
+        "movq (%%rsp), %%rdi\n\t"
+        "andq $-16, %%rsp\n\t"
+        "callq spl_x86_on_kernel_ud2_fault\n\t"
+        "cli\n\t"
+        "7:\n\t"
+        "hlt\n\t"
+        "jmp 7b\n\t"
         : : : "memory"
     );
 }
@@ -14757,7 +15142,7 @@ RuntimeValue rt_build_byte_range(RuntimeValue count_rv)
     size_t alloc = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)alloc;
     a->len = (uint32_t)count;
     a->cap = (uint32_t)count;
@@ -14774,7 +15159,7 @@ RuntimeValue rt_array_new_with_cap(int64_t cap)
     if (cap < 0) cap = 16;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -15183,6 +15568,8 @@ void rt_bare_spawn_leave(void) {
 }
 
 int64_t rt_bare_spawn_depth(void) { return _bare_spawn_depth; }
+
+static void _bare_exec_reset_files(void);
 
 void rt_user_heap_init(uint64_t base, uint64_t size) {
     _user_heap_base = base;
@@ -17118,7 +17505,7 @@ RuntimeValue rt_u32s_from_raw(RuntimeValue data_ptr, RuntimeValue count_val)
     size_t bytes = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.gc_flags = 0;         /* tagged 8-byte slots, NOT byte-packed */
     a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)bytes;
@@ -17696,6 +18083,12 @@ static uint32_t _bm_blend_pixel(uint32_t sp, uint32_t dp)
     return (out_a << 24) | (r << 16) | (g << 8) | b;
 }
 
+#define SIMPLEOS_DEFINE_RT_GUI_BLEND_SPAN8 1
+#include "direct_lfb_blend_span.h"
+
+/* The direct-LFB path uses the same tagged [u32] ABI and blend arithmetic as
+ * the hosted span kernel. Refuse the entire row before writing any pixel so
+ * the Simple caller can safely run its scalar fallback. */
 /* rt_engine2d_simd_fill_span_u32: fill dst[offset .. offset+count) with a
  * single colour, in place. Hosted reference:
  * src/runtime/runtime_simd_dispatch.c:1115 (which delegates to

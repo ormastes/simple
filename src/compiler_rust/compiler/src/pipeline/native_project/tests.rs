@@ -8,7 +8,10 @@ use std::sync::{Mutex, OnceLock};
 use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path};
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
-use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
+use super::linker::{
+    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
+    validate_extra_link_objects,
+};
 use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
@@ -32,6 +35,28 @@ fn source_defines_callable(path: &Path, name: &str) -> bool {
         matches!(item, simple_parser::ast::Node::Function(def)
             if def.name == name && !def.body.statements.is_empty())
     })
+}
+
+#[test]
+fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
+    assert!(is_boot_c_translation_unit(Path::new("boot_entry.c")));
+    // This legacy file is intentionally still a standalone TU: it owns unique
+    // runtime definitions until it is wrapped by a real .c source.
+    assert!(is_boot_c_translation_unit(Path::new("baremetal_runtime_core.inc.c")));
+    assert!(!is_boot_c_translation_unit(Path::new("runtime_tail.inc.c")));
+    assert!(!is_boot_c_translation_unit(Path::new("crt0.S")));
+}
+
+#[test]
+fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
+    assert!(minimal_boot_source_allowed("boot_entry", false));
+    assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
+    assert!(minimal_boot_source_allowed("freestanding_runtime", false));
+    assert!(minimal_boot_source_allowed("baremetal_stubs", false));
+    assert!(minimal_boot_source_allowed("rv64_display_backend", false));
+    assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
+    assert!(minimal_boot_source_allowed("full_networking_runtime", true));
+    assert!(!minimal_boot_source_allowed("unrelated_service", false));
 }
 
 #[test]
@@ -1637,10 +1662,21 @@ fn test_collect_spl_files() {
     std::fs::write(dir.join("b.txt"), "not spl").unwrap();
     std::fs::create_dir(dir.join("sub")).unwrap();
     std::fs::write(dir.join("sub/c.spl"), "# test").unwrap();
+    std::fs::create_dir_all(dir.join("cli")).unwrap();
+    std::fs::write(dir.join("cli/check.spl"), "# production check command").unwrap();
+    std::fs::write(dir.join("cli/arch_check.spl"), "# production check command").unwrap();
+    std::fs::create_dir_all(dir.join("check.spl.assets")).unwrap();
+    std::fs::write(dir.join("check.spl.assets/ordinary.spl"), "# nested production module").unwrap();
 
     let mut files = Vec::new();
     collect_spl_files_recursive(dir, &mut files);
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 5);
+    assert!(files.contains(&dir.join("a.spl")));
+    assert!(files.contains(&dir.join("sub/c.spl")));
+    assert!(files.contains(&dir.join("cli/check.spl")));
+    assert!(files.contains(&dir.join("cli/arch_check.spl")));
+    assert!(files.contains(&dir.join("check.spl.assets/ordinary.spl")));
+    assert!(!files.contains(&dir.join("b.txt")));
 }
 
 #[test]
@@ -4983,6 +5019,89 @@ fn test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe() {
         assert_ne!(cc, cxx);
     }
     assert!(builder.config.target.is_some());
+}
+
+#[test]
+fn selective_alias_prefers_exact_owner_over_nested_same_named_wrapper() {
+    let owner = "compiler__loader__smf_mmap_native__native_munmap".to_string();
+    let wrapper = "compiler__loader__loader__smf_mmap_native__native_munmap".to_string();
+    let all_mangled = std::collections::HashMap::from([
+        ("native_munmap".to_string(), vec![wrapper, owner.clone()]),
+        (
+            "stderr_write".to_string(),
+            vec!["lib__nogc_sync_mut__io__stderr_ops__stderr_write".to_string()],
+        ),
+    ]);
+    let source = "use compiler.loader.smf_mmap_native.{native_munmap as owner_munmap}\n\
+                  use std.io.stderr_ops.{stderr_write}\n\
+                  fn native_munmap(address: i64, size: i64) -> bool:\n    owner_munmap(address, size)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(
+        &ast,
+        &all_mangled,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(use_map.get("owner_munmap"), Some(&owner));
+    let reduced_owner = "loader__owner__native_probe_value".to_string();
+    let reduced = std::collections::HashMap::from([(
+        "native_probe_value".to_string(),
+        vec![
+            "loader__loader__owner__native_probe_value".to_string(),
+            reduced_owner.clone(),
+        ],
+    )]);
+    let reduced_ast = simple_parser::Parser::new(
+        "use loader.owner.{native_probe_value as owner_probe_value}\n",
+    )
+    .parse()
+    .unwrap();
+    let reduced_use_map = super::imports::build_use_map_from_ast(
+        &reduced_ast,
+        &reduced,
+        &std::collections::HashMap::new(),
+    );
+    assert_eq!(reduced_use_map.get("owner_probe_value"), Some(&reduced_owner));
+    // The tier-inserted std/lib spelling has no exact path. Preserve its
+    // existing subsequence fallback while fixing the nested-owner collision.
+    assert_eq!(
+        use_map.get("stderr_write").map(String::as_str),
+        Some("lib__nogc_sync_mut__io__stderr_ops__stderr_write"),
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn selective_alias_nested_owner_archive_has_no_bare_alias_reference() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("test/fixtures/macos_alias_link");
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("libalias_probe.a");
+    NativeProjectBuilder::new(repo_root, archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            entry_closure: true,
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_root.clone())
+        .entry_file(source_root.join("main.spl"))
+        .build()
+        .unwrap();
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let stdout = String::from_utf8_lossy(&symbols.stdout);
+    assert!(stdout.contains("loader__owner__native_probe_value"));
+    assert!(stdout.contains("loader__loader__owner__native_probe_value"));
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "U _owner_probe_value" || line.trim() == "U owner_probe_value"),
+        "unresolved selective-import alias survived object emission:\n{stdout}"
+    );
 }
 
 #[test]

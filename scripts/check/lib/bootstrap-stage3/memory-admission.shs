@@ -367,11 +367,16 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
             rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
         bootstrap_stage3_memory_process_source=fixture
     elif command -v ps >/dev/null 2>&1; then
-        ps -eo pid=,ppid=,rss=,args= 2>/dev/null | awk '
+        ps -eo pid=,ppid=,rss=,args= 2>/dev/null >"$bootstrap_stage3_memory_process_tmp.raw" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_process_tmp.raw"; return 1; }
+        awk '
             { pid=$1; ppid=$2; rss=$3; $1=""; $2=""; $3=""; sub(/^  */, "");
               print pid "|" ppid "|" rss "|" $0 }
-        ' >"$bootstrap_stage3_memory_process_tmp" || {
-            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+        ' "$bootstrap_stage3_memory_process_tmp.raw" >"$bootstrap_stage3_memory_process_tmp" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_process_tmp.raw"; return 1; }
+        rm -f "$bootstrap_stage3_memory_process_tmp.raw"
         bootstrap_stage3_memory_process_source=ps
     else
         rm -f "$bootstrap_stage3_memory_process_tmp"
@@ -381,6 +386,7 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
     bootstrap_stage3_memory_bootstrap_count=0
     bootstrap_stage3_memory_native_count=0
     bootstrap_stage3_memory_replay_count=0
+    bootstrap_stage3_memory_qemu_count=0
     while IFS='|' read -r bootstrap_stage3_memory_pid \
         bootstrap_stage3_memory_ppid bootstrap_stage3_memory_rss \
         bootstrap_stage3_memory_cmd; do
@@ -388,6 +394,9 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
             bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_ppid" &&
             bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_rss" || continue
         case "$bootstrap_stage3_memory_cmd" in
+            *qemu-system-*)
+                bootstrap_stage3_memory_kind=qemu
+                bootstrap_stage3_memory_qemu_count=$((bootstrap_stage3_memory_qemu_count + 1)) ;;
             *'/simple replay missing-build-log.json'*)
                 bootstrap_stage3_memory_kind=replay-chain
                 bootstrap_stage3_memory_replay_count=$((bootstrap_stage3_memory_replay_count + 1)) ;;
@@ -420,12 +429,117 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
     {
         echo 'process_scan_status=available'
         printf 'process_scan_source=%s\n' "$bootstrap_stage3_memory_process_source"
-        echo 'process_scan_effect=informational-only'
+        echo 'process_scan_effect=admission-gate'
         printf 'concurrent_process_count=%s\n' "$bootstrap_stage3_memory_process_count"
         printf 'concurrent_bootstrap_count=%s\n' "$bootstrap_stage3_memory_bootstrap_count"
         printf 'concurrent_native_build_count=%s\n' "$bootstrap_stage3_memory_native_count"
         printf 'runaway_replay_chain_count=%s\n' "$bootstrap_stage3_memory_replay_count"
+        printf 'concurrent_qemu_count=%s\n' "$bootstrap_stage3_memory_qemu_count"
     } >>"$bootstrap_stage3_memory_process_output"
+}
+
+# The 2026-09-22 failed Stage 3 retained 37.3 GiB after streaming parse had
+# released 841 surfaces; that retention is still an unresolved compiler defect,
+# not an expected registry cost. A point-in-time MemAvailable check alone cannot
+# protect the host when another native build or QEMU guest starts growing.
+# Refuse that known unsafe overlap before the runner is launched.  One outer
+# bootstrap coordinator is allowed because it may exec this resume helper.
+bootstrap_stage3_memory_require_exclusive_heavy() {
+    [ "$#" -eq 1 ] || return 2
+    bootstrap_stage3_memory_exclusive_evidence=$1
+    [ -f "$bootstrap_stage3_memory_exclusive_evidence" ] &&
+        [ ! -L "$bootstrap_stage3_memory_exclusive_evidence" ] || return 2
+    [ "$(bootstrap_stage3_manifest_value process_scan_status \
+        "$bootstrap_stage3_memory_exclusive_evidence")" = available ] || return 75
+    bootstrap_stage3_memory_exclusive_native=$(bootstrap_stage3_manifest_value \
+        concurrent_native_build_count "$bootstrap_stage3_memory_exclusive_evidence") || return 2
+    bootstrap_stage3_memory_exclusive_bootstrap=$(bootstrap_stage3_manifest_value \
+        concurrent_bootstrap_count "$bootstrap_stage3_memory_exclusive_evidence") || return 2
+    bootstrap_stage3_memory_exclusive_qemu=$(bootstrap_stage3_manifest_value \
+        concurrent_qemu_count "$bootstrap_stage3_memory_exclusive_evidence" 2>/dev/null || echo 0)
+    for bootstrap_stage3_memory_exclusive_value in \
+        "$bootstrap_stage3_memory_exclusive_native" \
+        "$bootstrap_stage3_memory_exclusive_bootstrap" \
+        "$bootstrap_stage3_memory_exclusive_qemu"; do
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_exclusive_value" || return 2
+    done
+    if [ "$bootstrap_stage3_memory_exclusive_native" -gt 0 ] ||
+       [ "$bootstrap_stage3_memory_exclusive_bootstrap" -gt 1 ] ||
+       [ "$bootstrap_stage3_memory_exclusive_qemu" -gt 0 ]; then
+        echo "Stage 3 memory admission blocked: concurrent heavy work (native=$bootstrap_stage3_memory_exclusive_native bootstrap=$bootstrap_stage3_memory_exclusive_bootstrap qemu=$bootstrap_stage3_memory_exclusive_qemu)" >&2
+        return 75
+    fi
+    return 0
+}
+
+# Stop a kernel-owned Stage 3 cgroup with bounded TERM/KILL escalation.  The
+# user service has KillMode=control-group, so reparenting and nested forks do
+# not escape ownership.  Success means systemd reports no active unit.
+bootstrap_stage3_memory_unit_inactive() {
+    [ "$#" -eq 1 ] || return 2
+    bootstrap_stage3_unit_check=$1
+    bootstrap_stage3_unit_load=$(timeout -k 1 3 systemctl --user show "$bootstrap_stage3_unit_check" \
+        --property=LoadState --value 2>/dev/null) || return 2
+    [ "$bootstrap_stage3_unit_load" != not-found ] || return 0
+    bootstrap_stage3_unit_active=$(timeout -k 1 3 systemctl --user show "$bootstrap_stage3_unit_check" \
+        --property=ActiveState --value 2>/dev/null) || return 2
+    case "$bootstrap_stage3_unit_active" in inactive|failed) ;; *) return 1 ;; esac
+    bootstrap_stage3_unit_cgroup=$(timeout -k 1 3 systemctl --user show "$bootstrap_stage3_unit_check" \
+        --property=ControlGroup --value 2>/dev/null) || return 2
+    [ -n "$bootstrap_stage3_unit_cgroup" ] || return 0
+    bootstrap_stage3_unit_events="/sys/fs/cgroup${bootstrap_stage3_unit_cgroup}/cgroup.events"
+    [ -r "$bootstrap_stage3_unit_events" ] || return 2
+    bootstrap_stage3_unit_populated=$(awk '$1 == "populated" { print $2; exit }' \
+        "$bootstrap_stage3_unit_events") || return 2
+    [ "$bootstrap_stage3_unit_populated" = 0 ]
+}
+
+bootstrap_stage3_memory_terminate_unit() {
+    [ "$#" -eq 2 ] || return 2
+    bootstrap_stage3_unit=$1
+    bootstrap_stage3_unit_evidence=$2
+    case "$bootstrap_stage3_unit" in
+        simple-bootstrap-stage3-[A-Za-z0-9_.-]*) ;;
+        *) return 2 ;;
+    esac
+    command -v systemctl >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1 || return 2
+    timeout -k 1 3 systemctl --user kill --kill-whom=all --signal=TERM "$bootstrap_stage3_unit" \
+        >/dev/null 2>&1 || return 2
+    bootstrap_stage3_unit_wait=0
+    while [ "$bootstrap_stage3_unit_wait" -lt 3 ]; do
+        if bootstrap_stage3_memory_unit_inactive "$bootstrap_stage3_unit"; then
+            echo 'shutdown_signal=TERM' >>"$bootstrap_stage3_unit_evidence"
+            return 0
+        fi
+        sleep 1
+        bootstrap_stage3_unit_wait=$((bootstrap_stage3_unit_wait + 1))
+    done
+    timeout -k 1 3 systemctl --user kill --kill-whom=all --signal=KILL "$bootstrap_stage3_unit" \
+        >/dev/null 2>&1 || return 2
+    bootstrap_stage3_unit_wait=0
+    while [ "$bootstrap_stage3_unit_wait" -lt 3 ]; do
+        if bootstrap_stage3_memory_unit_inactive "$bootstrap_stage3_unit"; then
+            echo 'shutdown_signal=KILL' >>"$bootstrap_stage3_unit_evidence"
+            return 0
+        fi
+        sleep 1
+        bootstrap_stage3_unit_wait=$((bootstrap_stage3_unit_wait + 1))
+    done
+    return 1
+}
+
+# Signal-path ownership handoff: only remove the exact output lock after the
+# kernel-owned cgroup is proven empty. Failure deliberately leaves it behind.
+bootstrap_stage3_memory_signal_cleanup() {
+    [ "$#" -eq 3 ] || return 2
+    bootstrap_stage3_signal_unit=$1
+    bootstrap_stage3_signal_evidence=$2
+    bootstrap_stage3_signal_lock=$3
+    [ -d "$bootstrap_stage3_signal_lock" ] &&
+        [ ! -L "$bootstrap_stage3_signal_lock" ] || return 2
+    bootstrap_stage3_memory_terminate_unit "$bootstrap_stage3_signal_unit" \
+        "$bootstrap_stage3_signal_evidence" || return 1
+    rm -rf "$bootstrap_stage3_signal_lock"
 }
 
 bootstrap_stage3_memory_emit_sample() {
@@ -527,11 +641,12 @@ ${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_MIN_PERCENT:-15}
                 {
                     echo 'process_scan_status=unavailable'
                     echo 'process_scan_source=unavailable'
-                    echo 'process_scan_effect=informational-only'
+                    echo 'process_scan_effect=admission-gate'
                     echo 'concurrent_process_count=0'
                     echo 'concurrent_bootstrap_count=0'
                     echo 'concurrent_native_build_count=0'
                     echo 'runaway_replay_chain_count=0'
+                    echo 'concurrent_qemu_count=0'
                 } >>"$bootstrap_stage3_memory_tmp"
             }
         fi

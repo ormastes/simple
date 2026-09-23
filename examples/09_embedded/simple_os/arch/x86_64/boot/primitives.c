@@ -368,7 +368,7 @@ static RuntimeValue prim_int_to_str(int64_t n)
     uint32_t len = (uint32_t)(pos + neg);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = len;
     int out = 0;
@@ -515,7 +515,7 @@ RuntimeValue substring(RuntimeValue s, RuntimeValue start, RuntimeValue end)
     uint32_t len = (uint32_t)(b - a);
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     for (uint32_t j = 0; j < len; j++) r->data[j] = str->data[a + j];
@@ -546,7 +546,7 @@ RuntimeValue trim_start(RuntimeValue s)
     uint32_t len = str->len - i;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     for (uint32_t j = 0; j < len; j++) r->data[j] = str->data[i + j];
@@ -570,7 +570,7 @@ RuntimeValue trim_end(RuntimeValue s)
     uint32_t len = (uint32_t)end;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!r) return NIL_VALUE;
-    r->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&r->hdr, HEAP_STRING);
     r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     r->len = len;
     for (uint32_t j = 0; j < len; j++) r->data[j] = str->data[j];

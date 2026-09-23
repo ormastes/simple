@@ -73,6 +73,94 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(lowering.errors.len()).to_equal(0)
         expect(hir.symbols.lookup("answer") != nil).to_equal(true)
 
+    it "diagnoses a missing explicit item from its requested module":
+        val log = make_logger()
+        val provider_source = "pub fn present() -> i64:\n    1"
+        # missing is declared locally. That must not hide that the named
+        # import asks the provider for a symbol it does not expose.
+        val consumer_source = "use named.provider.\{missing\}\nfn missing() -> i64:\n    2"
+        val provider = parse_full_frontend(provider_source, "named.provider", "named.provider", log)
+        val consumer = parse_full_frontend(consumer_source, "named.consumer", "named.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["named.provider"] = provider
+        modules["named.consumer"] = consumer
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: "named/provider.spl", content: provider_source, module_name: "named.provider"),
+            SourceFile(path: "named/consumer.spl", content: consumer_source, module_name: "named.consumer")
+        ])
+        var lowering = hirlowering_for_module("named.consumer", surfaces)
+        lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("module named.provider has no exported item missing")
+
+    it "diagnoses an explicit import whose module is absent from the closure":
+        val log = make_logger()
+        val consumer_source = "use named.absent.\{missing\}\nfn main() -> i64:\n    0"
+        val consumer = parse_full_frontend(consumer_source, "named.absent_consumer", "named.absent_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["named.absent_consumer"] = consumer
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: "named/absent_consumer.spl", content: consumer_source, module_name: "named.absent_consumer")
+        ])
+        var lowering = hirlowering_for_module("named.absent_consumer", surfaces)
+        lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("missing module surface for named.absent")
+
+    it "diagnoses a missing aliased explicit item independently of its local alias":
+        val log = make_logger()
+        val provider_source = "pub fn present() -> i64:\n    1"
+        val unrelated_source = "pub fn missing() -> i64:\n    2"
+        val consumer_source = "use named.alias_provider.\{missing as local_present\}\nuse named.unrelated.*\nfn local_present() -> i64:\n    3"
+        val provider = parse_full_frontend(provider_source, "named.alias_provider", "named.alias_provider", log)
+        val unrelated = parse_full_frontend(unrelated_source, "named.unrelated", "named.unrelated", log)
+        val consumer = parse_full_frontend(consumer_source, "named.alias_consumer", "named.alias_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["named.alias_provider"] = provider
+        modules["named.unrelated"] = unrelated
+        modules["named.alias_consumer"] = consumer
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: "named/alias_provider.spl", content: provider_source, module_name: "named.alias_provider"),
+            SourceFile(path: "named/unrelated.spl", content: unrelated_source, module_name: "named.unrelated"),
+            SourceFile(path: "named/alias_consumer.spl", content: consumer_source, module_name: "named.alias_consumer")
+        ])
+        var lowering = hirlowering_for_module("named.alias_consumer", surfaces)
+        lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].message).to_contain("module named.alias_provider has no exported item missing as local_present")
+
+    it "accepts direct and transitive explicit re-export items while preserving glob imports":
+        val log = make_logger()
+        val provider_source = "pub fn direct() -> i64:\n    1\npub fn reexported() -> i64:\n    2"
+        val glob_source = "pub fn glob_only() -> i64:\n    3"
+        val facade_source = "export use named.good_provider.\{reexported\}"
+        val consumer_source = "use named.good_provider.\{direct\}\nuse named.facade.\{reexported\}\nuse named.glob_provider.*\nfn main() -> i64:\n    direct() + reexported() + glob_only()"
+        val provider = parse_full_frontend(provider_source, "named.good_provider", "named.good_provider", log)
+        val glob = parse_full_frontend(glob_source, "named.glob_provider", "named.glob_provider", log)
+        val facade = parse_full_frontend(facade_source, "named.facade", "named.facade", log)
+        val consumer = parse_full_frontend(consumer_source, "named.good_consumer", "named.good_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["named.good_provider"] = provider
+        modules["named.glob_provider"] = glob
+        modules["named.facade"] = facade
+        modules["named.good_consumer"] = consumer
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: "named/good_provider.spl", content: provider_source, module_name: "named.good_provider"),
+            SourceFile(path: "named/glob_provider.spl", content: glob_source, module_name: "named.glob_provider"),
+            SourceFile(path: "named/facade.spl", content: facade_source, module_name: "named.facade"),
+            SourceFile(path: "named/good_consumer.spl", content: consumer_source, module_name: "named.good_consumer")
+        ])
+        var lowering = hirlowering_for_module("named.good_consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("direct") != nil).to_equal(true)
+        expect(hir.symbols.lookup("reexported") != nil).to_equal(true)
+        expect(hir.symbols.lookup("glob_only") != nil).to_equal(true)
+
     it "follows a glob re-export from a punctuated absolute importer":
         val log = make_logger()
         val root = "/tmp/stage3-integrated-migration/glob_pkg"

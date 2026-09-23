@@ -1,0 +1,42 @@
+#!/bin/sh
+# Provision an admitted self-hosted runtime for clean-checkout cache writers.
+# The receipt-free lane stops at Stage 2. The typed planner receipt then grants
+# the normal scheduler authority to converge and deploy Stage 4; the Rust seed
+# is never exposed as bin/simple.
+set -eu
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
+cd "$root"
+
+# The normal scheduler otherwise sizes itself from every online CPU and
+# replaces the CLI --jobs value for critical work. Keep hosted-runner CPU/RSS
+# pressure bounded as well as the explicit bootstrap child jobs.
+export SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=2
+
+SIMPLE_NO_STUB_FALLBACK=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh \
+    --backend=llvm \
+    --mode=dynload \
+    --full-bootstrap \
+    --stop-after-stage2 \
+    --no-mcp \
+    --jobs=2
+
+stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit)
+test -n "$stage2"
+receipt="$PWD/build/bootstrap/cache-writer-stage4-planner-admission-v2.env"
+
+sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+  --target=//bootstrap:stage4 \
+  --reason=self-host-convergence-check \
+  --parent-compiler="$stage2" \
+  --out="$receipt"
+
+SIMPLE_NO_STUB_FALLBACK=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh \
+    --bootstrap-receipt="$receipt" \
+    --deploy \
+    --no-mcp \
+    --jobs=2
+
+test -x bin/simple

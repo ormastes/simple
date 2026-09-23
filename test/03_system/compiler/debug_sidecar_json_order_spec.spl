@@ -13,7 +13,7 @@ describe block (source contract) always runs against the tracked manifest
 source; the generated-output and baseline-comparison blocks additionally need
 the SA-3 split build output and the SA-1 baseline respectively.
 ## Compatibility and limitations
-`src/hardware/fpga_linux/fpga_linux_manifest.spl` and
+`src/lib/hardware/fpga_linux/fpga_linux_manifest.spl` and
 `fpga_linux_orchestrator.spl` do not exist in this tree yet (SA-3 has not
 split them out) — every scenario in the source-contract block is a real,
 currently-failing assertion documenting that gap, not a placeholder.
@@ -29,7 +29,7 @@ populates the generated directories.
 # doc/04_architecture/hardware/riscv/riscv_fpga_linux.md ;
 # doc/05_design/app/riscv/rtl_riscv_mdsoc_capsules.md
 # @manual_section: debug_sidecar_json_key_order
-# @cover src/hardware/fpga_linux/fpga_linux_manifest.spl 80%
+# @cover src/lib/hardware/fpga_linux/fpga_linux_manifest.spl 80%
 # @cover src/compiler/35.semantics/lint/riscv_rtl_debuggability_lint.spl 80%
 #
 # Debug Sidecar JSON Key-Order Specification
@@ -72,16 +72,16 @@ fn rv64_build_dir() -> text:
     "build/rtl_linux/generated_rv64"
 
 fn manifest_src_path() -> text:
-    "src/hardware/fpga_linux/fpga_linux_manifest.spl"
+    "src/lib/hardware/fpga_linux/fpga_linux_manifest.spl"
 
 fn orchestrator_src_path() -> text:
-    "src/hardware/fpga_linux/fpga_linux_orchestrator.spl"
+    "src/lib/hardware/fpga_linux/fpga_linux_orchestrator.spl"
 
 fn json_key_byte_offset(file_path: text, key: text) -> i64:
     # Use grep to find the byte offset of `"key":` in file_path.
     # Returns -1 if not found or on error.
     val search = "\"" + key + "\":"
-    val cmd = "grep -boa '" + search + "' '" + file_path + "' 2>/dev/null | head -1 | cut -d: -f1"
+    val cmd = "grep -Fboa '" + search + "' '" + file_path + "' 2>/dev/null | head -1 | cut -d: -f1"
     val (stdout, _stderr, code) = rt_process_run("sh", ["-c", cmd])
     if code != 0:
         return -1
@@ -90,25 +90,46 @@ fn json_key_byte_offset(file_path: text, key: text) -> i64:
         return -1
     trimmed.to_i64() ?? -1
 
+fn source_key_byte_offset(file_path: text, key: text) -> i64:
+    # SPL source stores the JSON literal with escaped quotes, unlike output.
+    val search = "\\\"" + key + "\\\":"
+    val cmd = "grep -Fboa '" + search + "' '" + file_path + "' 2>/dev/null | head -1 | cut -d: -f1"
+    val (stdout, _stderr, code) = rt_process_run("sh", ["-c", cmd])
+    if code != 0:
+        return -1
+    stdout.trim().to_i64() ?? -1
+
 fn source_key_offset(key: text) -> i64:
     # Find byte offset of `"key":` in fpga_linux_manifest.spl source.
     val path = manifest_src_path()
     if not rt_file_exists(path):
         return -1
-    json_key_byte_offset(path, key)
+    source_key_byte_offset(path, key)
 
-fn find_first_debug_json(dir: text) -> text:
-    # Returns the path of the first *.debug.json file found in dir, or "".
-    val cmd = "find '" + dir + "' -name '*.debug.json' 2>/dev/null | sort | head -1"
-    val (stdout, _stderr, _code) = rt_process_run("sh", ["-c", cmd])
-    stdout.trim()
+fn debug_json_path(dir: text, lane: text) -> text:
+    "{dir}/rtl/simple_{lane}gc_core.debug.json"
 
-fn debug_json_key_offset(dir: text, key: text) -> i64:
-    # Find byte offset of key in first debug.json under dir. Returns -1 if absent.
-    val json_path = find_first_debug_json(dir)
+fn debug_json_key_offset(dir: text, lane: text, key: text) -> i64:
+    # The canonical lane path rejects stale or unrelated sidecars.
+    val json_path = debug_json_path(dir, lane)
     if json_path == "":
         return -1
     json_key_byte_offset(json_path, key)
+
+fn file_sha256(path: text) -> text:
+    val cmd = "sha256sum '" + path + "' 2>/dev/null | cut -d' ' -f1"
+    val (stdout, _stderr, code) = rt_process_run("sh", ["-c", cmd])
+    if code != 0:
+        return ""
+    stdout.trim()
+
+fn baseline_debug_json_sha256(lane: text) -> text:
+    # Baselines use: debug_json_rv32_sha256 = <64 lowercase hex chars>.
+    val cmd = "grep -E '^debug_json_" + lane + "_sha256 = [0-9a-f]{64}$' '" + baseline_path() + "' 2>/dev/null | head -1 | cut -d' ' -f3"
+    val (stdout, _stderr, code) = rt_process_run("sh", ["-c", cmd])
+    if code != 0:
+        return ""
+    stdout.trim()
 
 describe "Debug Sidecar JSON Key Order: source contract (AC-3, D-4)":
     """
@@ -199,7 +220,7 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
 
     Tests that parse actual generated *.debug.json files from the build
     directory and verify key ordering. Every scenario here is a real,
-    fail-closed assertion — none of them is masked behind a pending()
+    fail-closed assertion — none of them is masked behind a deferred marker
     placeholder, so each stays genuinely RED until SA-1 baseline exists and
     the SA-3 split build actually produces the directory it inspects.
     """
@@ -208,7 +229,7 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         # @req REQ-DBGJ-006
         # @capture(bit_table): whether the RV32 generated build directory exists yet
         step("Check whether the RV32 split-build output directory exists")
-        # NOTE: genuine pre-existing gap, converted from a pending() scaffold
+        # NOTE: genuine pre-existing gap, converted from a deferred scaffold
         # to a real fail-closed tripwire 2026-09-06 (a pending marker can
         # never itself be the oracle — see .spipe skill checklist SSDOC-ORA-001).
         # Confirmed absent: build/rtl_linux/generated_rv32 does not exist.
@@ -221,7 +242,7 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         step("Search the first RV32 generated debug.json for the reportMarkers key")
         # NOTE: same genuine pre-existing RV32-build-dir-absent failure as
         # debug_sidecar_json_order_spec.spl:189 above — see that NOTE.
-        val pos = debug_json_key_offset(rv32_build_dir(), "reportMarkers")
+        val pos = debug_json_key_offset(rv32_build_dir(), "rv32", "reportMarkers")
         check_msg(pos >= 0, "reportMarkers missing from generated debug.json in " + rv32_build_dir())
         expect(pos).to_be_greater_than(-1)
 
@@ -231,7 +252,7 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         step("Search the first RV32 generated debug.json for the runnerSuccessMarkers key")
         # NOTE: same genuine pre-existing RV32-build-dir-absent failure as
         # debug_sidecar_json_order_spec.spl:189 above — see that NOTE.
-        val pos = debug_json_key_offset(rv32_build_dir(), "runnerSuccessMarkers")
+        val pos = debug_json_key_offset(rv32_build_dir(), "rv32", "runnerSuccessMarkers")
         check_msg(pos >= 0, "runnerSuccessMarkers missing from generated debug.json in " + rv32_build_dir())
         expect(pos).to_be_greater_than(-1)
 
@@ -241,8 +262,8 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         step("Compare the byte offsets of reportMarkers and runnerSuccessMarkers in the first RV32 generated debug.json")
         # NOTE: same genuine pre-existing RV32-build-dir-absent failure as
         # debug_sidecar_json_order_spec.spl:189 above — see that NOTE.
-        val pos_report = debug_json_key_offset(rv32_build_dir(), "reportMarkers")
-        val pos_runner = debug_json_key_offset(rv32_build_dir(), "runnerSuccessMarkers")
+        val pos_report = debug_json_key_offset(rv32_build_dir(), "rv32", "reportMarkers")
+        val pos_runner = debug_json_key_offset(rv32_build_dir(), "rv32", "runnerSuccessMarkers")
         check_msg(pos_report >= 0, "reportMarkers not found in generated json")
         check_msg(pos_runner >= 0, "runnerSuccessMarkers not found in generated json")
         expect(pos_report).to_be_less_than(pos_runner)
@@ -251,7 +272,7 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         # @req REQ-DBGJ-010
         # @capture(bit_table): whether the RV64 generated build directory exists yet
         step("Check whether the RV64 split-build output directory exists")
-        # NOTE: genuine pre-existing gap, converted from a pending() scaffold
+        # NOTE: genuine pre-existing gap, converted from a deferred scaffold
         # to a real fail-closed tripwire 2026-09-06 — same rationale as
         # debug_sidecar_json_order_spec.spl:189 above. Confirmed absent:
         # build/rtl_linux/generated_rv64 does not exist. Turns green
@@ -264,7 +285,7 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         step("Search the first RV64 generated debug.json for the reportMarkers key")
         # NOTE: same genuine pre-existing RV64-build-dir-absent failure as
         # debug_sidecar_json_order_spec.spl:222 above — see that NOTE.
-        val pos = debug_json_key_offset(rv64_build_dir(), "reportMarkers")
+        val pos = debug_json_key_offset(rv64_build_dir(), "rv64", "reportMarkers")
         check_msg(pos >= 0, "reportMarkers missing from generated debug.json in " + rv64_build_dir())
         expect(pos).to_be_greater_than(-1)
 
@@ -274,8 +295,8 @@ describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
         step("Compare the byte offsets of reportMarkers and runnerSuccessMarkers in the first RV64 generated debug.json")
         # NOTE: same genuine pre-existing RV64-build-dir-absent failure as
         # debug_sidecar_json_order_spec.spl:222 above — see that NOTE.
-        val pos_report = debug_json_key_offset(rv64_build_dir(), "reportMarkers")
-        val pos_runner = debug_json_key_offset(rv64_build_dir(), "runnerSuccessMarkers")
+        val pos_report = debug_json_key_offset(rv64_build_dir(), "rv64", "reportMarkers")
+        val pos_runner = debug_json_key_offset(rv64_build_dir(), "rv64", "runnerSuccessMarkers")
         check_msg(pos_report >= 0, "reportMarkers not found in generated json")
         check_msg(pos_runner >= 0, "runnerSuccessMarkers not found in generated json")
         expect(pos_report).to_be_less_than(pos_runner)
@@ -291,7 +312,7 @@ describe "Debug Sidecar JSON Order: baseline comparison (AC-3)":
         # @req REQ-DBGJ-013
         # @capture(bit_table): whether both RV32 and RV64 generated build directories exist for sha256 comparison
         step("Check whether both split-build output directories exist for a real sha256 comparison")
-        # NOTE: genuine pre-existing gap, converted from a pending() scaffold
+        # NOTE: genuine pre-existing gap, converted from a deferred scaffold
         # to a real fail-closed tripwire 2026-09-06 — same rationale as
         # debug_sidecar_json_order_spec.spl:189 above. The SA-1 baseline
         # document itself already exists (doc/09_report/verify/
@@ -300,13 +321,33 @@ describe "Debug Sidecar JSON Order: baseline comparison (AC-3)":
         # against it. Turns green automatically once SA-3 populates both dirs.
         expect(rt_file_exists(rv32_build_dir()) and rt_file_exists(rv64_build_dir())).to_equal(true)
 
-    it "AC-3: baseline contains debug.json section when present":
+    it "AC-3: baseline records canonical RV32 and RV64 debug.json hashes":
         # @req REQ-DBGJ-014
         # @capture(bit_table): whether the SA-1 baseline document's text mentions debug.json
-        step("Read the SA-1 baseline document and search for a debug.json section")
+        step("Read the SA-1 baseline document and require canonical lane hashes")
         val path = baseline_path()
         check_msg(rt_file_exists(path), "file not found: " + path)
         val baseline = read_file(path)
-        val has_json_section = baseline.contains("debug.json")
-        check_msg(has_json_section, "baseline missing debug.json section — SA-1 must record sidecar sha256")
-        expect(has_json_section).to_equal(true)
+        val has_rv32_hash = baseline.contains("debug_json_rv32_sha256 = ")
+        val has_rv64_hash = baseline.contains("debug_json_rv64_sha256 = ")
+        check_msg(has_rv32_hash, "baseline missing canonical RV32 debug.json sha256")
+        check_msg(has_rv64_hash, "baseline missing canonical RV64 debug.json sha256")
+        expect(has_rv32_hash and has_rv64_hash).to_equal(true)
+
+    it "AC-3: RV32 canonical debug.json sha256 equals the baseline":
+        # @req REQ-DBGJ-015
+        step("Compare the canonical RV32 sidecar sha256 with its baseline")
+        val expected = baseline_debug_json_sha256("rv32")
+        val actual = file_sha256(debug_json_path(rv32_build_dir(), "rv32"))
+        check_msg(expected != "", "baseline lacks a valid RV32 debug.json sha256")
+        check_msg(actual != "", "canonical RV32 debug.json is missing or unreadable")
+        expect(actual).to_equal(expected)
+
+    it "AC-3: RV64 canonical debug.json sha256 equals the baseline":
+        # @req REQ-DBGJ-016
+        step("Compare the canonical RV64 sidecar sha256 with its baseline")
+        val expected = baseline_debug_json_sha256("rv64")
+        val actual = file_sha256(debug_json_path(rv64_build_dir(), "rv64"))
+        check_msg(expected != "", "baseline lacks a valid RV64 debug.json sha256")
+        check_msg(actual != "", "canonical RV64 debug.json is missing or unreadable")
+        expect(actual).to_equal(expected)
