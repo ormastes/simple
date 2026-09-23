@@ -54,8 +54,9 @@ The driver returns 0 only for accepted frames; refusal must be exit 70.
 The reentry fixture is compiled with `-DSIMPLE_GUI_TEST_REENTER=1`; link its
 driver with `-Wl,-exported_symbol,_rt_string_new` and
 `-Wl,-exported_symbol,_rt_gui_present_html` so `dlsym(RTLD_DEFAULT, ...)`
-can call back during the version handshake. It exits 70 with
-`provider initialization reentry` rather than hanging.
+can call back during the version handshake. With the event lifecycle
+integration, the outer callback guard exits 70 with `GUI callback reentry`
+before entering the preserved initialization guard.
 
 On macOS, the sectioned standalone `runtime_native.c` compiled and linked
 with the C selfchecks. `rt_core_c_utf8_math_array_twin_parity_selfcheck`

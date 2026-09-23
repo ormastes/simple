@@ -3,6 +3,9 @@
 Status: DRAFT / live-provider acceptance blocked. PR #1418, stacked on #1417
 at `d5fc5a9b294b7a0c3ca9bcbea7b4583f9ee05eb8` for this source pass.
 
+Integration update: #1418 carried the initial design/header/probe and was
+merged into #1417. The complete implementation below now belongs to #1417.
+
 ## Reproduction and cause
 
 `gui_shell_poll_event()` in both `src/app/editor/gui_shell.spl` and
@@ -114,3 +117,31 @@ selfcheck not yet in that commit's roster plus inherited
 event C fixtures; the unrelated Windows inventory repair belongs to its own
 lane. Repository-wide SFFI backlog generation passed four assertions and
 reported 11063 source-only rows; it is not provider admission evidence.
+
+## Combined #1417 integration receipt
+
+Astra issued SOURCE PASS for `fc01b0276d5` after the two ownership/OOM fixes.
+That implementation was cherry-picked without conflict onto exact remote
+#1417 head `184c0835b44ad5abaa4ecab071753b1486d08e79` in a new sparse worktree,
+producing `8edbf0de18d`. The extracted loader retains the newer thread-local
+initialization guard, `sched_yield` lock wait, and flag reset. The outer GUI
+callback guard now catches callback reentry before entering that loader;
+the expected diagnostic is `GUI callback reentry` with the same exit 70.
+
+All checks below ran once on that combined source, in
+`build/gui-event-integration/`:
+
+- Core-C UTF-8/math/array parity: **123 checks, 0 failures**.
+- Event/session fixture matrix: **37 modes, 0 failures**, including both
+  allocation fault modes and all three standalone/session overlap modes.
+- Existing standalone HTML fixture matrix: **7 modes, 0 failures** (accepted,
+  absent path, invalid path, wrong ABI, rejected frame, invalid tag, reentry).
+- Direct-env runtime guard and scoped whitespace check: PASS.
+- Event selfcheck dependency inspection: libSystem only; no AppKit/WebKit.
+- Committed-tree executable specs under `doc/06_spec`: 0.
+
+Five Windows script files appeared dirty immediately on this fresh sparse
+checkout; they are excluded from the 13-file integration diff and were not
+edited or staged. No golden changes, LFS stash, or root worktree changes were
+incorporated. The same Simple/live-provider/full-bootstrap limitations above
+remain; this receipt is scoped C-boundary evidence only.
