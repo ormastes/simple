@@ -2,6 +2,9 @@
 
 #include <stdatomic.h>
 #include <string.h>
+#if defined(SIMPLE_GUI_TEST_REENTER)
+#include <dlfcn.h>
+#endif
 
 #ifndef SIMPLE_GUI_TEST_ABI_VERSION
 #define SIMPLE_GUI_TEST_ABI_VERSION SIMPLE_GUI_HTML_PROVIDER_ABI_VERSION_V1
@@ -12,6 +15,14 @@ static atomic_int present_calls = ATOMIC_VAR_INIT(0);
 
 int64_t simple_gui_html_provider_abi_v1(void) {
     atomic_fetch_add_explicit(&version_calls, 1, memory_order_relaxed);
+#if defined(SIMPLE_GUI_TEST_REENTER)
+    union { void *symbol; int64_t (*call)(const uint8_t *, uint64_t); } make_text;
+    union { void *symbol; void (*call)(int64_t); } present;
+    make_text.symbol = dlsym(RTLD_DEFAULT, "rt_string_new");
+    present.symbol = dlsym(RTLD_DEFAULT, "rt_gui_present_html");
+    if (!make_text.call || !present.call) return -1;
+    present.call(make_text.call((const uint8_t *)"<p>ok</p>", 9));
+#endif
     return SIMPLE_GUI_TEST_ABI_VERSION;
 }
 

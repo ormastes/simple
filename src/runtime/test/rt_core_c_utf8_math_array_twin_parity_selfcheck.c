@@ -270,6 +270,30 @@ static void check_sum_and_sorted(void) {
     expect_i64("sorted packed u64[2]", rt_array_get((SplArray*)(uintptr_t)sorted_u64s, 2), (int64_t)UINT64_MAX);
     expect_i64("original packed u64[0] unchanged", rt_array_get(u64s, 0), (int64_t)UINT64_MAX);
 
+    int64_t mixed_float_1 = rt_value_float(1.0);
+    int64_t mixed_float_0 = rt_value_float(0.0);
+    SplArray* mixed = rt_array_new(4);
+    rt_array_push(mixed, mixed_float_1);
+    rt_array_push(mixed, rt_value_int(2));
+    rt_array_push(mixed, mixed_float_0);
+    rt_array_push(mixed, rt_value_int(1));
+    int64_t sorted_mixed = rt_array_sorted((int64_t)(uintptr_t)mixed);
+    expect_i64("mixed sorted int first", rt_array_get((SplArray*)(uintptr_t)sorted_mixed, 0), rt_value_int(1));
+    expect_i64("mixed sorted second int", rt_array_get((SplArray*)(uintptr_t)sorted_mixed, 1), rt_value_int(2));
+    expect_i64("mixed sorted float 0", rt_array_get((SplArray*)(uintptr_t)sorted_mixed, 2), mixed_float_0);
+    expect_i64("mixed sorted float 1", rt_array_get((SplArray*)(uintptr_t)sorted_mixed, 3), mixed_float_1);
+    expect_i64("mixed original first unchanged", rt_array_get(mixed, 0), mixed_float_1);
+
+    int64_t unsigned_2 = rt_value_u64(2);
+    SplArray* mixed_uint = rt_array_new(3);
+    rt_array_push(mixed_uint, unsigned_2);
+    rt_array_push(mixed_uint, rt_value_int(-1));
+    rt_array_push(mixed_uint, rt_value_int(1));
+    int64_t sorted_uint = rt_array_sorted((int64_t)(uintptr_t)mixed_uint);
+    expect_i64("mixed unsigned negative first", rt_array_get((SplArray*)(uintptr_t)sorted_uint, 0), rt_value_int(-1));
+    expect_i64("mixed unsigned positive next", rt_array_get((SplArray*)(uintptr_t)sorted_uint, 1), rt_value_int(1));
+    expect_i64("mixed unsigned boxed last", rt_array_get((SplArray*)(uintptr_t)sorted_uint, 2), unsigned_2);
+
     int64_t text_b = rt_string_new((const uint8_t*)"b", 1);
     int64_t text_a1 = rt_string_new((const uint8_t*)"a", 1);
     int64_t text_a2 = rt_string_new((const uint8_t*)"a", 1);
@@ -278,9 +302,9 @@ static void check_sum_and_sorted(void) {
     rt_array_push(texts, text_a1);
     rt_array_push(texts, text_a2);
     int64_t sorted_texts = rt_array_sorted((int64_t)(uintptr_t)texts);
-    expect_i64("sorted text stable first equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 0), text_a1);
-    expect_i64("sorted text stable second equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 1), text_a2);
-    expect_i64("sorted text last", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 2), text_b);
+    expect_i64("sorted text keeps first mixed-equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 0), text_b);
+    expect_i64("sorted text keeps second mixed-equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 1), text_a1);
+    expect_i64("sorted text keeps third mixed-equal", rt_array_get((SplArray*)(uintptr_t)sorted_texts, 2), text_a2);
     expect_i64("sorted(nil) is nil", rt_array_sorted(RT_NIL_VALUE), RT_NIL_VALUE);
 }
 
