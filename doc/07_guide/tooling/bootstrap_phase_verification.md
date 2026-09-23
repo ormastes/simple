@@ -56,6 +56,43 @@ failures in the inventory and summary. A nonzero runner status is preserved.
 
 `scripts/bootstrap/validate-test-runner-json.pl` owns the strict JSON boundary;
 the shell runner records only its admitted passed/failed/skipped counters.
+The interpreter and compile bootstrap-directory smoke rows use the same
+`--assert-ran --json` contract and retain their counters in `summary.env`.
+The repository-wide Phase 3 inventory also routes every row through this
+validator; a later valid-looking verdict cannot hide an earlier duplicate,
+malformed, truncated, failed, or zero-execution terminal row.
+
+Full Stage 3 and Stage 4 verification then builds
+`phase3_expanded_tests.inventory.tsv`. It covers canonical tests under
+`test/01_unit`, `test/02_integration`, `test/03_system`, and `test/feature`;
+embedded `describe` owners under `src/lib`; package-owned tests under `tools`;
+Markdown and Simple-comment doctests; and tests in recursively tracked Git
+submodules. Historical `test/unit`, `test/integration`, and `test/system`
+mirrors are excluded so a logical test has one owner. Repository rows already
+proved by `repository_full_tests.results.tsv` are reused rather than rerun.
+
+Each remaining physical owner has one terminal result. Simple rows use the
+strict test-runner JSON validator. Jest rows use the strict Jest JSON
+validator. The doctest bootstrap owner runs untargeted `test --whole` so its
+Markdown and source-comment lanes retain the default whole-tree roots, and it
+must emit its explicit per-lane counts plus PASS verdict.
+The final `phase3_expanded_tests.surface-counts.tsv` reports category count,
+logical execute rows, policy skip rows, executed examples, and skipped
+examples for every discovered surface.
+
+Nested-module discovery requires every tracked gitlink to be initialized at
+the exact commit recorded by its parent index and clean before it emits a row.
+`phase3_expanded_tests.nested-receipt.tsv` retains path, pinned SHA, actual
+SHA, policy category, and reason. A required module without tests emits an
+executable presence contract. Only an explicitly listed optional or platform
+ineligible module may become a policy skip; a missing, uninitialized,
+mismatched, dirty, or unclassified empty module fails discovery.
+
+A Simple spec with skipped examples is admissible only when the whole file is
+skipped and its sole tag directive is `# @tag: in-development`. Mixed
+executed/skipped results, untagged skips, unknown tags, duplicate directives,
+and noncanonical spellings fail closed. Aggregate directory smoke rows cannot
+prove a per-file category, so any skip in those rows is also a failure.
 
 The phase-owned full CLI and standalone test runner also run the compiler
 bootstrap suite, the complete `compiler/interpreter` subtree, and
@@ -160,19 +197,48 @@ separately as `PRESENT`, never counted as executed. It still catches the
   deleted, renamed, or left syntactically broken, which would make that phase's
 verification a silent no-op inside a real bootstrap run.
 
+### Complete compiler test inventory
+
+`scripts/bootstrap/bootstrap-phase-verification.shs` discovers and sorts the
+compiler unit inventory before running any spec. If discovery emits some paths
+and then fails, the task records `result=FAIL|status=discovery-error` and executes
+none of that partial list. A failed sort similarly records `status=sort-error`.
+Both failures retain a terminal summary row and diagnostic log. A complete but
+empty inventory also fails. The repository-wide Phase 3 inventory applies the
+same discovery and sorting requirements.
+
+The focused regression is
+`test/01_unit/scripts/bootstrap_compiler_inventory_discovery_test.shs`. It invokes
+the production inventory function with a complete list, a partial discovery
+failure, and a sort failure; the failing cases must never launch a spec.
+
 ### Stage 4 tooling matrix scheduling contract
 
 `stage4-tooling-matrix.shs --build-jobs=<effective>` uses the admitted effective
 job count as a bounded case-worker ceiling (normally capped at 16 by
 `bootstrap-build-jobs-policy.shs`). The parent schedules only dependency-ready
 matrix rows. Each worker owns a distinct HOME, TMPDIR, XDG cache/config/data
-root, log, receipt, and result path; the native-build row retains its distinct
-explicit cache. Workers never write the shared summary. The parent alone reaps
-exact worker PIDs/process groups and commits `scheduler/schedule.tsv` and
-`summary.env` in frozen manifest order. It captures and verifies the complete
-frozen source/tool identity immediately before dispatch and again after all
-workers stop; per-task receipt snapshots copy that admitted identity instead of
-launching concurrent repeated tree scans. TERM/INT/HUP cancels and waits for all
+root, log, draft receipt, and result path; the native-build row retains its distinct
+explicit cache. Workers never publish canonical task receipts or the shared summary.
+The parent alone reaps each supervisor, validates its exit status and the draft's
+schema, result, config, and source identity, then atomically commits the task receipt
+in frozen matrix order. Dependencies become ready only after this parent commit.
+The schedule is atomically published at `scheduler/schedule.tsv`.
+Supervisor PIDs and actual child session/group IDs are recorded separately.
+Each parent invocation atomically allocates a unique `run.<pid>.<sequence>`
+directory and publishes a `Stage4SchedulerRunOwnerV1` marker bound to its PID,
+matrix hash, and config hash. A reused PID therefore cannot inherit stale draft,
+session, or committed markers from an earlier process. Allocation never removes
+an existing run directory, since it may belong to a concurrent invocation.
+Normal and signal cleanup remove only a nonsymlink run directory whose complete
+owner marker still matches the current parent and admitted identities. The
+focused allocation regression is
+`test/02_integration/bootstrap_stage4_scheduler_run_allocation_test.shs`.
+The parent captures and verifies the complete frozen source/tool identity before
+dispatch and after all workers stop. Workers currently capture current source
+snapshots before and after their task and compare them with the admitted config;
+the repeated tree scans remain a performance cost, not a completed optimization.
+TERM/INT/HUP cancels and waits for all
 active groups before removing that invocation's scheduler state. Every command
 inside a row remains covered by `--timeout-seconds`; one timeout or failure does
 not stop independent rows, while dependents terminalize fail-closed.
@@ -181,7 +247,10 @@ The focused fake-artifact contract is
 `test/02_integration/bootstrap_stage4_tooling_matrix_test.shs`. It checks the
 worker bound, jobs=1 parity, manifest ordering, failure continuation, isolated
 cache/tmp ownership, per-case timeout, receipt collision protection, and signal
-cleanup without building a compiler.
+cleanup without building a compiler. Its supervisor fault cases also reject a
+successful child followed by supervisor failure, duplicate receipt keys, wrong
+source hashes, and source drift. These controller fixtures do not admit a live
+bootstrap or resolve either C2 stdio protocol-root hold.
 
 ## Phase → gate map
 
