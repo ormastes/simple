@@ -12,10 +12,41 @@ echo Linux
 EOF
 cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
 #!/bin/sh
-for arg do case "$arg" in --work-root=*) work=${arg#*=};; esac; done
+timeout_seen=0
+for arg do case "$arg" in
+    --work-root=*) work=${arg#*=};;
+    --timeout-seconds=900) timeout_seen=1;;
+esac; done
+[ "$timeout_seen" = 1 ] || exit 9
 mkdir -p "$work/outputs/compiler-tools/fixture"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_test_runner"
+cli="$work/outputs/compiler-tools/fixture/simple_cli"
+runner="$work/outputs/compiler-tools/fixture/simple_test_runner"
+receipt="$work/outputs/compiler-tools/fixture/command-owners.env"
+cli_sha=$(sha256sum "$cli" | awk '{print $1}')
+runner_sha=$(sha256sum "$runner" | awk '{print $1}')
+{
+    echo schema=simple-bootstrap-command-owners-v3
+    echo status=frozen
+    echo phase=stage2
+    echo "compiler_cli_path=$cli"
+    echo "compiler_cli_sha256=$cli_sha"
+    echo "test_runner_path=$runner"
+    echo "test_runner_sha256=$runner_sha"
+} >"$receipt"
+receipt_sha=$(sha256sum "$receipt" | awk '{print $1}')
+if [ "$TEST_CASE" != receipt_missing ]; then
+    {
+        echo "command_owner_receipt=$receipt"
+        if [ "$TEST_CASE" = receipt_hash ]; then
+            echo command_owner_receipt_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        else
+            echo "command_owner_receipt_sha256=$receipt_sha"
+        fi
+    } >"$work/summary.env"
+fi
+[ "$TEST_CASE" != tool_hash ] || echo mutation >>"$cli"
 EOF
 cat >"$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
 #!/bin/sh
@@ -24,6 +55,7 @@ exec "$@"
 EOF
 cat >"$tmp/source/scripts/resource/run_capped.shs" <<'EOF'
 #!/bin/sh
+[ "${CAP_REQUIRE:-}" = 1 ] || exit 10
 exec "$@"
 EOF
 cat >"$tmp/tool" <<'EOF'
@@ -64,7 +96,7 @@ chmod +x "$tmp/tool" "$tmp/bin/uname" \
 export TEST_TOOL="$tmp/tool" PATH="$tmp/bin:$PATH"
 failed=0
 checks=0
-for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout; do
+for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout receipt_missing receipt_hash tool_hash; do
     export TEST_CASE=$scenario
     work="$tmp/$scenario"
     mkdir -p "$work/post-phase2-fixture"
@@ -89,5 +121,15 @@ for scenario in good binding zero missing failed skipped inconsistent duplicate 
         failed=$((failed + 1))
     fi
 done
+# Invalid cap syntax must fail before the verifier can run.
+status=0
+SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX=32junkG \
+    sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
+        "--compiler=$tmp/tool" \
+        --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "--runtime-path=$tmp/runtime" "--work-root=$tmp/bad-cap" \
+        "--source-root=$tmp/source" >/dev/null 2>&1 || status=$?
+checks=$((checks + 1))
+[ "$status" -ne 0 ] || { echo 'FAIL: malformed memory cap accepted'; failed=$((failed + 1)); }
 echo "$checks runner scenarios; $failed failures"
 [ "$failed" = 0 ]
