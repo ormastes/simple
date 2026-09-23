@@ -16,8 +16,15 @@ float fabsf(float x) {
 }
 
 double sqrt(double x) {
-    if (x < 0.0) return 0.0;   /* NaN not available in freestanding */
-    if (x == 0.0) return 0.0;
+    if (x != x) {
+        union { double f; unsigned long long u; } rep = { x };
+        rep.u |= 0x0008000000000000ULL;
+        return rep.f;
+    }
+    if (x < 0.0) return __builtin_nan("");
+    /* Preserve signed zero and avoid turning positive infinity into NaN in
+     * the Newton step (inf / inf).  Both builtins are freestanding constants. */
+    if (x == 0.0 || x == __builtin_inf()) return x;
 
     /* Newton-Raphson iteration */
     double guess = x * 0.5;
