@@ -1,0 +1,108 @@
+"""One-in-flight and reset contracts for host-GPU stream sessions."""
+
+use std.spec.*
+use std.common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_KIND_HELLO, SIMPLEOS_HOST_GPU_KIND_DRAW_IR, SIMPLEOS_HOST_GPU_STATUS_IDLE, SIMPLEOS_HOST_GPU_STATUS_PASS, SIMPLEOS_HOST_GPU_REASON_TIMEOUT}
+use std.common.gpu.simpleos_host_gpu_stream_protocol.{
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE,
+    SimpleOsHostGpuStreamHeader
+}
+use std.common.gpu.simpleos_host_gpu_stream_session.{
+    simpleos_host_gpu_stream_session_new,
+    simpleos_host_gpu_stream_session_reset,
+    simpleos_host_gpu_stream_session_begin,
+    simpleos_host_gpu_stream_session_accept
+}
+
+fn header(message_type: i64, generation: i64, run_id_hash: i64, frame_id: i64, kind_or_status: i64) -> SimpleOsHostGpuStreamHeader:
+    SimpleOsHostGpuStreamHeader(message_type: message_type, body_bytes: 0, body_checksum: 0, generation: generation, run_id_hash: run_id_hash, frame_id: frame_id, backend_code: 1, kind_or_status: kind_or_status)
+
+describe "SimpleOS host-GPU stream session":
+    it "requires a successful hello and admits only one request":
+        val fresh = simpleos_host_gpu_stream_session_new()
+        val submit_too_early = simpleos_host_gpu_stream_session_begin(fresh, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 1, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(submit_too_early.reason).to_equal("hello-required")
+        val hello = simpleos_host_gpu_stream_session_begin(fresh, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 1, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        expect(hello.ok).to_be(true)
+        val overlap = simpleos_host_gpu_stream_session_begin(hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 2, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        expect(overlap.reason).to_equal("request-in-flight")
+        val negotiated = simpleos_host_gpu_stream_session_accept(hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 1, 0, 0, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        expect(negotiated.ok).to_be(true)
+        expect(negotiated.session.negotiated).to_be(true)
+        val renegotiate = simpleos_host_gpu_stream_session_begin(negotiated.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 2, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        val rejected = simpleos_host_gpu_stream_session_accept(renegotiate.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 2, 0, 0, SIMPLEOS_HOST_GPU_STATUS_IDLE))
+        expect(rejected.reason).to_equal("hello-rejected")
+        expect(rejected.session.last_generation).to_equal(2)
+
+    it "rejects replay and resets after a mismatched response":
+        val fresh = simpleos_host_gpu_stream_session_new()
+        val hello = simpleos_host_gpu_stream_session_begin(fresh, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 1, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        val negotiated = simpleos_host_gpu_stream_session_accept(hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 1, 0, 0, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        val submit = simpleos_host_gpu_stream_session_begin(negotiated.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 2, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(submit.ok).to_be(true)
+        val mismatch = simpleos_host_gpu_stream_session_accept(submit.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, 2, 10, 1, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        expect(mismatch.reason).to_equal("response-mismatch")
+        expect(mismatch.session.negotiated).to_be(false)
+        val replay = simpleos_host_gpu_stream_session_begin(mismatch.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 2, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(replay.reason).to_equal("stale-generation")
+        val submit_without_hello = simpleos_host_gpu_stream_session_begin(mismatch.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 3, 9, 2, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(submit_without_hello.reason).to_equal("hello-required")
+        val replayed_hello = simpleos_host_gpu_stream_session_begin(mismatch.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 1, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        expect(replayed_hello.reason).to_equal("stale-generation")
+
+    it "commits monotonic submit identity and rejects stale or cross-session work":
+        val fresh = simpleos_host_gpu_stream_session_new()
+        val hello = simpleos_host_gpu_stream_session_begin(fresh, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 1, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        val negotiated = simpleos_host_gpu_stream_session_accept(hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 1, 0, 0, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        val submit = simpleos_host_gpu_stream_session_begin(negotiated.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 2, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        val accepted = simpleos_host_gpu_stream_session_accept(submit.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, 2, 9, 1, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        expect(accepted.ok).to_be(true)
+        expect(accepted.session.last_generation).to_equal(2)
+        expect(accepted.session.last_frame_id).to_equal(1)
+        val stale_generation = simpleos_host_gpu_stream_session_begin(accepted.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 2, 9, 2, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(stale_generation.reason).to_equal("stale-generation")
+        val stale_frame = simpleos_host_gpu_stream_session_begin(accepted.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 3, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(stale_frame.reason).to_equal("stale-frame")
+        val cross_session = simpleos_host_gpu_stream_session_begin(accepted.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 3, 10, 2, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        expect(cross_session.reason).to_equal("cross-session")
+        val wrong_backend = SimpleOsHostGpuStreamHeader(message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, body_bytes: 0, body_checksum: 0, generation: 3, run_id_hash: 9, frame_id: 2, backend_code: 2, kind_or_status: SIMPLEOS_HOST_GPU_KIND_DRAW_IR)
+        expect(simpleos_host_gpu_stream_session_begin(accepted.session, wrong_backend).reason).to_equal("backend-mismatch")
+
+    it "fails closed on invalid local requests and unsolicited responses":
+        val fresh = simpleos_host_gpu_stream_session_new()
+        val invalid = header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, 1, 9, 1, SIMPLEOS_HOST_GPU_STATUS_PASS)
+        expect(simpleos_host_gpu_stream_session_begin(fresh, invalid).reason).to_equal("request-type")
+        val unsolicited = simpleos_host_gpu_stream_session_accept(fresh, invalid)
+        expect(unsolicited.reason).to_equal("no-request")
+        expect(unsolicited.session.pending).to_be(false)
+
+    it "forces a new higher-generation hello after timeout or nonterminal response":
+        val fresh = simpleos_host_gpu_stream_session_new()
+        val hello = simpleos_host_gpu_stream_session_begin(fresh, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 1, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        val negotiated = simpleos_host_gpu_stream_session_accept(hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 1, 0, 0, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        val submit = simpleos_host_gpu_stream_session_begin(negotiated.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 2, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        val timeout = simpleos_host_gpu_stream_session_accept(submit.session, header(SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE, 2, 9, 1, SIMPLEOS_HOST_GPU_REASON_TIMEOUT))
+        expect(timeout.reason).to_equal("remote-error")
+        expect(timeout.session.negotiated).to_be(false)
+        val stale_hello = simpleos_host_gpu_stream_session_begin(timeout.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 2, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        expect(stale_hello.reason).to_equal("stale-generation")
+        val new_hello = simpleos_host_gpu_stream_session_begin(timeout.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 3, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        val renegotiated = simpleos_host_gpu_stream_session_accept(new_hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 3, 0, 0, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        val next_submit = simpleos_host_gpu_stream_session_begin(renegotiated.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 4, 10, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        val idle = simpleos_host_gpu_stream_session_accept(next_submit.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE, 4, 10, 1, SIMPLEOS_HOST_GPU_STATUS_IDLE))
+        expect(idle.reason).to_equal("nonterminal-response")
+        expect(idle.session.negotiated).to_be(false)
+
+    it "preserves replay high-water when the transport owner resets pending work":
+        val fresh = simpleos_host_gpu_stream_session_new()
+        val hello = simpleos_host_gpu_stream_session_begin(fresh, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 1, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO))
+        val negotiated = simpleos_host_gpu_stream_session_accept(hello.session, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE, 1, 0, 0, SIMPLEOS_HOST_GPU_STATUS_PASS))
+        val submit = simpleos_host_gpu_stream_session_begin(negotiated.session, header(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, 2, 9, 1, SIMPLEOS_HOST_GPU_KIND_DRAW_IR))
+        val reset = simpleos_host_gpu_stream_session_reset(submit.session)
+        expect(reset.pending).to_be(false)
+        expect(reset.negotiated).to_be(false)
+        expect(simpleos_host_gpu_stream_session_begin(reset, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 2, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO)).reason).to_equal("stale-generation")
+        expect(simpleos_host_gpu_stream_session_begin(reset, header(SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, 3, 0, 0, SIMPLEOS_HOST_GPU_KIND_HELLO)).ok).to_be(true)

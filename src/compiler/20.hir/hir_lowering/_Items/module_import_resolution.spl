@@ -482,8 +482,37 @@ impl HirLowering:
                         val local_name = if item_has_alias[item_idx]:
                             item_aliases[item_idx]
                         else: item_name
+                        # An explicit named import is a declaration about its
+                        # target surface.  Do not use the local symbol table
+                        # as the oracle here: an unrelated local declaration
+                        # (or an alias collision) can already occupy the local
+                        # name while item_name is absent from the imported
+                        # module.  The generic registration helper deliberately
+                        # permits speculative misses for lazy dependency
+                        # probes, so make the hard diagnostic only here.
+                        if not self.surface_declares_item_indexed(imported_surface, item_name):
+                            val reexport = self.find_reexport_source(
+                                imported_surface.physical_index, item_name)
+                            # A truncated or invalid walk is not proof that
+                            # the frozen target lacks the requested export.
+                            # Preserve the registration path in that case;
+                            # only a complete re-export miss is diagnostic.
+                            if not reexport.found and self.reexport_walk_complete and
+                               self.reexport_walk_valid:
+                                val alias_suffix = if item_has_alias[item_idx]:
+                                    " as {local_name}"
+                                else: ""
+                                self.error(
+                                    "module {imp.module} has no exported item {item_name}{alias_suffix}",
+                                    imp.span)
                         self.register_imported_symbol(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
                         item_idx = item_idx + 1
+            else:
+                # Do not change unresolved module-only/glob behavior. Named
+                # imports name a required source item and therefore diagnose
+                # an absent target module at this boundary.
+                if imp.items.len() > 0:
+                    self.error("missing module surface for {imp.module}", imp.span)
             import_idx = import_idx + 1
 
     me resolve_package_sibling_symbols(module: ParserModule):

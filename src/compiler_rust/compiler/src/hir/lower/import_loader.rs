@@ -281,6 +281,20 @@ impl Lowerer {
                     self.register_type_alias_mapping(alias_name.clone(), original_name.clone());
                     self.globals.insert(alias_name.clone(), type_id);
                 }
+
+                // Trait parameters retain their authored name as a MIR hint
+                // even though the type registry aliases them to `Any`.  Keep
+                // the imported method table reachable under that authored
+                // alias, otherwise `use m.{Gateway as CacheGateway}` followed
+                // by `fn consume(g: CacheGateway): g.store()` cannot recover
+                // the vtable slot and degrades to a bare static `store` call.
+                if let Some(trait_info) = self.module.trait_infos.get(&original_name).cloned() {
+                    // Alias bindings overwrite consistently with type aliases
+                    // and globals. The cloned record retains its canonical
+                    // `name`; inference deduplicates by that name while MIR
+                    // can resolve the authored alias key directly.
+                    self.module.trait_infos.insert(alias_name.clone(), trait_info);
+                }
             }
 
             if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
@@ -1446,6 +1460,131 @@ fn pressed(backend: InputBackend) -> bool:
             }),
             "imported trait call must not degrade to an unresolved bare static method"
         );
+    }
+
+    #[test]
+    fn aliased_imported_trait_preserves_method_metadata_for_virtual_dispatch() {
+        use crate::hir::{HirExprKind, HirStmt};
+        use crate::module_resolver::ModuleResolver;
+        use simple_parser::Parser;
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let input = src.join("input");
+        fs::create_dir_all(&input).unwrap();
+        fs::write(input.join("backend.spl"), "trait InputBackend:\n    fn poll() -> i64\n").unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            r#"use input.backend.{InputBackend as BackendAlias}
+
+fn read(backend: BackendAlias) -> i64:
+    backend.poll()
+"#,
+        )
+        .unwrap();
+
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let mut parser = Parser::new(&source);
+        let ast = parser.parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let mut lowerer = Lowerer::with_module_resolver(resolver, main_path);
+        let lowered = lowerer
+            .lower_module(&ast)
+            .expect("aliased trait import must lower to HIR");
+
+        let alias_info = lowered
+            .trait_infos
+            .get("BackendAlias")
+            .expect("aliased imported trait must retain its method table");
+        assert_eq!(
+            alias_info.get_vtable_slot("poll"),
+            Some(0),
+            "alias must preserve the declaration-order vtable slot"
+        );
+
+        let read = lowered
+            .functions
+            .iter()
+            .find(|func| func.name == "read")
+            .expect("read function");
+        assert!(
+            read.body
+                .iter()
+                .any(|stmt| matches!(stmt, HirStmt::Expr(expr) if matches!(expr.kind, HirExprKind::MethodCall { .. }))),
+            "fixture must contain the imported trait method call"
+        );
+
+        let mir = crate::mir::lower_to_mir(&lowered).expect("aliased imported trait call must lower to MIR");
+        let read = mir
+            .functions
+            .iter()
+            .find(|func| func.name == "read")
+            .expect("read MIR function");
+        assert!(
+            read.blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    instruction,
+                    crate::mir::MirInst::MethodCallVirtual { vtable_slot: 0, .. }
+                )),
+            "aliased imported trait receiver must dispatch through slot zero"
+        );
+        assert!(
+            read.blocks.iter().flat_map(|block| &block.instructions).all(|instruction| {
+                !matches!(instruction, crate::mir::MirInst::MethodCallStatic { func_name, .. } if func_name == "poll")
+            }),
+            "aliased imported trait call must not degrade to a bare static method"
+        );
+    }
+
+    #[test]
+    fn aliased_imported_trait_from_variant_folder_preserves_selected_slots() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test/01_unit/compiler/module_resolver/fixtures/variants/lib/crypto")
+            .canonicalize()
+            .expect("checked-in variant fixtures");
+        // The selected overlay and the default both define CryptoBackend, but
+        // available has a different slot. This catches accidental fallback to
+        // a base directory even if the authored alias and method name survive.
+        for (selection, expected_slot) in [("openssl", 1), ("default", 0)] {
+            let dir = create_test_project();
+            let src = dir.path().join("src");
+            let main_path = src.join("main.spl");
+            let source = r#"use crypto.backend.{CryptoBackend as SelectedBackend}
+use crypto.provider.{name}
+
+fn selected_name() -> text:
+    name()
+
+fn available(backend: SelectedBackend) -> bool:
+    backend.available()
+"#;
+            fs::write(&main_path, source).unwrap();
+            let ast = Parser::new(source).parse().expect("variant consumer parses");
+            let resolver = ModuleResolver::new(dir.path().to_path_buf(), src).with_var_roots(vec![
+                fixtures.join(selection),
+                fixtures.join("default"),
+            ]);
+            let mut lowerer = Lowerer::with_module_resolver(resolver, main_path);
+            let lowered = lowerer.lower_module(&ast).expect("cross-folder variant import lowers");
+            let metadata = lowered.trait_infos.get("SelectedBackend").expect("alias metadata");
+            assert_eq!(metadata.name, "CryptoBackend");
+            assert_eq!(metadata.get_vtable_slot("available"), Some(expected_slot));
+            assert_eq!(metadata.get_method("available").unwrap().return_type, TypeId::BOOL);
+            let mir = crate::mir::lower_to_mir(&lowered).expect("variant call lowers to MIR");
+            let available = mir.functions.iter().find(|function| function.name == "available").unwrap();
+            assert!(available.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
+                matches!(instruction, crate::mir::MirInst::MethodCallVirtual { vtable_slot, .. }
+                    if *vtable_slot == expected_slot)
+            }), "{selection} must use its selected declaration's vtable slot");
+            assert!(available.blocks.iter().flat_map(|block| &block.instructions).all(|instruction| {
+                !matches!(instruction, crate::mir::MirInst::MethodCallStatic { func_name, .. }
+                    if func_name == "available")
+            }), "variant trait must not degrade to a bare static method");
+        }
     }
 
     #[test]

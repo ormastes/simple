@@ -46,16 +46,6 @@ exact_env_schema() {
   [ "$schema_actual" -eq "$schema_expected" ] || return 1
 }
 
-valid_worker_run_identity() {
-  worker_identity=$1
-  case "$worker_identity" in run.*.*) ;; *) return 1 ;; esac
-  worker_identity_parts=${worker_identity#run.}
-  worker_identity_pid=${worker_identity_parts%%.*}
-  worker_identity_sequence=${worker_identity_parts#*.}
-  case "$worker_identity_pid" in ''|*[!0-9]*|0) return 1 ;; esac
-  case "$worker_identity_sequence" in ''|*[!0-9]*) return 1 ;; esac
-}
-
 matrix_id=
 compiler_manifest=
 cli_journal=
@@ -65,7 +55,6 @@ linker=cc
 scope=full
 resume=0
 worker_task=
-worker_run=
 source_root=$(pwd -P)
 timeout_seconds=${STAGE4_MATRIX_TIMEOUT_SECONDS:-1800}
 phase_live_manifest=${STAGE4_PHASE_LIVE_MANIFEST:-}
@@ -85,7 +74,6 @@ for arg in "$@"; do
     --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
     --build-jobs=*) build_jobs=${arg#*=} ;;
     --worker-task=*) worker_task=${arg#*=} ;;
-    --worker-run=*) worker_run=${arg#*=} ;;
     --resume) resume=1 ;;
     *) die "unknown option: $arg" ;;
   esac
@@ -127,20 +115,6 @@ tmps="$work_root/tmps"
 summary="$work_root/summary.env"
 matrix="$work_root/matrix.tsv"
 config="$work_root/config.env"
-receipt_dir="$state"
-if [ -n "$worker_task" ]; then
-  case "$worker_task" in *[!A-Za-z0-9_]*) die "invalid worker task" ;; esac
-  valid_worker_run_identity "$worker_run" || die "invalid parent run identity"
-  worker_run_dir="$work_root/scheduler/$worker_run"
-  receipt_dir="$worker_run_dir/drafts"
-  [ -d "$receipt_dir" ] && [ ! -L "$receipt_dir" ] || die "worker draft directory is unavailable"
-  # The canonical supervisor execs this shell as its setsid session leader.
-  printf 'pid=%s\npgid=%s\n' "$$" "$$" >"$receipt_dir/$worker_task.session.tmp.$$" || exit 2
-  mv "$receipt_dir/$worker_task.session.tmp.$$" "$receipt_dir/$worker_task.session" || exit 2
-  STAGE4_MATRIX_ID=$matrix_id
-  STAGE4_MATRIX_TASK_ID=$worker_task
-  export STAGE4_MATRIX_ID STAGE4_MATRIX_TASK_ID
-fi
 
 if [ -e "$work_root" ] && [ -n "$(find "$work_root" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] && [ "$resume" -ne 1 ]; then
   die "matrix evidence already exists; use --resume"
@@ -353,10 +327,8 @@ frozen_identity_snapshot() {
 frozen_identity_stable() {
   [ "$(hash_file "$config")" = "$config_hash" ] &&
     [ "$(hash_file "$matrix")" = "$matrix_hash" ] || return 1
-  if [ "${matrix_worker:-0}" = 1 ] && [ "${snapshot_task:-}" = "$worker_task" ]; then
-    # write_identity_snapshot captured current source at this task boundary.
-    # Validate those bytes, without a redundant second full-tree scan.
-    scheduler_identity_matches_config "$state/$snapshot_task.identity-$snapshot_phase"
+  if [ "${matrix_worker:-0}" = 1 ]; then
+    [ -f "$work_root/scheduler/identity-before" ] && [ ! -L "$work_root/scheduler/identity-before" ]
     return $?
   fi
   frozen_identity_snapshot | while IFS='=' read -r frozen_key frozen_value; do
@@ -672,7 +644,7 @@ write_task_receipt() {
   receipt_log=$5
   receipt_output=$6
   receipt_output_hash=$7
-  receipt_file="$receipt_dir/$receipt_task.env"
+  receipt_file="$state/$receipt_task.env"
   receipt_tmp="$receipt_file.tmp.$$"
   receipt_log_hash=-
   [ ! -f "$receipt_log" ] || receipt_log_hash=$(hash_file "$receipt_log")
@@ -1833,7 +1805,6 @@ scheduler_task_dependencies_terminal() {
   set -- $scheduler_deps
   IFS=$scheduler_old_ifs
   for scheduler_dep in "$@"; do
-    [ -f "$scheduler_run_dir/committed/$scheduler_dep" ] || return 1
     [ -f "$state/$scheduler_dep.env" ] && [ ! -L "$state/$scheduler_dep.env" ] || return 1
   done
 }
@@ -1892,7 +1863,6 @@ scheduler_run_worker() {
   mkdir -p "$tmps/scheduler-$scheduler_run_task" || die "cannot create worker supervisor state"
   scheduler_worker_args >"$scheduler_args"
   printf '%s\n' "--worker-task=$scheduler_run_task" >>"$scheduler_args"
-  printf '%s\n' "--worker-run=${scheduler_run_dir##*/}" >>"$scheduler_args"
   set --
   while IFS= read -r scheduler_arg; do
     set -- "$@" "$scheduler_arg"
@@ -1900,35 +1870,16 @@ scheduler_run_worker() {
   # The contained launcher executes `setsid sh "$scheduler_launcher" ...`
   # inside the canonical supervisor, which owns timeout and reaping.
   TMPDIR="$tmps/scheduler-$scheduler_run_task" \
-    STAGE4_WORKER_DRAFT_DIR="$scheduler_run_dir/drafts" \
-    STAGE4_PARENT_CONFIG_HASH="$config_hash" STAGE4_PARENT_MATRIX_HASH="$matrix_hash" \
-    STAGE4_PARENT_IDENTITY_HASH="$scheduler_admitted_identity_hash" \
     sh "$scheduler_supervisor" "$timeout_seconds" 15 sh "$scheduler_launcher" "$@" &
   scheduler_pid=$!
-  # Publish ownership immediately; cancellation always signals/reaps this
-  # supervisor, including the interval before its child registers a session.
+  scheduler_pgid=$scheduler_pid
   {
     echo "task=$scheduler_run_task"
     echo "pid=$scheduler_pid"
-    echo "pgid=0"
+    echo "pgid=$scheduler_pgid"
     echo "launcher=process-group-timeout"
-    echo "action=executed"
   } >"$scheduler_active"
-  scheduler_session="$scheduler_run_dir/drafts/$scheduler_run_task.session"
-  scheduler_session_wait=0
-  while [ ! -f "$scheduler_session" ] && kill -0 "$scheduler_pid" 2>/dev/null && [ "$scheduler_session_wait" -lt 200 ]; do
-    sleep 0.05
-    scheduler_session_wait=$((scheduler_session_wait + 1))
-  done
-  scheduler_pgid=0
-  if exact_env_schema "$scheduler_session" pid pgid; then
-    scheduler_child=$(field pid "$scheduler_session")
-    case "$scheduler_child" in ''|*[!0-9]*|0|1) ;; *)
-      [ "$(field pgid "$scheduler_session")" != "$scheduler_child" ] || scheduler_pgid=$scheduler_child ;;
-    esac
-  fi
-  sed "s/^pgid=.*/pgid=$scheduler_pgid/" "$scheduler_active" >"$scheduler_meta.tmp.$$" || die "cannot retain worker ownership"
-  mv "$scheduler_meta.tmp.$$" "$scheduler_meta" || die "cannot publish worker ownership"
+  cp "$scheduler_active" "$scheduler_meta"
 }
 
 scheduler_finish_worker() {
@@ -1939,58 +1890,22 @@ scheduler_finish_worker() {
   scheduler_pid=$(field pid "$scheduler_meta")
   scheduler_status=0
   wait "$scheduler_pid" || scheduler_status=$?
-  scheduler_draft="$scheduler_finish_dir/drafts/$scheduler_finish_task.env"
-  scheduler_failure=
-  if [ "$scheduler_status" -ne 0 ]; then
-    scheduler_failure="supervisor-exit-$scheduler_status"
-  elif [ "$(hash_file "$config")" != "$config_hash" ] || [ "$(hash_file "$matrix")" != "$matrix_hash" ]; then
-    scheduler_failure=parent-config-drift
-  elif [ "$(field pgid "$scheduler_meta")" = 0 ]; then
-    scheduler_failure=missing-worker-session
-  elif ! receipt_envelope_valid "$scheduler_finish_task" "$(task_required "$scheduler_finish_task")" "$scheduler_draft"; then
-    scheduler_failure=invalid-worker-receipt
-  fi
-  if [ -n "$scheduler_failure" ]; then
-    # Never keep a child's PASS after a failing supervisor or invalid envelope.
-    scheduler_reject_worker "$scheduler_finish_task" "$scheduler_failure" "$scheduler_status"
-  else
-    mv "$scheduler_draft" "$state/$scheduler_finish_task.env" || die "cannot commit worker receipt"
-  fi
-  scheduler_result=$(field result "$state/$scheduler_finish_task.env")
+  scheduler_result=$(field result "$state/$scheduler_finish_task.env" 2>/dev/null || printf 'MISSING')
   {
     echo "exit_status=$scheduler_status"
     echo "result=$scheduler_result"
   } >>"$scheduler_meta"
   rm -f "$scheduler_active"
-  : >"$scheduler_finish_dir/committed/$scheduler_finish_task" || die "cannot commit dependency state"
-}
-
-scheduler_reject_worker() {
-  reject_task=$1
-  reject_reason=$2
-  reject_status=$3
-  [ "$reject_status" -ne 0 ] || reject_status=1
-  reject_result=$(classify_status "$reject_task" "$reject_status")
-  reject_log="$logs/$reject_task.log"
-  printf 'parent rejected worker: %s\n' "$reject_reason" >>"$reject_log"
-  rm -f "$state/$reject_task.pass-marker" "$state/$reject_task.executed-tests"
-  record_command "$reject_task" parent-worker-validation "$reject_reason"
-  write_identity_snapshot "$reject_task" before
-  write_identity_snapshot "$reject_task" after
-  write_task_input_snapshot "$reject_task" before
-  write_task_input_snapshot "$reject_task" after
-  reject_input=$(task_input_fingerprint "$reject_task")
-  write_task_receipt "$reject_task" "$reject_result" "$reject_status" "$reject_input" "$reject_log" - -
 }
 
 scheduler_write_manifest() {
   scheduler_dir=$1
-  scheduler_schedule="$work_root/scheduler/schedule.tsv"
+  scheduler_schedule="$scheduler_dir/schedule.tsv"
   scheduler_tmp="$scheduler_schedule.tmp.$$"
   printf 'task\trequired\tdependencies\taction\tpid\tpgid\tlauncher\tresult\n' >"$scheduler_tmp"
   while IFS="$(printf '\t')" read -r scheduler_task scheduler_required scheduler_deps; do
     scheduler_meta="$scheduler_dir/worker-meta/$scheduler_task.env"
-    if [ -f "$scheduler_meta" ] && [ "$(field action "$scheduler_meta")" = executed ]; then
+    if [ -f "$scheduler_meta" ]; then
       printf '%s\t%s\t%s\texecuted\t%s\t%s\t%s\t%s\n' \
         "$scheduler_task" "$scheduler_required" "$scheduler_deps" \
         "$(field pid "$scheduler_meta")" "$(field pgid "$scheduler_meta")" \
@@ -2024,62 +1939,11 @@ scheduler_cancel_all() {
   done
 }
 
-scheduler_allocate_run_dir() {
-  scheduler_allocate_root=$1
-  scheduler_allocate_attempt=0
-  while [ "$scheduler_allocate_attempt" -lt 1000 ]; do
-    scheduler_allocate_candidate="$scheduler_allocate_root/run.$$.$scheduler_allocate_attempt"
-    if mkdir "$scheduler_allocate_candidate" 2>/dev/null; then
-      scheduler_run_dir=$scheduler_allocate_candidate
-      {
-        echo 'schema=Stage4SchedulerRunOwnerV1'
-        echo "pid=$$"
-        echo "matrix_hash=$matrix_hash"
-        echo "config_hash=$config_hash"
-      } >"$scheduler_run_dir/owner.env.tmp" || die "cannot write scheduler ownership"
-      mv "$scheduler_run_dir/owner.env.tmp" "$scheduler_run_dir/owner.env" || die "cannot publish scheduler ownership"
-      mkdir "$scheduler_run_dir/active" "$scheduler_run_dir/worker-meta" \
-        "$scheduler_run_dir/drafts" "$scheduler_run_dir/committed" || die "cannot initialize scheduler state"
-      return 0
-    fi
-    [ -e "$scheduler_allocate_candidate" ] || die "cannot allocate scheduler run directory"
-    scheduler_allocate_attempt=$((scheduler_allocate_attempt + 1))
-  done
-  die "scheduler run namespace exhausted"
-}
-
-scheduler_cleanup_run_dir() {
-  scheduler_cleanup_root=$1
-  scheduler_cleanup_dir=$2
-  case "$scheduler_cleanup_dir" in
-    "$scheduler_cleanup_root"/run.$$.*) ;;
-    *) return 1 ;;
-  esac
-  scheduler_cleanup_sequence=${scheduler_cleanup_dir#"$scheduler_cleanup_root/run.$$."}
-  case "$scheduler_cleanup_sequence" in ''|*[!0-9]*) return 1 ;; esac
-  [ -d "$scheduler_cleanup_dir" ] && [ ! -L "$scheduler_cleanup_dir" ] || return 1
-  scheduler_cleanup_owner="$scheduler_cleanup_dir/owner.env"
-  [ -f "$scheduler_cleanup_owner" ] && [ ! -L "$scheduler_cleanup_owner" ] || return 1
-  [ "$(wc -l <"$scheduler_cleanup_owner" | tr -d ' ')" -eq 4 ] || return 1
-  grep -Fxq 'schema=Stage4SchedulerRunOwnerV1' "$scheduler_cleanup_owner" || return 1
-  grep -Fxq "pid=$$" "$scheduler_cleanup_owner" || return 1
-  grep -Fxq "matrix_hash=$matrix_hash" "$scheduler_cleanup_owner" || return 1
-  grep -Fxq "config_hash=$config_hash" "$scheduler_cleanup_owner" || return 1
-  rm -rf "$scheduler_cleanup_dir"
-}
-
-scheduler_exit_cleanup() {
-  [ -n "${scheduler_run_dir:-}" ] || return 0
-  scheduler_cancel_all "$scheduler_run_dir"
-  scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir" || :
-}
-
 scheduler_interrupted() {
-  [ -z "${scheduler_run_dir:-}" ] || scheduler_cancel_all "$scheduler_run_dir"
+  scheduler_cancel_all "$scheduler_run_dir"
   write_summary
-  [ -z "${scheduler_run_dir:-}" ] || \
-    scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir" || die "cannot clean owned scheduler state"
-  trap - EXIT INT TERM HUP
+  rm -rf "$scheduler_run_dir"
+  trap - INT TERM HUP
   exit 143
 }
 
@@ -2090,26 +1954,26 @@ run_scheduler_parent() {
   mkdir -p "$scheduler_root" || die "cannot create scheduler root"
   scheduler_capture_identity "$scheduler_parent_identity_before"
   scheduler_identity_matches_config "$scheduler_parent_identity_before" || die "frozen identity drift before scheduler dispatch"
-  scheduler_run_dir=
+  scheduler_run_dir="$scheduler_root/run.$$"
+  mkdir -p "$scheduler_run_dir/active" "$scheduler_run_dir/worker-meta" || die "cannot create scheduler state"
   trap 'scheduler_interrupted' INT TERM HUP
-  trap 'scheduler_exit_cleanup' EXIT
-  scheduler_allocate_run_dir "$scheduler_root"
-  cp "$scheduler_parent_identity_before" "$scheduler_run_dir/identity-before" || die "cannot freeze worker identity"
-  scheduler_admitted_identity_hash=$(hash_file "$scheduler_run_dir/identity-before")
   scheduler_pending="$scheduler_run_dir/pending"
   : >"$scheduler_pending"
   while IFS="$(printf '\t')" read -r scheduler_task scheduler_required scheduler_deps; do
     scheduler_task_in_scope "$scheduler_task" || continue
     printf '%s\n' "$scheduler_task" >>"$scheduler_pending"
   done <"$matrix"
-  # The matrix is topologically ordered. Dispatch any dependency-ready row,
-  # then reap/validate/commit the next matrix row, never a completion-order row.
-  while IFS="$(printf '\t')" read -r scheduler_commit_task scheduler_commit_required scheduler_commit_deps; do
+  while [ -s "$scheduler_pending" ]; do
     scheduler_started=0
     scheduler_active_count=$(find "$scheduler_run_dir/active" -type f -name '*.env' | wc -l | tr -d ' ')
     while [ "$scheduler_active_count" -lt "$build_jobs" ]; do
       scheduler_next=
       while IFS= read -r scheduler_candidate; do
+        scheduler_candidate_input=$(task_input_fingerprint "$scheduler_candidate")
+        if receipt_reusable "$scheduler_candidate" "$scheduler_candidate_input"; then
+          scheduler_next=$scheduler_candidate
+          break
+        fi
         if scheduler_dependencies_collected "$scheduler_candidate"; then
           scheduler_next=$scheduler_candidate
           break
@@ -2120,46 +1984,35 @@ run_scheduler_parent() {
       awk -v task="$scheduler_next" '$0 != task { print }' "$scheduler_pending" >"$scheduler_pending_tmp"
       mv "$scheduler_pending_tmp" "$scheduler_pending"
       scheduler_next_input=$(task_input_fingerprint "$scheduler_next")
-      if receipt_envelope_valid "$scheduler_next" "$(task_required "$scheduler_next")" &&
-          receipt_reusable "$scheduler_next" "$scheduler_next_input"; then
-        printf 'action=reused\n' >"$scheduler_run_dir/worker-meta/$scheduler_next.env"
+      if receipt_reusable "$scheduler_next" "$scheduler_next_input"; then
         scheduler_started=1
         continue
       fi
-      rm -f "$state/$scheduler_next.env"
       scheduler_run_worker "$scheduler_next" "$scheduler_run_dir"
       scheduler_started=1
       scheduler_active_count=$((scheduler_active_count + 1))
     done
-    scheduler_commit_meta="$scheduler_run_dir/worker-meta/$scheduler_commit_task.env"
-    [ -f "$scheduler_commit_meta" ] || die "scheduler cannot dispatch next matrix row"
-    if [ "$(field action "$scheduler_commit_meta")" = reused ]; then
-      # Reuse also becomes visible to this invocation's DAG only in matrix
-      # order and only after validating the complete retained envelope.
-      if ! receipt_envelope_valid "$scheduler_commit_task" "$scheduler_commit_required"; then
-        scheduler_reject_worker "$scheduler_commit_task" invalid-reused-receipt 1
-      fi
-      : >"$scheduler_run_dir/committed/$scheduler_commit_task" || die "cannot commit reused dependency state"
-    else
-      scheduler_finish_worker "$scheduler_commit_task" "$scheduler_run_dir"
+    scheduler_first_active=$(find "$scheduler_run_dir/active" -type f -name '*.env' -print | LC_ALL=C sort | head -n 1)
+    if [ -n "$scheduler_first_active" ]; then
+      scheduler_finish_worker "$(field task "$scheduler_first_active")" "$scheduler_run_dir"
+    elif [ "$scheduler_started" -eq 0 ]; then
+      die "scheduler has pending rows with no terminal dependencies"
     fi
-  done <"$matrix"
+  done
+  while scheduler_left=$(find "$scheduler_run_dir/active" -type f -name '*.env' -print | LC_ALL=C sort | head -n 1) && [ -n "$scheduler_left" ]; do
+    scheduler_finish_worker "$(field task "$scheduler_left")" "$scheduler_run_dir"
+  done
   scheduler_capture_identity "$scheduler_parent_identity_after"
   if ! cmp -s "$scheduler_parent_identity_before" "$scheduler_parent_identity_after" || ! scheduler_identity_matches_config "$scheduler_parent_identity_after"; then
     scheduler_identity_drift=true
   fi
   scheduler_write_manifest "$scheduler_run_dir"
   write_summary
-  scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir" || die "cannot clean owned scheduler state"
-  trap - EXIT INT TERM HUP
+  trap - INT TERM HUP
 }
 
 if [ -n "$worker_task" ]; then
   matrix_worker=1
-  [ "$config_hash" = "${STAGE4_PARENT_CONFIG_HASH:-}" ] &&
-    [ "$matrix_hash" = "${STAGE4_PARENT_MATRIX_HASH:-}" ] || die "worker is not bound to admitted parent config"
-  [ "$(hash_file "$worker_run_dir/identity-before")" = "${STAGE4_PARENT_IDENTITY_HASH:-}" ] &&
-    scheduler_identity_matches_config "$worker_run_dir/identity-before" || die "worker identity does not match admitted config"
   awk -F '\t' -v task="$worker_task" '$1 == task { found=1 } END { exit !found }' "$matrix" || die "unknown worker task: $worker_task"
   scheduler_task_in_scope "$worker_task" || die "worker task is outside matrix scope: $worker_task"
   case "$worker_task" in

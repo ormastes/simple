@@ -15,7 +15,13 @@
 # verifiable with `simple run <spec>` without a network or a mounted disk.
 
 use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request}
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha256.{
+    Sha256StreamV1, sha256_text, sha256_u8_hex, sha256_u8_hex_zeroizing,
+    sha256_stream_v1_new, sha256_stream_v1_reset,
+    sha256_stream_v1_update_byte, sha256_stream_v1_finish_hex,
+    sha256_stream_v1_zeroize
+}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
 
 pub val DBD_MAX_JOURNAL_BYTES: i64 = 1024 * 1024
 pub val DBD_MAX_JOURNAL_RECORDS: i64 = 4096
@@ -28,25 +34,22 @@ pub val DBD_MAX_PRINCIPAL_BYTES: i64 = 64
 pub val DBD_MIN_CREDENTIAL_BYTES: i64 = 32
 pub val DBD_MAX_CREDENTIAL_BYTES: i64 = 128
 pub val DBD_MAX_AUTH_ATTEMPTS_PER_SESSION: i64 = 4
-pub val DBD_BOOT_CREDENTIAL_OWNER_BLOCKER: text =
-    "boot-mutable-credential-owner-unavailable"
-
 val DBD_UNKNOWN_PRINCIPAL_DIGEST: text = sha256_text("dbd-unknown-principal")
 val DBD_UNKNOWN_CREDENTIAL_DIGEST: text = sha256_text("dbd-unknown-credential")
 
 # Owner-admission facts, not user configuration. The mutable TLS-to-AUTH wire
-# owner exists, but no boot mutable-credential provisioner, certificate/key
-# owner, typed entropy-failure path, or durable DBFS commit owner is wired to
-# dbd. Keeping these private prevents a socket caller from manufacturing a
-# boolean "verified" claim.
+# owner and canonical boot streaming-digest provisioner are wired. Certificate
+# and private-key authority, typed entropy failure, and durable DBFS commit
+# remain blocked. Keeping these private prevents a socket caller from
+# manufacturing a boolean "verified" claim.
 val DBD_AUTH_FRAMING_OWNER_VERIFIED: bool = true
-val DBD_AUTHENTICATION_OWNER_VERIFIED: bool = false
+val DBD_AUTHENTICATION_OWNER_VERIFIED: bool = true
 val DBD_TLS_OWNER_VERIFIED: bool = false
 val DBD_DBFS_OWNER_VERIFIED: bool = false
 
 # Advertised capabilities are intentionally conservative: features without a
 # verified implementation must remain visibly blocked.
-pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
+pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;auth=BootStreamingDigestOwnerV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
 
 pub fn dbd_production_startup_ready() -> bool:
     """True only after real auth, TLS, and DBFS owners verify admission."""
@@ -55,8 +58,6 @@ pub fn dbd_production_startup_ready() -> bool:
 
 pub fn dbd_production_startup_blocker() -> text:
     """Return a non-secret, stable production startup blocker."""
-    if not DBD_AUTHENTICATION_OWNER_VERIFIED:
-        return DBD_BOOT_CREDENTIAL_OWNER_BLOCKER
     if not DBD_TLS_OWNER_VERIFIED:
         return "tls-owner-unavailable"
     if not DBD_DBFS_OWNER_VERIFIED:
@@ -226,9 +227,27 @@ pub class DbdCredentialProvider:
             credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
             credential.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
             return false
+        # The expanded SHA-256 schedule and final word projection are derived
+        # from credential bytes. Admit the verifier only if their volatile
+        # wipe/readback succeeds; a digest-only provider must not leave a
+        # compiler-elidable temporary secret workspace behind.
+        val credential_digest = sha256_u8_hex_zeroizing(credential)
+        if not credential_digest.?:
+            return false
         self.principal = principal
         self.principal_digest = sha256_text(principal)
-        self.credential_digest = sha256_u8_hex(credential)
+        self.credential_digest = credential_digest.unwrap()
+        self.configured = true
+        true
+
+    me configure_owned_digest(principal: text, credential_digest: text) -> bool:
+        """Install only a digest produced by this module's boot owner."""
+        self.revoke()
+        if not _dbd_principal_valid(principal) or credential_digest.len() != 64:
+            return false
+        self.principal = principal
+        self.principal_digest = sha256_text(principal)
+        self.credential_digest = credential_digest
         self.configured = true
         true
 
@@ -237,6 +256,90 @@ pub class DbdCredentialProvider:
         self.principal = ""
         self.principal_digest = DBD_UNKNOWN_PRINCIPAL_DIGEST
         self.credential_digest = DBD_UNKNOWN_CREDENTIAL_DIGEST
+
+pub enum DbdBootCredentialStateV1:
+    Loading
+    Admitted
+    Quarantined
+    Revoked
+
+pub class DbdBootCredentialOwnerV1:
+    """Boot/reload credential owner that never retains raw credential bytes."""
+    state: DbdBootCredentialStateV1
+    principal: text
+    stream: Sha256StreamV1
+    byte_count: u64
+    provider: DbdCredentialProvider
+    hash_workspace_zeroized: bool
+    last_error: text
+
+    pub static fn new(principal: text) -> DbdBootCredentialOwnerV1:
+        DbdBootCredentialOwnerV1(
+            state: DbdBootCredentialStateV1.Loading,
+            principal: principal,
+            stream: sha256_stream_v1_new(),
+            byte_count: 0u64,
+            provider: DbdCredentialProvider.new(),
+            hash_workspace_zeroized: false,
+            last_error: "")
+
+    me quarantine(reason: text) -> bool:
+        self.provider.revoke()
+        self.hash_workspace_zeroized = sha256_stream_v1_zeroize(self.stream)
+        self.state = DbdBootCredentialStateV1.Quarantined
+        self.last_error = reason
+        false
+
+    pub me admit_source(source: [u8]) -> bool:
+        """Hash and wipe the same authoritative mutable source in one step."""
+        if self.state != DbdBootCredentialStateV1.Loading:
+            val _ = secure_zero_u8_slots(source)
+            return self.quarantine("dbd-boot-credential-owner-not-loading")
+        if source.len() < DBD_MIN_CREDENTIAL_BYTES as u64 or
+            source.len() > DBD_MAX_CREDENTIAL_BYTES as u64:
+            val _ = secure_zero_u8_slots(source)
+            return self.quarantine("dbd-boot-credential-boundary-invalid")
+        var index: u64 = 0u64
+        while index < source.len():
+            if not sha256_stream_v1_update_byte(self.stream, source[index]):
+                val _ = secure_zero_u8_slots(source)
+                return self.quarantine("dbd-boot-credential-hash-rejected")
+            index = index + 1u64
+        self.byte_count = source.len()
+        val report = secure_zero_u8_slots(source)
+        if not report.verified() or report.slot_count != self.byte_count:
+            return self.quarantine("dbd-boot-credential-source-wipe-unverified")
+        val digest = sha256_stream_v1_finish_hex(self.stream)
+        if digest == nil:
+            return self.quarantine("dbd-boot-credential-hash-failed")
+        self.hash_workspace_zeroized = sha256_stream_v1_zeroize(self.stream)
+        if not self.hash_workspace_zeroized:
+            return self.quarantine("dbd-boot-credential-workspace-wipe-unverified")
+        if not self.provider.configure_owned_digest(self.principal, digest.unwrap()):
+            return self.quarantine("dbd-boot-credential-provider-rejected")
+        self.state = DbdBootCredentialStateV1.Admitted
+        self.last_error = ""
+        true
+
+    pub me begin_reload(principal: text) -> bool:
+        if self.state != DbdBootCredentialStateV1.Admitted:
+            return false
+        self.provider.revoke()
+        sha256_stream_v1_reset(self.stream)
+        self.state = DbdBootCredentialStateV1.Loading
+        self.principal = principal
+        self.byte_count = 0u64
+        self.hash_workspace_zeroized = false
+        self.last_error = ""
+        true
+
+    pub me revoke():
+        self.provider.revoke()
+        self.hash_workspace_zeroized = sha256_stream_v1_zeroize(self.stream)
+        self.principal = ""
+        self.byte_count = 0u64
+        self.state = DbdBootCredentialStateV1.Revoked
+        self.last_error = "dbd-boot-credential-revoked"
 
 pub class DbdAuthSession:
     """One connection's bounded authentication attempts and admitted identity."""
@@ -297,10 +400,12 @@ pub class DbdAuthSession:
             sha256_text(principal)
         else:
             DBD_UNKNOWN_PRINCIPAL_DIGEST
-        val supplied_credential_digest = sha256_u8_hex(candidate)
+        val supplied_credential_digest = sha256_u8_hex_zeroizing(candidate)
+        if not supplied_credential_digest.?:
+            return self.reject_attempt()
         self.commit_digest_authentication(
             provider, principal_valid, supplied_principal_digest,
-            supplied_credential_digest)
+            supplied_credential_digest.unwrap())
 
     pub me authenticate_bytes(
         provider: DbdCredentialProvider,
@@ -318,10 +423,12 @@ pub class DbdAuthSession:
             sha256_u8_hex(principal)
         else:
             DBD_UNKNOWN_PRINCIPAL_DIGEST
-        val supplied_credential_digest = sha256_u8_hex(candidate)
+        val supplied_credential_digest = sha256_u8_hex_zeroizing(candidate)
+        if not supplied_credential_digest.?:
+            return self.reject_attempt()
         self.commit_digest_authentication(
             provider, principal_valid, supplied_principal_digest,
-            supplied_credential_digest)
+            supplied_credential_digest.unwrap())
 
     pub fn can_dispatch() -> bool:
         self.authenticated and not self.closed and self.identity != "" and

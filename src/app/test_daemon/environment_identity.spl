@@ -1,0 +1,60 @@
+use std.common.crypto.sha256.{sha256_text}
+use std.env.variables.{env_list_checked}
+
+val TEST_DAEMON_ENVIRONMENT_SCHEMA_V1: text =
+    "simple-test-daemon-environment-v1"
+
+struct TestDaemonEnvironmentIdentityV1:
+    valid: bool
+    digest: text
+    reason: text
+
+fn test_daemon_environment_snapshot_identity_v1(
+    snapshot: [(text, text)]
+) -> TestDaemonEnvironmentIdentityV1:
+    var seen: {text: bool} = {}
+    var rows: [text] = []
+    var saw_execution_mode = false
+    for pair in snapshot:
+        val (name, raw_value) = pair
+        # /bin/sh owns these two bookkeeping fields while it backgrounds the
+        # daemon. They are not caller-controlled spec inputs. The execution
+        # mode is deliberately normalized to the value the daemon launcher
+        # applies, so the client and the spawned daemon hash the same effective
+        # worker environment.
+        if name == "_" or name == "SHLVL":
+            continue
+        if name == "SIMPLE_EXECUTION_MODE":
+            saw_execution_mode = true
+        val value = if name == "SIMPLE_EXECUTION_MODE": "interpret" else: raw_value
+        if seen.contains_key(name):
+            return TestDaemonEnvironmentIdentityV1(
+                false, "", "environment-field-duplicate:{name}")
+        seen[name] = true
+        rows.push("{name.len()}:{name}|{value.len()}:{value}")
+    if not saw_execution_mode:
+        val name = "SIMPLE_EXECUTION_MODE"
+        val value = "interpret"
+        rows.push("{name.len()}:{name}|{value.len()}:{value}")
+    rows = rows.sorted()
+    val frame = TEST_DAEMON_ENVIRONMENT_SCHEMA_V1 + "\n" + rows.join("\n")
+    TestDaemonEnvironmentIdentityV1(true, sha256_text(frame), "ok")
+
+fn test_daemon_environment_can_reuse_v1(
+    caller: TestDaemonEnvironmentIdentityV1,
+    published_digest: text
+) -> bool:
+    caller.valid and published_digest.len() == 64 and
+        caller.digest == published_digest
+
+fn test_daemon_environment_identity_v1() -> TestDaemonEnvironmentIdentityV1:
+    match env_list_checked():
+        case Err(reason): TestDaemonEnvironmentIdentityV1(
+            false, "", "environment-snapshot-unavailable:{reason}")
+        case Ok(snapshot): test_daemon_environment_snapshot_identity_v1(snapshot)
+
+export TestDaemonEnvironmentIdentityV1
+export TEST_DAEMON_ENVIRONMENT_SCHEMA_V1
+export test_daemon_environment_snapshot_identity_v1
+export test_daemon_environment_identity_v1
+export test_daemon_environment_can_reuse_v1

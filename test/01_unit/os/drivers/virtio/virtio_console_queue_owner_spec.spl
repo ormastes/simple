@@ -1,0 +1,81 @@
+# @tag: unit, simpleos, virtio-console, ownership
+
+use std.spec.*
+use os.drivers.virtio.virtio_console_queue_owner.*
+
+describe "VirtIO console bounded multi-queue owner":
+    it "binds negotiated port queues for x86 PCI and RISC-V MMIO":
+        var pci = VirtioConsoleQueueOwner.create(1u64, 8)
+        expect(pci.bind_x86_pci(1u32, 48u32)).to_equal("ready")
+        expect(pci.queue_id(VIRTIO_CONSOLE_CONTROL_RX_SLOT)).to_equal(2u16)
+        expect(pci.queue_id(VIRTIO_CONSOLE_CONTROL_TX_SLOT)).to_equal(3u16)
+        expect(pci.queue_id(VIRTIO_CONSOLE_DATA_RX_SLOT)).to_equal(4u16)
+        expect(pci.queue_id(VIRTIO_CONSOLE_DATA_TX_SLOT)).to_equal(5u16)
+
+        var mmio = VirtioConsoleQueueOwner.create(2u64, 8)
+        expect(mmio.bind_riscv_mmio(3u32, 10u32)).to_equal("ready")
+        expect(mmio.queue_id(VIRTIO_CONSOLE_DATA_RX_SLOT)).to_equal(8u16)
+        expect(mmio.queue_id(VIRTIO_CONSOLE_DATA_TX_SLOT)).to_equal(9u16)
+
+    it "fails closed for invalid capacity, port, interrupt, and rebinding":
+        var invalid = VirtioConsoleQueueOwner.create(1u64, 65)
+        expect(invalid.bind_x86_pci(1u32, 48u32)).to_equal("invalid-capacity")
+        var invalid_owner = VirtioConsoleQueueOwner.create(0u64, 4)
+        expect(invalid_owner.bind_x86_pci(1u32, 48u32)).to_equal("invalid-capacity")
+        var port_zero = VirtioConsoleQueueOwner.create(3u64, 4)
+        expect(port_zero.bind_x86_pci(0u32, 48u32)).to_equal("ready")
+        expect(port_zero.queue_id(VIRTIO_CONSOLE_DATA_RX_SLOT)).to_equal(0u16)
+        expect(port_zero.queue_id(VIRTIO_CONSOLE_DATA_TX_SLOT)).to_equal(1u16)
+        var owner = VirtioConsoleQueueOwner.create(4u64, 4)
+        expect(owner.bind_x86_pci(1u32, 0u32)).to_equal("invalid-interrupt")
+        expect(owner.bind_x86_pci(1u32, 48u32)).to_equal("ready")
+        expect(owner.bind_riscv_mmio(1u32, 10u32)).to_equal("already-bound")
+
+    it "keeps descriptor ownership queue-local and bounded":
+        var owner = VirtioConsoleQueueOwner.create(5u64, 2)
+        expect(owner.bind_x86_pci(1u32, 48u32)).to_equal("ready")
+        val first = owner.acquire(VIRTIO_CONSOLE_DATA_TX_SLOT, 0, 64)
+        expect(first.admitted).to_equal(true)
+        expect(owner.acquire(VIRTIO_CONSOLE_DATA_TX_SLOT, 0, 64).reason).to_equal("descriptor-owned")
+        val second = owner.acquire(VIRTIO_CONSOLE_DATA_TX_SLOT, 1, 65536)
+        expect(second.admitted).to_equal(true)
+        expect(owner.acquire(VIRTIO_CONSOLE_DATA_TX_SLOT, 2, 64).reason).to_equal("invalid-descriptor")
+        expect(owner.acquire(VIRTIO_CONSOLE_CONTROL_TX_SLOT, 0, 64).admitted).to_equal(true)
+        expect(owner.complete(first)).to_equal("completed")
+        expect(owner.complete(first)).to_equal("not-owned")
+
+        val reused = owner.acquire(VIRTIO_CONSOLE_DATA_TX_SLOT, 0, 64)
+        expect(reused.admitted).to_equal(true)
+        expect(owner.complete(first)).to_equal("stale-lease")
+        expect(owner.complete(reused)).to_equal("completed")
+
+        var other = VirtioConsoleQueueOwner.create(6u64, 2)
+        expect(other.bind_x86_pci(1u32, 49u32)).to_equal("ready")
+        val other_live = other.acquire(VIRTIO_CONSOLE_DATA_TX_SLOT, 0, 64)
+        expect(other_live.admitted).to_equal(true)
+        expect(other.complete(reused)).to_equal("owner-mismatch")
+        expect(other.complete(other_live)).to_equal("completed")
+
+    it "invalidates old leases on reset without growing storage":
+        var owner = VirtioConsoleQueueOwner.create(7u64, 4)
+        expect(owner.bind_riscv_mmio(1u32, 10u32)).to_equal("ready")
+        val old = owner.acquire(VIRTIO_CONSOLE_DATA_RX_SLOT, 0, 128)
+        expect(old.admitted).to_equal(true)
+        expect(owner.reset(false)).to_equal("device-not-quiesced")
+        expect(owner.complete(old)).to_equal("completed")
+        val pending = owner.acquire(VIRTIO_CONSOLE_DATA_RX_SLOT, 0, 128)
+        expect(owner.reset(true)).to_equal("reset")
+        expect(owner.current_generation()).to_equal(2u64)
+        expect(owner.complete(pending)).to_equal("stale-generation")
+        expect(owner.acquire(VIRTIO_CONSOLE_DATA_RX_SLOT, 0, 128).admitted).to_equal(true)
+
+    it "marks IRQ work only and drains ready queues fairly in task context":
+        var owner = VirtioConsoleQueueOwner.create(8u64, 4)
+        expect(owner.bind_x86_pci(1u32, 48u32)).to_equal("ready")
+        expect(owner.record_irq(1u32, 0b1101u32).accepted).to_equal(true)
+        expect(owner.take_ready().queue_slot).to_equal(VIRTIO_CONSOLE_CONTROL_RX_SLOT)
+        expect(owner.take_ready().queue_slot).to_equal(VIRTIO_CONSOLE_DATA_RX_SLOT)
+        expect(owner.take_ready().queue_slot).to_equal(VIRTIO_CONSOLE_DATA_TX_SLOT)
+        expect(owner.take_ready().ready).to_equal(false)
+        expect(owner.record_irq(0u32, 1u32).reason).to_equal("not-used-ring")
+        expect(owner.record_irq(1u32, 16u32).reason).to_equal("invalid-ready-mask")

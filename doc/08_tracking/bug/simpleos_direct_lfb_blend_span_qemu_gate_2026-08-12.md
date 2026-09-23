@@ -2,7 +2,7 @@
 
 Status: **IMPLEMENTED / BOOT EVIDENCE BLOCKED**.
 
-The x86_64 freestanding runtime now owns `rt_gui_blend_span4`, validates the
+The x86_64 freestanding runtime now owns `rt_gui_blend_span8`, validates the
 tagged source array and row bounds, and performs exact straight-alpha src-over
 directly against the registered LFB. `FramebufferDriver` uses it only for an
 oversized non-staged MMIO surface and falls back to portable per-pixel blending
@@ -60,3 +60,44 @@ evidence requiring a freshly built SimpleOS kernel ELF and a real
 serial/QMP screenshot capture. No kernel build or QEMU environment
 available/attempted in this lane. Leaving OPEN.
 
+## Recheck 2026-09-22 — x86 direct path absent at e0dd873
+
+The earlier claim that the x86 freestanding runtime owns the direct-LFB
+implementation is contradicted by this base revision: `baremetal_stubs.c`
+contains no `rt_gui_blend_span4`, while `freestanding_optional_backends.c`
+defines it as an unconditional zero-return fallback. Thus an oversized
+non-staged x86 surface always takes the portable per-pixel path. The existing
+route SSpec expected the missing C body, and the static SIMD gate checked
+fill only.
+
+This lane adds the bounded x86 source-over routine, removes the duplicate
+fallback symbol, and extends the static prerequisite gate to require its
+compiled symbol. The routine rejects invalid source arrays, offsets, counts,
+or framebuffer bounds before writing and returns success only after the row.
+The host/staged SIMD routes and unsupported-architecture fallbacks are intact.
+
+The x86 C registry currently comes from `rt_gui_set_fb`, which programs BGA
+height 768 and stores its own detected framebuffer address and pitch. The
+driver can construct a scanout from independent address/height/pitch metadata.
+The old four-argument blend ABI did not carry destination identity and could
+therefore return success after writing registry A when the requesting driver
+owned scanout B. The replacement `rt_gui_blend_span8` carries the
+`FramebufferDriver` address, width, height, and pitch and rejects any mismatch
+before MMIO access.
+`simpleos_direct_lfb_blend_contract_test.c` reproduces the two-buffer mismatch
+and proves zero reads/writes on rejection. It also proves transparent pixels
+perform zero destination accesses and opaque pixels avoid the old unnecessary
+read. The live gate still must establish readback; this is not general 8K
+acceleration evidence.
+
+Verification remains blocked before QEMU: the base ARM64 and x86 C translation
+units fail to compile for unrelated existing declarations/layout mismatches
+(including ARM64 nonce/array fields and x86 `HeapHeader.gc_flags`). The gate
+does not report PASS. No guest boot, direct route receipt, readback/checksum,
+or 8K timing is claimed. Status remains **OPEN** pending base compile repair,
+review, and a fresh guest evidence run.
+
+TODO(deferred-qemu): after a fresh SimpleOS image is available, run the direct
+route in QEMU with correlated serial and framebuffer readback, then measure an
+8K-width row workload. This host contract test proves bounded arithmetic and
+access behavior only; it is not guest, presentation, or 8K performance proof.

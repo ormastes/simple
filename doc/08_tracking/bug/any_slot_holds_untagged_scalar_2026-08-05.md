@@ -176,3 +176,25 @@ alone via the interpreter-vs-JIT split) and a scoped fix in
 ## Triage 2026-09-13
 
 Confirmed the two remaining consumer-side sites are unchanged: `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`'s Binary-op lowering still only boxes the other operand for the nil-comparison special case (no general `is_runtime_value_local`-vs-literal boxing rule), and `method_calls_literals.spl`'s `is_text_conversion` arm still decides rendering purely from `local_mir_type_of(receiver)`, which is the erased `I64` for a boxed `Any` local. The doc's own assessment stands: this is "a new kind of check" needing its own careful design, not a small surgical port -- risking a regression across all `Any`-typed JIT codegen if rushed. Leaving OPEN, no code change made this pass.
+
+## Draft repair 2026-09-21 — HOLD pending admitted native execution
+
+The canonical MIR owner
+`test/01_unit/compiler/mir/any_runtime_value_consumer_spec.spl` covers bool,
+i64, f64, and text values across local, parameter, and return boundaries.
+Against `origin/main` it reported 4 failures in 6 examples: scalar peers were
+not boxed for equality, Any parameters lost tagged-value provenance, and both
+implicit and explicit `-> Any` producers returned raw scalars. The repaired
+MIR test reports 6/6 passing.
+
+The repair keeps this row **OPEN**. Both binaries available during this pass
+self-identify as Rust bootstrap seeds, so neither can admit the required
+native/JIT behavioral result. The interpreter run establishes the semantic
+oracle and executes the pure-Simple MIR lowering test; it is not native
+acceptance. Close this row only after an admitted self-hosted Stage 2 or later
+binary executes the same local/parameter/return matrix without stub fallback.
+
+Paired compiler-lowering probe (same fixture and seed-hosted compiler modules,
+diagnostic only): baseline 9814.3 ms / 1,185,054,720-byte peak working set;
+repair 7859.8 ms / 1,186,283,520-byte peak working set. The 0.10% RSS delta and
+timing variation support no performance claim.

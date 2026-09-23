@@ -1,6 +1,6 @@
 # Stage 2 link passes GNU driver flags to cl.exe (Windows/MSVC)
 
-- **Status:** OPEN
+- **Status:** RESOLVED (driver fix `db06afd50ccd`; rechecked 2026-09-22)
 - **Severity:** P1 — blocks Stage 2 of the Windows/MSVC bootstrap
 - **Discovered:** 2026-09-12
 - **Lane:** `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --mode=dynload`
@@ -57,6 +57,25 @@ has — branch on
 output and `/link /INCLUDE:<symbol>` for the forced-reference arguments, and
 leave the GNU branch byte-identical. The `/INCLUDE:` payloads themselves are
 already MSVC-correct; only the driver wrapper around them is wrong.
+
+## Resolution and regression evidence
+
+Commit `db06afd50ccd` applies the MSVC driver branch in
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`: the output
+uses `/Fe:`, forced references accumulate as `/INCLUDE:`, and one `/link` group
+is emitted after all compiler inputs. The GNU branch retains `-o` and `-Wl,`
+arguments. The existing `linker_flags_follow_target_flavor_not_compiler_probe`
+unit test covers the ABI/flavor selection independently of the compiler name.
+
+On 2026-09-22, LLVM 23.1.1 `clang-cl.exe` at
+`C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin/clang-cl.exe`
+compiled a C source with `/TC /c` and then linked its object with
+`-fuse-ld=lld`, `/Fe:<output with spaces>`, and a final
+`/link /ENTRY:mainCRTStartup /SUBSYSTEM:CONSOLE /NODEFAULTLIB
+/INCLUDE:force_reference /OPT:REF,ICF`. Compile, link, and executable exit
+codes were all 0. This is focused driver evidence; it does not claim a full
+Stage 2 bootstrap pass. The historical `cl.exe` D8021 failure is addressed by
+the committed driver branch, but that compiler was not rerun in this check.
 
 ## Not yet investigated
 

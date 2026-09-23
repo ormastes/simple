@@ -22,6 +22,8 @@
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
+#include "simple_gui_html_provider_abi_v1.h"
+#include "simple_gui_event_provider_abi_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +69,7 @@ typedef SSIZE_T ssize_t;
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
+#include "platform/windows_raw_mapping.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -139,6 +142,7 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #include <dirent.h>
 #include <netdb.h>
 #include <dlfcn.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -733,20 +737,7 @@ int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_o
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
                     int64_t fd, int64_t offset) {
 #if defined(_WIN32)
-    (void)flags;
-    (void)offset;
-    if (length <= 0 || fd != -1) return -1;
-    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
-    DWORD protect;
-    if (prot == 0x0) protect = PAGE_NOACCESS;
-    else if (prot == 0x1) protect = PAGE_READONLY;
-    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-    else if (prot == 0x4) protect = PAGE_EXECUTE;
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else return -1;
-    void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length,
-                                MEM_COMMIT | MEM_RESERVE, protect);
-    return result ? (int64_t)(uintptr_t)result : -1;
+    return spl_windows_mmap_raw(addr, length, prot, flags, fd, offset);
 #else
     if (length <= 0 || offset < 0) return -1;
     /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
@@ -1760,6 +1751,12 @@ static int rt_core_transient_raw_grow(void) {
     size_t next_cap = rt_core_transient_raw_alloc_cap == 0
         ? 256
         : rt_core_transient_raw_alloc_cap * 2;
+    /* Reclaim retired slots without retaining a larger table for every HIR
+     * module. Grow only when live allocations need the additional capacity. */
+    if (rt_core_transient_raw_alloc_cap != 0 &&
+        (rt_core_transient_raw_alloc_len + 1) * 10 < rt_core_transient_raw_alloc_cap * 6) {
+        next_cap = rt_core_transient_raw_alloc_cap;
+    }
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
     RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
         next_cap, sizeof(RtCoreTransientRawAlloc));
@@ -2198,6 +2195,182 @@ static inline RtCoreString* rt_core_as_string(int64_t value) {
     if (!rt_core_is_registered_string(s)) return NULL;
     if (!s || s->kind != RT_VALUE_HEAP_STRING) return NULL;
     return s;
+}
+
+/* Optional HTML GUI provider. Loading is deferred until the GUI is actually
+ * used; ordinary compiler/CLI startup never loads AppKit or a GUI dylib.
+ * One process-lifetime handle is retained, and the hot path does one atomic
+ * readiness check plus one borrowed-byte call (no repeated dlopen/dlsym). */
+static atomic_bool rt_gui_html_ready = ATOMIC_VAR_INIT(false);
+static atomic_flag rt_gui_html_init_lock = ATOMIC_FLAG_INIT;
+static void *rt_gui_html_library = NULL;
+static int64_t (*rt_gui_html_present)(const uint8_t *, uint64_t) = NULL;
+#if !defined(_WIN32)
+static _Thread_local int rt_gui_html_initializing = 0;
+#endif
+
+static void rt_gui_html_refuse(const char *reason) {
+    fprintf(stderr, "[simple-gui] HTML provider unavailable: %s\n", reason);
+    fflush(stderr);
+    exit(70);
+}
+
+static void rt_gui_html_load(void) {
+#if defined(_WIN32)
+    rt_gui_html_refuse("dynamic HTML provider unsupported on this host");
+#else
+    if (rt_gui_html_initializing) rt_gui_html_refuse("provider initialization reentry");
+    if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_acquire)) {
+        while (atomic_flag_test_and_set_explicit(&rt_gui_html_init_lock, memory_order_acquire)) {
+            sched_yield();
+        }
+        if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_relaxed)) {
+            rt_gui_html_initializing = 1;
+            const char *path = getenv("SIMPLE_GUI_HTML_PROVIDER_PATH");
+            if (!path || path[0] != '/') rt_gui_html_refuse("absolute provider path required");
+            void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+            if (!library) rt_gui_html_refuse("provider load failed");
+            union { void *symbol; int64_t (*call)(void); } version;
+            union { void *symbol; int64_t (*call)(const uint8_t *, uint64_t); } present;
+            version.symbol = dlsym(library, "simple_gui_html_provider_abi_v1");
+            present.symbol = dlsym(library, "simple_gui_present_html_v1");
+            if (!version.call || !present.call ||
+                version.call() != SIMPLE_GUI_HTML_PROVIDER_ABI_VERSION_V1) {
+                dlclose(library);
+                rt_gui_html_refuse("provider ABI mismatch");
+            }
+            rt_gui_html_library = library;
+            rt_gui_html_present = present.call;
+            atomic_store_explicit(&rt_gui_html_ready, true, memory_order_release);
+            rt_gui_html_initializing = 0;
+        }
+        atomic_flag_clear_explicit(&rt_gui_html_init_lock, memory_order_release);
+    }
+#endif
+}
+
+/* Event sessions are deliberately separate from the concurrent, standalone
+ * HTML v1 API. All session state is owned by the macOS main thread. */
+static bool rt_gui_event_active = false;
+static bool rt_gui_event_ready = false;
+/* Nonnegative = admitted standalone calls; -1 = exclusive event session.
+ * Reserve before provider admission, and release only after callbacks finish. */
+static atomic_int rt_gui_call_gate = ATOMIC_VAR_INIT(0);
+static _Thread_local bool rt_gui_event_in_callback = false;
+static int64_t (*rt_gui_event_poll)(uint8_t *, uint64_t, uint64_t) = NULL;
+static int64_t (*rt_gui_event_shutdown)(void) = NULL;
+static int64_t splc_utf8_valid_up_to(const uint8_t *bytes, int64_t length);
+
+static void rt_gui_event_owner(void) {
+#if defined(__APPLE__)
+    if (!pthread_main_np()) rt_gui_html_refuse("GUI session requires main thread");
+#else
+    rt_gui_html_refuse("GUI event sessions require macOS");
+#endif
+    if (rt_gui_event_in_callback) rt_gui_html_refuse("GUI callback reentry");
+}
+
+void rt_gui_present_html(int64_t tagged_html) {
+    if (rt_gui_event_in_callback) rt_gui_html_refuse("GUI callback reentry");
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+    int calls = atomic_load_explicit(&rt_gui_call_gate, memory_order_acquire);
+    do {
+        if (calls < 0 || calls == INT_MAX)
+            rt_gui_html_refuse("standalone HTML overlaps GUI session");
+    } while (!atomic_compare_exchange_weak_explicit(&rt_gui_call_gate, &calls,
+                calls + 1, memory_order_acq_rel, memory_order_acquire));
+    rt_gui_event_in_callback = true;
+    rt_gui_html_load();
+    if (!rt_gui_html_library || !rt_gui_html_present ||
+        rt_gui_html_present((const uint8_t *)html->data, html->len) != 1) {
+        rt_gui_html_refuse("provider rejected frame");
+    }
+    rt_gui_event_in_callback = false;
+    atomic_fetch_sub_explicit(&rt_gui_call_gate, 1, memory_order_release);
+}
+
+void rt_gui_begin_session(void) {
+    rt_gui_event_owner();
+    if (rt_gui_event_active) rt_gui_html_refuse("GUI session already active");
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&rt_gui_call_gate, &expected,
+                -1, memory_order_acq_rel, memory_order_acquire))
+        rt_gui_html_refuse("GUI session overlaps standalone HTML");
+    rt_gui_event_in_callback = true;
+    rt_gui_html_load();
+    rt_gui_event_in_callback = false;
+#if !defined(_WIN32)
+    if (!rt_gui_event_ready) {
+        union { void *symbol; int64_t (*call)(void); } version, shutdown;
+        union { void *symbol; int64_t (*call)(uint8_t *, uint64_t, uint64_t); } poll;
+        version.symbol = dlsym(rt_gui_html_library, "simple_gui_event_provider_abi_v1");
+        poll.symbol = dlsym(rt_gui_html_library, "simple_gui_poll_event_v1");
+        shutdown.symbol = dlsym(rt_gui_html_library, "simple_gui_shutdown_v1");
+        if (!version.call || !poll.call || !shutdown.call)
+            rt_gui_html_refuse("provider event capability missing");
+        rt_gui_event_in_callback = true;
+        int64_t abi = version.call();
+        rt_gui_event_in_callback = false;
+        if (abi != SIMPLE_GUI_EVENT_PROVIDER_ABI_VERSION_V1)
+            rt_gui_html_refuse("provider event ABI mismatch");
+        rt_gui_event_poll = poll.call;
+        rt_gui_event_shutdown = shutdown.call;
+        rt_gui_event_ready = true;
+    }
+#endif
+    rt_gui_event_active = true;
+}
+
+void rt_gui_session_present_html(int64_t tagged_html) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+    rt_gui_event_in_callback = true;
+    int64_t accepted = rt_gui_html_present((const uint8_t *)html->data, html->len);
+    rt_gui_event_in_callback = false;
+    if (accepted != 1) rt_gui_html_refuse("provider rejected frame");
+}
+
+int64_t rt_gui_poll_event(void) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    uint8_t packet[SIMPLE_GUI_EVENT_PACKET_CAPACITY_V1] = {0};
+    rt_gui_event_in_callback = true;
+    int64_t count = rt_gui_event_poll(packet, sizeof(packet), SIMPLE_GUI_EVENT_WAIT_MS_V1);
+    rt_gui_event_in_callback = false;
+    if (count < 0 || count > (int64_t)sizeof(packet))
+        rt_gui_html_refuse("provider event length invalid");
+    if (count == 0) {
+        int64_t empty = rt_string_new_literal((const uint8_t *)"", 0);
+        if (!rt_core_as_string(empty)) rt_gui_html_refuse("event text allocation failed");
+        return empty;
+    }
+    int64_t delimiter = 0;
+    while (delimiter < count && packet[delimiter] != '\n') {
+        uint8_t byte = packet[delimiter];
+        if (delimiter >= 31 || !((byte >= 'a' && byte <= 'z') || byte == '-'))
+            rt_gui_html_refuse("provider event kind invalid");
+        delimiter++;
+    }
+    if (delimiter == 0 || delimiter == count || memchr(packet, 0, (size_t)count) ||
+        splc_utf8_valid_up_to(packet, count) != count)
+        rt_gui_html_refuse("provider event packet invalid");
+    int64_t copied = rt_string_new(packet, (uint64_t)count);
+    if (!rt_core_as_string(copied)) rt_gui_html_refuse("event text allocation failed");
+    return copied;
+}
+
+void rt_gui_end_session(void) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    rt_gui_event_active = false;
+    rt_gui_event_in_callback = true;
+    int64_t closed = rt_gui_event_shutdown();
+    rt_gui_event_in_callback = false;
+    if (closed != 1) rt_gui_html_refuse("provider shutdown failed");
+    atomic_store_explicit(&rt_gui_call_gate, 0, memory_order_release);
 }
 
 static atomic_bool rt_core_invalid_array_reported = ATOMIC_VAR_INIT(false);
@@ -5463,6 +5636,116 @@ bool rt_array_sort(int64_t receiver) {
     return true;
 }
 
+static int rt_sorted_byte_cmp(const void* lhs, const void* rhs) {
+    uint8_t a = *(const uint8_t*)lhs;
+    uint8_t b = *(const uint8_t*)rhs;
+    return (a > b) - (a < b);
+}
+
+static int rt_sorted_u64_cmp(const void* lhs, const void* rhs) {
+    uint64_t a = *(const uint64_t*)lhs;
+    uint64_t b = *(const uint64_t*)rhs;
+    return (a > b) - (a < b);
+}
+
+/* Match the hosted rt_array_sorted comparator, not rt_sort's interpreter
+ * comparator: unsigned boxes compare as u64 (including against tagged ints),
+ * tagged ints precede floats, and all other mixed types compare Equal. */
+static int rt_sorted_value_cmp(int64_t a, int64_t b) {
+    RtCoreUInt* unsigned_a = rt_core_as_heap_uint(a);
+    RtCoreUInt* unsigned_b = rt_core_as_heap_uint(b);
+    if (unsigned_a && unsigned_b) {
+        return (unsigned_a->value > unsigned_b->value) -
+               (unsigned_a->value < unsigned_b->value);
+    }
+    if (unsigned_a && rt_core_is_int(b)) {
+        int64_t integer_b = rt_core_as_int(b);
+        if (integer_b < 0) return 1;
+        return (unsigned_a->value > (uint64_t)integer_b) -
+               (unsigned_a->value < (uint64_t)integer_b);
+    }
+    if (unsigned_b && rt_core_is_int(a)) {
+        int64_t integer_a = rt_core_as_int(a);
+        if (integer_a < 0) return -1;
+        return ((uint64_t)integer_a > unsigned_b->value) -
+               ((uint64_t)integer_a < unsigned_b->value);
+    }
+    int integer_a = rt_core_is_int(a);
+    int integer_b = rt_core_is_int(b);
+    int float_a = rt_core_is_float(a);
+    int float_b = rt_core_is_float(b);
+    if (integer_a && integer_b) {
+        int64_t x = rt_core_as_int(a), y = rt_core_as_int(b);
+        return (x > y) - (x < y);
+    }
+    if (float_a && float_b) {
+        double x = rt_core_as_float(a), y = rt_core_as_float(b);
+        return (x > y) - (x < y); /* NaN compares Equal, as in Rust. */
+    }
+    if (integer_a && float_b) return -1;
+    if (float_a && integer_b) return 1;
+    return 0;
+}
+
+/* Non-mutating `sorted`: preserve both the input and its storage shape.
+ * Byte and u64-packed arrays carry RAW elements, not tagged RuntimeValues;
+ * feeding those slots to rt_sort_cmp can interpret integers as pointers.
+ * Duplicate packed scalars are identical, so qsort's stability is immaterial.
+ * Generic tagged elements use a stable O(n log n) bottom-up merge, avoiding
+ * rt_sort's O(n^2) insertion-sort cost for a new public entrypoint. */
+int64_t rt_array_sorted(int64_t receiver) {
+    if (!rt_core_as_array(receiver)) return rt_core_nil();
+    SplArray* copy = rt_array_copy((SplArray*)(uintptr_t)receiver);
+    if (!copy) return rt_core_nil();
+    RtCoreArray* array = rt_core_as_array((int64_t)(uintptr_t)copy);
+    if (!array) return rt_core_nil();
+    size_t n = (size_t)array->len;
+    if (n < 2) return (int64_t)(uintptr_t)copy;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        qsort(array->data, n, sizeof(uint8_t), rt_sorted_byte_cmp);
+        return (int64_t)(uintptr_t)copy;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        qsort(array->data, n, sizeof(uint64_t), rt_sorted_u64_cmp);
+        return (int64_t)(uintptr_t)copy;
+    }
+    if (n > SIZE_MAX / sizeof(int64_t)) {
+        rt_array_free(copy);
+        return rt_core_nil();
+    }
+    int64_t* scratch = (int64_t*)malloc(n * sizeof(int64_t));
+    if (!scratch) {
+        rt_array_free(copy);
+        return rt_core_nil();
+    }
+    int64_t* data = (int64_t*)array->data;
+    int64_t* src = data;
+    int64_t* dst = scratch;
+    for (size_t width = 1; width < n; ) {
+        for (size_t left = 0; left < n; ) {
+            size_t middle = left + (width < n - left ? width : n - left);
+            size_t right = middle + (width < n - middle ? width : n - middle);
+            size_t i = left;
+            size_t j = middle;
+            size_t out = left;
+            while (i < middle && j < right) {
+                dst[out++] = rt_sorted_value_cmp(src[i], src[j]) <= 0 ? src[i++] : src[j++];
+            }
+            while (i < middle) dst[out++] = src[i++];
+            while (j < right) dst[out++] = src[j++];
+            left = right;
+        }
+        int64_t* next = src;
+        src = dst;
+        dst = next;
+        if (width >= n - width) break;
+        width *= 2;
+    }
+    if (src != data) memcpy(data, src, n * sizeof(int64_t));
+    free(scratch);
+    return (int64_t)(uintptr_t)copy;
+}
+
 int64_t rt_array_max(int64_t receiver) {
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
@@ -6237,7 +6520,9 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     }
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
             >= rt_struct_alloc_cap * 7) {
-        if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
+        if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
+            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
+        } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
         } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
@@ -9359,6 +9644,22 @@ static int splc_array_numeric_at(RtCoreArray* array, int64_t index, double* out)
     return splc_numeric_to_f64(((int64_t*)array->data)[index], out);
 }
 
+/* Scalar parity for the hosted `rt_numeric_sum_f64` fallback. The core-C
+ * provider uses its own array and float boxes, so this cannot be linked from
+ * the Rust runtime. Accumulate in source order, refusing non-numeric elements
+ * and malformed arrays with tagged NIL. No temporary vector is allocated. */
+int64_t rt_numeric_sum_f64(int64_t array_value) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array || array->len < 0) return rt_core_nil();
+    double sum = 0.0;
+    for (int64_t i = 0; i < array->len; i++) {
+        double item = 0.0;
+        if (!splc_array_numeric_at(array, i, &item)) return rt_core_nil();
+        sum += item;
+    }
+    return rt_value_float(sum);
+}
+
 /* Twin of rt_numeric_dot_f64 -> packed_dot_f64 -> scalar_dot_runtime_f64:
  * lengths must match, every element must be numeric, and the accumulation is
  * `acc = a.mul_add(b, acc)` -- a fused multiply-add, one rounding per term.
@@ -10340,7 +10641,10 @@ bool rt_munmap(int64_t addr, int64_t size) {
 }
 bool rt_msync(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX does not expose a synchronous mapped-file flush primitive yet. */
+    return false;
+#elif defined(_WIN32)
     return FlushViewOfFile((void*)(intptr_t)addr, (SIZE_T)size) != 0;
 #else
     return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
@@ -10348,7 +10652,10 @@ bool rt_msync(int64_t addr, int64_t size) {
 }
 bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (addr <= 0 || size <= 0) return false;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* Advice is optional, but unknown advice remains a contract error. */
+    return advice >= 0 && advice <= 4;
+#elif defined(_WIN32)
     /* Advice is a hint everywhere. Windows offers no VirtualAlloc equivalent
      * for these five, so honour the contract that matters to callers: reject an
      * unknown advice code exactly as the POSIX branch does, accept a known one.
@@ -10957,7 +11264,12 @@ static wchar_t* rt_widen_long_path_rc(const char* path) {
         free(wide);
         return NULL;
     }
-    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
     {
         wchar_t* scan;
         DWORD need;
@@ -10968,7 +11280,11 @@ static wchar_t* rt_widen_long_path_rc(const char* path) {
         if (need == 0) return wide;
         full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
         out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
         out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
@@ -11345,13 +11661,91 @@ int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
 /* Non-accelerator native bridges. Text parameters use the ABI selected by
  * the caller: path_parent is (ptr, len); the legacy filename/extension
  * aliases receive a tagged RuntimeValue. */
+static int rt_path_parent_is_separator_for(uint8_t byte, int windows) {
+    /* Win32 accepts both spellings, and callers routinely preserve whichever
+     * spelling entered through argv or a project file. Scan bytes only: both
+     * separators are ASCII and cannot occur inside a UTF-8 continuation. */
+    return byte == (uint8_t)'/' || (windows && byte == (uint8_t)'\\');
+}
+
+static int rt_path_parent_is_separator(uint8_t byte) {
+#if defined(_WIN32)
+    return rt_path_parent_is_separator_for(byte, 1);
+#else
+    /* A backslash is an ordinary filename byte on POSIX. */
+    return rt_path_parent_is_separator_for(byte, 0);
+#endif
+}
+
+#if defined(SIMPLE_RUNTIME_TESTING)
+int rt_path_parent_is_separator_for_test(uint8_t byte, int windows) {
+    return rt_path_parent_is_separator_for(byte, windows != 0);
+}
+#endif
+
+#if defined(_WIN32)
+static int rt_path_parent_ascii_equal(uint8_t byte, char upper) {
+    return byte == (uint8_t)upper || byte == (uint8_t)(upper + ('a' - 'A'));
+}
+
+/* Number of bytes in a Windows root, including its final separator when one
+ * exists. This keeps a direct child's parent absolute and stops at a UNC share
+ * rather than walking into the server component. */
+static int64_t rt_path_parent_windows_root_len(const uint8_t* path, int64_t len) {
+    if (len >= 3 && path[1] == (uint8_t)':' &&
+            rt_path_parent_is_separator(path[2])) return 3;
+
+    int64_t unc_start = -1;
+    if (len >= 2 && rt_path_parent_is_separator(path[0]) &&
+            rt_path_parent_is_separator(path[1])) {
+        unc_start = 2;
+        if (len >= 8 && path[2] == (uint8_t)'?' &&
+                rt_path_parent_is_separator(path[3]) &&
+                rt_path_parent_ascii_equal(path[4], 'U') &&
+                rt_path_parent_ascii_equal(path[5], 'N') &&
+                rt_path_parent_ascii_equal(path[6], 'C') &&
+                rt_path_parent_is_separator(path[7])) {
+            unc_start = 8;
+        } else if (len >= 7 && path[2] == (uint8_t)'?' &&
+                rt_path_parent_is_separator(path[3]) && path[5] == (uint8_t)':' &&
+                rt_path_parent_is_separator(path[6])) {
+            return 7;
+        }
+    }
+    if (unc_start >= 0) {
+        int64_t i = unc_start;
+        while (i < len && !rt_path_parent_is_separator(path[i])) i++;
+        if (i >= len) return len;
+        i++;
+        while (i < len && !rt_path_parent_is_separator(path[i])) i++;
+        return i < len ? i + 1 : i;
+    }
+    return len > 0 && rt_path_parent_is_separator(path[0]) ? 1 : 0;
+}
+#endif
+
 int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     if (!path_ptr || path_len <= 0) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    int64_t root_len = rt_path_parent_windows_root_len(path_ptr, path_len);
+    if (path_len <= root_len) return rt_string_new(NULL, 0);
+#else
+    int64_t root_len = 0;
+#endif
     int64_t end = path_len;
-    while (end > 1 && path_ptr[end - 1] == '/') end--;
+    while (end > (root_len > 1 ? root_len : 1) &&
+            rt_path_parent_is_separator(path_ptr[end - 1])) end--;
+#if defined(_WIN32)
+    if (end <= root_len) return rt_string_new(NULL, 0);
+#endif
     int64_t slash = end - 1;
-    while (slash >= 0 && path_ptr[slash] != '/') slash--;
+    while (slash >= 0 && !rt_path_parent_is_separator(path_ptr[slash])) slash--;
     if (slash < 0) return rt_string_new((const uint8_t*)".", 1);
+#if defined(_WIN32)
+    if (root_len > 0 && slash < root_len) {
+        return rt_string_new(path_ptr, (uint64_t)root_len);
+    }
+#endif
     if (slash == 0) return rt_string_new(path_ptr, 1);
     return rt_string_new(path_ptr, (uint64_t)slash);
 }
@@ -12536,8 +12930,10 @@ static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
  *     ABI fix uses for the identical single-word-boxed-text shape.
  * ---------------------------------------------------------------- */
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
 #include <glob.h>
+extern char** environ;
+#elif defined(__simpleos__)
 extern char** environ;
 #endif
 
@@ -12762,7 +13158,7 @@ int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
     SplArray* out = rt_array_new(0);
     if (!out) return rt_core_nil();
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
     char* pattern = rt_core_text_arg_to_cstr(pattern_ptr, pattern_len);
     if (!pattern) return (int64_t)(uintptr_t)out;
     glob_t results;
@@ -13815,7 +14211,10 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) || !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX has no secure random temporary-directory primitive yet. */
+    return rt_string_new(NULL, 0);
+#elif defined(_WIN32)
     typedef LONG (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
     typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
@@ -13870,7 +14269,12 @@ static wchar_t* spl_widen_long_path(const char* path) {
         free(wide);
         return NULL;
     }
-    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
     {
         wchar_t* scan;
         DWORD need;
@@ -13881,7 +14285,11 @@ static wchar_t* spl_widen_long_path(const char* path) {
         if (need == 0) return wide;
         full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
         out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
         out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
@@ -13896,7 +14304,10 @@ static wchar_t* spl_widen_long_path(const char* path) {
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX has no atomic no-replace file publication primitive yet. */
+    return -1;
+#elif defined(_WIN32)
     /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
      * underlying filesystem's real limit; the AOT native-build cache path
      * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/

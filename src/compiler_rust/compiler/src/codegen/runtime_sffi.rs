@@ -980,13 +980,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_driver_create", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_destroy", &[I64], &[]),
     RuntimeFuncSpec::new("rt_driver_submit_accept", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_connect", &[I64, I64, I64, I64], &[I64]),
+    // handle + address pointer/length + port
+    RuntimeFuncSpec::new("rt_driver_submit_connect", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_recv", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_send", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_sendfile", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_read", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_write", &[I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_submit_open", &[I64, I64, I64, I64], &[I64]),
+    // handle + path pointer/length + flags + mode
+    RuntimeFuncSpec::new("rt_driver_submit_open", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_close", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_fsync", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_submit_timeout", &[I64, I64], &[I64]),
@@ -2296,6 +2298,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_clear", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_collection_set", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset_d32", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_drop", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_is_char_device", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
@@ -2356,6 +2359,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collection_set_abi_is_registered_for_native_codegen() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_collection_set")
+            .expect("erased Dict.set must be registered for native codegen");
+        assert_eq!(spec.params, [I64, I64, I64]);
+        assert_eq!(spec.returns, [I64]);
+    }
 
     #[test]
     fn all_funcs_have_unique_names() {

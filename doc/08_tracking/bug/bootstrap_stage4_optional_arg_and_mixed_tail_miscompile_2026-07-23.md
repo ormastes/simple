@@ -5,6 +5,25 @@
 - **Severity:** critical (silently wrong code in the self-hosted AOT driver)
 - **Status:** open (seed defect; .spl call sites worked around, fix pinned by probes)
 
+## 2026-09-22 revalidation (Codex, Windows x86_64)
+
+Still open; execution is blocked, not source-fixed. New uninstrumented probes
+cover optional arguments (including a guarded field on a match-bound optional),
+mixed match/if tails, and adjacent scalar/pure-tail/explicit-tail controls in
+`test/fixtures/stage4_optional_mixed_tail/`.
+
+The admitted pure-Simple Stage 2 scalar control fails in Cranelift codegen and
+crashes in LLVM before emitting an executable. The focused language probes also
+produce no executable. These failures do not reproduce the historical silent
+wrong-value symptom or establish its root cause. Stage 4 interpreter/JIT and
+the original seed-produced-driver chain remain unverified. No production
+compiler change or performance/memory non-regression is claimed.
+
+See [the report](../../09_report/stage4_optional_mixed_tail_revalidation_2026-09-22.md)
+for binary identity, commands, elapsed/RSS observations, evidence, and platform
+limits. Keep the existing workarounds. Receiver transport remains separately
+unverified by this probe set.
+
 ## Defect 1 — optional in argument position never invokes the callee
 
 Passing a flat optional (`LocalId?`), or a **field of a match-arm-bound flat

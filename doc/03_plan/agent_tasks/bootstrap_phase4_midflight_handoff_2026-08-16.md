@@ -148,7 +148,6 @@ only after fresh Stage 2/3 admission. The final full matrix remains blocked
 until both `mcp_stdio_integration` and `lsp_stdio_integration` have an accepted
 protocol-root contract and executable passing receipts; never relabel either
 row as PASS from a static review.
-
 ### 2026-09-21 receipt ownership repair continuation
 
 Independent review of `77d7a31aeba93b9545f71edd45388ee54279a80e`

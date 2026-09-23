@@ -95,3 +95,4 @@ Relevant current feature slices:
 - [SimpleOS NVFS Submodule Migration](os/storage/simpleos_nvfs_submodule_migration.md) - OS-owned NVFS service package migration
 - [KAIROS-Like Simple MCP + LLM Dashboard](app/ui/kairos_like_simple_mcp_llm_dashboard.md) - Assistant/dashboard architecture, live bridge, and web-login/PBP bootstrap notes
 - [Graphics 3D Session Managed Backend](compiler/graphics/graphics_3d_session_managed_backend.md) - Common session architecture for 2D, 2D game, 3D, 3D game, web renderer, GUI, WM, and CPU/CUDA/Vulkan/Metal/WebGPU backends
+- [Dynamic Runtime / Kernel Provider Composition](compiler/dynamic_runtime_kernel_provider_composition_2026-09-22.md) ([TLDR](compiler/dynamic_runtime_kernel_provider_composition_2026-09-22_tldr.md)) - Runtime cdylib authority, macOS Cocoa ownership, optional providers, aspect lifecycle and static trust-root boundaries

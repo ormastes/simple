@@ -1391,21 +1391,52 @@ fn ssa_local_is_param(mir_locals: [MirLocal], local_id: i64) -> bool:
                 case _: pass_do_nothing
     is_param
 
+fn ssa_param_local_ids(mir_locals: [MirLocal]) -> Dict<i64, bool>:
+    """Build parameter membership once for the alloca analysis.
+
+    A malformed MIR list can carry duplicate ids. The historical predicate is
+    true when any matching entry is an Arg, so insert Arg entries only: a later
+    non-Arg must never erase that fact. Dict membership also keeps sparse ids,
+    including LocalId(0), sparse.
+    """
+    var params: Dict<i64, bool> = {}
+    for local in mir_locals:
+        match local.kind:
+            case Arg(_): params[ssa_local_id_value(local.id)] = true
+            case _: pass_do_nothing
+    params
+
+fn ssa_block_written_local_ids(block: MirBlock) -> Dict<i64, bool>:
+    """Collect all definitions before considering any uses in this block.
+
+    This deliberately preserves the existing whole-block semantics, which do
+    not depend on the instruction order of a definition and use.
+    """
+    var written: Dict<i64, bool> = {}
+    for inst in block.instructions:
+        val local_id = _ssa_written_local_id(inst)
+        # Keep LocalId(0) and discard only the negative no-destination sentinel.
+        if local_id >= 0:
+            written[local_id] = true
+    written
+
 fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i64]:
     """Locals whose use-block set is not a subset of {their def-block}: a use
     appears in some block where the local is not itself defined. Parameters are
     excluded (they are live from entry and dominate every block)."""
     if blocks.len() < 2:
         return []
+    val params = ssa_param_local_ids(mir_locals)
     var result: [i64] = []
     for block in blocks:
+        val written = ssa_block_written_local_ids(block)
         var used: [i64] = []
         for inst in block.instructions:
             used = ssa_collect_inst_operand_locals(used, inst)
         used = ssa_collect_term_operand_locals(used, block.terminator)
         for local_id in used:
-            if not ssa_local_is_param(mir_locals, local_id):
-                if not ssa_local_defined_in_block(block, local_id):
+            if not params.contains_key(local_id):
+                if not written.contains_key(local_id):
                     result = local_list_push_unique(result, local_id)
     result
 
@@ -1418,11 +1449,12 @@ fn ssa_reassigned_param_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i
     both nets. Slot them like any reassigned local; the driver also seeds the
     slot with an entry Store of the incoming arg, since a param has no defining
     instruction for ssa_alloca_apply_def_store to convert into the first store."""
+    val params = ssa_param_local_ids(mir_locals)
     var result: [i64] = []
     for block in blocks:
         for inst in block.instructions:
             val written_id = _ssa_written_local_id(inst)
-            if written_id >= 0 and ssa_local_is_param(mir_locals, written_id):
+            if written_id >= 0 and params.contains_key(written_id):
                 result = local_list_push_unique(result, written_id)
     result
 

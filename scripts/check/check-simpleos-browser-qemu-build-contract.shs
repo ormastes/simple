@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+builder=$root/scripts/check/build-simpleos-browser-qemu.shs
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/browser-qemu-contract.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+for lane in browser-probe desktop-probe browser-soft desktop-e2e; do
+    plan=$(sh "$builder" --print-plan "$lane")
+    printf '%s\n' "$plan" | grep -Fxq "lane=$lane"
+    printf '%s\n' "$plan" | grep -Fxq threads=12
+    entry=$(printf '%s\n' "$plan" | sed -n 's/^entry=//p')
+    [ -f "$root/$entry" ] || { echo "missing fixture source: $entry" >&2; exit 1; }
+    if env -u SIMPLE_RUNTIME_PATH -u SIMPLE_STAGE4_PROVENANCE -u SIMPLE_RUNTIME_RECEIPT \
+        sh "$builder" "$lane" >"$scratch/refusal.log" 2>&1; then
+        echo "unadmitted browser build accepted: $lane" >&2; exit 1
+    fi
+    grep -Fq 'SIMPLE_RUNTIME_PATH, SIMPLE_STAGE4_PROVENANCE, and SIMPLE_RUNTIME_RECEIPT are required' \
+        "$scratch/refusal.log"
+done
+if sh "$builder" --print-plan unknown >"$scratch/invalid.log" 2>&1; then
+    echo 'unknown fixture accepted' >&2; exit 1
+fi
+grep -Fq 'unknown browser QEMU fixture: unknown' "$scratch/invalid.log"
+printf '%s\n' browser_qemu_build_contract=pass

@@ -18,7 +18,9 @@ use os.smf.provider_loader.{
 }
 use os.posix.dynlib_sffi.{ProviderQueryCallV1}
 use std.nogc_sync_mut.composition.provider_contract.{
-    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1
+    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1,
+    SimpleProviderDigestV1, simple_provider_digest_zero_v1,
+    simple_provider_digest_is_zero_v1, simple_provider_digest_equal_v1
 }
 use std.nogc_sync_mut.kernel_plugin.{
     KpfGenerationHandle, KpfGenerationTable, KpfGenerationView, KpfPinHandle,
@@ -61,7 +63,7 @@ pub struct KpfSmfAdmissionReceiptV1:
     interface_minor: u32
     granted_capability_bits: u64
     required_capability_bits: u64
-    abi_digest: u64
+    abi_digest: SimpleProviderDigestV1
     operation_table: KpfSmfCachedOperationTableV1
     reason: text
 
@@ -72,7 +74,7 @@ pub struct KpfSmfAdmissionPolicyV1:
     interface_id: u64
     interface_major: u32
     interface_minor: u32
-    expected_abi_digest: u64
+    expected_abi_digest: SimpleProviderDigestV1
     granted_capability_bits: u64
     required_capability_bits: u64
 
@@ -120,7 +122,7 @@ fn _empty_table() -> KpfSmfCachedOperationTableV1:
 
 fn _receipt(policy: KpfSmfAdmissionPolicyV1, status: KpfSmfAdmissionStatus,
         admitted: bool, artifact_digest: text, major: u32, minor: u32,
-        abi_digest: u64, table: KpfSmfCachedOperationTableV1, reason: text) -> KpfSmfAdmissionReceiptV1:
+        abi_digest: SimpleProviderDigestV1, table: KpfSmfCachedOperationTableV1, reason: text) -> KpfSmfAdmissionReceiptV1:
     KpfSmfAdmissionReceiptV1(
         status: status, admitted: admitted, provider_id: policy.provider_id,
         generation: policy.generation, artifact_digest: artifact_digest,
@@ -147,14 +149,14 @@ pub fn kpf_smf_validate_admission_v1(policy: KpfSmfAdmissionPolicyV1,
         result: SimpleProviderQueryResultV1, generation: KpfGenerationView) -> KpfSmfAdmissionReceiptV1:
     if loader_admission.status != PROVIDER_ADMISSION_OK:
         return _receipt(policy, KpfSmfAdmissionStatus.LoaderRejected, false,
-            loader_admission.artifact_digest, 0, 0, 0, _empty_table(), loader_admission.reason)
+            loader_admission.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), loader_admission.reason)
     if query.interface_id != policy.interface_id or query.minimum_major != policy.interface_major or query.minimum_minor != policy.interface_minor:
         return _receipt(policy, KpfSmfAdmissionStatus.InterfaceMismatch, false,
-            loader_admission.artifact_digest, 0, 0, 0, _empty_table(), "query-interface-policy-mismatch")
+            loader_admission.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), "query-interface-policy-mismatch")
     if (query.requested_capability_bits != policy.required_capability_bits or
             (policy.granted_capability_bits & policy.required_capability_bits) != policy.required_capability_bits):
         return _receipt(policy, KpfSmfAdmissionStatus.CapabilityMismatch, false,
-            loader_admission.artifact_digest, 0, 0, 0, _empty_table(), "capability-policy-mismatch")
+            loader_admission.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), "capability-policy-mismatch")
     if result.status != SIMPLE_PROVIDER_OK or result.interface_handle == 0:
         return _receipt(policy, KpfSmfAdmissionStatus.QueryRejected, false,
             loader_admission.artifact_digest, result.provided_major, result.provided_minor,
@@ -163,7 +165,8 @@ pub fn kpf_smf_validate_admission_v1(policy: KpfSmfAdmissionPolicyV1,
         return _receipt(policy, KpfSmfAdmissionStatus.InterfaceMismatch, false,
             loader_admission.artifact_digest, result.provided_major, result.provided_minor,
             result.abi_digest, _empty_table(), "provider-interface-version-mismatch")
-    if policy.expected_abi_digest == 0 or result.abi_digest != policy.expected_abi_digest:
+    if simple_provider_digest_is_zero_v1(policy.expected_abi_digest) or
+            not simple_provider_digest_equal_v1(result.abi_digest, policy.expected_abi_digest):
         return _receipt(policy, KpfSmfAdmissionStatus.AbiDigestMismatch, false,
             loader_admission.artifact_digest, result.provided_major, result.provided_minor,
             result.abi_digest, _empty_table(), "provider-interface-abi-digest-mismatch")
@@ -197,11 +200,11 @@ pub fn kpf_smf_admit_trusted_evidence_v1(policy: KpfSmfAdmissionPolicyV1,
     val trust = kpf_validate_signature_trust_v1(trust_policy, signature_evidence)
     if not trust.admitted:
         return _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
-            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(), trust.reason)
+            signature_evidence.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), trust.reason)
     if loader_request.expected_artifact_digest != trust_policy.expected_artifact_digest or
             evidence.artifact_digest != signature_evidence.artifact_digest:
         return _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
-            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(),
+            signature_evidence.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(),
             "loader-signature-artifact-digest-mismatch")
     kpf_smf_admit_evidence_v1(policy, loader_request, evidence, query, result, generation)
 
@@ -217,12 +220,12 @@ pub fn kpf_smf_admit_native_v1(policy: KpfSmfAdmissionPolicyV1,
     val dynamic = provider_admit_dynamic_v1(loader_request)
     if dynamic.admission.status != PROVIDER_ADMISSION_OK:
         val receipt = _receipt(policy, KpfSmfAdmissionStatus.LoaderRejected, false,
-            dynamic.admission.artifact_digest, 0, 0, 0, _empty_table(), dynamic.admission.reason)
+            dynamic.admission.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), dynamic.admission.reason)
         return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(dynamic.session, receipt))
     val call = provider_session_query_v1(dynamic.session, query)
     if call.status != PROVIDER_SESSION_OK:
         val receipt = _receipt(policy, KpfSmfAdmissionStatus.QueryRejected, false,
-            dynamic.admission.artifact_digest, 0, 0, 0, _empty_table(), call.reason)
+            dynamic.admission.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), call.reason)
         provider_session_close_v1(dynamic.session)
         return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(dynamic.session, receipt))
     val generation_view = generations.view(policy.generation)
@@ -253,7 +256,7 @@ pub fn kpf_smf_admit_trusted_native_v1(policy: KpfSmfAdmissionPolicyV1,
     val trust = kpf_validate_signature_trust_v1(trust_policy, signature_evidence)
     if not trust.admitted or loader_request.expected_artifact_digest != trust_policy.expected_artifact_digest:
         val receipt = _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
-            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(), trust.reason)
+            signature_evidence.artifact_digest, 0, 0, simple_provider_digest_zero_v1(), _empty_table(), trust.reason)
         val closed = _empty_loader_session()
         return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(closed, receipt))
     kpf_smf_admit_native_v1(policy, loader_request, query, generations)

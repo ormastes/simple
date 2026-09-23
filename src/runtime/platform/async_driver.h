@@ -111,6 +111,10 @@ int64_t spl_driver_flush(spl_driver* d);
 int64_t spl_driver_poll(spl_driver* d, spl_completion* out, int64_t max,
                          int64_t timeout_ms);
 
+/* Release the owned payload returned in one completion.  Completion arrays
+ * are caller-owned, while read/recv payloads are allocated by the backend. */
+void spl_completion_release(spl_completion* completion);
+
 /* ===== Cancel ===== */
 
 /*

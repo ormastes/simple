@@ -3439,6 +3439,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
           fi
         fi
+        # Publish the platform's runtime names and bind the exact capsule to
+        # this admission before exposing a completed Stage 2 to verification.
+        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
+          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
+          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
+          exit 1
+        }
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
           sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
@@ -4385,6 +4393,8 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   }
   deploy_transaction_id="${full_hash}.$$"
+  BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER="${repo_root}/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs"
+  export BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER
   bootstrap_deploy_tx_begin "${deploy_release_root}" "${deploy_platform}" \
     "${deploy_transaction_id}" || {
     echo "ERROR: deploy refused - generation transaction recovery/admission failed" >&2
@@ -4440,6 +4450,12 @@ if [ "${deploy}" -eq 1 ]; then
 
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
   deploy_receipt="${deploy_dir}/bootstrap-deploy-receipt.env"
+  if [ "${os}" = windows ]; then
+    bootstrap_deploy_tx_stable_prepare "${full_hash}" || {
+      echo "ERROR: deploy refused - durable Windows launcher backup failed" >&2
+      exit 1
+    }
+  fi
   [ ! -L "${deploy_receipt}" ] || {
     echo "ERROR: deploy refused - symlinked deployment receipt" >&2
     exit 1
@@ -4645,6 +4661,7 @@ if [ "${deploy}" -eq 1 ]; then
     echo "stage4_candidate_path=${bootstrap_deploy_tx_final_dir}/simple${exe_suffix}"
     echo "stage4_candidate_source_path=${full_bin}"
     echo "stage4_candidate_sha256=${full_hash}"
+    bootstrap_deploy_tx_stable_fields
     echo "stage4_provenance_path=${bootstrap_deploy_tx_final_dir}/authority.stage4-provenance.env"
     echo "stage4_provenance_source_path=${stage4_provenance}"
     echo "stage4_provenance_sha256=${locked_stage4_provenance_sha}"
@@ -4693,8 +4710,6 @@ if [ "${deploy}" -eq 1 ]; then
     bootstrap_deploy_tx_abort || true
     exit 1
   }
-  BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER="${repo_root}/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs"
-  export BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER
   if [ "${os}" != windows ]; then
     simple_release_bind_generation_launchers "${repo_root}" "${deploy_platform}" "${exe_suffix}" || {
       echo "ERROR: immutable generation launchers could not be bound" >&2
@@ -4707,12 +4722,34 @@ if [ "${deploy}" -eq 1 ]; then
     bootstrap_deploy_tx_abort || true
     exit 1
   }
+  # Publish the immutable admitted candidate; the transaction journal owns
+  # rollback of the stable executable and its prior receipt on every exit.
+  if [ "${os}" = windows ]; then
+    stable_windows_bin="${bootstrap_deploy_tx_stable_path}"
+    stable_windows_receipt="${repo_root}/bin/.simple-windows-stable-entrypoint.env"
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+      -File "${repo_root}/scripts/bootstrap/publish-windows-stable-entrypoint.ps1" \
+      -Candidate "${bootstrap_deploy_tx_final_dir}/simple.exe" -Destination "${stable_windows_bin}" \
+      -ExpectedSha256 "${full_hash}" -Receipt "${stable_windows_receipt}" || {
+        echo "ERROR: deploy refused - could not atomically publish bin/simple.exe" >&2
+        bootstrap_deploy_tx_abort || echo "ERROR: rollback incomplete; recovery journal retained" >&2
+        exit 1
+      }
+    run_timeout 30 "${stable_windows_bin}" build --help >/dev/null 2>&1 || {
+      echo "ERROR: deploy refused - published bin/simple.exe cannot execute build --help" >&2
+      bootstrap_deploy_tx_abort || echo "ERROR: rollback incomplete; recovery journal retained" >&2
+      exit 1
+    }
+  fi
   [ "$(hash_file "${deployed_bin}")" = "${full_hash}" ] || {
     echo "ERROR: published generation does not resolve to the admitted Stage 4 digest" >&2
     bootstrap_deploy_tx_abort || true
     exit 1
   }
-  bootstrap_deploy_tx_commit || exit 1
+  bootstrap_deploy_tx_commit || {
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
   echo "Deployed compiler and companions as immutable generation ${deploy_transaction_id}"
   echo "Deployment receipt: ${deploy_receipt}"
 

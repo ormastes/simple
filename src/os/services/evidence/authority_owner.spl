@@ -1,0 +1,158 @@
+"""Privileged trust-root, policy, and wall-clock owner for PASS admission.
+
+Roots are projected only from the loader's one-time immutable registry. The
+service owns its fixed bounded policy, and admission time is sampled here with
+rollback detection. Callers cannot supply roots, policy values, or timestamps
+to the authoritative path.
+"""
+
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_snapshot_v1
+}
+use os.services.evidence.trusted_signer.{SimpleOsTrustedEvidenceSignerV1}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.services.evidence.authority_clock_transition.{
+    simpleos_evidence_clock_transition_v1,
+    simpleos_evidence_unlock_requires_quarantine_write_v1
+}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+
+pub val SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1: i64 = 900000000
+pub val SIMPLEOS_EVIDENCE_POLICY_MAX_CHALLENGE_TTL_US_V1: i64 = 300000000
+
+pub struct SimpleOsEvidenceAuthorityStatusV1:
+    ok: bool
+    reason: text
+    generation: u64
+
+pub struct SimpleOsEvidenceAuthorityTimeV1:
+    ok: bool
+    reason: text
+    unix_us: i64
+    generation: u64
+
+val _AUTHORITY_MUTEX: i64 = mutex_raw_create()
+var _authority_started: bool = false
+var _authority_quarantined: bool = false
+var _authority_generation: u64 = 0u64
+var _authority_loader_generation: u64 = 0u64
+var _authority_roots: [SimpleOsTrustedEvidenceSignerV1] = []
+var _authority_last_unix_us: i64 = 0
+
+fn _sample_wall_time_v1() -> i64:
+    time_sample_unix_micros_or_failure()
+
+fn _status(ok: bool, reason: text) -> SimpleOsEvidenceAuthorityStatusV1:
+    SimpleOsEvidenceAuthorityStatusV1(
+        ok: ok, reason: reason, generation: _authority_generation)
+
+fn _copy_root(root: ExecutableTrustedSignerV1) -> SimpleOsTrustedEvidenceSignerV1:
+    var key: [u8] = []
+    for byte in root.public_key: key.push(byte)
+    SimpleOsTrustedEvidenceSignerV1(key_id: root.key_id, public_key: key)
+
+fn _unlock(ok: bool) -> bool:
+    val quarantined_before_unlock = _authority_quarantined
+    val unlocked = mutex_raw_unlock(_AUTHORITY_MUTEX)
+    # Successful unlock performs no state write: it cannot erase a quarantine
+    # published by the next lock owner. Unlock failure is monotonic quarantine.
+    if simpleos_evidence_unlock_requires_quarantine_write_v1(unlocked):
+        _authority_quarantined = true
+    ok and unlocked and not quarantined_before_unlock
+
+pub fn simpleos_evidence_authority_start_v1(
+) -> SimpleOsEvidenceAuthorityStatusV1:
+    if _authority_quarantined:
+        return _status(false, "evidence-authority-quarantined")
+    val loader = executable_loader_trust_roots_snapshot_v1()
+    if not loader.ok or loader.generation == 0u64 or loader.roots.len() == 0:
+        return _status(false, "trust-root-owner-unavailable")
+    if not mutex_raw_lock(_AUTHORITY_MUTEX):
+        return _status(false, "evidence-authority-lock-unavailable")
+    if _authority_quarantined:
+        val _ = _unlock(false)
+        return _status(false, "evidence-authority-quarantined")
+    val sampled = _sample_wall_time_v1()
+    val clock = simpleos_evidence_clock_transition_v1(
+        _authority_started, _authority_quarantined,
+        _authority_last_unix_us, sampled)
+    if not clock.ok:
+        _authority_quarantined = clock.quarantined
+        val _ = _unlock(false)
+        return _status(false, clock.reason)
+    if _authority_started:
+        val same_generation = loader.generation == _authority_loader_generation
+        if not same_generation:
+            _authority_quarantined = true
+            val _ = _unlock(false)
+            return _status(false, "trust-root-generation-changed")
+        _authority_last_unix_us = clock.next_last_unix_us
+        val unlocked = _unlock(true)
+        return _status(unlocked, if unlocked: "" else:
+            "evidence-authority-unlock-unavailable")
+    var projected: [SimpleOsTrustedEvidenceSignerV1] = []
+    for root in loader.roots: projected.push(_copy_root(root))
+    _authority_roots = projected
+    _authority_loader_generation = loader.generation
+    _authority_last_unix_us = clock.next_last_unix_us
+    _authority_generation = 1u64
+    _authority_started = true
+    val unlocked = _unlock(true)
+    _status(unlocked, if unlocked: "" else:
+        "evidence-authority-unlock-unavailable")
+
+pub fn simpleos_evidence_authority_time_v1(
+) -> SimpleOsEvidenceAuthorityTimeV1:
+    if not mutex_raw_lock(_AUTHORITY_MUTEX):
+        return SimpleOsEvidenceAuthorityTimeV1(
+            ok: false, reason: "evidence-authority-lock-unavailable",
+            unix_us: 0, generation: 0u64)
+    if _authority_quarantined:
+        val _ = _unlock(false)
+        return SimpleOsEvidenceAuthorityTimeV1(
+            ok: false, reason: "evidence-authority-quarantined",
+            unix_us: 0, generation: 0u64)
+    val sampled = _sample_wall_time_v1()
+    val clock = simpleos_evidence_clock_transition_v1(
+        _authority_started, _authority_quarantined,
+        _authority_last_unix_us, sampled)
+    if not clock.ok:
+        _authority_quarantined = clock.quarantined
+        val _ = _unlock(false)
+        return SimpleOsEvidenceAuthorityTimeV1(
+            ok: false, reason: clock.reason,
+            unix_us: 0, generation: 0u64)
+    if not _authority_started:
+        val _ = _unlock(false)
+        return SimpleOsEvidenceAuthorityTimeV1(
+            ok: false, reason: "time-owner-unavailable",
+            unix_us: 0, generation: 0u64)
+    _authority_last_unix_us = clock.next_last_unix_us
+    val generation = _authority_generation
+    if not _unlock(true):
+        return SimpleOsEvidenceAuthorityTimeV1(
+            ok: false, reason: "evidence-authority-unlock-unavailable",
+            unix_us: 0, generation: 0u64)
+    SimpleOsEvidenceAuthorityTimeV1(
+        ok: true, reason: "", unix_us: sampled, generation: generation)
+
+pub fn simpleos_evidence_authority_roots_v1(
+) -> [SimpleOsTrustedEvidenceSignerV1]:
+    if _authority_quarantined:
+        return []
+    if not mutex_raw_lock(_AUTHORITY_MUTEX):
+        return []
+    if _authority_quarantined:
+        val _ = _unlock(false)
+        return []
+    if not _authority_started:
+        val _ = _unlock(false)
+        return []
+    var copied: [SimpleOsTrustedEvidenceSignerV1] = []
+    for root in _authority_roots:
+        var key: [u8] = []
+        for byte in root.public_key: key.push(byte)
+        copied.push(SimpleOsTrustedEvidenceSignerV1(
+            key_id: root.key_id, public_key: key))
+    if not _unlock(true): return []
+    copied
