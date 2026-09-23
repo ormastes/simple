@@ -20,7 +20,7 @@ See [cross-lane contract](rt_hash_text_cross_lane_disagreement_2026-09-07.md).
 
 Add the missing common/hash leaf and its explicit export, without modifying
 callers, import lowering, C runtime, or generic trait dispatch. Iterate bytes
-directly, retaining O(n) time and O(1) auxiliary memory; no byte-array copy,
+directly, with O(n) time for length-bearing text and O(1) auxiliary memory; no byte-array copy,
 syscall, allocation, mutable global, or host-dependent seed is introduced.
 This is a non-cryptographic freshness hash, never an integrity proof.
 
@@ -46,6 +46,12 @@ This is a non-cryptographic freshness hash, never an integrity proof.
   be rebuilt, not merely relinked against the new owner.
 - Complexity/no-copy claims are structural; short fixture timing does not prove
   throughput parity with the legacy C runtime. No such benchmark claim is made.
+- Astra review identified a legacy representation limit: `rt_string_byte_at`
+  scans raw-pointer text for NUL on each access (C `runtime_native.c` and
+  pure-Simple `core_string.spl`), making this fallback potentially O(n²).
+  Embedded NUL requires length-bearing text. Native vectors prove the selected
+  admitted runtime representation, not all text producers/runtime variants.
+  Cross-runtime representation and performance parity remain admission blockers.
 - General SSpec/docgen/core/MCP gates require an admitted general runtime and
   remain unexecuted; no production verification PASS or full-CLI claim.
 
