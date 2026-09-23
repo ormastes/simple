@@ -4745,6 +4745,11 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     for symbol in ["rt_gpu_provider_loaded", "rt_cuda_module_load_data_array", "rt_vulkan_compile_spirv_array"] {
         assert!(symbols.contains(symbol) || symbols.contains(&format!("_{symbol}")), "host-gpu lacks provider loader symbol {symbol}");
     }
+    for symbol in ["rt_rocm_init", "rt_rocm_is_available", "rt_rocm_shutdown"] {
+        let present = symbols.contains(symbol) || symbols.contains(&format!("_{symbol}"));
+        assert_eq!(present, cfg!(target_os = "macos"),
+            "{symbol}: macOS must retain its unsupported-host ABI; Linux must exclude its real HIP implementation");
+    }
 }
 
 #[cfg(target_os = "linux")]
