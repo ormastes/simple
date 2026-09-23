@@ -97,3 +97,26 @@ and lock-failure injection coverage.
 
 Static review is complete. Executable status remains unverified because only a
 Stage-2 compile/native-build lane is admitted; it is not SSpec/test authority.
+
+## Performance campaign policy checkpoint (2026-09-23)
+
+`performance_policy_owner.spl` adds an immutable service-local campaign lookup.
+Its authoritative API takes a candidate and the verified byte snapshot, never
+the caller-constructible `SimpleOsCapabilityAdmissionContextV1`. The policy
+value checker binds the exact row/workload, the indexed fixture artifact, a
+distinct baseline identity, fixed config/board/CPU/frequency/noise/accelerator,
+positive bounded RSS and baseline values, and the
+canonical sample/noise/absolute-budget/regression projection. The immutable
+catalog is empty because no reviewed fixture and baseline artifact set is
+preregistered; a performance row therefore fails with
+`performance-policy-unavailable`. This does not enable the policy gate.
+
+TODO(integration): the serialized verifier must call
+`simpleos_evidence_performance_policy_check_v1(candidate, snapshot)` after
+rehashing the snapshot and before creating a verified handle, then again on
+commit if the catalog ever becomes mutable. Preregister reviewed native
+campaign fixture/baseline values in the private catalog only after an exact
+baseline artifact is available. Run
+`test/01_unit/os/services/evidence/performance_policy_owner_spec.spl` with an
+admitted test-capable self-hosted runtime and the corresponding native/QEMU
+campaign when the phase environment is ready.
