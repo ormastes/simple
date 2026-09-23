@@ -44,6 +44,12 @@ body-sized scratch buffer. Exact command, diagnostics, verdict, timing, and RSS
 output is retained at `build/evidence/virtio_stream_codec/focused-test-time.log`
 in the isolated lane.
 
+TODO(phase-environment): when an admitted pure-Simple phase runtime and the
+SimpleOS QEMU environment are available, run the focused stream-codec spec on
+that runtime, then implement and verify the bounded socket endpoint, guest-owned
+VirtIO descriptor queues, one-in-flight session reset, and correlated x86_64 and
+RISC-V QEMU round trips. Codec-only evidence must not close this bug.
+
 The current wrapper correctly reports `virtio-serial-unimplemented` when
 `ivshmem-plain` and the AArch64-only file-backed RAM tail are unavailable but
 QEMU exposes `virtio-serial-pci` or `virtio-serial-device`. Do not weaken that
