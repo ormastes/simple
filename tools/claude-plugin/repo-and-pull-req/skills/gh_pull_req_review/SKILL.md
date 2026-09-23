@@ -36,6 +36,11 @@ defaults to `1`. Older state files with no `level` key default to `1`.
 - `gh` CLI authenticated
 - Active PR (need PR number and branch name)
 
+If a signed local-CI note exists, treat it as input to the Code Idiom job, not
+as a provider status. That job must still succeed on the current head/test
+merge. See `doc/07_guide/infra/local_ci_receipt/operator_guide.md`; never
+submit an untrusted key or a receipt from an earlier head to unblock a review.
+
 ## Procedure
 
 ### Step 1 — Check PR Status

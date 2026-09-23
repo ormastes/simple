@@ -1,0 +1,94 @@
+# Retained-parser Stage-3 scale probe. It drives the non-streaming parser and
+# HIR loops directly, first for a two-module baseline and then for a sixteen
+# module closure. Cache is disabled deliberately and every module emits an M4
+# work receipt, so a cache hit cannot conceal the ownership lifecycle.
+
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_types.{CompileMode}
+use std.nogc_sync_mut.io.sysinfo_ops.{process_peak_rss_kb}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn sys_get_args() -> [text]
+
+const BASELINE_MODULES: i64 = 2
+const SCALED_MODULES: i64 = 16
+const MAX_ELAPSED_MS: i64 = 120000
+const MAX_PEAK_RSS_KIB: i64 = 1048576
+
+fn make_driver(module_count: i64) -> CompilerDriver:
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Check
+    options.backend = "cranelift"
+    var driver = CompilerDriver.create(options)
+    var sources: [SourceFile] = []
+    var index: i64 = 0
+    while index < module_count:
+        val name = "hir.retained.rss.module_" + index.to_text()
+        val content = if index == 0:
+            "pub trait RetainedTrait:\n    fn inherited(self) -> i64: 7\n" +
+            "pub struct RetainedComposite:\n    value: i64\n" +
+            "pub fn retained_value_0() -> i64:\n    0\n"
+        elif index == 1:
+            "use hir.retained.rss.module_0.{RetainedTrait, RetainedComposite}\n" +
+            "impl RetainedTrait for RetainedComposite:\n    pass_dn\n" +
+            "pub fn retained_value_1() -> i64:\n    1\n"
+        elif index == 2:
+            "use hir.retained.rss.module_0.{RetainedComposite, retained_value_0}\n" +
+            "export RetainedComposite, retained_value_0\n" +
+            "pub fn retained_value_2() -> i64:\n    retained_value_0()\n"
+        else:
+            "use hir.retained.rss.module_2.{RetainedComposite, retained_value_0}\n" +
+            "pub fn retained_value_" + index.to_text() + "() -> i64:\n    retained_value_0()\n"
+        sources.push(SourceFile(
+            path: "build/hir-retained-rss/module_" + index.to_text() + ".spl",
+            content: content,
+            module_name: name))
+        index = index + 1
+    driver.ctx.sources = sources
+    driver
+
+fn run_closure(module_count: i64) -> (bool, i64):
+    var driver = make_driver(module_count)
+    val started_us = rt_time_now_unix_micros()
+    if not driver.parse_all_committing_impl():
+        return (false, (rt_time_now_unix_micros() - started_us) / 1000)
+    val (ctx, lowered_ok) = driver.lower_and_check_impl()
+    val elapsed_ms = (rt_time_now_unix_micros() - started_us) / 1000
+    if not lowered_ok or ctx.hir_module_count_value != module_count or
+            ctx.hir_modules.keys().len() != module_count:
+        return (false, elapsed_ms)
+    val first = "hir.retained.rss.module_0"
+    val last = "hir.retained.rss.module_" + (module_count - 1).to_text()
+    if not ctx.hir_modules.contains_key(first) or not ctx.hir_modules.contains_key(last):
+        return (false, elapsed_ms)
+    (ctx.hir_modules[first].functions.keys().len() > 0 and
+        ctx.hir_modules[last].functions.keys().len() > 0, elapsed_ms)
+
+fn main() -> i32:
+    # Force the cache-miss control before either closure is created. M4 emits
+    # one `work=1` receipt per lowered source; the wrapper validates 18 total.
+    val _cache = rt_env_set("SIMPLE_HIR_CACHE", "0")
+    val _receipt = rt_env_set("SIMPLE_M4_WORK_RECEIPT", "1")
+    val args = sys_get_args()
+    val module_count = if args.len() == 2 and args[1] == "--baseline":
+        BASELINE_MODULES
+    elif args.len() == 2 and args[1] == "--scaled":
+        SCALED_MODULES
+    else:
+        print "usage: stage3_hir_retained_parser_rss_probe --baseline|--scaled"
+        return 2
+    val hwm_before = process_peak_rss_kb()
+    val (semantic_ok, elapsed_ms) = run_closure(module_count)
+    val peak_rss_kib = process_peak_rss_kb()
+    val within_budget = elapsed_ms >= 0 and elapsed_ms <= MAX_ELAPSED_MS and
+        peak_rss_kib >= hwm_before and peak_rss_kib > 0 and
+        peak_rss_kib <= MAX_PEAK_RSS_KIB
+
+    print "stage3_hir_retained_parser_modules={module_count} semantic_ok={semantic_ok} elapsed_ms={elapsed_ms}"
+    print "stage3_hir_retained_parser_peak_rss_kib={peak_rss_kib}"
+    print "stage3_hir_retained_parser_budget_ok={within_budget}"
+    if semantic_ok and within_budget:
+        return 0
+    1
