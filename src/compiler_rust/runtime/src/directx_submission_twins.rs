@@ -129,6 +129,7 @@ mod tests {
     // duplicate exports, real phase transitions prove that C owns the ABI.
     #[cfg(target_os = "windows")]
     #[test]
+    #[ignore = "requires hardware D3D11; run check-directx-submission-abi-windows.cmd"]
     fn windows_c_abi_keeps_real_submission_lifecycle() {
         mod c {
             extern "C" {

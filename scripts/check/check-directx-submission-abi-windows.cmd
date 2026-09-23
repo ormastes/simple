@@ -21,9 +21,17 @@ if errorlevel 1 goto failed
 rem Exact unmangled definitions must all belong to the C object.
 powershell -NoProfile -Command "$c = Get-Content '%OUT%\c-symbols.log'; $r = Get-Content '%OUT%\rust-symbols.log'; foreach ($n in 'poll','complete','retire','abandon','readback_pixel') { $p = '\srt_directx_submission_' + $n + '$'; $cc = @($c -match $p).Count; $rc = @($r -match $p).Count; Write-Output ($n + ': C=' + $cc + ' Rust=' + $rc); if ($cc -ne 1 -or $rc -ne 0) { exit 1 } }" > "%OUT%\symbol-check.log" 2>&1
 if errorlevel 1 goto failed
-"%OUT%\directx_submission_twins.exe" --nocapture > "%OUT%\tests.log" 2>&1
+"%OUT%\directx_submission_twins.exe" --nocapture --exact tests::rust_twins_remain_callable_and_fail_closed > "%OUT%\tests.log" 2>&1
+if errorlevel 1 goto failed
+findstr /c:"test result: ok. 1 passed; 0 failed; 0 ignored;" "%OUT%\tests.log" >nul
+if errorlevel 1 goto failed
+rem This opt-in test must execute on hardware; unavailable D3D11 is a failure.
+"%OUT%\directx_submission_twins.exe" --nocapture --ignored --exact tests::windows_c_abi_keeps_real_submission_lifecycle > "%OUT%\hardware-tests.log" 2>&1
+if errorlevel 1 goto failed
+findstr /c:"test result: ok. 1 passed; 0 failed; 0 ignored;" "%OUT%\hardware-tests.log" >nul
 if errorlevel 1 goto failed
 type "%OUT%\tests.log"
+type "%OUT%\hardware-tests.log"
 popd
 exit /b 0
 :failed
