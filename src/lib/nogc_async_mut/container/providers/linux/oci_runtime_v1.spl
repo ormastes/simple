@@ -316,6 +316,13 @@ impl LinuxOciRuntimeProviderV1:
             if recovery.status == RUNTIME_STATUS_OK or
                     recovery.reason != "native-recover-not-found":
                 return recovery
+            # Only an intent journaled before native create may be retried.
+            # A later phase or a recorded native ID is evidence that create
+            # succeeded once; absence now must not silently make a new one.
+            if saved_intent.phase != RUNTIME_PHASE_PREPARED or
+                    saved_intent.native_id != "":
+                return self._rejected("create", "previous-native-workload-missing",
+                    runtime_command_empty())
         val operation_id = if request.operation_id != "": request.operation_id
             elif saved_intent.operation_id != "": saved_intent.operation_id
             else: self._next_operation("create")
@@ -573,6 +580,21 @@ impl LinuxOciRuntimeProviderV1:
         self._load_persisted_intent(request)
         val index = self._find(request.pod_uid, request.attempt)
         val saved_intent = self._intent_for(request.pod_uid, request.attempt)
+        if saved_intent.operation_id != "" and request.operation_id != "" and
+                request.operation_id != saved_intent.operation_id:
+            return self._rejected("recover", "intent-operation-id-mismatch",
+                runtime_command_empty())
+        if saved_intent.provider_generation > 0 and
+                saved_intent.provider_generation != self.provider_generation:
+            return self._rejected("recover", "intent-provider-generation-mismatch",
+                runtime_command_empty())
+        if saved_intent.node_boot_id != "" and
+                saved_intent.node_boot_id != self.node_boot_id:
+            return self._rejected("recover", "intent-node-boot-id-mismatch",
+                runtime_command_empty())
+        if saved_intent.engine != "" and saved_intent.engine != self.engine:
+            return self._rejected("recover", "intent-engine-mismatch",
+                runtime_command_empty())
         if saved_intent.phase == RUNTIME_PHASE_DESTROYED:
             val destroyed = _state_from_intent(saved_intent, RUNTIME_PHASE_DESTROYED,
                 "destroyed")
@@ -585,20 +607,8 @@ impl LinuxOciRuntimeProviderV1:
                 "recovered durable destroyed tombstone")
         var expected_operation_id = request.operation_id
         var expected_native_id = ""
-        if saved_intent.operation_id != "" and request.operation_id != "" and
-                request.operation_id != saved_intent.operation_id:
-            return self._rejected("recover", "intent-operation-id-mismatch",
-                runtime_command_empty())
         if saved_intent.operation_id != "": expected_operation_id = saved_intent.operation_id
         if expected_native_id == "": expected_native_id = saved_intent.native_id
-        if saved_intent.provider_generation > 0 and
-                saved_intent.provider_generation != self.provider_generation:
-            return self._rejected("recover", "intent-provider-generation-mismatch",
-                runtime_command_empty())
-        if saved_intent.node_boot_id != "" and
-                saved_intent.node_boot_id != self.node_boot_id:
-            return self._rejected("recover", "intent-node-boot-id-mismatch",
-                runtime_command_empty())
         var current = runtime_state_empty()
         if index >= 0:
             current = self.states[index]

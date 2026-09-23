@@ -224,6 +224,9 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         expect(file_atomic_write_mode(journal_path, tombstone, 0o600)).to_equal(true)
         val restarted = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
             journal_dir, "boot-1", 7, [])
+        val wrong_operation = restarted.recover(request("create-other"))
+        expect(wrong_operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(wrong_operation.reason).to_equal("intent-operation-id-mismatch")
         val recovered = restarted.recover(r)
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.state.phase).to_equal(RUNTIME_PHASE_DESTROYED)
@@ -232,6 +235,30 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         expect(recreate.status).to_equal(RUNTIME_STATUS_REJECTED)
         expect(recreate.reason).to_equal("attempt-already-destroyed")
         expect(recreate.command.args.len()).to_equal(0)
+
+    it "rejects destroyed tombstones from another provider identity":
+        val r = request()
+        val tombstone = RuntimeIntentV1(pod_uid: "pod-1", attempt: 1,
+            provider_generation: 7, operation_id: "create-old", engine: OCI_DEFAULT_ENGINE,
+            native_id: "ctr-old", node_boot_id: "boot-1", phase: RUNTIME_PHASE_DESTROYED)
+        var other_generation = tombstone
+        other_generation.provider_generation = 8
+        val generation_provider = LinuxOciRuntimeProviderV1.scripted_with_intents(
+            "linux", OCI_DEFAULT_ENGINE, "/path/not/present", "boot-1", 7,
+            [other_generation], [])
+        expect(generation_provider.recover(r).reason).to_equal("intent-provider-generation-mismatch")
+        var other_boot = tombstone
+        other_boot.node_boot_id = "boot-other"
+        val boot_provider = LinuxOciRuntimeProviderV1.scripted_with_intents(
+            "linux", OCI_DEFAULT_ENGINE, "/path/not/present", "boot-1", 7,
+            [other_boot], [])
+        expect(boot_provider.recover(r).reason).to_equal("intent-node-boot-id-mismatch")
+        var other_engine = tombstone
+        other_engine.engine = OCI_ENGINE_DOCKER
+        val engine_provider = LinuxOciRuntimeProviderV1.scripted_with_intents(
+            "linux", OCI_DEFAULT_ENGINE, "/path/not/present", "boot-1", 7,
+            [other_engine], [])
+        expect(engine_provider.recover(r).reason).to_equal("intent-engine-mismatch")
 
     it "inspects a timed out attempt before allowing a create retry":
         val r = request()
@@ -276,6 +303,24 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val failed = blocked.create(r)
         expect(failed.status).to_equal(RUNTIME_STATUS_REJECTED)
         expect(failed.reason).to_equal("native-recover-inspect-failed")
+
+    it "never recreates a previously created workload after native absence":
+        val r = request()
+        val intent = RuntimeIntentV1(pod_uid: "pod-1", attempt: 1,
+            provider_generation: 7, operation_id: "create-old", engine: OCI_DEFAULT_ENGINE,
+            native_id: "ctr-old", node_boot_id: "boot-1", phase: RUNTIME_PHASE_CREATED)
+        val inspect_cmd = build_inspect_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            "ctr-old").1
+        val absent = ScriptedCommandResultV1(operation: inspect_cmd.operation,
+            program: inspect_cmd.program, args: inspect_cmd.args, stdout: "",
+            stderr: "Error: no such container ctr-old", exit_code: 125)
+        val provider = LinuxOciRuntimeProviderV1.scripted_with_intents("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, [intent], [absent])
+        val result = provider.create(r)
+        expect(result.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(result.reason).to_equal("previous-native-workload-missing")
+        expect(result.command.args.len()).to_equal(0)
+        expect(provider.intent_for(r).native_id).to_equal("ctr-old")
 
     it "checks inspect after a create error before reporting failure":
         val r = request("create-timeout")
