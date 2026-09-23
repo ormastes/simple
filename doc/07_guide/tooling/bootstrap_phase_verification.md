@@ -39,6 +39,20 @@ pins the absolute executable, SHA-256, generation, provenance, admission, test
 inventory, selected bootstrap jobs, and detected CPU count. Missing or stale
 rows fail before launch; Phase 1/2 results are never release evidence.
 
+### Phase compiler inventory rows
+
+`bootstrap-phase-verification.shs --strategy=full` runs each
+`test/01_unit/compiler/**/*_spec.spl` row, including loader specs, through the
+phase-owned standalone test runner and full CLI. Exit code zero is insufficient.
+Each row uses `--assert-ran` and isolated caches, emits exactly one complete
+terminal JSON object, and must report outer and spec success, zero failures,
+canonical bounded counters, and at least one executed example. Malformed,
+truncated, duplicate-field, zero-execution, and failed JSON remain terminal
+failures in the inventory and summary. A nonzero runner status is preserved.
+
+`scripts/bootstrap/validate-test-runner-json.pl` owns the strict JSON boundary;
+the shell runner records only its admitted passed/failed/skipped counters.
+
 ## Why an umbrella exists
 
 Before this, the gates were scattered across three regimes: some invoked from
