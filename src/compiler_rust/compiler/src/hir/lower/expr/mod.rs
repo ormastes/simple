@@ -198,6 +198,60 @@ impl Lowerer {
         }
     }
 
+    /// Flat nullable values may be nil, canonical Option, or a raw present T.
+    /// Test absence before unwrapping one Option envelope; never project a
+    /// present user enum (including variants named Ok, Err, or None).
+    fn build_nullable_unwrap(&self, subject: HirExpr, local_idx: usize, inner: TypeId) -> HirExpr {
+        let subject_ref = HirExpr { kind: HirExprKind::Local(local_idx), ty: subject.ty };
+        let none = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_new".to_string(),
+                args: vec![
+                    HirExpr { kind: HirExprKind::Integer(1), ty: TypeId::I64 },
+                    HirExpr {
+                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("None")),
+                        ty: TypeId::I64,
+                    },
+                    HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL },
+                ],
+            },
+            ty: TypeId::ANY,
+        };
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx,
+                value: Box::new(subject),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_is_none".to_string(),
+                                args: vec![subject_ref.clone()],
+                            },
+                            ty: TypeId::BOOL,
+                        }),
+                        then_branch: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_trap".to_string(),
+                                args: vec![none],
+                            },
+                            ty: inner,
+                        }),
+                        else_branch: Some(Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![subject_ref],
+                            },
+                            ty: inner,
+                        })),
+                    },
+                    ty: inner,
+                }),
+            },
+            ty: inner,
+        }
+    }
+
     /// Main expression lowering dispatcher
     ///
     /// This method delegates to specialized helper methods for each expression type,
@@ -1445,7 +1499,7 @@ impl Lowerer {
             _ => None,
         };
         let hir_args = match (method, element_ty, args) {
-            ("map", Some(element_ty), [arg]) => {
+            ("map" | "filter", Some(element_ty), [arg]) => {
                 if let Expr::Lambda {
                     params,
                     body,
@@ -1454,12 +1508,12 @@ impl Lowerer {
                 } = &arg.value
                 {
                     if params.len() == 1 && params[0].ty.is_none() && element_ty != TypeId::ANY {
-                        vec![self.lower_lambda_with_first_param_type(
+                        vec![self.lower_lambda_with_param_types(
                             params,
                             body,
                             *capture_all,
                             ctx,
-                            Some(element_ty),
+                            &[element_ty],
                         )?]
                     } else {
                         self.lower_call_args(args, ctx)?
@@ -1525,6 +1579,19 @@ impl Lowerer {
                     }
                 }
                 "unwrap" => {
+                    let nullable_named_inner = match self.module.types.get(receiver.ty) {
+                        Some(HirType::Pointer { inner, .. })
+                            if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. } | HirType::Enum { .. })) => Some(*inner),
+                        _ => None,
+                    };
+                    if let Some(inner) = nullable_named_inner {
+                        let local_idx = ctx.add_local(
+                            "$nullable_unwrap_subject".to_string(),
+                            receiver.ty,
+                            simple_parser::ast::Mutability::Immutable,
+                        );
+                        return Ok(Some(self.build_nullable_unwrap(receiver.clone(), local_idx, inner)));
+                    }
                     // `.unwrap()` on an optional over a BoxInt-family scalar
                     // (`i64?`): the JIT-lane value is a TAGGED word (raw
                     // migration form), not necessarily an enum, so it must go
@@ -1896,7 +1963,18 @@ impl Lowerer {
                 // `rt_array_sum`'s tag-boxed result to match this type.
                 "sum" => Some(TypeId::I64),
                 "join" => Some(TypeId::STRING),
-                "slice" | "filter" | "map" => Some(receiver.ty), // Returns same array type
+                "slice" | "filter" => Some(receiver.ty),
+                "map" => hir_args.first().map(|callback| {
+                    let element = if matches!(callback.kind, HirExprKind::Lambda { .. }) {
+                        callback.ty
+                    } else {
+                        match self.module.types.get(callback.ty) {
+                            Some(HirType::Function { ret, .. }) => *ret,
+                            _ => TypeId::ANY,
+                        }
+                    };
+                    self.module.types.register(HirType::Array { element, size: None })
+                }),
                 // `arr.take(n)` / `arr.skip(n)` / `arr.drop(n)` all return a
                 // NEW array of the same element type, clamped to [0, len] —
                 // same shape as `slice`/`filter`/`map` above. `arr.insert(i,
