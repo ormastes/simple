@@ -106,4 +106,17 @@ printf '%s\n' "$payload" | run_measured_timeout "$tmp/metric" 5 1 sh -c 'cat >"$
 [ "$(cat "$tmp/stdin")" = "$payload" ] || fail 'measured wrapper replaced caller stdin with EOF'
 [ -s "$tmp/metric" ] || fail 'measured wrapper omitted its RSS verdict'
 
-echo 'PASS: Windows RSS units, group identity, zombie controls, and measured stdin parity'
+# Main's platform-specific rusage parser must survive the Windows sampler fix.
+awk '/^read_max_rss_kib\(\)/ { copy=1 } copy { print } copy && /^}/ { exit }' "$runner" >"$tmp/read-rss.sh"
+. "$tmp/read-rss.sh"
+printf '  102401 maximum resident set size\n' >"$tmp/platform-rss"
+rss_time_style=darwin
+[ "$(read_max_rss_kib "$tmp/platform-rss")" = 101 ] || fail 'Darwin bytes must round up to KiB'
+rss_time_style=bsd-kib
+[ "$(read_max_rss_kib "$tmp/platform-rss")" = 102401 ] || fail 'FreeBSD rusage must retain KiB'
+rss_time_style=gnu
+printf '321\n' >"$tmp/platform-rss"
+[ "$(read_max_rss_kib "$tmp/platform-rss")" = 321 ] || fail 'GNU rusage must retain KiB'
+[ "$(read_max_rss_kib "$tmp/absent-rss")" = unavailable ] || fail 'missing RSS must remain unavailable'
+
+echo 'PASS: Windows RSS units, group identity, zombie controls, stdin parity, and Darwin/FreeBSD/GNU rusage'
