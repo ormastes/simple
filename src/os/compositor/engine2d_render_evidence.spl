@@ -21,9 +21,10 @@ val SIMPLEOS_RENDER_ARCH_X86_64: u32 = 1u32
 val SIMPLEOS_RENDER_ARCH_AARCH64: u32 = 2u32
 val SIMPLEOS_RENDER_ARCH_RV64: u32 = 3u32
 val SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU: u32 = 1u32
+val SIMPLEOS_RENDER_BACKEND_BGA: u32 = 2u32
 val SIMPLEOS_RENDER_FORMAT_ARGB8888: u32 = 1u32
 
-struct SimpleOsRenderReceipt:
+pub struct SimpleOsRenderReceipt:
     header: BackendRenderReceiptHeader
     event: BackendRenderReceiptEvent
     trailer: BackendRenderReceiptTrailer
@@ -155,3 +156,58 @@ fn simpleos_render_receipt(
         return nil
     Some(SimpleOsRenderReceipt(
         header: header, event: event, trailer: trailer))
+
+fn simpleos_render_receipt_from_digest(
+    arch_code: u32,
+    backend_code: u32,
+    firmware: SimpleOsBuildIdentityV1,
+    boot_id: u64,
+    frame_id: u64,
+    surface_handle: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    pixel_hash: SimpleOsBuildIdentityV1,
+    nonblank_pixel_count: u64
+) -> SimpleOsRenderReceipt?:
+    """Build a receipt from an independently streamed scanout digest."""
+    if (width == 0u32 or height == 0u32 or stride != width * 4u32 or
+        surface_handle == 0u64 or nonblank_pixel_count == 0u64):
+        return nil
+    val header = BackendRenderReceiptHeader(
+        version: BACKEND_RENDER_RECEIPT_VERSION,
+        arch_code: arch_code,
+        runtime_code: SIMPLEOS_RENDER_RUNTIME_QEMU,
+        backend_code: backend_code,
+        firmware_hash_word0: firmware.word0,
+        firmware_hash_word1: firmware.word1,
+        firmware_hash_word2: firmware.word2,
+        firmware_hash_word3: firmware.word3,
+        boot_id: boot_id,
+        frame_id: frame_id,
+        surface_handle: surface_handle,
+        width: width,
+        height: height,
+        stride: stride,
+        format_code: SIMPLEOS_RENDER_FORMAT_ARGB8888)
+    val event = BackendRenderReceiptEvent(
+        sequence: 1u32,
+        operation_code: BACKEND_RENDER_OPERATION_PRESENT,
+        resource_id: surface_handle,
+        state_before: 0u32,
+        state_after: 1u32,
+        value_hash: pixel_hash.word0)
+    val trailer = BackendRenderReceiptTrailer(
+        event_count: 1u32,
+        frame_complete: true,
+        pixel_hash_word0: pixel_hash.word0,
+        pixel_hash_word1: pixel_hash.word1,
+        pixel_hash_word2: pixel_hash.word2,
+        pixel_hash_word3: pixel_hash.word3,
+        nonblank_pixel_count: nonblank_pixel_count,
+        reason_code: 0u32)
+    if (not backend_render_receipt_header_valid(header) or
+        not backend_render_receipt_event_valid(event, 1u32) or
+        not backend_render_receipt_trailer_valid(trailer, 1u32)):
+        return nil
+    Some(SimpleOsRenderReceipt(header: header, event: event, trailer: trailer))

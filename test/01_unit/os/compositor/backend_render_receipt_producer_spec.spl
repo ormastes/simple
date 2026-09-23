@@ -18,7 +18,12 @@ use os.compositor.engine2d_render_evidence.{
     SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
     SimpleOsBuildIdentityV1
 }
-use os.compositor.backend_render_receipt_producer.{produce_backend_render_receipt_after_present_v1}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.compositor.backend_render_receipt_producer.{
+    produce_backend_render_receipt_after_present_v1,
+    produce_backend_render_receipt_from_scanout_v1,
+    simpleos_build_identity_from_admission_v1
+}
 use os.kernel.arch.x86.render_capture_ack.{
     RenderCaptureAckV1,
     render_capture_control_wire_byte_at,
@@ -65,6 +70,110 @@ fn receipt_wire() -> text:
     wire
 
 describe "SimpleOS backend render receipt producer":
+    it "streams the production framebuffer while preserving scanout identity":
+        var owner = BaremetalWmPresentOwnerV1.create(scanout())
+        val presented = owner.commit_present(scanout(), 3u64, 7u64, 1u64, true)
+        var framebuffer = FramebufferDriver.from_buffer(2u32, 1u32)
+        val host_pixels = framebuffer.host_pixels()
+        host_pixels[0] = 0xff112233u32
+        host_pixels[1] = 0xff445566u32
+        val emission = produce_backend_render_receipt_from_scanout_v1(
+            WM_PRESENT_ARCH_X86_64,
+            SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+            11u64,
+            scanout(),
+            presented,
+            0u64,
+            framebuffer)
+        expect(emission.accepted).to_be(true)
+        expect(emission.receipt!.header.surface_handle).to_equal(29u64)
+        expect(emission.receipt!.header.stride).to_equal(8u32)
+        expect(emission.receipt!.trailer.pixel_hash_word0).to_equal(
+            valid_emission().receipt!.trailer.pixel_hash_word0)
+
+    it "accepts only an exact admitted kernel SHA-256 identity":
+        val identity = simpleos_build_identity_from_admission_v1(
+            "schema=simpleos-wm-kernel-admission-v3\n" +
+            "kernel_sha256=0000000000000001000000000000000200000000000000030000000000000004\n")
+        expect(identity == nil).to_be(false)
+        expect(identity!.word0).to_equal(1u64)
+        expect(simpleos_build_identity_from_admission_v1("kernel_sha256=not-a-digest") == nil).to_be(true)
+
+    it "rejects duplicate and prefixed admission digests":
+        val schema = "schema=simpleos-wm-kernel-admission-v3\n"
+        val digest = "kernel_sha256=0000000000000001000000000000000200000000000000030000000000000004\n"
+        expect(simpleos_build_identity_from_admission_v1(schema + digest + digest) == nil).to_be(true)
+        expect(simpleos_build_identity_from_admission_v1(schema + "wrong_" + digest) == nil).to_be(true)
+        expect(simpleos_build_identity_from_admission_v1(digest) == nil).to_be(true)
+
+    it "rejects an admitted presentation reused for a different scanout":
+        var owner = BaremetalWmPresentOwnerV1.create(scanout())
+        val presented = owner.commit_present(scanout(), 3u64, 7u64, 1u64, true)
+        val other = BaremetalWmScanoutIdentityV1(
+            architecture: WM_PRESENT_ARCH_X86_64, scanout_id: 30u64,
+            width: 2u32, height: 1u32, stride: 8u32, bpp: 32u32)
+        val emission = produce_backend_render_receipt_from_scanout_v1(
+            WM_PRESENT_ARCH_X86_64, SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+            11u64, other, presented, 0u64, FramebufferDriver.from_buffer(2u32, 1u32))
+        expect(emission.accepted).to_be(false)
+        expect(emission.reason).to_equal("presentation-scanout-mismatch")
+
+    it "rejects a same-sized framebuffer at a different address before MMIO":
+        var owner = BaremetalWmPresentOwnerV1.create(scanout())
+        val presented = owner.commit_present(scanout(), 3u64, 7u64, 1u64, true)
+        # Neither sentinel address is mapped. Rejection must precede read_pixel.
+        val other = FramebufferDriver.from_scanout_raw(8192u64, 2u32, 1u32, 8u32, 32u32)
+        val emission = produce_backend_render_receipt_from_scanout_v1(
+            WM_PRESENT_ARCH_X86_64, SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+            11u64, scanout(), presented, 4096u64, other)
+        expect(emission.accepted).to_be(false)
+        expect(emission.reason).to_equal("scanout-framebuffer-mismatch")
+
+    it "matches all digest words across a full scratch chunk and tail":
+        val identity = BaremetalWmScanoutIdentityV1(
+            architecture: WM_PRESENT_ARCH_X86_64, scanout_id: 31u64,
+            width: 65u32, height: 1u32, stride: 260u32, bpp: 32u32)
+        var owner = BaremetalWmPresentOwnerV1.create(identity)
+        val presented = owner.commit_present(identity, 3u64, 7u64, 1u64, true)
+        val firmware = SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64)
+        var framebuffer = FramebufferDriver.from_buffer(65u32, 1u32)
+        val pixels = framebuffer.host_pixels()
+        var i = 0
+        while i < 65:
+            pixels[i] = 0xff000000u32 | (i + 1).to_u32()
+            i = i + 1
+        val streamed = produce_backend_render_receipt_from_scanout_v1(
+            WM_PRESENT_ARCH_X86_64, SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            firmware, 11u64, identity, presented, 0u64, framebuffer)
+        val reference = produce_backend_render_receipt_after_present_v1(
+            WM_PRESENT_ARCH_X86_64, SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            firmware, 11u64, identity, presented, pixels)
+        expect(streamed.accepted).to_be(true)
+        expect(reference.accepted).to_be(true)
+        expect(streamed.receipt!.trailer.pixel_hash_word0).to_equal(reference.receipt!.trailer.pixel_hash_word0)
+        expect(streamed.receipt!.trailer.pixel_hash_word1).to_equal(reference.receipt!.trailer.pixel_hash_word1)
+        expect(streamed.receipt!.trailer.pixel_hash_word2).to_equal(reference.receipt!.trailer.pixel_hash_word2)
+        expect(streamed.receipt!.trailer.pixel_hash_word3).to_equal(reference.receipt!.trailer.pixel_hash_word3)
+
+    it "rejects framebuffer metadata that does not match the admitted scanout":
+        var owner = BaremetalWmPresentOwnerV1.create(scanout())
+        val presented = owner.commit_present(scanout(), 3u64, 7u64, 1u64, true)
+        val wrong_framebuffer = FramebufferDriver.from_buffer(3u32, 1u32)
+        val emission = produce_backend_render_receipt_from_scanout_v1(
+            WM_PRESENT_ARCH_X86_64,
+            SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+            11u64,
+            scanout(),
+            presented,
+            0u64,
+            wrong_framebuffer)
+        expect(emission.accepted).to_be(false)
+        expect(emission.reason).to_equal("scanout-framebuffer-mismatch")
+
     it "binds admitted build boot frame scanout and committed pixels":
         val emission = valid_emission()
         expect(emission.accepted).to_be(true)

@@ -22,7 +22,7 @@
 #
 # QEMU scenario: x64-desktop-gui (gui_mode: true + NVMe + removable + net)
 
-use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.arch.x86_64.console.{serial_init, serial_write_byte, serial_writeln}
 use os.kernel.boot.cpu.{port_inb, port_outb}
 use os.drivers.framebuffer.bga_init.{bga_device_id, bga_init_scanout, bga_pci_decode_is_enabled, find_bga_pci_device, scanout_evidence_is_valid, bga_mmio_read, bga_read}
 use os.services.audio.audio_service.{
@@ -47,6 +47,20 @@ use os.compositor.baremetal_wm_present_owner.{
     WM_PRESENT_ARCH_X86_64,
     BaremetalWmScanoutIdentityV1,
     BaremetalWmPresentOwnerV1
+}
+use os.compositor.backend_render_receipt_producer.{
+    BackendRenderReceiptEmissionV1,
+    produce_backend_render_receipt_from_scanout_v1,
+    simpleos_build_identity_from_admission_v1
+}
+use os.compositor.engine2d_render_evidence.{SIMPLEOS_RENDER_BACKEND_BGA}
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    backend_render_receipt_header_wire_byte_at,
+    backend_render_receipt_header_wire_byte_count,
+    backend_render_receipt_event_wire_byte_at,
+    backend_render_receipt_event_wire_byte_count,
+    backend_render_receipt_trailer_wire_byte_at,
+    backend_render_receipt_trailer_wire_byte_count
 }
 use os.compositor.legacy_ps2_input_gate.{legacy_ps2_input_ready}
 use os.compositor.input_backend.{Ps2InputBackend}
@@ -284,6 +298,24 @@ fn _submit_hda_boot_calibration() -> i64:
         samples.push(sample)
         frame = frame + 1
     simpleos_hda_submit_pcm_i16(samples, 2)
+
+fn _emit_first_present_render_receipt(emission: BackendRenderReceiptEmissionV1) -> bool:
+    if not emission.accepted or emission.receipt == nil:
+        return false
+    val receipt = emission.receipt!
+    var index = 0
+    while index < backend_render_receipt_header_wire_byte_count():
+        serial_write_byte(backend_render_receipt_header_wire_byte_at(receipt.header, index))
+        index = index + 1
+    index = 0
+    while index < backend_render_receipt_event_wire_byte_count():
+        serial_write_byte(backend_render_receipt_event_wire_byte_at(receipt.event, index))
+        index = index + 1
+    index = 0
+    while index < backend_render_receipt_trailer_wire_byte_count():
+        serial_write_byte(backend_render_receipt_trailer_wire_byte_at(receipt.trailer, index))
+        index = index + 1
+    true
 
 fn spl_start():
     # Canonical Cocoa/UEFI lane uses -m 2G. Reserve the whole link-resident
@@ -618,6 +650,27 @@ fn spl_start():
         serial_println("[production-readiness-failed] reason=wm-present-owner-first-frame")
         port_outb(0xF4, 1)
         return
+    # Production receipt seam: identity comes from the admission record staged
+    # beside the exact kernel, and pixels are streamed from this scanout after
+    # the owner admitted the first platform present. Missing admission fails
+    # closed and never substitutes a canned digest.
+    val kernel_admission = g_vfs_read_file_text("/SYS/KERNEL.ADM")
+    val build_identity = simpleos_build_identity_from_admission_v1(kernel_admission)
+    val render_boot_id = boot_monotonic_now_us().to_u64()
+    if build_identity == nil or render_boot_id == 0u64:
+        serial_println("[backend-render-receipt-unavailable] reason=kernel-admission-or-boot-identity")
+    else:
+        val render_emission = produce_backend_render_receipt_from_scanout_v1(
+            WM_PRESENT_ARCH_X86_64,
+            SIMPLEOS_RENDER_BACKEND_BGA,
+            build_identity!,
+            render_boot_id,
+            wm_scanout_identity,
+            first_present_receipt,
+            scanout.address,
+            fb)
+        if not _emit_first_present_render_receipt(render_emission):
+            serial_println("[backend-render-receipt-unavailable] reason=production-scanout-rejected")
     val simd_enabled = baremetal_simd_fill_enabled()
     val simd_hits = baremetal_simd_fill_hits()
     val simd_chunks = baremetal_simd_fill_chunks()

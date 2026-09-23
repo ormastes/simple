@@ -4,15 +4,46 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-Status: fixed in `codex/simpleos-render-receipt` (2026-09-22).
+Status: source repair complete in `codex/simpleos-render-receipt`; target
+verification remains open (2026-09-22).
 
 The guest producer is now `os.compositor.backend_render_receipt_producer`.
-It accepts exactly one already-admitted `BaremetalWmPresentReceiptV1` seam and
-binds the firmware/build digest, boot ID, frame ID, scanout identity, geometry,
-and committed ARGB pixels.  The x86 capture control module emits fixed-width
-`W/A/K` records and accepts an ACK only when both boot and frame identities
-match.  The focused producer spec includes malformed, reordered, truncated,
-wrong-frame ACK, rejected-presentation, and 256-repeat stateless cases.
+The x86 production entry calls it only after the presentation owner admits the
+first frame, using the exact scanout object, a per-boot monotonic identity, and
+the admitted kernel SHA-256 read from `/SYS/KERNEL.ADM`. Pixels are streamed
+from the committed framebuffer through 256 bytes of scratch instead of copying
+the 4K scanout into bump-allocated pixel and canonical-byte arrays. Fixed-width
+receipt records are written directly to the architecture UART byte owner.
+
+2026-09-23 source repair: presentation receipts now retain the full scalar
+scanout identity admitted by their owner. Both producer paths reject a receipt
+reused with another scanout. The production framebuffer reader also compares
+the presented address with `FramebufferDriver.front_addr` before any MMIO read,
+validates bounded geometry, and rejects duplicate/prefixed admission digests.
+The address remains outside the presentation owner and the wire protocol.
+
+Memory/performance boundary: SHA state/schedule/block arrays and the 256-byte
+scratch buffer are fixed size, with at most one bounded tail copy. Hash work is
+linear in pixels. Production creates this state once before the desktop frame
+loop, so bump-allocator use does not grow with frame count. This is source
+analysis, not measured target timing or allocator evidence; the public producer
+is not advertised as allocation-free when called repeatedly.
+
+TODO when an admitted x86 Linux runtime is ready: execute
+`test/01_unit/os/compositor/backend_render_receipt_producer_spec.spl`,
+`test/01_unit/os/compositor/baremetal_wm_present_owner_spec.spl`, and
+`test/01_unit/os/compositor/baremetal_wm_present_entry_wiring_spec.spl`.
+New behavioral cases cover wrong scanout identity, equal geometry at a wrong
+address (reject before unmapped MMIO), malformed admission, and SHA digest parity
+across a full scratch chunk plus tail. No Rust seed substitutes for these tests.
+Measure first-frame qualification time and bump-heap usage at 1080p/4K after
+Linux bootstrap, and confirm no receipt work/allocation enters the frame loop.
+
+Deferred target TODO: stage the admission record in the canonical QEMU image,
+exercise the `W/A/K` hold/capture/ACK exchange, retain serial plus QMP pixels,
+and repeat the correlated gate on x86_64, AArch64, and RV64 and supported boards.
+Until those runs pass, this change claims source correctness only—not live
+rendering, QEMU verification, or board verification.
 
 - Status: open
 - Priority: P0
@@ -22,10 +53,10 @@ wrong-frame ACK, rejected-presentation, and 256-repeat stateless cases.
 
 `BackendRenderReceiptHeader`, `BackendRenderReceiptEvent`, and
 `BackendRenderReceiptTrailer` now have fail-closed validators, a fixed-width
-allocation-free UART codec, and a bounded host parser. No production SimpleOS
-guest entry emits the ordered records yet. Current guest entries expose static
-frame markers, so QMP pixels still cannot be bound to firmware, boot, frame,
-surface, or operation identities.
+allocation-free UART codec, and a bounded host parser. The x86 production entry
+now emits a one-shot present receipt; AArch64/RV64 integration, ordered operation
+events, and the guest hold/host capture/ACK integration remain incomplete. QMP
+pixels are therefore not yet proven to match the emitted receipt.
 
 The receipt now carries all four SHA-256 words. Target evidence separately
 tracks retained PPM artifact SHA-256 and decoded raw-pixel SHA-256.
