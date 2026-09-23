@@ -183,8 +183,8 @@ static void *handle_remove(int64_t id, uint8_t kind) {
 
 typedef struct {
     int64_t     w, h;
-    NSWindow   *ns_window;    /* strong, retained via CFRetain */
-    NSImageView *ns_view;     /* strong */
+    NSWindow   *ns_window;    /* owns the alloc/init reference (MRC) */
+    NSImageView *ns_view;     /* owns alloc/init; contentView also retains */
     int64_t     event_queue[EVENT_QUEUE_CAP];
     int         eq_head, eq_tail, eq_count;
 } CocoaWindow;
@@ -246,6 +246,12 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
     if (!is_main_thread())  return COCOA_INVALID_HANDLE;
 
     char *title_cstr = text_rv_to_cstr(title_rv);
+    if (!title_cstr) return COCOA_INVALID_HANDLE;
+    CocoaWindow *wnd = (CocoaWindow *)calloc(1, sizeof(CocoaWindow));
+    if (!wnd) {
+        free(title_cstr);
+        return COCOA_INVALID_HANDLE;
+    }
 
     @autoreleasepool {
         ensure_app();
@@ -262,24 +268,31 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
                       styleMask:style
                         backing:NSBackingStoreBuffered
                           defer:NO];
+        if (!ns_window) {
+            free(title_cstr);
+            free(wnd);
+            return COCOA_INVALID_HANDLE;
+        }
+        /* The handle owns the window until rt_cocoa_window_close, including
+         * after AppKit processes a user's close-button event. */
+        [ns_window setReleasedWhenClosed:NO];
 
         NSString *ns_title = [NSString stringWithUTF8String:title_cstr];
-        [ns_window setTitle:ns_title];
+        [ns_window setTitle:ns_title ? ns_title : @"untitled"];
         [ns_window center];
 
         NSImageView *ns_view = [[NSImageView alloc] initWithFrame:frame];
-        [ns_window setContentView:ns_view];
-        [ns_window makeKeyAndOrderFront:nil];
-
-        CocoaWindow *wnd = (CocoaWindow *)calloc(1, sizeof(CocoaWindow));
-        if (!wnd) {
+        if (!ns_view) {
+            [ns_window release];
             free(title_cstr);
+            free(wnd);
             return COCOA_INVALID_HANDLE;
         }
+        [ns_window setContentView:ns_view];
         wnd->w          = w;
         wnd->h          = h;
-        wnd->ns_window  = (NSWindow *)CFRetain((__bridge CFTypeRef)ns_window);
-        wnd->ns_view    = (NSImageView *)CFRetain((__bridge CFTypeRef)ns_view);
+        wnd->ns_window  = ns_window;
+        wnd->ns_view    = ns_view;
         wnd->eq_head    = 0;
         wnd->eq_tail    = 0;
         wnd->eq_count   = 0;
@@ -292,11 +305,12 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
 
         free(title_cstr);
         if (!ok) {
-            CFRelease((__bridge CFTypeRef)wnd->ns_window);
-            CFRelease((__bridge CFTypeRef)wnd->ns_view);
+            [wnd->ns_window release];
+            [wnd->ns_view release];
             free(wnd);
             return COCOA_INVALID_HANDLE;
         }
+        [ns_window makeKeyAndOrderFront:nil];
         return id;
     }
 }
@@ -322,16 +336,20 @@ bool rt_cocoa_window_resize(int64_t win, int64_t w, int64_t h) {
 }
 
 bool rt_cocoa_window_close(int64_t win) {
+    /* Match create/resize/present: removing ownership and calling AppKit must
+     * happen on the main thread, before any handle can become dangling. */
+    if (!is_main_thread()) return false;
+
     pthread_mutex_lock(&g_mutex);
     CocoaWindow *wnd = (CocoaWindow *)handle_remove(win, KIND_WINDOW);
     pthread_mutex_unlock(&g_mutex);
     if (!wnd) return false;
 
     @autoreleasepool {
-        [wnd->ns_window orderOut:nil];
+        [wnd->ns_window close];
+        [wnd->ns_window release];
+        [wnd->ns_view release];
     }
-    CFRelease((__bridge CFTypeRef)wnd->ns_window);
-    CFRelease((__bridge CFTypeRef)wnd->ns_view);
     free(wnd);
     return true;
 }
