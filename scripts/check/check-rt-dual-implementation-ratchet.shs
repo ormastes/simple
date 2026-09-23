@@ -47,6 +47,14 @@
 # 0 symbols compared is ERROR, never a pass. --selftest runs before every scan
 # and is fatal.
 #
+# Push admission (since 2026-09-23): --rev <tip> --baseline-rev <base> compares
+# the single-lane set at <tip> against the set at <base>, the commit the push
+# replaces; only symbols single-lane at <tip> and not at <base> are fatal, and
+# the frozen-baseline drift is printed as information. Without --baseline-rev
+# the frozen comparison above applies unchanged (bootstrap, CI, standalone).
+#   PASS — <n> symbol(s) checked against <m> single-lane at base <sha>, 0 new (...)   exit 0
+#   FAIL — ... <k> new (...)                                                         exit 1
+#
 # Deliberate-update path: --generate-baseline. For REVIEWED updates only, exactly
 # like the divergence and unbacked-extern baselines. Do not "fix" a FAIL with it
 # without reading the diff — a FAIL naming new symbols is real new debt, and
@@ -60,6 +68,7 @@ REV=""
 ROOT=""
 BASELINE=""
 BASELINE_EXPLICIT=0
+BASELINE_REV=""
 GENERATE=0
 SELFTEST_ONLY=0
 
@@ -68,6 +77,7 @@ while [ $# -gt 0 ]; do
         --rev) REV="$2"; shift 2 ;;
         --root) ROOT="$2"; shift 2 ;;
         --baseline) BASELINE="$2"; BASELINE_EXPLICIT=1; shift 2 ;;
+        --baseline-rev) BASELINE_REV="$2"; shift 2 ;;
         --generate-baseline) GENERATE=1; shift ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
@@ -265,6 +275,50 @@ selftest() {
     esac
     st_n=$((st_n + 1))
 
+    # Fixture 8: --baseline-rev is a DELTA against the base commit. Commit 1 is
+    # the clean pair, commit 2 adds a rust-only symbol WITHOUT touching the
+    # frozen baseline, commit 3 edits an unrelated C body. Against base=HEAD~1:
+    # commit 2 must FAIL naming the symbol; commit 3 must PASS even though the
+    # frozen baseline is now stale (that drift is informational in delta mode),
+    # and the same commit 3 without --baseline-rev must still FAIL on the
+    # frozen comparison — proving the two modes genuinely differ.
+    mkfixture f8
+    ( cd "$st_dir/f8" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest ) >/dev/null 2>&1
+    mkdir -p "$st_dir/f8/scripts/check"
+    printf 'rt_conly\tc-only\nrt_ronly\trust-only\n' \
+        > "$st_dir/f8/scripts/check/rt_dual_implementation_baseline.txt"
+    ( cd "$st_dir/f8" && git add -A && git commit -q -m base ) >/dev/null 2>&1
+    printf 'pub fn rt_delta_new_rust_only() -> i64 { 8 }\n' \
+        >> "$st_dir/f8/src/compiler_rust/runtime/src/lib.rs"
+    ( cd "$st_dir/f8" && git add -A && git commit -q -m adds-debt ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 sh "$SELF" \
+        --root "$st_dir/f8" --rev HEAD --baseline-rev HEAD~1 2>&1 | tail -1)
+    case "$st_out" in
+        "FAIL — 3 symbol(s) checked against 2 single-lane at base HEAD~1, 1 new"*) ;;
+        *) echo "selftest: FAILED — delta mode did not catch the new symbol, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    printf 'int64_t rt_conly(void) { return 3; }\n' >> "$st_dir/f8/src/runtime/r.c"
+    ( cd "$st_dir/f8" && git add -A && git commit -q -m unrelated ) >/dev/null 2>&1
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 sh "$SELF" \
+        --root "$st_dir/f8" --rev HEAD --baseline-rev HEAD~1 2>&1 | tail -1)
+    case "$st_out" in
+        "PASS — 3 symbol(s) checked against 3 single-lane at base HEAD~1, 0 new (frozen baseline drift: 1 new, 0 stale, informational)") ;;
+        *) echo "selftest: FAILED — delta mode blamed inherited debt, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    st_out=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 sh "$SELF" \
+        --root "$st_dir/f8" --rev HEAD 2>&1 | tail -1)
+    case "$st_out" in
+        "FAIL — 3 symbol(s) checked against 2 baselined, 1 new, 0 stale") ;;
+        *) echo "selftest: FAILED — frozen mode no longer sees the debt, got [$st_out]"
+           rm -rf "$st_dir"; return 1 ;;
+    esac
+    st_n=$((st_n + 1))
+
     rm -rf "$st_dir"
     echo "selftest: $st_n fixture(s) passed"
     return 0
@@ -285,7 +339,7 @@ if [ $RC -ne 0 ]; then
 fi
 
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 7 fixture(s) checked, selftest only, no real tree scanned"
+    echo "PASS — 8 fixture(s) checked, selftest only, no real tree scanned"
     exit 0
 fi
 
@@ -387,6 +441,79 @@ fi
 if [ ! -f "$BASELINE" ]; then
     echo "ERROR — nothing was checked (baseline not found at $BASELINE)"
     exit 2
+fi
+
+# --baseline-rev <base>: DELTA mode for push admission. The fatal comparison is
+# the single-lane set at --rev minus the single-lane set at <base> (the commit
+# the push replaces), both read from committed content. A push that adds no new
+# single-lane rt_* relative to its own base passes even when main already
+# carries debt the frozen baseline does not list — on 2026-09-23 main itself
+# went red (6, then 18, then 9 new single-lane rt_*) and the frozen comparison
+# blocked 15 unrelated pushes in one day. The frozen-baseline drift is still
+# computed and printed, but as information: the standalone / bootstrap / CI
+# lanes keep running the frozen comparison, so main's own debt stays visible
+# there instead of being paid by whichever pusher arrives first.
+if [ -n "$BASELINE_REV" ]; then
+    # Content-keyed census cache for the base (positive proof, not a path
+    # filter): the single-lane set is a pure function of the two runtime
+    # trees, so it is stored under the sha of their tree ids plus this
+    # script. The base of a push is usually a commit whose census was already
+    # computed (the previous push's tip, or main), so the base half costs a
+    # `git rev-parse` instead of an archive + extraction. Written only after a
+    # non-empty extraction. RT_DUAL_CENSUS_DIR=none disables it.
+    _census_base_dir() {
+        if [ -d /mnt/data ] && [ -w /mnt/data ]; then echo /mnt/data; return; fi
+        if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then echo "$SIMPLE_USER_STORAGE_ROOT"; return; fi
+        echo "${TMPDIR:-/tmp}"
+    }
+    CENSUS_DIR=${RT_DUAL_CENSUS_DIR:-$(_census_base_dir)/.rt-dual-census}
+    CENSUS_KEY=""
+    if [ "$CENSUS_DIR" != none ]; then
+        CENSUS_KEY=$( {
+            ( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" )
+            sha256sum "$SELF" 2>/dev/null
+        } 2>/dev/null | sha256sum | awk '{print $1}')
+    fi
+    if [ -n "$CENSUS_KEY" ] && [ -s "$CENSUS_DIR/$CENSUS_KEY" ]; then
+        cp "$CENSUS_DIR/$CENSUS_KEY" "$WORK/base.txt"
+        echo "note: base census for $BASELINE_REV read from the content-keyed cache" >&2
+    else
+        mkdir -p "$WORK/base"
+        ( cd "$ROOT" && git archive "$BASELINE_REV" -- src/runtime src/compiler_rust/runtime ) 2>/dev/null \
+            | tar -x -C "$WORK/base" 2>/dev/null
+        RC=$?
+        if [ $RC -ne 0 ] || [ ! -d "$WORK/base/src" ]; then
+            echo "ERROR — nothing was checked (could not materialise base $BASELINE_REV)"
+            exit 2
+        fi
+        mkdir -p "$WORK/basework"
+        extract_lanes "$WORK/base" "$WORK/basework"
+        single_lane "$WORK/basework" > "$WORK/base.txt"
+        if [ -n "$CENSUS_KEY" ] && [ -s "$WORK/base.txt" ] && mkdir -p "$CENSUS_DIR" 2>/dev/null; then
+            cp "$WORK/base.txt" "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" 2>/dev/null &&
+                mv -f "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" "$CENSUS_DIR/$CENSUS_KEY" 2>/dev/null ||
+                rm -f "$CENSUS_DIR/$CENSUS_KEY.tmp.$$"
+        fi
+    fi
+    BASE_SET_N=$(wc -l < "$WORK/base.txt" | tr -d ' ')
+    if [ "$BASE_SET_N" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 single-lane rt_* symbols extracted at base $BASELINE_REV)"
+        exit 2
+    fi
+    comm -23 "$WORK/current.txt" "$WORK/base.txt" > "$WORK/new.txt"
+    NEW_N=$(wc -l < "$WORK/new.txt" | tr -d ' ')
+    grep -v '^#' "$BASELINE" | grep -v '^[[:space:]]*$' | sort > "$WORK/baseline.txt"
+    DRIFT_NEW=$(comm -23 "$WORK/current.txt" "$WORK/baseline.txt" | wc -l | tr -d ' ')
+    DRIFT_STALE=$(comm -13 "$WORK/current.txt" "$WORK/baseline.txt" | wc -l | tr -d ' ')
+    if [ "$NEW_N" -ne 0 ]; then
+        echo "NEW single-lane rt_* relative to base $BASELINE_REV (adding one violates the directive — implement"
+        echo "the missing lane in C and Simple with an alias):"
+        cut -f1 "$WORK/new.txt" | sed 's/^/  /'
+        echo "FAIL — $CUR_N symbol(s) checked against $BASE_SET_N single-lane at base $BASELINE_REV, $NEW_N new (frozen baseline drift: $DRIFT_NEW new, $DRIFT_STALE stale, informational)"
+        exit 1
+    fi
+    echo "PASS — $CUR_N symbol(s) checked against $BASE_SET_N single-lane at base $BASELINE_REV, 0 new (frozen baseline drift: $DRIFT_NEW new, $DRIFT_STALE stale, informational)"
+    exit 0
 fi
 
 grep -v '^#' "$BASELINE" | grep -v '^[[:space:]]*$' | sort > "$WORK/baseline.txt"

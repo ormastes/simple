@@ -273,6 +273,59 @@ Same verdict convention as the others: `PASS — <n> file(s) checked, seed bin +
 - Stale `.git/index.lock` with no live holder: `find .git/index.lock -mmin +5 -delete`. Check `pgrep -af 'jj (rebase|restore)'` first — a D-state jj may still be progressing (verify via `/proc/PID/io` deltas) and must not be killed.
 - Edit-tool changes are not auto-snapshotted: commit immediately after editing, and re-verify file content (`grep`) after any `workspace update-stale` — a parallel-session reconcile can silently clobber uncommitted edits.
 
+## Push tier minimised to < 20 s; required CI check < 1 min (2026-09-23)
+
+User targets that day: the pre-push gate finishes in **< 20 s** for a typical
+push and the required GitHub check in **< 1 min**, so a PR can land that fast.
+Measured over 67 real pushes before the change, a push took median 171 s and
+p75 ~16 min with no per-gate timing anywhere in the logs. The dispatcher now
+prints `push-must-check: gate <id> exit=<rc> <n>s` per row, and the push tier
+was cut to nine diff-scoped, cached, committed-content rows: conflict-tree,
+tree-size, conflict-markers, sdn-crc32-sealed, rust-duplicate-reexport
+(touched .rs only), no-stale-snapshot-rewind, range-shs-hygiene (touched .shs
+parse + new guard wired), runtime-api-regression, rt-dual-implementation (delta
+vs base, content-keyed census cache). The required status context
+"Code Idiom & Structural Ratchet Gates" is now carried by the `fast-gates` job
+in `repo-hygiene.yml`, which runs 8 of those 9 against the PR's base..head with
+a sparse checkout (rewind needs a 40-ancestor window a shallow PR fetch lacks,
+so that class is push-only); the 47-step ratchet lane is the non-required
+"(extended)" job and still runs on every PR and on main, including the FROZEN
+rt-dual comparison so main's own single-lane debt stays a red verdict there.
+Local-CI receipts now only affect the extended job. Classes that moved
+out of the blocking push tier (C runtime compile, whole-tree guard wiring,
+extern-registry gap, rules registry, module owners, source-list parity, etc.)
+are caught by the extended job on the PR and on main, and by the merge lane's
+own merge-tree + CRC + rt-delta checks. Details:
+
+- **Advisory rows (`push_blocking: false`) are skipped on an ordinary push.**
+  They never blocked, their verdicts sat red for weeks with nothing acting, and
+  they were ~80 % of the wall time (plan-acceptance sweep, llm-caret ~180 s,
+  main-test-runnable ~60 s). The rows stay in the manifest (wiring preserved,
+  exact dispatch arm still required, fail-closed) and `MUST_CHECK_ADVISORY=1`
+  runs all of them. The skip prints a count; it is never silent.
+- **New blocking rows:** `push-sdn-crc32-sealed` (every sealed `*.sdn` at the
+  pushed sha must verify — a stale `#sdn-crc32` header made the whole
+  `bug_db.sdn` load as nil), `push-rust-duplicate-reexport` (rustc E0252 class,
+  static, ~2 s; the full seed `cargo check` is outside the budget and belongs to
+  CI), `push-no-stale-snapshot-rewind` (the e274cd33719 class itself).
+- **`push-rt-dual-implementation` is a DELTA vs the commit the push replaces**
+  (`--baseline-rev`); frozen-baseline drift is printed as information. The
+  frozen comparison blocked 15 unrelated pushes in one day once main was red.
+- **Demoted to advisory (run with `MUST_CHECK_ADVISORY=1`, enforced by the
+  extended CI job):** guard-wiring, sffi-v2-authority, main-test-runnable,
+  no-direct-rt, windows-checkout-damage, orphan-part-files, the five
+  `*-spirv-pinned` rows and windows-msvc-toolchain-contract (blocking `tree`
+  rows read the working checkout), c-runtime-compiles, no-document-symlinks,
+  rules-quick, interpreter-module-owners, interpreter-extern-registry-gap,
+  type-walk-constructor-parity, runtime-source-list-parity,
+  transient-scope-text-field-promotion, port-io-single-owner,
+  no-mock-file-system-io. `check-c-runtime-compiles-push.shs` gained a
+  content-keyed green marker (6 s -> 0 s on a hit);
+  `check-no-mock-file-system-io.shs` went from 28 s to 1 s; the
+  plan-acceptance sweep's default job count is 2.
+- The extended CI job also re-runs the core classes (`Push-tier core gates`
+  step) with the C compile included, because the push tier is bypassable.
+
 ## Standalone origin-health watchdog (NOT an eighth pre-push guard)
 
 `sh scripts/check/watch-origin-tree-health.shs` is a pull-based safety net,
