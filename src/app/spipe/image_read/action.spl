@@ -9,10 +9,20 @@ struct SpipeImageReadResultV1:
     status: text
     reason: text
     run: ExtractionRunV1
+    # Flat convenience projections of the run for callers that gate on the
+    # outcome without opening the run: empty whenever the run produced no
+    # extraction. `markdown` is rendered by the caller from the structured
+    # document; only the structured JSON is carried here.
+    markdown: text
+    structured_json: text
 
 fn _empty_failed_run_v1(code: text, message: text) -> ExtractionRunV1:
     ExtractionRunV1(status: "failed", inventory_json: "", extraction_json: "",
         audited_json: "", error_code: code, error_message: message, retry_count: 0)
+
+fn _skipped_result_v1(reason: text, code: text, message: text) -> SpipeImageReadResultV1:
+    SpipeImageReadResultV1(status: "skipped", reason: reason,
+        run: _empty_failed_run_v1(code, message), markdown: "", structured_json: "")
 
 fn run_spipe_image_read_v1(
     image_read_profile: text,
@@ -21,13 +31,16 @@ fn run_spipe_image_read_v1(
     complete: fn(MultimodalRequestV1) -> ModelCompletionV1
 ) -> SpipeImageReadResultV1:
     if image_read_profile == "":
-        return SpipeImageReadResultV1(status: "skipped", reason: "image_read_profile not configured",
-            run: _empty_failed_run_v1("not_configured", "image_read_profile not configured"))
+        return _skipped_result_v1("image_read_profile not configured",
+            "not_configured", "image_read_profile not configured")
     if image_read_profile != profile.profile_id:
-        return SpipeImageReadResultV1(status: "failed", reason: "configured profile ID mismatch",
-            run: _empty_failed_run_v1("profile_mismatch", "configured profile ID mismatch"))
+        return SpipeImageReadResultV1(status: "failed",
+            reason: "configured profile ID mismatch",
+            run: _empty_failed_run_v1("profile_mismatch", "configured profile ID mismatch"),
+            markdown: "", structured_json: "")
     val run = run_three_stage_extraction_v1(profile, image, complete)
-    SpipeImageReadResultV1(status: run.status, reason: run.error_message, run: run)
+    SpipeImageReadResultV1(status: run.status, reason: run.error_message, run: run,
+        markdown: "", structured_json: run.extraction_json)
 
 fn publish_spipe_image_read_evidence_v1(
     spec_path: text,
