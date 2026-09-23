@@ -6,6 +6,8 @@
 # ============================================================================
 
 use std.io_runtime.{cwd as io_runtime_cwd}
+export use std.nogc_sync_mut.sffi.system_env_core.{env_get, env_get_i64, env_remove, env_vars_nilable}
+export use std.nogc_sync_mut.sffi.system_hosted_extras.{process_run_with_limits, process_run_with_all_limits, execute_native, get_host_target_code, exec}
 
 # The canonical wrapper maps getcwd failure to ".". Every caller here wants a
 # total path to join against, so both compatibility spellings preserve that
@@ -40,29 +42,6 @@ fn env_home_checked() -> Result<text, text>:
         return Err("rt_env_home returned no home directory")
     Ok(value)
 
-# Same defect class as `flat_bridge_env_get` in
-# src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl: `rt_env_get`
-# yields nil for an UNSET variable, so both it and this wrapper must be
-# declared optional or the SFFI return-contract validator rejects the nil.
-# Unlike that wrapper this one must stay OPTIONAL rather than collapse to "" —
-# callers such as `env_get("SIMPLE_TRACE_FONT_STYLE") != nil` distinguish
-# unset from empty, and returning "" would silently turn those flags on.
-@unsafe(reason: "raw environment text lookup ABI; nil means absent", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text?
-
-@always_inline
-fn env_get(key: text) -> text?:
-    unsafe(capabilities: [ffi]):
-        rt_env_get(key)
-
-@unsafe(reason: "raw environment integer lookup uses the caller default as its failure sentinel", capabilities: [ffi])
-extern fn rt_env_get_i64(key: text, default: i64) -> i64
-
-@always_inline
-fn env_get_i64(key: text, default: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_env_get_i64(key, default)
-
 @unsafe(reason: "raw PRNG ABI; not cryptographically secure", capabilities: [ffi])
 extern fn rt_random_i64() -> i64
 
@@ -95,33 +74,13 @@ fn env_set(key: text, value: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_env_set(key, value)
 
-@unsafe(reason: "raw environment key removal-status ABI", capabilities: [ffi])
-extern fn rt_env_remove(key: text) -> bool
-
-@always_inline
-fn env_remove(key: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_env_remove(key)
-
-@unsafe(reason: "raw nullable environment snapshot and owned tuple-array ABI", capabilities: [ffi])
-extern fn rt_env_vars() -> [(text, text)]?
-
-@always_inline
-fn _env_vars_raw() -> [(text, text)]?:
-    unsafe(capabilities: [ffi]):
-        rt_env_vars()
-
-@always_inline
-fn env_vars_nilable() -> [(text, text)]?:
-    _env_vars_raw()
-
 @unsafe(reason: "environment snapshot ownership is not represented by the facade type", capabilities: [ffi])
 @always_inline
 fn env_vars() -> [(text, text)]:
-    _env_vars_raw() ?? []
+    env_vars_nilable() ?? []
 
 fn env_vars_checked() -> Result<[(text, text)], text>:
-    val values = _env_vars_raw()
+    val values = env_vars_nilable()
     if values == nil:
         return Err("rt_env_vars failed to allocate an environment snapshot")
     Ok(values)
@@ -171,37 +130,6 @@ fn _sffi_system_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     _sffi_system_process_run_timeout_raw(cmd, args, timeout_ms)
-
-# ABI: env_process.rs:1269 takes EIGHT words --
-# (cmd_ptr, cmd_len, args, timeout_ms, memory_bytes, cpu_seconds, max_fds,
-# max_procs). Declaring only four Simple params left cpu_seconds/max_fds/
-# max_procs reading uninitialised registers, and those three go straight into
-# setrlimit(2) for the child. Note the unit is BYTES, not MB, despite the old
-# parameter name.
-@unsafe(reason: "raw limited process capture; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
-extern fn rt_process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32)
-
-@always_inline
-fn _sffi_system_process_run_with_limits_raw(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
-    unsafe(capabilities: [ffi]):
-        rt_process_run_with_limits(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs)
-
-fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64) -> (text, text, i32):
-    _sffi_system_process_run_with_limits_raw(cmd, args, timeout_ms, memory_bytes, 0, 0, 0)
-
-fn process_run_with_all_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
-    _sffi_system_process_run_with_limits_raw(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs)
-
-@unsafe(reason: "raw native execution; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
-extern fn rt_execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-
-@always_inline
-fn _sffi_system_execute_native_raw(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    unsafe(capabilities: [ffi]):
-        rt_execute_native(binary_path, args, timeout_ms)
-
-fn execute_native(binary_path: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    _sffi_system_execute_native_raw(binary_path, args, timeout_ms)
 
 @unsafe(reason: "raw process output; empty text conflates empty output with execution failure", capabilities: [ffi])
 extern fn rt_process_output(cmd: text, args: [text]) -> text
@@ -312,14 +240,6 @@ fn cpu_count_checked() -> Result<i64, text>:
         return Err("rt_cpu_count returned a non-positive count")
     Ok(count)
 
-@unsafe(reason: "raw host-target discriminant ABI; failure sentinel is untyped", capabilities: [ffi])
-extern fn rt_get_host_target_code() -> i64
-
-@unsafe(reason: "host-target failure sentinel is not represented by the facade type", capabilities: [ffi])
-@always_inline
-fn get_host_target_code() -> i64:
-    rt_get_host_target_code()
-
 @unsafe(reason: "raw runtime-owned UUID text ABI; empty text is failure", capabilities: [ffi])
 extern fn rt_uuid_v4() -> text
 
@@ -345,14 +265,6 @@ extern fn rt_shell_output(cmd: text) -> text
 @always_inline
 fn shell_output(cmd: text) -> text:
     rt_shell_output(cmd)
-
-@unsafe(reason: "raw command text execution-status ABI", capabilities: [ffi])
-extern fn rt_exec(cmd: text) -> i32
-
-@always_inline
-fn exec(cmd: text) -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_exec(cmd)
 
 # ============================================================================
 # Time Operations

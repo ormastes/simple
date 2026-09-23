@@ -34,6 +34,7 @@ def main():
     for key in ("max-bytes", "timeout-seconds", "term-grace-seconds"):
         parser.add_argument("--" + key, type=int, required=True)
     parser.add_argument("--command-environment", choices=("inherited", "clean-prefix"), default="inherited")
+    parser.add_argument("--root-exit-policy", choices=("wait-job", "terminate-job"), default="wait-job")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else []
@@ -97,6 +98,9 @@ def main():
         _fields_ = [("times", ct.c_longlong * 4), ("page_faults", wt.DWORD),
                     ("total", wt.DWORD), ("active", wt.DWORD), ("terminated", wt.DWORD)]
 
+    class JobPids(ct.Structure):
+        _fields_ = [("assigned", wt.DWORD), ("listed", wt.DWORD), ("pids", size * 16)]
+
     def api(name, result, *parameters):
         fn = getattr(kernel, name)
         fn.restype, fn.argtypes = result, parameters
@@ -116,6 +120,9 @@ def main():
     resume = api("ResumeThread", wt.DWORD, handle)
     wait = api("WaitForSingleObject", wt.DWORD, handle, wt.DWORD)
     exit_code = api("GetExitCodeProcess", wt.BOOL, handle, ct.POINTER(wt.DWORD))
+    open_process = api("OpenProcess", handle, wt.DWORD, wt.BOOL, wt.DWORD)
+    process_image = api("QueryFullProcessImageNameW", wt.BOOL, handle, wt.DWORD,
+                        wt.LPWSTR, ct.POINTER(wt.DWORD))
     peek = api("PeekNamedPipe", wt.BOOL, handle, voidp, wt.DWORD, voidp, ct.POINTER(wt.DWORD), voidp)
     move = api("MoveFileExW", wt.BOOL, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD)
     api("SetErrorMode", wt.UINT, wt.UINT)(0x0001 | 0x0002)
@@ -186,14 +193,43 @@ def main():
             os.close(input_fd)
             input_fd = None
             captured = 0
+            job_remnants_terminated = False
+            root_exit_active_count = "not-observed"
+            root_exit_elapsed_ms = "not-observed"
+            root_exit_members = "not-observed"
             log_hash = hashlib.sha256()
-            deadline = time.monotonic() + args.timeout_seconds
+            started = time.monotonic()
+            deadline = started + args.timeout_seconds
             read_handle = msvcrt.get_osfhandle(read_fd)
 
             def active_processes():
                 accounting = Accounting()
                 require(query_job(job, 1, ct.byref(accounting), ct.sizeof(accounting), None), "query job")
                 return accounting.active
+
+            def member_diagnostics():
+                # Advisory only: a member can exit between listing and opening.
+                # Never include command lines, environment, or full image paths.
+                members = JobPids()
+                if not query_job(job, 3, ct.byref(members), ct.sizeof(members), None):
+                    return "query-unavailable"
+                found = []
+                for pid in members.pids[:min(members.listed, 16)]:
+                    name = "unavailable"
+                    held = open_process(0x1000, False, pid)
+                    if held:
+                        try:
+                            buffer = ct.create_unicode_buffer(32768)
+                            length = wt.DWORD(len(buffer))
+                            if process_image(held, 0, buffer, ct.byref(length)):
+                                name = re.sub(r"[^A-Za-z0-9_.-]", "_",
+                                              buffer.value.rsplit("\\", 1)[-1])[:128]
+                        finally:
+                            close(held)
+                    found.append(f"{pid}:{name}")
+                if members.assigned > len(found):
+                    found.append("truncated")
+                return ",".join(found) or "empty"
 
             while spawned:
                 if time.monotonic() >= deadline:
@@ -204,7 +240,28 @@ def main():
                 # observing the child exit.  Once the root is signaled and the
                 # no-breakaway job is empty, a subsequent empty sample has
                 # drained every byte a contained process can still produce.
-                job_done = not active_processes() and wait(process.process, 0) == 0
+                root_done = wait(process.process, 0) == 0
+                job_active = active_processes()
+                if root_done and job_active and args.root_exit_policy == "terminate-job":
+                    # Synchronous Cargo can exit while an orphaned MSVC
+                    # telemetry process remains in its Job with our pipe open.
+                    # Its own exit code is already final; stop only this Job's
+                    # remnants, then drain the bytes already queued below.
+                    native = wt.DWORD()
+                    require(exit_code(process.process, ct.byref(native)), "read child exit before job cleanup")
+                    native_status = native.value
+                    root_exit_active_count = job_active
+                    root_exit_elapsed_ms = int((time.monotonic() - started) * 1000)
+                    root_exit_members = member_diagnostics()
+                    require(terminate_job(job, 125), "terminate root-exit job remnants")
+                    job_remnants_terminated = True
+                    cleanup_deadline = min(deadline, time.monotonic() + 10)
+                    while active_processes():
+                        if time.monotonic() >= cleanup_deadline:
+                            raise RuntimeError("root-exit job cleanup deadline")
+                        time.sleep(0.01)
+                    job_active = 0
+                job_done = root_done and not job_active
                 available = wt.DWORD()
                 if not peek(read_handle, None, 0, None, ct.byref(available), None):
                     if ct.get_last_error() != 109:  # ERROR_BROKEN_PIPE is EOF.
@@ -222,13 +279,14 @@ def main():
                     # An external service may retain an inherited write handle
                     # after the bounded job exits.  EOF is not a completion
                     # predicate for the contained process group.
-                    native = wt.DWORD()
-                    require(exit_code(process.process, ct.byref(native)), "read child exit")
-                    native_status = native.value
-                    reason = "child-native-exception" if native.value & 0xC0000000 == 0xC0000000 else "child-exit"
-                    raw_status = native.value if native.value <= 255 else {
+                    if native_status == "not-run":
+                        native = wt.DWORD()
+                        require(exit_code(process.process, ct.byref(native)), "read child exit")
+                        native_status = native.value
+                    reason = "child-native-exception" if native_status & 0xC0000000 == 0xC0000000 else "child-exit"
+                    raw_status = native_status if native_status <= 255 else {
                         0xC0000005: 139, 0xC000001D: 132, 0xC0000094: 136, 0xC00000FD: 139
-                    }.get(native.value, 125 if reason == "child-native-exception" else 1)
+                    }.get(native_status, 125 if reason == "child-native-exception" else 1)
                     break
                 if not available.value:
                     time.sleep(0.01)
@@ -257,6 +315,11 @@ def main():
             "timeout_seconds": args.timeout_seconds, "term_grace_seconds": args.term_grace_seconds,
             "combined_stream": "stdout-stderr", "process_group": "windows-job",
             "termination": "job-terminate", "artifact_limit": "none",
+            "root_exit_policy": args.root_exit_policy,
+            "job_remnants_terminated": "yes" if job_remnants_terminated else "no",
+            "root_exit_active_count": root_exit_active_count,
+            "root_exit_elapsed_ms": root_exit_elapsed_ms,
+            "root_exit_members": root_exit_members,
             "log_leaf": args.log_leaf, "log_sha256": log_hash.hexdigest(),
             "helper_sha256": args.helper_sha256,
             "command_environment": args.command_environment,

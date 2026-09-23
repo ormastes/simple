@@ -8,10 +8,16 @@
 use std.editor.view.diagnostics_panel.*
 use std.editor.view.lsp_result_panel.*
 use std.editor.view.wiki_panel.*
+use std.editor.view.dock_zone.{DockPanel}
+use std.editor.core.session.{EditSession}
+use std.editor.backend.gui_backend.{GuiBackendConfig, gui_backend_default_config}
+use std.editor.common.platform.{PlatformConfig, EditorPlatform, platform_default_config}
+use std.editor.extensions.host.{ExtensionHost}
 use std.editor.services.diagnostics.*
 use std.editor.services.md_search.*
 use std.editor.backend.gui_sdl_bridge.{gui_sdl_init, gui_sdl_shutdown, gui_sdl_present_frame, gui_sdl_poll}
 use std.editor.view.dock_zone.{dock_layout_tab_contains}
+use app.editor.editor_controller.{EditorController}
 
 use std.nogc_sync_mut.ui.html_gui_sffi.*
 
@@ -70,7 +76,7 @@ fn gui_shell_run(session: EditSession):
     gui_shell_run_profile(session, "editor")
 
 fn gui_shell_run_profile(session: EditSession, profile: text):
-    var state = gui_shell_new(session)
+    var state: GuiShellState = gui_shell_new(session)
     gui_shell_apply_profile(state, profile)
     state.ctrl.file_tree_visible = true
     var drag = _drag_state_new()
@@ -95,7 +101,7 @@ fn gui_shell_run_sdl(session: EditSession):
     gui_shell_run_sdl_profile(session, "editor")
 
 fn gui_shell_run_sdl_profile(session: EditSession, profile: text):
-    var state = gui_shell_new(session)
+    var state: GuiShellState = gui_shell_new(session)
     gui_shell_apply_profile(state, profile)
     state.ctrl.file_tree_visible = true
     var drag = _drag_state_new()
@@ -802,46 +808,38 @@ fn gui_handle_mouse_up(state: GuiShellState, drag: DragState) -> DragState:
         return drag
     if drag.drop_target_zone >= 0 and drag.drop_target_zone != drag.source_zone:
         val dock = state.ctrl.session.dock_layout
-        val panels = dock.visible_panels_in(drag.source_zone)
-        var found_label = ""
-        var found_icon = ""
-        var pi = 0
-        while pi < panels.len():
-            if panels[pi].id == drag.source_panel_id:
-                found_label = panels[pi].label
-                found_icon = panels[pi].icon
-            pi = pi + 1
-        dock.remove_panel(drag.source_panel_id)
-        dock.add_panel(DockPanel(id: drag.source_panel_id, label: found_label, zone: drag.drop_target_zone, icon: found_icon, visible: true))
-        dock.set_active(drag.drop_target_zone, drag.source_panel_id)
+        dock.move_panel(drag.source_panel_id, drag.drop_target_zone)
+    else:
+        state.ctrl.session.dock_layout.set_active(drag.source_zone, drag.source_panel_id)
     _drag_state_new()
 
 fn gui_compute_drop_zone(state: GuiShellState, x: i64, y: i64) -> i64:
     val w = state.config.initial_width
     val h = state.config.initial_height
-    val left_edge = w / 5
-    val right_edge = w - w / 5
-    val bottom_edge = h - h / 4
-    if x < left_edge:
-        return DOCK_LEFT
-    if x > right_edge:
-        return DOCK_RIGHT
-    if y > bottom_edge:
+    val dock = state.ctrl.session.dock_layout
+    if x < 0 or x >= w or y < 20 or y >= h - 20:
+        return -1
+    if y >= h - 20 - dock.bottom.size:
         return DOCK_BOTTOM
+    if x < dock.left.size:
+        return DOCK_LEFT
+    if x >= w - dock.right.size:
+        return DOCK_RIGHT
     -1
 
-fn gui_render_drop_overlay(drag: DragState, width: i64, height: i64) -> text:
+fn gui_render_drop_overlay(state: GuiShellState, drag: DragState, width: i64, height: i64) -> text:
     if not drag.active:
         return ""
     if drag.drop_target_zone < 0:
         return ""
+    val dock = state.ctrl.session.dock_layout
     var zone_style = ""
     if drag.drop_target_zone == DOCK_LEFT:
-        zone_style = "left:0;top:0;width:20%;height:100%"
+        zone_style = "left:0;top:20px;width:" + dock.left.size.to_text() + "px;bottom:20px"
     elif drag.drop_target_zone == DOCK_RIGHT:
-        zone_style = "right:0;top:0;width:20%;height:100%"
+        zone_style = "right:0;top:20px;width:" + dock.right.size.to_text() + "px;bottom:20px"
     elif drag.drop_target_zone == DOCK_BOTTOM:
-        zone_style = "left:0;bottom:0;width:100%;height:25%"
+        zone_style = "left:0;right:0;bottom:20px;height:" + dock.bottom.size.to_text() + "px"
     else:
         return ""
     "<div class=\"drop-overlay\" style=\"position:absolute;" + zone_style + ";background:rgba(0,120,215,0.3);pointer-events:none;\"></div>"
@@ -850,11 +848,28 @@ fn _drag_hit_zone_tab(state: GuiShellState, zone: i64, x: i64, y: i64) -> text:
     val w = state.config.initial_width
     val h = state.config.initial_height
     val tab_h = 28
-    if dock_layout_tab_contains(state.ctrl.session.dock_layout, zone,
-            DOCK_LEFT, DOCK_RIGHT, DOCK_BOTTOM, w, h, tab_h, x, y):
-        val panels = state.ctrl.session.dock_layout.visible_panels_in(zone)
-        if panels.len() > 0:
-            return panels[0].id
+    val tab_w = 120
+    var zone_x = 0
+    var zone_y = 0
+    var zone_w = 0
+    if zone == DOCK_LEFT:
+        zone_x = 0
+        zone_y = 20
+        zone_w = state.ctrl.session.dock_layout.left_width_value()
+    elif zone == DOCK_RIGHT:
+        zone_w = state.ctrl.session.dock_layout.right_width_value()
+        zone_x = w - zone_w
+        zone_y = 20
+    elif zone == DOCK_BOTTOM:
+        zone_x = 0
+        zone_y = h - 20 - state.ctrl.session.dock_layout.bottom.size
+        zone_w = w
+    if x >= zone_x and x < zone_x + zone_w and y >= zone_y and y < zone_y + tab_h:
+        val panels: [DockPanel] = state.ctrl.session.dock_layout.visible_panels_in(zone)
+        val tab_index = (x - zone_x) / tab_w
+        if tab_index < panels.len():
+            val panel: DockPanel = panels[tab_index]
+            return panel.id
     ""
 
 
@@ -885,9 +900,29 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
         editor_html = gui_render_editor_area_with_diagnostics_and_hover_delay(buffer, lang, buffer.viewport, path, diagnostics, state.ctrl.config.hover_delay_ms)
     else:
         editor_html = "<div class=\"empty\">No file open</div>"
+    val doc_frame = state.ctrl.session.active_document()
+    val mode_str = editor_mode_name(state.ctrl.session.mode)
+    var status_extra = ""
+    if doc_frame != nil and doc_frame.language_id == "markdown" and doc_frame.cached_md_stats != nil:
+        status_extra = " | " + md_stats_to_status_bar(doc_frame.cached_md_stats)
+    val hover_html = gui_render_lsp_hover_popup_html(state.ctrl.lsp_hover_popup)
+    val signature_html = gui_render_lsp_signature_popup_html(state.ctrl.lsp_signature_popup)
+    val status_html = "<div class=\"status\">" + mode_str + " | " + state.ctrl.status_msg + status_extra + "</div>"
+    val left_dock_html = gui_render_dock_zone_html(state, DOCK_LEFT, file_tree_html)
+    val right_dock_html = gui_render_dock_zone_html(state, DOCK_RIGHT, file_tree_html)
+    val bottom_dock_html = gui_render_dock_zone_html(state, DOCK_BOTTOM, file_tree_html)
+    val legacy_panel_html = if state.ctrl.session.dock_layout.panel_zone(state.ctrl.session.dock_layout.active_right) < 0 then gui_render_side_panel_html(state, state.ctrl.session.dock_layout.active_right) else: ""
+    GuiFrame(
+        tab_bar_html: tab_bar,
+        file_tree_html: left_dock_html,
+        editor_html: editor_html + hover_html + signature_html + right_dock_html + bottom_dock_html + legacy_panel_html,
+        status_html: status_html
+    )
+
+fn gui_render_side_panel_html(state: GuiShellState, panel_id: text) -> text:
     var right_panel_html = ""
     val doc_frame = state.ctrl.session.active_document()
-    if state.ctrl.session.dock_layout.active_right == "wiki-panel":
+    if panel_id == "wiki-panel":
         var wiki_content = ""
         if state.ctrl.wiki_panel.title == "Properties":
             wiki_content = gui_render_wiki_property_form_html_with_root_and_schema(state.ctrl.wiki_panel, state.ctrl.wiki_property_vault_root, state.ctrl.wiki_property_schema_payload)
@@ -949,10 +984,10 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
                 wpi = wpi + 1
                 rendered_wiki = rendered_wiki + 1
         right_panel_html = "<div class=\"wiki-pane\">" + wiki_content + "</div>"
-    elif state.ctrl.session.dock_layout.active_right == "lsp-panel":
+    elif panel_id == "lsp-panel":
         var lsp_content = gui_render_lsp_navigation_tools_html(state.ctrl) + gui_render_workspace_edit_tools_html(state.ctrl)
         right_panel_html = "<div class=\"lsp-results-pane\">" + lsp_content + gui_render_lsp_result_rows_html(state.ctrl.lsp_result_panel) + "</div>"
-    elif state.ctrl.session.dock_layout.active_right == "problems":
+    elif panel_id == "problems":
         var problem_content = gui_render_diagnostics_tools_html() + gui_render_diagnostics_table_html(state.ctrl.diagnostics_panel)
         right_panel_html = "<div class=\"problems-pane\">" + problem_content + "</div>"
     elif doc_frame != nil and doc_frame.md_state != nil:
@@ -972,19 +1007,38 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
                 outline_content = outline_content + "<div>" + outline_lines[oli] + "</div>"
                 oli = oli + 1
             right_panel_html = "<div class=\"outline-pane\">" + outline_content + "</div>"
-    val mode_str = editor_mode_name(state.ctrl.session.mode)
-    var status_extra = ""
-    if doc_frame != nil and doc_frame.language_id == "markdown" and doc_frame.cached_md_stats != nil:
-        status_extra = " | " + md_stats_to_status_bar(doc_frame.cached_md_stats)
-    val hover_html = gui_render_lsp_hover_popup_html(state.ctrl.lsp_hover_popup)
-    val signature_html = gui_render_lsp_signature_popup_html(state.ctrl.lsp_signature_popup)
-    val status_html = "<div class=\"status\">" + mode_str + " | " + state.ctrl.status_msg + status_extra + "</div>"
-    GuiFrame(
-        tab_bar_html: tab_bar,
-        file_tree_html: file_tree_html,
-        editor_html: editor_html + hover_html + signature_html + right_panel_html,
-        status_html: status_html
-    )
+    right_panel_html
+
+fn gui_render_dock_zone_html(state: GuiShellState, zone: i64, file_tree_html: text) -> text:
+    val dock = state.ctrl.session.dock_layout
+    val panels = dock.visible_panels_in(zone)
+    if panels.len() == 0:
+        return ""
+    var active = dock.active_in(zone)
+    var found = false
+    for panel in panels:
+        if panel.id == active:
+            found = true
+    if not found:
+        active = panels[0].id
+    var zone_name = "left"
+    var style = "left:0;top:20px;width:" + dock.left.size.to_text() + "px;bottom:20px"
+    if zone == DOCK_RIGHT:
+        zone_name = "right"
+        style = "right:0;top:20px;width:" + dock.right.size.to_text() + "px;bottom:20px"
+    elif zone == DOCK_BOTTOM:
+        zone_name = "bottom"
+        style = "left:0;right:0;bottom:20px;height:" + dock.bottom.size.to_text() + "px"
+    var html = "<div class=\"dock-zone\" data-zone=\"" + zone_name + "\" style=\"position:absolute;" + style + "\"><div class=\"dock-tabs\">"
+    for panel in panels:
+        val active_class = if panel.id == active then " active" else: ""
+        html = html + "<div class=\"dock-tab" + active_class + "\" data-panel=\"" + _gui_shell_escape_html(panel.id) + "\" style=\"display:inline-block;width:120px;height:28px\">" + _gui_shell_escape_html(panel.label) + "</div>"
+    html = html + "</div>"
+    if active == "file-tree":
+        html = html + file_tree_html
+    else:
+        html = html + gui_render_side_panel_html(state, active)
+    html + "</div>"
 
 fn gui_render_lsp_hover_popup_html(popup: LspHoverPopup) -> text:
     if not popup.visible:

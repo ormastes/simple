@@ -74,7 +74,13 @@ check_tree() {
   require "$factory" 'match select_static_backend_v1(kind.to_text())'
   require "$factory" 'for entry in active_static_backend_table_v1()'
 
-  require "$codegen" 'select_static_backend_v1(kind.to_text())'
+  # The native bootstrap cannot materialize this dynamic default argument.
+  # Require executable statements for both the active table and its explicit
+  # selector argument; comments mentioning the call must not satisfy the gate.
+  grep -Eq '^[[:space:]]*val table = active_static_backend_table_v1\(\)[[:space:]]*$' "$root/$codegen" ||
+    fail "CodegenFactory.create missing active backend table binding"
+  grep -Eq '^[[:space:]]*val selected = match select_static_backend_v1\(kind\.to_text\(\), table\):[[:space:]]*$' "$root/$codegen" ||
+    fail "CodegenFactory.create missing explicit-table selector dispatch"
   reject "$registry" 'use[[:space:]]+compiler\.backend\.(llvm|cranelift)_codegen_adapter'
   require "$registry" 'install_k1_static_backend_table_v1'
   require "$registry" '_k1_static_backend_policy_v1 != policy'
@@ -160,6 +166,30 @@ selftest() {
 
   PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null
 
+  cp "$fixture/$codegen" "$fixture/$codegen.clean"
+  for dispatch_mutation in missing commented implicit-table; do
+    case "$dispatch_mutation" in
+      missing) sed '/val selected = match select_static_backend_v1/d' "$fixture/$codegen.clean" >"$fixture/$codegen" ;;
+      commented) sed 's/val selected = match select_static_backend_v1/# val selected = match select_static_backend_v1/' "$fixture/$codegen.clean" >"$fixture/$codegen" ;;
+      implicit-table) sed 's/kind.to_text(), table/kind.to_text()/' "$fixture/$codegen.clean" >"$fixture/$codegen" ;;
+    esac
+    dispatch_output=$fixture/dispatch-mutant.out
+    if PHASE5_DISPATCH_ROOT="$fixture" "$0" >"$dispatch_output" 2>&1; then
+      fail "selftest admitted $dispatch_mutation selector dispatch"
+    fi
+    grep -Fxq 'FAIL — CodegenFactory.create missing explicit-table selector dispatch' "$dispatch_output" ||
+      fail "selftest $dispatch_mutation selector mutant lacked exact failure"
+    echo "KPM_PHASE5_CODEGEN_DISPATCH_MUTATION_RECEIPT case=$dispatch_mutation state=FAIL_AT_EXACT_ASSERTION"
+  done
+  sed '/val table = active_static_backend_table_v1()/d' "$fixture/$codegen.clean" >"$fixture/$codegen"
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >"$dispatch_output" 2>&1; then
+    fail "selftest admitted selector dispatch without the active table binding"
+  fi
+  grep -Fxq 'FAIL — CodegenFactory.create missing active backend table binding' "$dispatch_output" ||
+    fail "selftest missing table binding mutant lacked exact failure"
+  echo 'KPM_PHASE5_CODEGEN_DISPATCH_MUTATION_RECEIPT case=missing-table state=FAIL_AT_EXACT_ASSERTION'
+  mv "$fixture/$codegen.clean" "$fixture/$codegen"
+
   first_mapping=$(sed -n '1p' "$fixture/$relocation_map")
   old_path=$(printf '%s\n' "$first_mapping" | cut -f1)
   new_path=$(printf '%s\n' "$first_mapping" | cut -f2)
@@ -243,7 +273,7 @@ selftest() {
   fi
   mv "$fixture/$compatibility.clean" "$fixture/$compatibility"
 
-  echo "PASS — Phase 5 dispatch checker rejected 9/9 relocation, boundary, and dispatch mutations"
+  echo "PASS — Phase 5 dispatch checker rejected 13/13 relocation, boundary, and dispatch mutations"
 }
 
 factory=src/compiler/70.backend/backend/backend_factory_full.spl

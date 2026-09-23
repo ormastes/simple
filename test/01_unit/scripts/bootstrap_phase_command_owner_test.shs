@@ -255,6 +255,32 @@ grep -F 'task=compiler_bootstrap_tests|' "$tmp/work/summary.env" | \
 grep -F 'task=compiler_bootstrap_compile_tests|' "$tmp/work/summary.env" | \
   grep -Fq 'executed=1|passed=1|failed=0|skipped=0' ||
   fail "compile bootstrap row lacks non-vacuous counters"
+
+# The opt-in worker setting must reach every test runner invocation while the
+# default run above retains its sequential command contract.
+: >"$tmp/parallel-executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_INVOCATIONS="$tmp/invocations" \
+PHASE_EXECUTIONS="$tmp/parallel-executions" PHASE_TOOL="$tmp/tool" \
+BOOTSTRAP_VERIFY_BUILD_THREADS=12 BOOTSTRAP_VERIFY_TEST_WORKERS=12 \
+BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=600 \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage4 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/parallel-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -eq 0 ] || fail "12-worker phase fixture failed (status=$status)"
+grep -Fq -- '--threads 12' "$tmp/invocations" ||
+  fail "build thread setting was not passed to tool builds"
+grep -Fq 'simple_test_runner' "$tmp/parallel-executions" ||
+  fail "12-worker fixture did not execute tests"
+if grep -F 'simple_test_runner' "$tmp/parallel-executions" | \
+   grep -Ev -- '--parallel --max-workers=12( --json)?$' >/dev/null; then
+  fail "a phase test runner invocation did not receive 12 workers"
+fi
+grep -Fq 'overall=PASS' "$tmp/parallel-work/summary.env" ||
+  fail "12-worker fixture did not retain passing evidence"
+
 receipt=$(find "$tmp/work/outputs/compiler-tools" -name 'command-owners.*.env' -type f | head -n 1)
 [ -n "$receipt" ] || fail "command-owner receipt was not written"
 case "$(uname -s)" in

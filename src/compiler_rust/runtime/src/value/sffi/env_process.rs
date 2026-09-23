@@ -876,33 +876,157 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
     }
 }
 
+/// Second lane (rt-dual-implementation ratchet) of the C `rt_mcp_parent`
+/// static helper in `src/runtime/runtime_process.c`: the parent directory of
+/// a path, or `None` at a root that cannot be truncated further (mirrors the
+/// C helper's `strrchr` refusing an already-root path).
+#[cfg(not(windows))]
+fn rt_mcp_parent(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Second lane of the C `rt_mcp_regular` static helper: true when `path`
+/// exists and is a regular file (not a directory).
+#[cfg(not(windows))]
+fn rt_mcp_regular(path: &std::path::Path) -> bool {
+    path.metadata().map(|meta| meta.is_file()).unwrap_or(false)
+}
+
+/// Second lane of the C `rt_mcp_wrapper` static helper: locate the
+/// `simple_mcp_server` wrapper two directories above the current executable
+/// (the installed-package layout), falling back to beside the executable
+/// (the dev-checkout layout).
+#[cfg(not(windows))]
+fn rt_mcp_wrapper() -> Option<std::path::PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let exe_dir = current_exe.parent()?.to_path_buf();
+    let bin_dir = rt_mcp_parent(&exe_dir)
+        .and_then(|parent| rt_mcp_parent(&parent))
+        .unwrap_or_else(|| exe_dir.clone());
+    let bin_wrapper = bin_dir.join("simple_mcp_server");
+    Some(if rt_mcp_regular(&bin_wrapper) {
+        bin_wrapper
+    } else {
+        exe_dir.join("simple_mcp_server")
+    })
+}
+
+/// Second lane of the C `rt_mcp_parent_w` static helper: the parent
+/// directory of a Windows path, refusing to truncate past a root (mirrors
+/// the C helper's drive-letter/UNC-root handling).
+#[cfg(windows)]
+fn rt_mcp_parent_w(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Second lane of the C `rt_mcp_regular_w` static helper: true when `path`
+/// exists and is a regular file (not a directory), via `GetFileAttributesW`.
+#[cfg(windows)]
+fn rt_mcp_regular_w(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, INVALID_FILE_ATTRIBUTES,
+    };
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+    attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY.0) == 0
+}
+
+/// Second lane of the C `rt_mcp_wrapper_w` static helper: locate the
+/// `simple_mcp_server.cmd` wrapper two directories above the current
+/// executable, falling back to beside the executable.
+#[cfg(windows)]
+fn rt_mcp_wrapper_w() -> Option<std::path::PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let exe_dir = current_exe.parent()?.to_path_buf();
+    let bin_dir = rt_mcp_parent_w(&exe_dir)
+        .and_then(|parent| rt_mcp_parent_w(&parent))
+        .unwrap_or_else(|| exe_dir.clone());
+    let bin_wrapper = bin_dir.join("simple_mcp_server.cmd");
+    Some(if rt_mcp_regular_w(&bin_wrapper) {
+        bin_wrapper
+    } else {
+        exe_dir.join("simple_mcp_server.cmd")
+    })
+}
+
+/// Second lane of the C `rt_mcp_environment_w` static helper: the child
+/// environment with `_SIMPLE_STACK_SET` cleared and `_SIMPLE_MCP_WRAPPER_PATH`
+/// pointing at the resolved wrapper. The C lane hand-builds a sorted
+/// `GetEnvironmentStringsW` block for `CreateProcessW`; the Rust lane
+/// returns the equivalent (name, value) pairs for
+/// `std::process::Command::envs`, which the Rust spawn path already uses.
+#[cfg(windows)]
+#[allow(dead_code)]
+fn rt_mcp_environment_w(wrapper: &std::path::Path) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            !name.eq_ignore_ascii_case("_SIMPLE_STACK_SET")
+                && !name.eq_ignore_ascii_case("_SIMPLE_MCP_WRAPPER_PATH")
+        })
+        .collect();
+    vars.push((
+        std::ffi::OsString::from("_SIMPLE_MCP_WRAPPER_PATH"),
+        wrapper.as_os_str().to_owned(),
+    ));
+    vars
+}
+
+/// Second lane of the C `rt_mcp_duplicate_std` static helper: duplicate one
+/// of the current process's standard handles so a spawned child can inherit
+/// it explicitly via an attribute list, matching the C lane's
+/// `DuplicateHandle(..., DUPLICATE_SAME_ACCESS)` contract.
+#[cfg(windows)]
+#[allow(dead_code)]
+fn rt_mcp_duplicate_std(
+    which: windows::Win32::System::Console::STD_HANDLE,
+) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+    use windows::Win32::System::Console::GetStdHandle;
+    use windows::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+    unsafe {
+        let source = GetStdHandle(which).ok()?;
+        if source.is_invalid() {
+            return None;
+        }
+        let mut duplicate = windows::Win32::Foundation::HANDLE::default();
+        let current = GetCurrentProcess();
+        DuplicateHandle(current, source, current, &mut duplicate, 0, true, DUPLICATE_SAME_ACCESS).ok()?;
+        Some(duplicate)
+    }
+}
+
 /// Spawn a child that transparently inherits the current process stdio.
 #[no_mangle]
 pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     use std::process::{Command, Stdio};
-    let wrapper_name = if cfg!(windows) {
-        "simple_mcp_server.cmd"
-    } else {
-        "simple_mcp_server"
-    };
-    let current_exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("failed to resolve current executable for MCP: {err}");
+    #[cfg(not(windows))]
+    let wrapper = match rt_mcp_wrapper() {
+        Some(path) => path,
+        None => {
+            eprintln!("failed to resolve current executable for MCP: no simple_mcp_server wrapper found");
             return -1;
         }
     };
-    let exe_dir = match current_exe.parent() {
+    #[cfg(windows)]
+    let wrapper = match rt_mcp_wrapper_w() {
         Some(path) => path,
-        None => return -1,
-    };
-    let bin_dir = exe_dir.parent().and_then(|path| path.parent()).unwrap_or(exe_dir);
-    let wrapper = {
-        let bin_wrapper = bin_dir.join(wrapper_name);
-        if bin_wrapper.is_file() {
-            bin_wrapper
-        } else {
-            exe_dir.join(wrapper_name)
+        None => {
+            eprintln!("failed to resolve current executable for MCP: no simple_mcp_server.cmd wrapper found");
+            return -1;
         }
     };
     #[cfg(windows)]
