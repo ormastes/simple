@@ -1,0 +1,351 @@
+#!/bin/sh
+# Canonical Phase-3 test inventory policy.
+#
+# `test/01_unit`, `test/02_integration`, and `test/03_system` are authoritative.
+# The historical `test/unit`, `test/integration`, and `test/system` mirrors are
+# deliberately excluded so one logical test cannot be admitted twice.
+
+set -eu
+
+tab=$(printf '\t')
+header="surface${tab}category${tab}runner${tab}disposition${tab}path${tab}reason"
+find_command=${PHASE3_FIND:-find}
+
+die() {
+  printf 'phase3-test-inventory: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  phase3-test-inventory.shs discover SOURCE_ROOT [NESTED_RECEIPT]
+  phase3-test-inventory.shs validate INVENTORY_TSV
+  phase3-test-inventory.shs summarize INVENTORY_TSV
+  phase3-test-inventory.shs check-results INVENTORY_TSV RESULTS_TSV
+
+RESULTS_TSV header: runner<TAB>path<TAB>result<TAB>executed<TAB>skipped
+There is one result per physical runner+path owner. A PASS must execute at
+least one example; a SKIP must execute none and report a categorized skip.
+EOF
+  exit 2
+}
+
+emit() {
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
+discover_test_root() {
+  root=$1
+  logical=$2
+  category=$3
+  [ -d "$root/test/$logical" ] || return 0
+  candidates="$scratch/test-${logical}.paths"
+  "$find_command" "$root/test/$logical" -type f \
+    \( -name '*_spec.spl' -o -name '*_test.spl' \) -print >"$candidates" \
+    || die "cannot discover test/$logical"
+  LC_ALL=C sort -u "$candidates" -o "$candidates" \
+    || die "cannot sort test/$logical inventory"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    relative=${file#"$root/"}
+    case "$relative" in
+      test/"$logical"/lib/*)
+        emit library "$category" simple-spec execute "$relative" - >>"$raw"
+        ;;
+      test/"$logical"/tools/*)
+        emit tool "$category" simple-spec execute "$relative" - >>"$raw"
+        ;;
+    esac
+  done <"$candidates"
+}
+
+discover_library_embedded() {
+  root=$1
+  [ -d "$root/src/lib" ] || die "missing src/lib"
+  candidates="$scratch/library-embedded.paths"
+  # The BDD declaration is authoritative.  Suffixes are not: production-named
+  # modules may own embedded specs, while compatibility facades may end in
+  # `_test.spl` without defining a test at all.  Accept both Simple spellings,
+  # `describe "..."` and canonical `describe("...")`.
+  "$find_command" "$root/src/lib" -type f -name '*.spl' \
+    -exec awk '
+      /^[[:space:]]*describe([[:space:]]+|[[:space:]]*\()/ {
+        if (!emitted[FILENAME]++) print FILENAME
+      }
+    ' {} + \
+    >"$candidates" \
+    || die "cannot discover src/lib tests"
+  LC_ALL=C sort -u "$candidates" -o "$candidates" \
+    || die "cannot sort src/lib inventory"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    relative=${file#"$root/"}
+    emit library embedded simple-spec execute "$relative" - >>"$raw"
+  done <"$candidates"
+
+}
+
+discover_tools() {
+  root=$1
+  [ -d "$root/tools" ] || die "missing tools"
+  candidates="$scratch/tool-tests.paths"
+  "$find_command" "$root/tools" \
+    \( -type d -name node_modules -prune \) -o \
+    \( -type f \( -name '*.test.ts' -o -name '*.spec.ts' -o -name '*.test.js' \
+       -o -name '*.spec.js' -o -name '*_spec.spl' -o -name '*_test.spl' \) \
+       -print \) >"$candidates" || die "cannot discover tools tests"
+  LC_ALL=C sort -u "$candidates" -o "$candidates" \
+    || die "cannot sort tools inventory"
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    relative=${file#"$root/"}
+    base=${file##*/}
+    case "$base" in
+      *_spec.spl|*_test.spl)
+        package=${relative#tools/}; package=${package%%/*}
+        emit tool "$package" simple-spec execute "$relative" - >>"$raw"
+        ;;
+      *.test.ts|*.spec.ts|*.test.js|*.spec.js)
+        dir=${file%/*}
+        package_dir=
+        while [ "$dir" != "$root/tools" ] && [ "$dir" != "$root" ]; do
+          if [ -f "$dir/package.json" ] && grep -Eq '"test"[[:space:]]*:' "$dir/package.json"; then
+            package_dir=$dir
+            break
+          fi
+          dir=${dir%/*}
+        done
+        if [ -n "$package_dir" ]; then
+          package_relative=${package_dir#"$root/"}
+          package=$(printf '%s\n' "${package_relative#tools/}" | tr '/' '-')
+          emit tool "$package" npm-test execute "$relative" - >>"$raw"
+        else
+          die "tool test has no package test runner: $relative"
+        fi
+        ;;
+    esac
+  done <"$candidates"
+}
+
+discover_docs() {
+  root=$1
+  owner=scripts/check/check-sdoctest-bootstrap.shs
+  [ -f "$root/$owner" ] || return 0
+  # The owner is executable policy, not a marker file.  Bind both explicit
+  # fixture lanes and the non-vacuous whole-tree gate before claiming rows.
+  grep -Fq 'run_explicit_fixture --sdoctest' "$root/$owner" \
+    || die "doctest owner lacks markdown fixture predicate"
+  grep -Fq 'run_explicit_fixture --spl-doctest' "$root/$owner" \
+    || die "doctest owner lacks source-comment fixture predicate"
+  grep -Fq '"$SIMPLE" test --whole --mode=interpreter' "$root/$owner" \
+    || die "doctest owner lacks whole-tree predicate"
+  grep -Fq "lane_is_green \"\$_out\" Sdoctest" "$root/$owner" \
+    || die "doctest owner lacks markdown non-vacuity predicate"
+  grep -Fq "lane_is_green \"\$_out\" 'SPL Doctest'" "$root/$owner" \
+    || die "doctest owner lacks source-comment non-vacuity predicate"
+  emit docs markdown-doctest doctest-bootstrap execute "$owner" - >>"$raw"
+  emit docs spl-comment-doctest doctest-bootstrap execute "$owner" - >>"$raw"
+}
+
+discover_nested_modules() {
+  root=$1
+  helper=$root/scripts/bootstrap/phase3-nested-test-inventory.shs
+  policy=$root/scripts/bootstrap/phase3-nested-test-policy.tsv
+  [ -f "$helper" ] || die "missing nested-module inventory helper"
+  [ -f "$policy" ] || die "missing nested-module test policy"
+  nested_inventory=$scratch/nested.tsv
+  nested_errors=$scratch/nested.err
+  if ! sh "$helper" discover "$root" "$policy" ${nested_receipt:+"$nested_receipt"} \
+      >"$nested_inventory" 2>"$nested_errors"; then
+    cat "$nested_errors" >&2
+    die "nested-module discovery failed"
+  fi
+  IFS= read -r nested_header <"$nested_inventory" ||
+    die "nested-module discovery produced no header"
+  [ "$nested_header" = "$header" ] ||
+    die "nested-module discovery produced a noncanonical header"
+  sed '1d' "$nested_inventory" >>"$raw" ||
+    die "cannot append nested-module inventory"
+}
+
+validate_stream() {
+  inventory=$1
+  [ -f "$inventory" ] || die "inventory does not exist: $inventory"
+  awk -F '\t' '
+    NR == 1 {
+      expected = "surface\tcategory\trunner\tdisposition\tpath\treason"
+      if ($0 != expected) { print "invalid inventory header" > "/dev/stderr"; exit 1 }
+      next
+    }
+    {
+      if (NF != 6) { print "inventory row must have six columns at line " NR > "/dev/stderr"; exit 1 }
+      if ($1 == "" || $2 == "" || $3 == "" || $4 == "" || $5 == "" || $6 == "") {
+        print "empty inventory column at line " NR > "/dev/stderr"; exit 1
+      }
+      if ($1 !~ /^(library|tool|docs|nested)$/) { print "unknown surface at line " NR > "/dev/stderr"; exit 1 }
+      if ($3 !~ /^(simple-spec|simple-doctest|markdown-doctest|npm-test|nested|doctest-bootstrap)$/) {
+        print "unknown runner at line " NR > "/dev/stderr"; exit 1
+      }
+      if ($4 !~ /^(execute|skip)$/) { print "unknown disposition at line " NR > "/dev/stderr"; exit 1 }
+      if (($4 == "execute" && $6 != "-") || ($4 == "skip" && $6 == "-")) {
+        print "invalid disposition reason at line " NR > "/dev/stderr"; exit 1
+      }
+      if ($5 ~ /^\// || $5 ~ /(^|\/)\.\.(\/|$)/ || $5 ~ /\\/) {
+        print "path is not canonical repo-relative at line " NR > "/dev/stderr"; exit 1
+      }
+      row = $0
+      if (seen_row[row]++) { print "duplicate inventory row at line " NR > "/dev/stderr"; exit 1 }
+      logical = $1 SUBSEP $2 SUBSEP $5
+      if (seen_logical[logical]++) { print "duplicate logical category/path at line " NR > "/dev/stderr"; exit 1 }
+      owner = $3 SUBSEP $5
+      if (owner_disposition[owner] != "" && owner_disposition[owner] != $4) {
+        print "physical owner has mixed dispositions at line " NR > "/dev/stderr"; exit 1
+      }
+      owner_disposition[owner] = $4
+      surfaces[$1] = 1
+      categories[$1 SUBSEP $2] = 1
+      rows++
+    }
+    END {
+      if (rows == 0) { print "inventory has zero rows" > "/dev/stderr"; exit 1 }
+      for (surface in surfaces) {
+        found = 0
+        for (key in categories) {
+          split(key, parts, SUBSEP)
+          if (parts[1] == surface) found++
+        }
+        if (found == 0) { print "surface has zero categories: " surface > "/dev/stderr"; exit 1 }
+      }
+    }
+  ' "$inventory" || die "inventory validation failed"
+}
+
+summarize_inventory() {
+  inventory=$1
+  validate_stream "$inventory"
+  printf 'surface\tcategory_count\texecute_rows\tskip_rows\towner_count\n'
+  awk -F '\t' 'NR > 1 {
+      surface[$1] = 1
+      category[$1 SUBSEP $2] = 1
+      owner[$1 SUBSEP $3 SUBSEP $5] = 1
+      if ($4 == "execute") execute[$1]++; else skip[$1]++
+    }
+    END {
+      for (s in surface) {
+        c = 0; o = 0
+        for (k in category) { split(k, a, SUBSEP); if (a[1] == s) c++ }
+        for (k in owner) { split(k, a, SUBSEP); if (a[1] == s) o++ }
+        printf "%s\t%d\t%d\t%d\t%d\n", s, c, execute[s]+0, skip[s]+0, o
+      }
+    }' "$inventory" | LC_ALL=C sort
+}
+
+check_results() {
+  inventory=$1
+  results=$2
+  validate_stream "$inventory"
+  [ -f "$results" ] || die "results do not exist: $results"
+  checked="$scratch/results-summary.tsv"
+  awk -F '\t' '
+    FNR == NR {
+      if (FNR == 1) next
+      key = $3 SUBSEP $5
+      disposition[key] = $4
+      owner_surface[key SUBSEP $1] = 1
+      surface[$1] = 1
+      category[$1 SUBSEP $2] = 1
+      if ($4 == "execute") logical_execute[$1]++; else policy_skip[$1]++
+      next
+    }
+    FNR == 1 {
+      if ($0 != "runner\tpath\tresult\texecuted\tskipped") {
+        print "invalid results header" > "/dev/stderr"; exit 1
+      }
+      next
+    }
+    {
+      if (NF != 5) { print "result row must have five columns at line " FNR > "/dev/stderr"; exit 1 }
+      key = $1 SUBSEP $2
+      if (seen_result[key]++) { print "duplicate physical result owner" > "/dev/stderr"; exit 1 }
+      if (disposition[key] != "execute") { print "result has no executable inventory owner" > "/dev/stderr"; exit 1 }
+      if ($4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || ($4 + $5) == 0 ||
+          !(($3 == "PASS" && $4 > 0) || ($3 == "SKIP" && $4 == 0 && $5 > 0))) {
+        print "non-terminal or empty result for " $1 " " $2 > "/dev/stderr"; exit 1
+      }
+      result_executed[key] = $4 + 0
+      result_skipped[key] = $5 + 0
+    }
+    END {
+      if (exit_status) exit exit_status
+      for (key in disposition) {
+        if (disposition[key] == "execute" && !seen_result[key]) {
+          split(key, p, SUBSEP)
+          print "missing physical result for " p[1] " " p[2] > "/dev/stderr"
+          bad = 1
+        }
+      }
+      if (bad) exit 1
+      print "surface\tcategory_count\texecute_rows\tpolicy_skip_rows\texecuted\tskipped"
+      for (s in surface) {
+        c = 0; e = 0; k = 0
+        for (ck in category) { split(ck, p, SUBSEP); if (p[1] == s) c++ }
+        for (ok in result_executed) {
+          if (owner_surface[ok SUBSEP s]) { e += result_executed[ok]; k += result_skipped[ok] }
+        }
+        printf "%s\t%d\t%d\t%d\t%d\t%d\n", s, c, logical_execute[s]+0, policy_skip[s]+0, e, k
+      }
+    }
+  ' "$inventory" "$results" >"$checked" || die "result accounting failed"
+  IFS= read -r first <"$checked" || die "result accounting produced no summary"
+  printf '%s\n' "$first"
+  sed '1d' "$checked" | LC_ALL=C sort || die "cannot sort result summary"
+}
+
+command=${1:-}
+case "$command" in
+  discover)
+    [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage
+    source_root=$(cd "$2" && pwd -P) || die "cannot resolve source root: $2"
+    nested_receipt=${3:-}
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/phase3-test-inventory.XXXXXX") \
+      || die "cannot create temporary directory"
+    trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+    raw="$scratch/raw.tsv"
+    : >"$raw"
+    discover_test_root "$source_root" 01_unit unit
+    discover_test_root "$source_root" 02_integration integration
+    discover_test_root "$source_root" 03_system system
+    discover_test_root "$source_root" feature feature
+    discover_library_embedded "$source_root"
+    discover_tools "$source_root"
+    discover_docs "$source_root"
+    discover_nested_modules "$source_root"
+    grep -Eq '^(library|tool|nested)[[:space:]]' "$raw" \
+      || die "discovery produced no dynamic test rows"
+    sorted="$scratch/sorted.tsv"
+    LC_ALL=C sort -t "$tab" -k5,5 -k1,1 -k2,2 -k3,3 -k4,4 -u "$raw" >"$sorted" \
+      || die "cannot sort canonical inventory"
+    inventory="$scratch/inventory.tsv"
+    printf '%s\n' "$header" >"$inventory"
+    cat "$sorted" >>"$inventory"
+    validate_stream "$inventory"
+    cat "$inventory"
+    ;;
+  validate)
+    [ "$#" -eq 2 ] || usage
+    validate_stream "$2"
+    ;;
+  summarize)
+    [ "$#" -eq 2 ] || usage
+    summarize_inventory "$2"
+    ;;
+  check-results)
+    [ "$#" -eq 3 ] || usage
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/phase3-test-results.XXXXXX") \
+      || die "cannot create temporary directory"
+    trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+    check_results "$2" "$3"
+    ;;
+  *) usage ;;
+esac

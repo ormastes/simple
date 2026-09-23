@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+runner="$root/scripts/bootstrap/stage4-tooling-matrix.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage4-scheduler-run.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT INT TERM HUP
+
+sed -n '/^valid_worker_run_identity() {$/,/^}$/p; /^scheduler_allocate_run_dir() {$/,/^}$/p; /^scheduler_cleanup_run_dir() {$/,/^}$/p' \
+  "$runner" >"$fixture/owner.sh"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+die() { fail "$*"; }
+
+# shellcheck disable=SC1090
+. "$fixture/owner.sh"
+
+valid_worker_run_identity run.123.0 || fail 'worker parser rejected a fresh unique run identity'
+for invalid_run in run.0.0 run.123 run.123. run..0 run.123.0.extra run.123.x '../run.123.0' 'run.123/0'; do
+  ! valid_worker_run_identity "$invalid_run" || fail "worker parser accepted invalid identity: $invalid_run"
+done
+
+# Exercise the actual worker option boundary. A valid identity reaches the
+# pre-existing-evidence guard; an extra component is rejected at the parser.
+fake_root="$fixture/source"
+mkdir -p "$fake_root/scripts/bootstrap" \
+  "$fake_root/build/mini_builds/stage4_tooling_worker-parser/scheduler/run.123.0/drafts"
+cp "$runner" "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+printf '#!/bin/sh\nexit 0\n' >"$fake_root/scripts/bootstrap/stage4-tools-only.sh"
+printf '#!/bin/sh\nexit 0\n' >"$fixture/fake-linker"
+chmod +x "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs" \
+  "$fake_root/scripts/bootstrap/stage4-tools-only.sh" "$fixture/fake-linker"
+printf 'fixture\n' >"$fixture/compiler-manifest.env"
+worker_status=0
+"$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs" --matrix-id=worker-parser \
+  --compiler-manifest="$fixture/compiler-manifest.env" --source-root="$fake_root" \
+  --linker="$fixture/fake-linker" --worker-task=probe --worker-run=run.123.0 \
+  >"$fixture/valid-worker.log" 2>&1 || worker_status=$?
+[ "$worker_status" -eq 2 ] || fail 'valid worker boundary did not reach the later evidence guard'
+grep -Fq 'matrix evidence already exists' "$fixture/valid-worker.log" || fail 'valid worker identity did not cross the actual parser'
+! grep -Fq 'invalid parent run identity' "$fixture/valid-worker.log" || fail 'actual parser rejected a valid worker identity'
+
+worker_status=0
+"$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs" --matrix-id=worker-parser \
+  --compiler-manifest="$fixture/compiler-manifest.env" --source-root="$fake_root" \
+  --linker="$fixture/fake-linker" --worker-task=probe --worker-run=run.123.0.extra \
+  >"$fixture/invalid-worker.log" 2>&1 || worker_status=$?
+[ "$worker_status" -eq 2 ] || fail 'invalid worker boundary status changed'
+grep -Fq 'invalid parent run identity' "$fixture/invalid-worker.log" || fail 'actual parser accepted an extra identity component'
+
+scheduler_root="$fixture/scheduler"
+mkdir -p "$scheduler_root/run.$$/committed" "$scheduler_root/run.$$/drafts"
+printf 'stale\n' >"$scheduler_root/run.$$/committed/upstream"
+printf 'pid=1\npgid=1\n' >"$scheduler_root/run.$$/drafts/upstream.session"
+matrix_hash=matrix-current
+config_hash=config-current
+
+scheduler_allocate_run_dir "$scheduler_root"
+case "$scheduler_run_dir" in "$scheduler_root/run.$$".*) ;; *) fail 'allocator did not use a PID-scoped unique identity' ;; esac
+[ -d "$scheduler_run_dir/active" ] || fail 'fresh active directory missing'
+[ -d "$scheduler_run_dir/worker-meta" ] || fail 'fresh worker metadata directory missing'
+[ -d "$scheduler_run_dir/drafts" ] || fail 'fresh draft directory missing'
+[ -d "$scheduler_run_dir/committed" ] || fail 'fresh commit directory missing'
+[ ! -e "$scheduler_run_dir/committed/upstream" ] || fail 'stale commit marker survived allocation'
+[ ! -e "$scheduler_run_dir/drafts/upstream.session" ] || fail 'stale session marker survived allocation'
+[ -f "$scheduler_root/run.$$/committed/upstream" ] || fail 'allocator deleted a preexisting stale or concurrent owner'
+[ -f "$scheduler_root/run.$$/drafts/upstream.session" ] || fail 'allocator mutated a preexisting stale or concurrent owner'
+grep -Fxq 'schema=Stage4SchedulerRunOwnerV1' "$scheduler_run_dir/owner.env" || fail 'owner schema missing'
+grep -Fxq "pid=$$" "$scheduler_run_dir/owner.env" || fail 'owner PID missing'
+grep -Fxq 'matrix_hash=matrix-current' "$scheduler_run_dir/owner.env" || fail 'matrix binding missing'
+grep -Fxq 'config_hash=config-current' "$scheduler_run_dir/owner.env" || fail 'config binding missing'
+
+scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_run_dir"
+[ ! -e "$scheduler_run_dir" ] || fail 'owned run directory survived cleanup'
+
+foreign="$scheduler_root/run.$$.77"
+mkdir "$foreign"
+printf '%s\n' 'schema=Stage4SchedulerRunOwnerV1' 'pid=1' \
+  'matrix_hash=matrix-current' 'config_hash=config-current' >"$foreign/owner.env"
+if scheduler_cleanup_run_dir "$scheduler_root" "$foreign" 2>/dev/null; then
+  fail 'cleanup accepted a foreign live owner'
+fi
+[ -d "$foreign" ] || fail 'cleanup removed a foreign live owner'
+
+mkdir "$scheduler_root/not-a-run"
+if scheduler_cleanup_run_dir "$scheduler_root" "$scheduler_root/not-a-run" 2>/dev/null; then
+  fail 'cleanup accepted a path outside the run namespace'
+fi
+[ -d "$scheduler_root/not-a-run" ] || fail 'rejected cleanup removed an unrelated directory'
+
+echo 'PASS Stage4 scheduler fresh allocation and deterministic cleanup contract'

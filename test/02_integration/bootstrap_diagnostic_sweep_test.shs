@@ -4,7 +4,11 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
-mkdir -p "$work/input" "$work/timeout-input" "$work/parent-input" "$work/explicit-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
+runner_root="$work/runner repo"
+sweep="$runner_root/scripts/check/bootstrap-diagnostic-sweep.shs"
+mkdir -p "$work/input" "$work/timeout-input" "$work/signal-input" "$work/parent-input" "$work/explicit-input" "$work/cache" "$runner_root/scripts/check" "$runner_root/bin" "$work/missing-child" "$work/rogue cwd/bin"
+cp "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" "$sweep"
+chmod +x "$sweep"
 
 printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
 printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
@@ -37,41 +41,62 @@ printf '%s\n' \
   '    while :; do /bin/sleep 10; done ;;' \
   '  *02_failure.spl) echo "error[E300]: timeout-adjacent failure" >&2; exit 1 ;;' \
   '  *04_success.spl) exit 0 ;;' \
+  '  *04_exit_139.spl) exit 139 ;;' \
+  '  *05_segv.spl) kill -SEGV $$ ;;' \
+  '  *06_after_crash.spl) exit 0 ;;' \
   'esac' \
   'exit 2' > "$fake"
 chmod +x "$fake"
 
-# Exact preflight: no worker may start when the seed's delegated pure-Simple
-# child is absent from the canonical repo-relative path.
+# Exact preflight: no worker may start when an explicitly selected delegated
+# pure-Simple child is absent.
 missing_output="$work/missing-child.txt"
 set +e
 (cd "$work/missing-child" && FAKE_INVOCATIONS="$work/missing-invocations" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
-  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  sh "$sweep" \
+  --compiler="$fake" --child-compiler="$work/missing-child/bin/simple" \
+  --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
   >"$missing_output" 2>&1
 missing_status=$?
 set -e
 [ "$missing_status" -eq 2 ] || { echo "missing child did not fail preflight" >&2; exit 1; }
-grep -Fq 'diagnostic child compiler is not executable: bin/simple' "$missing_output"
+grep -Fq "diagnostic child compiler is not executable: $work/missing-child/bin/simple" "$missing_output"
 [ ! -e "$work/missing-invocations" ] || { echo "worker ran before child preflight" >&2; exit 1; }
 
-# Adjacent admitted-child path: an executable at bin/simple preserves normal
-# aggregation. The fake seed below does not delegate, so a minimal executable
-# fixture is sufficient for this harness contract.
-printf '%s\n' '#!/bin/sh' 'exit 0' > "$work/repo/bin/simple"
-chmod +x "$work/repo/bin/simple"
+# A cwd-local executable must not replace the child owned by the runner's
+# repository. The fake seed records both injected child identity variables.
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$runner_root/bin/simple"
+chmod +x "$runner_root/bin/simple"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$work/rogue cwd/bin/simple"
+chmod +x "$work/rogue cwd/bin/simple"
+default_child=$(CDPATH= cd -- "$runner_root/bin" && pwd -P)/simple
+set +e
+(cd "$work/rogue cwd" && \
+  FAKE_INVOCATIONS="$work/default-invocations" \
+  FAKE_CHILD_IDENTITIES="$work/default-identities" \
+  sh "$sweep" \
+  --compiler="$fake" --root="$work/explicit-input" --cache-dir="$work/default-cache" --jobs=1) \
+  >"$work/default-output.txt" 2>&1
+default_status=$?
+set -e
+[ "$default_status" -eq 0 ] || { echo "runner-owned default child failed" >&2; exit 1; }
+[ "$(sort -u "$work/default-identities")" = "$default_child|$default_child" ] || {
+  echo "cwd-local child replaced runner-owned child identity" >&2
+  exit 1
+}
 
 # An isolated worktree may intentionally use an admitted child from another
 # artifact directory. The override is absolute and is bound into both worker
 # identity variables instead of relying on cwd-relative bin/simple lookup.
-explicit_child="$work/explicit-simple"
+mkdir -p "$work/child with spaces"
+explicit_child="$work/child with spaces/explicit simple"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$explicit_child"
 chmod +x "$explicit_child"
 set +e
 (cd "$work/missing-child" && \
   FAKE_INVOCATIONS="$work/explicit-invocations" \
   FAKE_CHILD_IDENTITIES="$work/explicit-identities" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  sh "$sweep" \
   --compiler="$fake" --child-compiler="$explicit_child" \
   --root="$work/explicit-input" --cache-dir="$work/explicit-cache" --jobs=1) \
   >"$work/explicit-output.txt" 2>&1
@@ -85,8 +110,8 @@ set -e
 
 output="$work/output.txt"
 set +e
-(cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+(cd "$work/rogue cwd" && FAKE_INVOCATIONS="$work/invocations" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" \
   --evidence-dir="$work/evidence" --jobs=2) \
   >"$output" 2>&1
@@ -106,8 +131,8 @@ grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2 timed_out=0'
 }
 touch "$work/cache/preserved-marker"
 set +e
-(cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations-second" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+(cd "$work/rogue cwd" && FAKE_INVOCATIONS="$work/invocations-second" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
   >/dev/null 2>&1
 second_status=$?
@@ -120,10 +145,10 @@ set -e
 # the deterministic source index rather than completion order.
 timeout_output="$work/timeout-output.txt"
 set +e
-(cd "$work/repo" && \
+(cd "$work/rogue cwd" && \
   FAKE_INVOCATIONS="$work/timeout-invocations" \
   FAKE_DESCENDANTS="$work/timeout-descendants" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/timeout-input" \
   --cache-dir="$work/timeout-cache" --jobs=2 --timeout=1 --timeout-grace=1) \
   >"$timeout_output" 2>&1
@@ -159,8 +184,8 @@ done < "$work/timeout-descendants"
 # raw signal exit is retained and lexically later inputs still run.
 signal_output="$work/signal-output.txt"
 set +e
-(cd "$work/repo" && FAKE_INVOCATIONS="$work/signal-invocations" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+(cd "$work/rogue cwd" && FAKE_INVOCATIONS="$work/signal-invocations" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/signal-input" \
   --cache-dir="$work/signal-cache" --evidence-dir="$work/signal-evidence" \
   --jobs=1) >"$signal_output" 2>&1
@@ -182,10 +207,10 @@ grep -Fxq 'remaining=0' "$work/signal-evidence/summary.env"
 
 # Parent termination must tear down every owned compiler process group rather
 # than leaving delegated pure-Simple descendants alive without a sweep owner.
-(cd "$work/repo" && exec env \
+(cd "$work/rogue cwd" && exec env \
   FAKE_INVOCATIONS="$work/parent-invocations" \
   FAKE_DESCENDANTS="$work/parent-descendants" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/parent-input" \
   --cache-dir="$work/parent-cache" --jobs=1 --timeout=30 --timeout-grace=1) \
   >"$work/parent-output" 2>&1 &
@@ -212,8 +237,8 @@ done < "$work/parent-descendants"
 
 # Adjacent option validation must fail before dispatch.
 set +e
-(cd "$work/repo" && FAKE_INVOCATIONS="$work/invalid-timeout-invocations" \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+(cd "$work/rogue cwd" && FAKE_INVOCATIONS="$work/invalid-timeout-invocations" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/input" --timeout=0) >/dev/null 2>&1
 invalid_timeout_status=$?
 set -e
@@ -223,9 +248,9 @@ set -e
 # An executable child that cannot complete the delegated known-good check is
 # infrastructure failure, not one failure per selected source file.
 set +e
-(cd "$work/repo" && FAKE_INVOCATIONS="$work/preflight-fail-invocations" \
+(cd "$work/rogue cwd" && FAKE_INVOCATIONS="$work/preflight-fail-invocations" \
   FAKE_FAIL_PREFLIGHT=1 \
-  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  sh "$sweep" \
   --compiler="$fake" --root="$work/input" --cache-dir="$work/preflight-fail-cache" --jobs=2) \
   >"$work/preflight-fail-output.txt" 2>&1
 preflight_fail_status=$?

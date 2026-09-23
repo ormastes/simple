@@ -2361,6 +2361,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collection_set_abi_is_registered_for_native_codegen() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_collection_set")
+            .expect("erased Dict.set must be registered for native codegen");
+        assert_eq!(spec.params, [I64, I64, I64]);
+        assert_eq!(spec.returns, [I64]);
+    }
+
+    #[test]
     fn all_funcs_have_unique_names() {
         let mut names: Vec<&str> = RUNTIME_FUNCS.iter().map(|f| f.name).collect();
         names.sort();

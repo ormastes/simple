@@ -1,0 +1,226 @@
+# Narrow WM-to-render-evidence seam.
+#
+# The producer accepts only an already-admitted presentation.  It binds the
+# real firmware/build digest, boot identity, monotonically admitted frame,
+# scanout identity, and committed framebuffer readback into one receipt.  It
+# owns no global state and retains no pixel buffers between frames.
+
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    BackendRenderReceiptHeader,
+    BackendRenderReceiptEvent,
+    BackendRenderReceiptTrailer
+}
+use std.common.crypto.sha256.{
+    sha256_stream_v1_new,
+    sha256_stream_v1_update,
+    sha256_stream_v1_finish_hex
+}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.compositor.baremetal_wm_present_owner.{
+    BaremetalWmPresentReceiptV1,
+    BaremetalWmScanoutIdentityV1,
+    baremetal_wm_scanout_identity_valid_v1,
+    baremetal_wm_scanout_identity_matches_v1
+}
+use os.compositor.engine2d_render_evidence.{
+    SimpleOsBuildIdentityV1,
+    SimpleOsRenderReceipt,
+    simpleos_render_receipt,
+    simpleos_render_receipt_from_digest
+}
+
+pub struct BackendRenderReceiptEmissionV1:
+    accepted: bool
+    reason: text
+    boot_id: u64
+    frame_id: u64
+    receipt: SimpleOsRenderReceipt?
+
+pub fn simpleos_build_identity_from_admission_v1(admission: text) -> SimpleOsBuildIdentityV1?:
+    """Read the exact admitted kernel digest, never a compiled-in placeholder."""
+    if admission.len() == 0 or admission.len() > 4096:
+        return nil
+    val marker = "kernel_sha256="
+    var digest = ""
+    var digest_count = 0
+    var schema_count = 0
+    for line in admission.split("\n"):
+        if line == "schema=simpleos-wm-kernel-admission-v3":
+            schema_count = schema_count + 1
+        if line.starts_with(marker):
+            digest_count = digest_count + 1
+            digest = line[marker.len():line.len()]
+    if schema_count != 1 or digest_count != 1:
+        return nil
+    _render_sha256_words_v1(digest)
+
+pub fn simpleos_boot_identity_from_admission_v1(admission: text) -> u64?:
+    """Use the host's per-launch nonce, never elapsed guest time."""
+    if simpleos_build_identity_from_admission_v1(admission) == nil:
+        return nil
+    val marker = "capture_boot_nonce="
+    var nonce = ""
+    var count = 0
+    for line in admission.split("\n"):
+        if line.starts_with(marker):
+            count = count + 1
+            nonce = line[marker.len():line.len()]
+    if count != 1 or nonce.len() != 16:
+        return nil
+    val digits = "0123456789abcdef"
+    var value = 0u64
+    for character in nonce:
+        val digit = digits.index_of(character.to_text())
+        if digit < 0:
+            return nil
+        value = (value << 4) | digit.to_u64()
+    if value == 0u64:
+        return nil
+    Some(value)
+
+fn _render_emission_rejected(
+    reason: text,
+    boot_id: u64,
+    frame_id: u64
+) -> BackendRenderReceiptEmissionV1:
+    BackendRenderReceiptEmissionV1(
+        accepted: false,
+        reason: reason,
+        boot_id: boot_id,
+        frame_id: frame_id,
+        receipt: nil)
+
+pub fn produce_backend_render_receipt_after_present_v1(
+    arch_code: u32,
+    backend_code: u32,
+    firmware: SimpleOsBuildIdentityV1,
+    boot_id: u64,
+    scanout: BaremetalWmScanoutIdentityV1,
+    present: BaremetalWmPresentReceiptV1,
+    pixels: [u32]
+) -> BackendRenderReceiptEmissionV1:
+    if not present.accepted:
+        return _render_emission_rejected("presentation-not-admitted", boot_id, present.frame_id)
+    if not baremetal_wm_scanout_identity_matches_v1(scanout, present.scanout):
+        return _render_emission_rejected("presentation-scanout-mismatch", boot_id, present.frame_id)
+    if boot_id == 0u64:
+        return _render_emission_rejected("boot-id-invalid", boot_id, present.frame_id)
+    if present.frame_id == 0u64:
+        return _render_emission_rejected("frame-id-invalid", boot_id, present.frame_id)
+    if scanout.architecture != arch_code:
+        return _render_emission_rejected("architecture-mismatch", boot_id, present.frame_id)
+    if scanout.scanout_id == 0u64:
+        return _render_emission_rejected("scanout-id-invalid", boot_id, present.frame_id)
+    if scanout.stride != scanout.width * 4u32 or scanout.bpp != 32u32:
+        return _render_emission_rejected("scanout-layout-invalid", boot_id, present.frame_id)
+    val receipt = simpleos_render_receipt(
+        arch_code,
+        backend_code,
+        firmware,
+        boot_id,
+        present.frame_id,
+        scanout.scanout_id,
+        scanout.width,
+        scanout.height,
+        pixels)
+    if receipt == nil:
+        return _render_emission_rejected("receipt-invalid", boot_id, present.frame_id)
+    BackendRenderReceiptEmissionV1(
+        accepted: true,
+        reason: "ready-for-serial-and-capture",
+        boot_id: boot_id,
+        frame_id: present.frame_id,
+        receipt: receipt)
+
+pub fn produce_backend_render_receipt_from_scanout_v1(
+    arch_code: u32,
+    backend_code: u32,
+    firmware: SimpleOsBuildIdentityV1,
+    boot_id: u64,
+    scanout: BaremetalWmScanoutIdentityV1,
+    present: BaremetalWmPresentReceiptV1,
+    presented_front_addr: u64,
+    framebuffer: FramebufferDriver
+) -> BackendRenderReceiptEmissionV1:
+    """Hash the authoritative committed scanout with bounded scratch storage."""
+    if not present.accepted:
+        return _render_emission_rejected("presentation-not-admitted", boot_id, present.frame_id)
+    if not baremetal_wm_scanout_identity_matches_v1(scanout, present.scanout):
+        return _render_emission_rejected("presentation-scanout-mismatch", boot_id, present.frame_id)
+    if boot_id == 0u64 or present.frame_id == 0u64:
+        return _render_emission_rejected("boot-or-frame-id-invalid", boot_id, present.frame_id)
+    if scanout.architecture != arch_code or not baremetal_wm_scanout_identity_valid_v1(scanout):
+        return _render_emission_rejected("scanout-identity-invalid", boot_id, present.frame_id)
+    if (presented_front_addr != framebuffer.front_addr or
+        scanout.width != framebuffer.width or scanout.height != framebuffer.height or
+        scanout.stride != framebuffer.pitch or scanout.bpp != framebuffer.bpp or
+        scanout.stride != scanout.width * 4u32):
+        return _render_emission_rejected("scanout-framebuffer-mismatch", boot_id, present.frame_id)
+
+    val stream = sha256_stream_v1_new()
+    var scratch: [u8] = [0u8; 256]
+    var scratch_len = 0
+    var nonblank = 0u64
+    var y = 0u32
+    while y < scanout.height:
+        var x = 0u32
+        while x < scanout.width:
+            val pixel = framebuffer.read_pixel(x, y)
+            if (pixel & 0x00ffffffu32) != 0u32:
+                nonblank = nonblank + 1u64
+            scratch[scratch_len] = ((pixel >> 24) & 0xffu32).to_u8()
+            scratch[scratch_len + 1] = ((pixel >> 16) & 0xffu32).to_u8()
+            scratch[scratch_len + 2] = ((pixel >> 8) & 0xffu32).to_u8()
+            scratch[scratch_len + 3] = (pixel & 0xffu32).to_u8()
+            scratch_len = scratch_len + 4
+            if scratch_len == 256:
+                if not sha256_stream_v1_update(stream, scratch):
+                    return _render_emission_rejected("scanout-hash-update-failed", boot_id, present.frame_id)
+                scratch_len = 0
+            x = x + 1u32
+        y = y + 1u32
+    if scratch_len > 0:
+        if not sha256_stream_v1_update(stream, scratch[0:scratch_len]):
+            return _render_emission_rejected("scanout-hash-tail-failed", boot_id, present.frame_id)
+    val digest_hex = sha256_stream_v1_finish_hex(stream)
+    if digest_hex == nil:
+        return _render_emission_rejected("scanout-hash-finish-failed", boot_id, present.frame_id)
+    val digest = _render_sha256_words_v1(digest_hex!)
+    if digest == nil:
+        return _render_emission_rejected("scanout-hash-invalid", boot_id, present.frame_id)
+    val receipt = simpleos_render_receipt_from_digest(
+        arch_code, backend_code, firmware, boot_id, present.frame_id,
+        scanout.scanout_id, scanout.width, scanout.height, scanout.stride,
+        digest!, nonblank)
+    if receipt == nil:
+        return _render_emission_rejected("receipt-invalid", boot_id, present.frame_id)
+    BackendRenderReceiptEmissionV1(
+        accepted: true,
+        reason: "ready-for-serial-and-capture",
+        boot_id: boot_id,
+        frame_id: present.frame_id,
+        receipt: receipt)
+
+fn _render_sha256_words_v1(value: text) -> SimpleOsBuildIdentityV1?:
+    if value.len() != 64:
+        return nil
+    val digits = "0123456789abcdef"
+    var word0 = 0u64
+    var word1 = 0u64
+    var word2 = 0u64
+    var word3 = 0u64
+    var index = 0
+    while index < 16:
+        val digit0 = digits.index_of(value[index].to_text())
+        val digit1 = digits.index_of(value[index + 16].to_text())
+        val digit2 = digits.index_of(value[index + 32].to_text())
+        val digit3 = digits.index_of(value[index + 48].to_text())
+        if digit0 < 0 or digit1 < 0 or digit2 < 0 or digit3 < 0:
+            return nil
+        word0 = (word0 << 4) | digit0.to_u64()
+        word1 = (word1 << 4) | digit1.to_u64()
+        word2 = (word2 << 4) | digit2.to_u64()
+        word3 = (word3 << 4) | digit3.to_u64()
+        index = index + 1
+    Some(SimpleOsBuildIdentityV1(
+        word0: word0, word1: word1, word2: word2, word3: word3))

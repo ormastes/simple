@@ -13,12 +13,15 @@ use os.smf.provider_loader.{
 use os.posix.dynlib.{DynLibKind}
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_QUERY_V1_SIZE,
-    SimpleProviderQueryV1, SimpleProviderQueryResultV1
+    SimpleProviderQueryV1, SimpleProviderQueryResultV1,
+    simple_provider_digest_from_hex_v1, simple_provider_digest_to_hex_v1
 }
 use std.nogc_sync_mut.kernel_plugin.{KpfGenerationHandle, KpfGenerationTable, KpfSyncStatus}
 
 fn provider_id() -> KpfId128: KpfId128(hi: 11, lo: 12)
 fn composition_digest() -> KpfDigest256: KpfDigest256(w0: 21, w1: 22, w2: 23, w3: 24)
+val TEST_ABI_DIGEST = "112233445566778899aabbccddeeff00010203040506070890abcdefdeadbeef"
+val WRONG_LAST_WORD_DIGEST = "112233445566778899aabbccddeeff00010203040506070890abcdefdeadbeee"
 
 fn loader_request() -> ProviderAdmissionRequestV1:
     ProviderAdmissionRequestV1(
@@ -47,13 +50,13 @@ fn result() -> SimpleProviderQueryResultV1:
         status: SIMPLE_PROVIDER_OK, provided_major: 1, provided_minor: 1,
         descriptor_size: 60, interface_handle: 700, provider_context: 800,
         provider_identity_digest: 900, implementation_digest: 901,
-        abi_digest: 902)
+        abi_digest: simple_provider_digest_from_hex_v1(TEST_ABI_DIGEST))
 
 fn policy(generation: KpfGenerationHandle) -> KpfSmfAdmissionPolicyV1:
     KpfSmfAdmissionPolicyV1(
         provider_id: provider_id(), composition_digest: composition_digest(),
         generation: generation, interface_id: 91, interface_major: 1,
-        interface_minor: 0, expected_abi_digest: 902,
+        interface_minor: 0, expected_abi_digest: simple_provider_digest_from_hex_v1(TEST_ABI_DIGEST),
         granted_capability_bits: 7, required_capability_bits: 5)
 
 describe "KPF SMF/native provider admission":
@@ -68,6 +71,7 @@ describe "KPF SMF/native provider admission":
         assert_equal(receipt.operation_table.interface_handle, 700u64)
         assert_equal(receipt.operation_table.provider_context, 800u64)
         assert_equal(receipt.operation_table.query_symbol_address, 4096)
+        assert_equal(simple_provider_digest_to_hex_v1(receipt.abi_digest), TEST_ABI_DIGEST)
 
     it "rejects path digest capability ABI interface and generation mismatches":
         step("mutate each exact admission authority independently")
@@ -89,7 +93,7 @@ describe "KPF SMF/native provider admission":
             query(), result(), generations.view(published.current)).status,
             KpfSmfAdmissionStatus.CapabilityMismatch)
         var wrong_abi = policy(published.current)
-        wrong_abi.expected_abi_digest = 999
+        wrong_abi.expected_abi_digest = simple_provider_digest_from_hex_v1(WRONG_LAST_WORD_DIGEST)
         assert_equal(kpf_smf_admit_evidence_v1(wrong_abi, loader_request(), evidence(),
             query(), result(), generations.view(published.current)).status,
             KpfSmfAdmissionStatus.AbiDigestMismatch)

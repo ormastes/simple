@@ -1310,3 +1310,44 @@ it requires driving a real Stage 2 + canonical Stage 3 to the HIR phase, which
 this record documents (section 11) as taking ~40 min (63-source closure) to ~12 h
 (775-source closure) on comparable hardware, and this session had neither a
 Stage 2 artifact nor the time budget for that.
+
+## 2026-09-21 — allocation registry churn contributor repaired; Stage 3 remains OPEN
+
+The current C owners had a reproducible bookkeeping-retention defect independent
+of the unresolved HIR promotion-closure hypothesis. Both struct-allocation
+registries doubled their backing table at the 70% occupied threshold even when
+retired addresses (tombstones), rather than live objects, caused the pressure.
+Both raw transient-allocation tables used the same unconditional growth policy.
+Transient scope completion does not shrink the retained table capacity.
+
+The repair applies the existing immortal-registry policy to these four tables:
+rehash at the current capacity when tombstones dominate and the next live entry
+still leaves live load below 50%; grow normally when the live set needs room.
+Rehashing copies allocation sizes and ownership flags and drops only tombstones.
+No HIR graph, promotion edge, or allocation reclamation policy changes.
+
+`src/runtime/test/rt_allocation_registry_churn_selfcheck.c` executes the actual
+owner functions, using distinct valid addresses for 512 module-shaped batches
+with 48 temporary entries and one retained cross-module root. It also checks
+retired lookup refusal, retained size/ownership, and a genuine 512-entry growth
+control. The table-byte oracle measures these bookkeeping buffers only.
+
+Linux x86_64, Clang C, WSL Ubuntu 22.04:
+
+| Provider | Before, bytes per table | After, bytes per table | Verdict |
+| --- | ---: | ---: | --- |
+| `runtime_native.c` | 262144 | 4096 | red baseline, repaired PASS |
+| `runtime_memory.c` | 262144 | 4096 | red baseline, repaired PASS |
+
+Run: `sh scripts/check/check-allocation-registry-churn.shs`.
+Logs: `build/native_probe/allocation-registry-churn/`.
+Windows x86_64 MSVC, Clang 18.1.8 `clang-cl /TC`: the memory-provider fixture
+passed with 4096 bytes per table. The native-provider translation compiled, but
+its isolated executable could not link unrelated runtime dependencies, so this
+lane does not claim a Windows native-provider execution PASS.
+
+This is a measured 64-fold reduction of retained registry storage for the
+bounded workload, **not attribution or closure of the historical Stage 3 P0**.
+The 25 GB termination, real full-entry-closure RSS budget, provenance-bound
+candidate, hello, and module-qualified field-layout checks remain unverified.
+No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.
