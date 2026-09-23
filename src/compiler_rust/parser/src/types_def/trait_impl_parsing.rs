@@ -295,10 +295,16 @@ impl<'a> Parser<'a> {
                     // Add parsed decorators to the function
                     f.decorators.extend(decorators);
 
-                    // Implicit static: constructor-like names are automatically static
-                    // unless explicitly marked with 'static' (which was already handled above)
-                    // BUT: `me` methods (mutable methods) are never static, even if they have constructor names
-                    if !is_static && !f.is_me_method && is_constructor_name(&f.name) {
+                    // Constructor names imply static only for receiver-free bodies.
+                    // Export receiver metadata before imports record the method ABI;
+                    // HIR must not repair an incorrectly static declaration later.
+                    let has_self = f.params.first().map(|p| p.name == "self").unwrap_or(false);
+                    if !is_static
+                        && !f.is_me_method
+                        && !has_self
+                        && is_constructor_name(&f.name)
+                        && !crate::ast::receiver::block_uses_self(&f.body)
+                    {
                         is_static = true;
                     }
 
