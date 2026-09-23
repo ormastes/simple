@@ -64,6 +64,13 @@ those copies after `CapabilityTable` registration.
 
 ## Required closure
 
+TODO (SimpleOS QEMU owner, after Linux bootstrap and admitted ARM64 runtime):
+run `test/01_unit/os/apps/dbd/dbd_provisioning_spec.spl` and the native
+`test/fixtures/simpleos_dbd_credential_zeroization/main.spl` against this
+revision, then repeat the ARM64 service provisioning/authentication/rejection
+probe in QEMU. Retain volatile readback, signed receipt, artifact secret scan,
+request latency and peak RSS; the bug remains OPEN until target evidence passes.
+
 Provide a target-owned secret buffer with bounded read, non-copying policy
 registration or an owned move, and compiler-resistant zeroization at shutdown.
 Verify that logs, receipts, crash output, and retained images contain no
