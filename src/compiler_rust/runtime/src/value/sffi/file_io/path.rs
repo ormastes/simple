@@ -244,6 +244,103 @@ pub unsafe extern "C" fn rt_path_join(
     rt_string_new(bytes.as_ptr(), bytes.len() as u64)
 }
 
+/// Byte-level path-separator/root helpers, ported from the C lane
+/// (`src/runtime/runtime_native.c` `rt_path_parent_is_separator_for` /
+/// `_is_separator` / `_is_separator_for_test` / `_ascii_equal` /
+/// `_windows_root_len`) so this primitive has an implementation in both
+/// lanes, per the dual-implementation directive. `rt_path_parent` above uses
+/// `std::path::Path` instead and does not call these; they are kept as
+/// direct byte-for-byte translations of the C originals so the two lanes
+/// cannot silently diverge on the semantics that name records.
+#[allow(dead_code)]
+fn rt_path_parent_is_separator_for(byte: u8, windows: i32) -> i32 {
+    (byte == b'/' || (windows != 0 && byte == b'\\')) as i32
+}
+
+#[allow(dead_code)]
+fn rt_path_parent_is_separator(byte: u8) -> i32 {
+    #[cfg(windows)]
+    {
+        rt_path_parent_is_separator_for(byte, 1)
+    }
+    #[cfg(not(windows))]
+    {
+        // A backslash is an ordinary filename byte on POSIX.
+        rt_path_parent_is_separator_for(byte, 0)
+    }
+}
+
+#[allow(dead_code)]
+fn rt_path_parent_is_separator_for_test(byte: u8, windows: i32) -> i32 {
+    rt_path_parent_is_separator_for(byte, if windows != 0 { 1 } else { 0 })
+}
+
+#[allow(dead_code)]
+fn rt_path_parent_ascii_equal(byte: u8, upper: u8) -> i32 {
+    (byte == upper || byte == upper.wrapping_add(b'a' - b'A')) as i32
+}
+
+/// Number of bytes in a Windows root, including its final separator when one
+/// exists. `path` must be valid for `len` bytes.
+#[allow(dead_code)]
+unsafe fn rt_path_parent_windows_root_len(path: *const u8, len: i64) -> i64 {
+    if path.is_null() || len <= 0 {
+        return 0;
+    }
+    let p = std::slice::from_raw_parts(path, len as usize);
+    let l = len as usize;
+    // This helper computes a WINDOWS root specifically, so its separator
+    // check is pinned to windows=1 regardless of host platform — matching
+    // the C original, which only ever exists inside `#if defined(_WIN32)`
+    // (where `rt_path_parent_is_separator` is itself always the windows=1
+    // form). Using the host-cfg'd `rt_path_parent_is_separator` here would
+    // make this function answer differently depending on which platform
+    // ran `cargo check`, which is not what either lane observably does.
+    let is_sep = |b: u8| rt_path_parent_is_separator_for(b, 1) != 0;
+
+    if l >= 3 && p[1] == b':' && is_sep(p[2]) {
+        return 3;
+    }
+
+    let mut unc_start: i64 = -1;
+    if l >= 2 && is_sep(p[0]) && is_sep(p[1]) {
+        unc_start = 2;
+        if l >= 8
+            && p[2] == b'?'
+            && is_sep(p[3])
+            && rt_path_parent_ascii_equal(p[4], b'U') != 0
+            && rt_path_parent_ascii_equal(p[5], b'N') != 0
+            && rt_path_parent_ascii_equal(p[6], b'C') != 0
+            && is_sep(p[7])
+        {
+            unc_start = 8;
+        } else if l >= 7 && p[2] == b'?' && is_sep(p[3]) && p[5] == b':' && is_sep(p[6]) {
+            return 7;
+        }
+    }
+
+    if unc_start >= 0 {
+        let mut i = unc_start as usize;
+        while i < l && !is_sep(p[i]) {
+            i += 1;
+        }
+        if i >= l {
+            return len;
+        }
+        i += 1;
+        while i < l && !is_sep(p[i]) {
+            i += 1;
+        }
+        return if i < l { (i + 1) as i64 } else { i as i64 };
+    }
+
+    if is_sep(p[0]) {
+        1
+    } else {
+        0
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -455,6 +552,50 @@ mod tests {
             let result3 = rt_path_join(p5_ptr, p5_len, p6_ptr, p6_len);
             let joined3 = extract_string(result3);
             assert_eq!(joined3, "/etc/config");
+        }
+    }
+
+    #[test]
+    fn path_parent_separator_helpers_match_c_semantics() {
+        assert_eq!(rt_path_parent_is_separator_for(b'/', 0), 1);
+        assert_eq!(rt_path_parent_is_separator_for(b'\\', 0), 0);
+        assert_eq!(rt_path_parent_is_separator_for(b'\\', 1), 1);
+        assert_eq!(rt_path_parent_is_separator_for(b'a', 1), 0);
+
+        assert_eq!(rt_path_parent_is_separator_for_test(b'\\', 1), 1);
+        assert_eq!(rt_path_parent_is_separator_for_test(b'\\', 0), 0);
+
+        assert_eq!(rt_path_parent_ascii_equal(b'U', b'U'), 1);
+        assert_eq!(rt_path_parent_ascii_equal(b'u', b'U'), 1);
+        assert_eq!(rt_path_parent_ascii_equal(b'x', b'U'), 0);
+    }
+
+    #[test]
+    fn path_parent_windows_root_len_matches_c_semantics() {
+        unsafe {
+            // "C:\" -> 3
+            let p = b"C:\\rest";
+            assert_eq!(rt_path_parent_windows_root_len(p.as_ptr(), p.len() as i64), 3);
+
+            // "\\\\?\\UNC\\server\\share\\x" -> up through the share, plus sep
+            let p = b"\\\\?\\UNC\\server\\share\\x";
+            let got = rt_path_parent_windows_root_len(p.as_ptr(), p.len() as i64);
+            assert_eq!(&p[..got as usize], b"\\\\?\\UNC\\server\\share\\");
+
+            // "\\\\?\\C:\\rest" -> 7
+            let p = b"\\\\?\\C:\\rest";
+            assert_eq!(rt_path_parent_windows_root_len(p.as_ptr(), p.len() as i64), 7);
+
+            // A bare leading separator with no drive/UNC shape -> 1
+            let p = b"\\rest";
+            assert_eq!(rt_path_parent_windows_root_len(p.as_ptr(), p.len() as i64), 1);
+
+            // No separator at all -> 0
+            let p = b"rest";
+            assert_eq!(rt_path_parent_windows_root_len(p.as_ptr(), p.len() as i64), 0);
+
+            // Null/empty -> 0
+            assert_eq!(rt_path_parent_windows_root_len(std::ptr::null(), 0), 0);
         }
     }
 }
