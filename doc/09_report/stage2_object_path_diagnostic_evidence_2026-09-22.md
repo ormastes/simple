@@ -107,7 +107,7 @@ with the patch. The failing-provider log SHA-256 is
 Validate the retained recovery evidence and five negative controls:
 
 ```text
-python scripts/check/check-stage2-object-path-diagnostic-evidence.py --evidence build/object-path-evidence --admission D:/wk-stage2-llvm-c-link/.simple/storage/build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-admitted/admission.env
+sh scripts/check/check-stage2-object-path-diagnostic-evidence.shs --evidence build/object-path-evidence --admission D:/wk-stage2-llvm-c-link/.simple/storage/build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-admitted/admission.env
 ```
 
 Windows x86_64/LLVM is the only fresh execution claim. Windows long and mixed
