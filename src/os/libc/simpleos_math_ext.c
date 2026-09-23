@@ -378,9 +378,14 @@ double exp(double x) {
     double r = x - (double)k * LN2;
 
     /* exp(r) via Taylor series: 1 + r + r^2/2! + r^3/3! + ...
-     * 13 terms for |r| <= 0.35, giving ~1e-16 accuracy */
+     * 13 terms for |r| <= 0.35.  Accumulate terms 8..13 together before
+     * adding that tail: adding each tiny term directly to the near-one head
+     * loses enough rounding residue to make exp(1) one ULP low.  The split
+     * costs one fixed scalar and one addition, with no allocation or
+     * input-dependent extra iteration. */
     double term = 1.0;
     double sum  = 1.0;
+    double tail = 0.0;
 
     term *= r / 1.0;   sum += term;
     term *= r / 2.0;   sum += term;
@@ -389,12 +394,13 @@ double exp(double x) {
     term *= r / 5.0;   sum += term;
     term *= r / 6.0;   sum += term;
     term *= r / 7.0;   sum += term;
-    term *= r / 8.0;   sum += term;
-    term *= r / 9.0;   sum += term;
-    term *= r / 10.0;  sum += term;
-    term *= r / 11.0;  sum += term;
-    term *= r / 12.0;  sum += term;
-    term *= r / 13.0;  sum += term;
+    term *= r / 8.0;   tail += term;
+    term *= r / 9.0;   tail += term;
+    term *= r / 10.0;  tail += term;
+    term *= r / 11.0;  tail += term;
+    term *= r / 12.0;  tail += term;
+    term *= r / 13.0;  tail += term;
+    sum += tail;
 
     /* Multiply by 2^k using bit manipulation */
     double_bits db;
