@@ -3331,8 +3331,13 @@ static void rt_gpu_fill_wm_anchor_scene(void) {
 /* The RISC-V virtio scanout does not expose the generic direct-LFB array ABI
  * yet. Returning zero keeps FramebufferDriver on its exact portable fallback
  * instead of falsely claiming that a row was presented. */
-spl_u64 rt_gui_blend_span4(spl_u64 xy, spl_u64 src, spl_u64 src_offset,
-                           spl_u64 count) {
+spl_u64 rt_gui_blend_span8(spl_u64 framebuffer_addr, spl_u64 width,
+                           spl_u64 height, spl_u64 pitch, spl_u64 xy,
+                           spl_u64 src, spl_u64 src_offset, spl_u64 count) {
+    (void)framebuffer_addr;
+    (void)width;
+    (void)height;
+    (void)pitch;
     (void)xy;
     (void)src;
     (void)src_offset;

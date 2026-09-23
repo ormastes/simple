@@ -1,0 +1,105 @@
+#!/bin/sh
+# Prove that Clang's hosted SimpleOS SSP output has a real libc owner and that
+# the shipped failure handler terminates instead of returning.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+CC=${CLANG:-clang}
+NM=${LLVM_NM:-llvm-nm}
+LD=${LD_LLD:-ld.lld}
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+cat > "$WORK/probe.c" <<'EOF'
+extern void escape(void *);
+int protected_probe(int value) {
+    char buffer[64];
+    buffer[0] = (char)value;
+    escape(buffer);
+    return buffer[0];
+}
+EOF
+
+cat > "$WORK/stubs.c" <<'EOF'
+typedef unsigned long size_t;
+int protected_probe(int value);
+long write(int fd, const void *buffer, size_t count) {
+    (void)fd; (void)buffer; return (long)count;
+}
+void abort(void) { for (;;) {} }
+void escape(void *pointer) { __asm__ volatile("" : : "r"(pointer) : "memory"); }
+void _start(void) { (void)protected_probe(7); }
+EOF
+
+COMMON="--target=x86_64-unknown-simpleos -ffreestanding -nostdlib -fno-builtin -mno-red-zone -ffunction-sections -fdata-sections -O2"
+$CC $COMMON -fstack-protector-strong -c "$WORK/probe.c" -o "$WORK/probe.o"
+$CC $COMMON -fno-stack-protector -c "$WORK/probe.c" -o "$WORK/probe-baseline.o"
+$CC $COMMON -fno-stack-protector -c "$WORK/stubs.c" -o "$WORK/stubs.o"
+$CC --target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-builtin \
+    -mno-red-zone -fno-stack-protector -ffunction-sections -fdata-sections -O2 \
+    -I "$ROOT/src/os/libc/include" -c "$ROOT/src/os/libc/simpleos_cxxabi.c" \
+    -o "$WORK/simpleos_cxxabi.o"
+
+undefined=$($NM --undefined-only "$WORK/probe.o")
+printf '%s\n' "$undefined" | grep -q '__stack_chk_fail'
+printf '%s\n' "$undefined" | grep -q '__stack_chk_guard'
+
+if $LD --gc-sections -e _start "$WORK/probe.o" "$WORK/stubs.o" \
+    -o "$WORK/missing-runtime.elf" >"$WORK/negative.log" 2>&1; then
+    echo "FAIL: SSP probe linked without the SimpleOS stack runtime" >&2
+    exit 1
+fi
+/usr/bin/time -f '%e %M' -o "$WORK/baseline-time.txt" \
+    $LD --gc-sections -e _start "$WORK/probe-baseline.o" "$WORK/stubs.o" \
+    -o "$WORK/baseline.elf"
+/usr/bin/time -f '%e %M' -o "$WORK/ssp-time.txt" \
+    $LD --gc-sections -e _start "$WORK/probe.o" "$WORK/stubs.o" \
+    "$WORK/simpleos_cxxabi.o" -o "$WORK/with-runtime.elf"
+
+$NM --defined-only "$WORK/with-runtime.elf" | grep -q '__stack_chk_fail'
+$NM --defined-only "$WORK/with-runtime.elf" | grep -q '__stack_chk_guard'
+baseline_size=$(wc -c < "$WORK/baseline.elf" | tr -d ' ')
+ssp_size=$(wc -c < "$WORK/with-runtime.elf" | tr -d ' ')
+size_delta=$((ssp_size - baseline_size))
+test "$size_delta" -le 4096
+read baseline_elapsed baseline_rss < "$WORK/baseline-time.txt"
+read ssp_elapsed ssp_rss < "$WORK/ssp-time.txt"
+test "$ssp_rss" -le $((baseline_rss + 32768))
+
+cat > "$WORK/fail-main.c" <<'EOF'
+extern void __stack_chk_fail(void);
+long simpleos_syscall(long number, long a, long b, long c) {
+    (void)number; (void)a; (void)b; (void)c; return -1;
+}
+int main(void) { __stack_chk_fail(); return 0; }
+EOF
+$CC -D__dso_handle=simpleos_test_dso_handle \
+    -ffunction-sections -fdata-sections -O2 -fno-stack-protector \
+    -I "$ROOT/src/os/libc/include" -c "$ROOT/src/os/libc/simpleos_cxxabi.c" \
+    -o "$WORK/host-cxxabi.o"
+$CC -ffunction-sections -fdata-sections -O2 -fno-stack-protector \
+    -c "$WORK/fail-main.c" -o "$WORK/fail-main.o"
+$CC -Wl,--gc-sections "$WORK/fail-main.o" "$WORK/host-cxxabi.o" \
+    -o "$WORK/fail-runtime"
+set +e
+(ulimit -c 0; /usr/bin/time -f '%e %M' -o "$WORK/runtime-time.txt" \
+    "$WORK/fail-runtime" >"$WORK/runtime.out" 2>"$WORK/runtime.err")
+runtime_status=$?
+set -e
+test "$runtime_status" -eq 134
+grep -q 'stack smashing detected' "$WORK/runtime.err"
+runtime_metrics=$(tail -n 1 "$WORK/runtime-time.txt")
+runtime_elapsed=${runtime_metrics% *}
+runtime_rss=${runtime_metrics#* }
+test "$runtime_rss" -le 32768
+
+printf 'PASS: negative link rejected missing SSP runtime\n'
+printf 'PASS: linked SimpleOS SSP runtime (__stack_chk_guard + __stack_chk_fail)\n'
+printf 'PASS: __stack_chk_fail emitted its diagnostic and terminated (status=%s)\n' "$runtime_status"
+printf 'baseline_size_bytes=%s ssp_size_bytes=%s delta_bytes=%s\n' \
+    "$baseline_size" "$ssp_size" "$size_delta"
+printf 'baseline_link_elapsed_s=%s baseline_link_max_rss_kib=%s\n' \
+    "$baseline_elapsed" "$baseline_rss"
+printf 'ssp_link_elapsed_s=%s ssp_link_max_rss_kib=%s\n' "$ssp_elapsed" "$ssp_rss"
+printf 'handler_startup_elapsed_s=%s handler_max_rss_kib=%s\n' \
+    "$runtime_elapsed" "$runtime_rss"

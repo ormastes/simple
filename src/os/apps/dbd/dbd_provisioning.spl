@@ -7,7 +7,8 @@
 # service is live and is wiped on close/reload failure.
 
 use os.apps.dbd.dbd_protocol.{
-    DbdCredentialProvider, DBD_MAX_PRINCIPAL_BYTES,
+    DbdCredentialProvider, DbdBootCredentialOwnerV1,
+    DbdBootCredentialStateV1, DBD_MAX_PRINCIPAL_BYTES,
     DBD_MIN_CREDENTIAL_BYTES, DBD_MAX_CREDENTIAL_BYTES
 }
 use os.tls13.server_types.{Tls13ServerConfig}
@@ -125,6 +126,42 @@ pub class DbdProvisioningOwnerV1:
             self.state = DbdProvisioningStateV1.Quarantined
             self.last_error = "dbd-credential-wipe-failed"
             return false
+        self.state = DbdProvisioningStateV1.Admitted
+        self.last_error = ""
+        true
+
+    pub me admit_boot_owner(
+        boot_owner: DbdBootCredentialOwnerV1, cert_chain: [[u8]],
+        private_key: [u8], signature_scheme: u16
+    ) -> bool:
+        """Consume digest-only boot authority; raw credentials cannot enter."""
+        if boot_owner.state != DbdBootCredentialStateV1.Admitted or
+            not boot_owner.provider.configured or
+            not boot_owner.hash_workspace_zeroized:
+            return self.quarantine("dbd-boot-credential-owner-unadmitted")
+        if self.state == DbdProvisioningStateV1.Admitted:
+            return false
+        if cert_chain.len().to_i64() <= 0 or
+            cert_chain.len().to_i64() > DBD_MAX_CERT_CHAIN_ENTRIES:
+            return self.quarantine("dbd-certificate-chain-boundary-invalid")
+        var total_cert_bytes: i64 = 0
+        for cert in cert_chain:
+            if cert.len() == 0u64 or cert.len().to_i64() > DBD_MAX_CERTIFICATE_BYTES:
+                return self.quarantine("dbd-certificate-boundary-invalid")
+            total_cert_bytes = total_cert_bytes + cert.len().to_i64()
+            if total_cert_bytes > DBD_MAX_CERTIFICATE_BYTES:
+                return self.quarantine("dbd-certificate-chain-too-large")
+        if private_key.len() == 0u64 or
+            private_key.len().to_i64() > DBD_MAX_PRIVATE_KEY_BYTES or
+            signature_scheme == 0u16:
+            return self.quarantine("dbd-private-key-boundary-invalid")
+        self.principal = boot_owner.provider.principal
+        self.provider = boot_owner.provider
+        self.cert_chain = cert_chain
+        self.private_key = private_key
+        self.signature_scheme = signature_scheme
+        self.credential = []
+        self.credential_wiped = true
         self.state = DbdProvisioningStateV1.Admitted
         self.last_error = ""
         true

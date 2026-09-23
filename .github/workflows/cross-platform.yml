@@ -144,8 +144,9 @@ jobs:
           # Setup bootstrap (Linux binary runs via Linuxulator)
           chmod +x bin/release/simple
 
-          # Install Linux runtime libraries and gcc
-          pkg install -y linux_base-c7 gcc
+          # Host C/C++ policy: use Clang everywhere. Do not replace this with
+          # GCC for a particular host or agent; fix the Clang invocation instead.
+          pkg install -y linux_base-c7 clang
 
           # Test basic execution
           if bin/release/simple -c "print 42" 2>/dev/null; then
@@ -163,7 +164,6 @@ jobs:
           # Run native compile spec (multi-file link tests)
           echo ""
           echo "=== Running native compile spec on FreeBSD ==="
-          gcc --version | head -1 || true
           clang --version | head -1 || true
           bin/release/simple test test/unit/compiler/native/native_compile_spec.spl
       continue-on-error: true
@@ -267,7 +267,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [clang, gcc]
+        # Keep this lane on the project host compiler policy. Compiler diversity
+        # belongs in an explicitly named compatibility job, never as a GCC fallback.
+        compiler: [clang]
 
     steps:
     - name: Checkout code
@@ -343,15 +345,18 @@ jobs:
         chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
-    - name: Install MinGW-w64
+    - name: Install Clang Windows cross target support
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq gcc-mingw-w64-x86-64
-        x86_64-w64-mingw32-gcc --version
+        sudo apt-get install -y -qq clang lld mingw-w64
+        # Do not substitute x86_64-w64-mingw32-gcc here. The MinGW sysroot
+        # supplies headers/libraries while Clang remains the compiler/driver.
+        clang --target=x86_64-w64-windows-gnu --version
 
     - name: Run Windows MinGW cross-compile test
       run: |
         export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        export CC="clang --target=x86_64-w64-windows-gnu"
         bin/release/simple scripts/test/test_windows_mingw.spl
       continue-on-error: true
 

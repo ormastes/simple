@@ -24,6 +24,13 @@ static uint64_t rd64(const uint8_t *p) {
     return v;
 }
 
+static const uint8_t expected_abi_digest[32] = {
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x90, 0xab, 0xcd, 0xef, 0xde, 0xad, 0xbe, 0xef,
+};
+
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) return 10;
     const char *expected = argc == 3 ? argv[2] : "native-provider-ok";
@@ -35,7 +42,7 @@ int main(int argc, char **argv) {
     void *invoke_fn = dlsym(lib, "simple_cli_command_invoke_v1");
     if (!query_fn || !invoke_fn) return 12;
 
-    uint8_t query[44] = {0}, query_result[60] = {0};
+    uint8_t query[44] = {0}, query_result[84] = {0};
     wr32(query, 44);
     wr64(query + 4, UINT64_C(5999723006133093425));
     wr32(query + 12, 1);
@@ -44,7 +51,9 @@ int main(int argc, char **argv) {
             (int64_t)(intptr_t)query, (int64_t)(intptr_t)query_result) != 0)
         return 13;
     if (rd32(query_result) != 0 || rd32(query_result + 4) != 1 ||
-            rd32(query_result + 12) != 28 || rd64(query_result + 16) == 0)
+            rd32(query_result + 12) != 28 || rd64(query_result + 16) == 0 ||
+            memcmp(query_result + 48, expected_abi_digest, sizeof(expected_abi_digest)) != 0 ||
+            rd32(query_result + 80) != 0)
         return 14;
 
     uint8_t request[35] = {0}, result[128] = {0};

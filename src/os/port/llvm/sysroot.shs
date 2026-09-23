@@ -21,6 +21,10 @@ LIBC_DIR="$REPO_ROOT/src/os/libc"
 LLVM_BUILD="$REPO_ROOT/build/os/llvm"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
 TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+SIMPLE_BUILD_JOBS="${SIMPLE_BUILD_JOBS:-12}"
+case "$SIMPLE_BUILD_JOBS" in
+    ''|*[!0-9]*|0) echo "[sysroot] ERROR: SIMPLE_BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
 # Per-arch sysroot, matching simpleos_sysroot_dir() in
 # src/compiler_rust/compiler/src/pipeline/native_project/linker.rs: x86_64 keeps
 # the historical unsuffixed path, aarch64 gets its own. Before this, an aarch64
@@ -39,6 +43,7 @@ echo "[sysroot] Building SimpleOS sysroot at $SYSROOT ..."
 mkdir -p "$SYSROOT/include"
 mkdir -p "$SYSROOT/lib"
 mkdir -p "$SYSROOT/share/simpleos"
+rm -f "$SYSROOT/share/simpleos/target-triple.txt"
 
 # -- Headers ----------------------------------------------------------------
 
@@ -65,10 +70,8 @@ echo "[sysroot] Installed $HEADER_COUNT headers"
 build_libc_runtime() {
     case "$TRIPLE" in
         x86_64-*)
-            if [ ! -f "$LIBC_DIR/libsimpleos_c.a" ]; then
-                echo "[sysroot] Building SimpleOS libc..."
-                (cd "$LIBC_DIR" && make)
-            fi
+            echo "[sysroot] Building SimpleOS libc..."
+            (cd "$LIBC_DIR" && make -j "$SIMPLE_BUILD_JOBS")
             cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/libsimpleos_c.a"
             cp "$LIBC_DIR/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
             "${CC:-clang}" --target=x86_64-unknown-none-elf \
@@ -129,7 +132,7 @@ build_libc_runtime() {
             # runtime_native.c defines no rt_port_* at all, so there is no ODR
             # overlap. See
             # doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md
-            for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
+            for rt_src in runtime_native runtime_legacy_core runtime_simd_utf8 runtime_contracts \
                           runtime_memory runtime_time runtime_timestamp \
                           runtime_pool runtime_memtrack \
                           runtime_simpleos_syscall_adapters \
@@ -146,6 +149,9 @@ build_libc_runtime() {
             done
             rm -f "$SYSROOT/lib/libsimple_runtime_native.a"
             "$AR" rcs "$SYSROOT/lib/libsimple_runtime_native.a" $RT_OBJS
+            # The SimpleOS user linker consumes libsimple_runtime.a directly.
+            # Keep the small compatibility archive separately for older probes.
+            cp "$SYSROOT/lib/libsimple_runtime_native.a" "$SYSROOT/lib/libsimple_runtime.a"
             echo "[sysroot] Built libsimple_runtime_native.a ($(echo $RT_OBJS | wc -w) members)"
             ;;
         aarch64-*)
@@ -560,6 +566,7 @@ SECTIONS {
 }
 LDEOF
 echo "[sysroot] Installed linker script"
+printf '%s\n' "$TRIPLE" > "$SYSROOT/share/simpleos/target-triple.txt"
 
 # -- Summary ----------------------------------------------------------------
 
