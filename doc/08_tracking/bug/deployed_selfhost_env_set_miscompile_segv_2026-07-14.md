@@ -707,6 +707,7 @@ expanded argument array. `rt_env_set`/`rt_set_env` expand only at their
 two-operand semantic facade; an already-lowered four-word bridge returns its
 original argument array unchanged. This guard is constant-time and
 allocation-free. The focused source gate pins both the registry value and its
-use before the split loop, while the existing MIR regression remains the
+use in the expansion function; source review confirms the guard precedes the
+split loop. The existing MIR regression remains the
 behavioral oracle once the admitted Phase 4 test runner is available. The five
 release-closure receipts above remain required.
