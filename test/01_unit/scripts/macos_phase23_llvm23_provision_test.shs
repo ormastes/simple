@@ -1,0 +1,110 @@
+#!/bin/sh
+# Offline execution of the actual installer; fake only host and Homebrew IO.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+installer=$root/scripts/setup/install-macos-phase23-llvm23.shs
+sh -n "$installer"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-llvm-provision-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir "$tmp/bin"
+export PROVISION_TEST_ROOT=$tmp
+cat >"$tmp/bin/uname" <<'SH'
+#!/bin/sh
+case $1 in -s) echo Darwin ;; -m) echo "${TEST_ARCH:-arm64}" ;; esac
+SH
+cat >"$tmp/bin/sw_vers" <<'SH'
+#!/bin/sh
+echo "${TEST_OS_VERSION:-15.7}"
+SH
+cat >"$tmp/bin/df" <<'SH'
+#!/bin/sh
+echo "disk 20000000 1000000 ${TEST_FREE_KIB:-19000000} 5% /opt/homebrew"
+SH
+cat >"$tmp/bin/shasum" <<'SH'
+#!/bin/sh
+case ${TEST_DOWNLOAD_HASH:-}:$3 in
+  corrupt:*) echo 'incorrect fixture.tar.gz' ;;
+  *llvm.tar.gz) echo '4ca75cd24ea8f06f85ad16113dc274bbd2496e3330cb0765e69b142a39749876 fixture.tar.gz' ;;
+  *lld.tar.gz) echo '0a3b3975ef21e47f18f7c20823f3e927bf006d92483733bea8434cf8c981efe2 fixture.tar.gz' ;;
+  *) exit 1 ;;
+esac
+SH
+cat >"$tmp/bin/brew" <<'SH'
+#!/bin/sh
+set -eu
+case "$*" in
+  --prefix) echo /opt/homebrew ;;
+  update)
+    [ "${HOMEBREW_NO_AUTO_UPDATE:-}" = 1 ]
+    [ "${TEST_UPDATE_FAIL:-0}" = 0 ]
+    echo update >>"$PROVISION_TEST_ROOT/calls"
+    ;;
+  'info --json=v2 llvm lld')
+    [ "$(cat "$PROVISION_TEST_ROOT/calls")" = update ]
+    echo info >>"$PROVISION_TEST_ROOT/calls"
+    cat "$PROVISION_TEST_ROOT/metadata.json"
+    ;;
+  'fetch --force-bottle --bottle-tag=arm64_sequoia llvm lld')
+    echo fetch >>"$PROVISION_TEST_ROOT/calls"
+    ;;
+  '--cache --bottle-tag=arm64_sequoia llvm') echo "$PROVISION_TEST_ROOT/llvm.tar.gz" ;;
+  '--cache --bottle-tag=arm64_sequoia lld') echo "$PROVISION_TEST_ROOT/lld.tar.gz" ;;
+  "reinstall --force-bottle $PROVISION_TEST_ROOT/llvm.tar.gz $PROVISION_TEST_ROOT/lld.tar.gz")
+    [ "${HOMEBREW_NO_AUTO_UPDATE:-}" = 1 ]
+    [ -z "${HOMEBREW_NO_INSTALL_UPGRADE:-}" ]
+    [ -z "${HOMEBREW_FORCE_API_AUTO_UPDATE:-}" ]
+    echo reinstall >>"$PROVISION_TEST_ROOT/calls"
+    ;;
+  *) exit 70 ;;
+esac
+SH
+chmod +x "$tmp/bin/"*
+fixture() {
+  ruby -rjson - "$1" >"$tmp/metadata.json" <<'RUBY'
+mode = ARGV.fetch(0)
+formulae = [
+  ['llvm', 1, '4ca75cd24ea8f06f85ad16113dc274bbd2496e3330cb0765e69b142a39749876'],
+  ['lld', 0, '0a3b3975ef21e47f18f7c20823f3e927bf006d92483733bea8434cf8c981efe2']
+].map do |name, revision, digest|
+  {'name'=>name, 'tap'=>'homebrew/core', 'versions'=>{'stable'=>'23.1.1'},
+   'revision'=>revision, 'bottle'=>{'stable'=>{'files'=>{'arm64_sequoia'=>{
+     'sha256'=>digest, 'url'=>"https://ghcr.io/v2/homebrew/core/#{name}/blobs/sha256:#{digest}"}}}}}
+end
+llvm = formulae.first
+case mode
+when 'stale' then llvm['versions']['stable'] = '23.1.0'
+when 'digest' then llvm['bottle']['stable']['files']['arm64_sequoia']['sha256'] = '0' * 64
+when 'url' then llvm['bottle']['stable']['files']['arm64_sequoia']['url'] = 'https://example.invalid/untrusted'
+when 'missing-bottle' then llvm['bottle']['stable']['files'] = {}
+when 'revision' then llvm['revision'] = 2
+when 'tap' then llvm['tap'] = 'untrusted/core'
+end
+puts JSON.generate({'formulae'=>formulae})
+RUBY
+}
+fixture accepted
+PATH="$tmp/bin:$PATH" HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_FORCE_API_AUTO_UPDATE=1 sh "$installer" >"$tmp/out"
+[ "$(tr '\n' ' ' <"$tmp/calls")" = 'update info fetch reinstall ' ]
+grep -F 'admitted_bottle=llvm version=23.1.1 revision=1 sha256=4ca75cd' "$tmp/out" >/dev/null
+for mode in stale digest url missing-bottle revision tap; do
+  fixture "$mode"
+  : >"$tmp/calls"
+  if PATH="$tmp/bin:$PATH" sh "$installer" >"$tmp/out" 2>&1; then
+    echo "FAIL: accepted $mode" >&2; exit 1
+  fi
+  [ "$(tr '\n' ' ' <"$tmp/calls")" = 'update info ' ]
+done
+fixture accepted
+: >"$tmp/calls"
+if TEST_DOWNLOAD_HASH=corrupt PATH="$tmp/bin:$PATH" sh "$installer" >"$tmp/out" 2>&1; then
+  echo 'FAIL: installed unadmitted bottle bytes' >&2; exit 1
+fi
+[ "$(tr '\n' ' ' <"$tmp/calls")" = 'update info fetch ' ]
+for assignment in TEST_ARCH=x86_64 TEST_OS_VERSION=26.0 TEST_FREE_KIB=1024 TEST_UPDATE_FAIL=1; do
+  : >"$tmp/calls"
+  if env "$assignment" PATH="$tmp/bin:$PATH" sh "$installer" >"$tmp/out" 2>&1; then
+    echo "FAIL: accepted $assignment" >&2; exit 1
+  fi
+  [ ! -s "$tmp/calls" ]
+done
+echo 'PASS: reviewed bottles installed after refresh; stale, changed, absent, wrong-host and low-disk inputs rejected'
