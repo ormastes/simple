@@ -14,7 +14,9 @@ fn request(operation_id: text = "") -> LinuxOciRequestV1:
         operation_id: operation_id,
         image: "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", bundle_path: "",
         command: ["/bin/busybox", "echo"], args: ["SIMPLEORCH-OK"],
-        timeout_ms: 5000)
+        timeout_ms: 5000, cpu_limit_millis: 1000,
+        memory_limit_bytes: 268435456, pid_limit: 64,
+        network_policy: "bridge", filesystem_policy: "read-only")
 
 fn identity() -> RuntimeIdentityV1:
     RuntimeIdentityV1(pod_uid: "pod-1", attempt: 1, provider_generation: 7,
@@ -44,9 +46,51 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         expect(built.1.args[4]).to_equal("io.simpleorch.pod_uid=pod-1")
         expect(built.1.args[8]).to_equal("io.simpleorch.node_boot_id=boot-1")
         expect(built.1.args[12]).to_equal("io.simpleorch.operation_id=create-1")
-        expect(built.1.args[13]).to_equal("docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        expect(built.1.args[14]).to_equal("/bin/busybox")
-        expect(built.1.args[16]).to_equal("SIMPLEORCH-OK")
+        expect(built.1.args).to_contain("--cpu-quota")
+        expect(built.1.args).to_contain("100000")
+        expect(built.1.args).to_contain("--memory")
+        expect(built.1.args).to_contain("268435456")
+        expect(built.1.args).to_contain("--pids-limit")
+        expect(built.1.args).to_contain("64")
+        expect(built.1.args).to_contain("--network")
+        expect(built.1.args).to_contain("bridge")
+        expect(built.1.args).to_contain("--read-only")
+        expect(built.1.args).to_contain("no-new-privileges")
+        expect(built.1.args).to_contain("ALL")
+        expect(built.1.args).to_contain("docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        expect(built.1.args).to_contain("/bin/busybox")
+        expect(built.1.args).to_contain("SIMPLEORCH-OK")
+
+    it "fails closed when any rootless launch prerequisite is absent":
+        val good = RootlessCapabilityEvidenceV1(uid: "1000",
+            uid_map: "0 1000 1", gid_map: "0 1000 1",
+            subuid: "1000:100000:65536", subgid: "1000:100000:65536",
+            cgroup_controllers: "cpu memory pids", cgroup_subtree_control: "cpu memory pids")
+        expect(rootless_capability_error(good)).to_equal("")
+        var missing_gid = good
+        missing_gid.gid_map = ""
+        expect(rootless_capability_error(missing_gid)).to_equal("rootless-gid-map-unavailable")
+        var missing_subgid = good
+        missing_subgid.subgid = ""
+        expect(rootless_capability_error(missing_subgid)).to_equal("rootless-subgid-range-unavailable")
+        var missing_delegation = good
+        missing_delegation.cgroup_subtree_control = ""
+        expect(rootless_capability_error(missing_delegation)).to_equal("rootless-cgroup-delegation-unavailable")
+
+    it "rejects missing create policy instead of silently launching unbounded":
+        var unbounded = request()
+        unbounded.pid_limit = 0
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", "boot-1", 7, false)
+        expect(provider.validate(unbounded).reason).to_equal("pid-limit-invalid")
+
+    it "classifies only engine-specific definitive absence as not found":
+        expect(native_inspect_definitively_not_found(OCI_ENGINE_PODMAN, 125,
+            "Error: no such container abc")).to_equal(true)
+        expect(native_inspect_definitively_not_found(OCI_ENGINE_DOCKER, 1,
+            "Error: No such object: abc")).to_equal(true)
+        expect(native_inspect_definitively_not_found(OCI_ENGINE_PODMAN, 125,
+            "connection reset by peer")).to_equal(false)
 
     it "fails closed for non-Linux, invalid identity, and unsafe input":
         val r = request()
@@ -173,6 +217,34 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.operation).to_equal("recover")
         expect(recovered.state.identity.native_id).to_equal("ctr-recovered")
+
+    it "retries create after definitive absence but preserves transient inspect failure":
+        val r = request()
+        val inspect_cmd = build_inspect_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            "simpleorch-pod-1-1").1
+        val create_cmd = build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            r, "create-missing", 7, "boot-1").1
+        val intent = RuntimeIntentV1(pod_uid: "pod-1", attempt: 1,
+            provider_generation: 7, operation_id: "create-missing", engine: OCI_DEFAULT_ENGINE,
+            native_id: "", node_boot_id: "boot-1", phase: RUNTIME_PHASE_PREPARED)
+        val absent = ScriptedCommandResultV1(operation: inspect_cmd.operation,
+            program: inspect_cmd.program, args: inspect_cmd.args, stdout: "",
+            stderr: "Error: no such container simpleorch-pod-1-1", exit_code: 125)
+        val converging = LinuxOciRuntimeProviderV1.scripted_with_intents("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, [intent],
+            [absent, scripted_result(create_cmd, "ctr-new\n", 0)])
+        val created = converging.create(r)
+        expect(created.status).to_equal(RUNTIME_STATUS_OK)
+        expect(created.state.identity.native_id).to_equal("ctr-new")
+
+        val transient = ScriptedCommandResultV1(operation: inspect_cmd.operation,
+            program: inspect_cmd.program, args: inspect_cmd.args, stdout: "",
+            stderr: "connection reset by peer", exit_code: 125)
+        val blocked = LinuxOciRuntimeProviderV1.scripted_with_intents("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, [intent], [transient])
+        val failed = blocked.create(r)
+        expect(failed.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(failed.reason).to_equal("native-recover-inspect-failed")
 
     it "checks inspect after a create error before reporting failure":
         val r = request("create-timeout")

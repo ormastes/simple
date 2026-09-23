@@ -47,6 +47,20 @@ pub struct LinuxOciRequestV1:
     command: [text]
     args: [text]
     timeout_ms: i64
+    cpu_limit_millis: i64
+    memory_limit_bytes: i64
+    pid_limit: i64
+    network_policy: text
+    filesystem_policy: text
+
+pub struct RootlessCapabilityEvidenceV1:
+    uid: text
+    uid_map: text
+    gid_map: text
+    subuid: text
+    subgid: text
+    cgroup_controllers: text
+    cgroup_subtree_control: text
 
 pub struct ScriptedCommandResultV1:
     operation: text
@@ -156,6 +170,12 @@ impl LinuxOciRuntimeProviderV1:
                 engine_present: true, healthy: false, launch_capable: false,
                 privilege: RUNTIME_PRIVILEGE_UNKNOWN,
                 reason: "engine-health-or-launch-capability-unavailable: " + health.1.trim())
+        if self.engine == OCI_ENGINE_PODMAN:
+            val capability = rootless_capability_error(_rootless_capability_evidence())
+            if capability != "":
+                return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                    engine_present: true, healthy: true, launch_capable: false,
+                    privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: capability)
         RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
             engine_present: true, healthy: true, launch_capable: true,
             privilege: if self.engine == OCI_ENGINE_DOCKER then RUNTIME_PRIVILEGE_ROOT else RUNTIME_PRIVILEGE_ROOTLESS,
@@ -221,6 +241,16 @@ impl LinuxOciRuntimeProviderV1:
             if item.contains("\n") or item.contains("\r"):
                 return RuntimeValidationV1(accepted: false,
                     reason: "argument-contains-control-character")
+        if request.cpu_limit_millis <= 0:
+            return RuntimeValidationV1(accepted: false, reason: "cpu-limit-invalid")
+        if request.memory_limit_bytes <= 0:
+            return RuntimeValidationV1(accepted: false, reason: "memory-limit-invalid")
+        if request.pid_limit <= 0:
+            return RuntimeValidationV1(accepted: false, reason: "pid-limit-invalid")
+        if request.network_policy != "bridge" and request.network_policy != "none":
+            return RuntimeValidationV1(accepted: false, reason: "network-policy-unsupported")
+        if request.filesystem_policy != "read-only":
+            return RuntimeValidationV1(accepted: false, reason: "filesystem-policy-unsupported")
         RuntimeValidationV1(accepted: true, reason: "")
 
     # Reserve the logical attempt before any native side effect.  This is the
@@ -275,7 +305,10 @@ impl LinuxOciRuntimeProviderV1:
             # A previous create may have timed out after native side effects.
             # Inspect/adopt the exact owned identity before permitting any
             # retry; ambiguity is returned to the caller and never duplicated.
-            return self.recover(request)
+            val recovery = self.recover(request)
+            if recovery.status == RUNTIME_STATUS_OK or
+                    recovery.reason != "native-recover-not-found":
+                return recovery
         val operation_id = if request.operation_id != "": request.operation_id
             elif saved_intent.operation_id != "": saved_intent.operation_id
             else: self._next_operation("create")
@@ -576,6 +609,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected_with_output("recover", current, command.1,
                 "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
+            if native_inspect_definitively_not_found(self.engine, run.exit_code,
+                    run.stderr):
+                return self._rejected_with_output("recover", current, command.1,
+                    "native-recover-not-found", run.stdout, run.stderr, run.exit_code)
             return self._rejected_with_output("recover", current, command.1,
                 "native-recover-inspect-failed", run.stdout, run.stderr, run.exit_code)
         match recover_state_from_inspect(self.engine, run.stdout, request,
@@ -845,6 +882,56 @@ fn _args_equal(left: [text], right: [text]) -> bool:
         index = index + 1
     true
 
+fn _read_probe_file(path: text) -> text:
+    match file_read_regular_no_follow_bounded(path, OCI_MAX_OUTPUT_BYTES):
+        case Ok(value): value
+        case Err(_): ""
+
+fn _rootless_capability_evidence() -> RootlessCapabilityEvidenceV1:
+    val uid_result = process_run_timeout("id", ["-u"], 5000)
+    val uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
+    RootlessCapabilityEvidenceV1(uid: uid,
+        uid_map: _read_probe_file("/proc/self/uid_map"),
+        gid_map: _read_probe_file("/proc/self/gid_map"),
+        subuid: _read_probe_file("/etc/subuid"),
+        subgid: _read_probe_file("/etc/subgid"),
+        cgroup_controllers: _read_probe_file("/sys/fs/cgroup/cgroup.controllers"),
+        cgroup_subtree_control: _read_probe_file("/sys/fs/cgroup/cgroup.subtree_control"))
+
+fn _has_subid_range(content: text, uid: text) -> bool:
+    if uid == "": return false
+    for line in content.split("\n"):
+        val fields = line.trim().split(":")
+        if fields.len() == 3 and fields[0] == uid and
+                fields[1].to_i64() > 0 and fields[2].to_i64() > 0:
+            return true
+    false
+
+pub fn rootless_capability_error(evidence: RootlessCapabilityEvidenceV1) -> text:
+    if evidence.uid == "": return "rootless-uid-unavailable"
+    if evidence.uid_map.trim() == "": return "rootless-uid-map-unavailable"
+    if evidence.gid_map.trim() == "": return "rootless-gid-map-unavailable"
+    if not _has_subid_range(evidence.subuid, evidence.uid):
+        return "rootless-subuid-range-unavailable"
+    if not _has_subid_range(evidence.subgid, evidence.uid):
+        return "rootless-subgid-range-unavailable"
+    if evidence.cgroup_controllers.trim() == "":
+        return "rootless-cgroup-v2-controllers-unavailable"
+    if evidence.cgroup_subtree_control.trim() == "":
+        return "rootless-cgroup-delegation-unavailable"
+    ""
+
+pub fn native_inspect_definitively_not_found(engine: text, exit_code: i64,
+        stderr: text) -> bool:
+    val message = stderr.to_lower()
+    if engine == OCI_ENGINE_PODMAN:
+        return exit_code == 125 and (message.contains("no such container") or
+            message.contains("no container with name or id"))
+    if engine == OCI_ENGINE_DOCKER:
+        return exit_code == 1 and (message.contains("no such container") or
+            message.contains("no such object"))
+    false
+
 pub fn linux_oci_container_name(pod_uid: text, attempt: i64) -> Result<text, text>:
     if not _safe_token(pod_uid):
         return Err("pod-uid-contains-unsafe-character")
@@ -902,6 +989,13 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--label", "io.simpleorch.node_boot_id=" + node_boot_id,
                 "--label", "io.simpleorch.provider_generation=" + provider_generation.to_text(),
                 "--label", "io.simpleorch.operation_id=" + operation_id,
+                "--cpu-period", "100000",
+                "--cpu-quota", (request.cpu_limit_millis * 100).to_text(),
+                "--memory", request.memory_limit_bytes.to_text(),
+                "--pids-limit", request.pid_limit.to_text(),
+                "--network", request.network_policy,
+                "--read-only", "--security-opt", "no-new-privileges",
+                "--cap-drop", "ALL",
                 request.image]
             for value in request.command:
                 args.push(value)
