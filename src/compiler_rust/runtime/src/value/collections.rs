@@ -192,7 +192,7 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
         // see `byte_kernels.rs` for the actual kernels and their
         // scalar-equivalence tests. `array_sort` stays on `scalar_array_sort`
         // for every tier here: this generic comparator sorts heterogeneous
-        // tagged `RuntimeValue`s (see `compare_runtime_values`), not a
+        // tagged `RuntimeValue`s (see `rt_sorted_value_cmp`), not a
         // homogeneous primitive buffer, so it was never SIMD-accelerated to
         // begin with — nothing to widen.
         SimdTier::X86_64Avx512 => CollectionProviders {
@@ -288,8 +288,14 @@ pub(crate) fn collection_provider_resolution_count_for_tests() -> usize {
         .resolutions
 }
 
+/// Rust-lane twin of the C runtime's `rt_sorted_value_cmp` static comparator
+/// (`src/runtime/runtime_native.c`): identical precedence — unsigned-boxed
+/// values compare as u64 (including against tagged ints, with a negative int
+/// always losing to any unsigned box), tagged ints precede floats, and every
+/// other mixed-type pair compares Equal. Used by `scalar_array_sort` below,
+/// exactly as the C static helper is used by `rt_array_sort`/`rt_array_sorted`.
 #[inline]
-fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+fn rt_sorted_value_cmp(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
     match (a.as_heap_u64(), b.as_heap_u64()) {
         (Some(left), Some(right)) => return left.cmp(&right),
         (Some(_), None) if b.is_int() && b.as_int() < 0 => return Ordering::Greater,
@@ -308,7 +314,25 @@ fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
 }
 
 fn scalar_array_sort(values: &mut [RuntimeValue]) {
-    values.sort_by(compare_runtime_values);
+    values.sort_by(rt_sorted_value_cmp);
+}
+
+/// Rust-lane twin of the C runtime's `rt_sorted_byte_cmp` static comparator
+/// (`src/runtime/runtime_native.c`): plain ascending `u8` order. Used by
+/// `rt_array_sort`'s byte-packed branch below, matching C's `qsort` over the
+/// same buffer.
+#[inline]
+fn rt_sorted_byte_cmp(a: &u8, b: &u8) -> Ordering {
+    a.cmp(b)
+}
+
+/// Rust-lane twin of the C runtime's `rt_sorted_u64_cmp` static comparator
+/// (`src/runtime/runtime_native.c`): plain ascending `u64` order. Used by
+/// `rt_array_sort`'s u64-packed branch below, matching C's `qsort` over the
+/// same buffer.
+#[inline]
+fn rt_sorted_u64_cmp(a: &u64, b: &u64) -> Ordering {
+    a.cmp(b)
 }
 
 fn avx2_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
@@ -5040,10 +5064,39 @@ pub extern "C" fn rt_array_reversed(array: RuntimeValue) -> RuntimeValue {
 
 /// Sort an array in place (ascending order)
 /// Works with integers and floats. Mixed types are sorted with ints first.
+///
+/// Byte-packed and u64-packed arrays store raw, untagged elements (see
+/// `rt_array_get`/`rt_array_set` above), so they cannot go through the
+/// tagged-`RuntimeValue` comparator path below — that would misinterpret the
+/// raw bits as a boxed/tagged value, exactly the divergence the C runtime's
+/// `rt_array_sort` avoids by branching on `RT_CORE_ARRAY_FLAG_BYTES` /
+/// `RT_CORE_ARRAY_FLAG_U64_PACKED` before calling `qsort` with
+/// `rt_sorted_byte_cmp`/`rt_sorted_u64_cmp`. These two branches are the
+/// Rust-lane twin of that: same ascending order, built on the existing
+/// per-element accessors so no new unsafe raw-buffer reinterpretation is
+/// introduced.
 #[no_mangle]
 pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            let len = (*arr).len as usize;
+            let mut bytes: Vec<u8> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u8).collect();
+            bytes.sort_by(rt_sorted_byte_cmp);
+            for (i, b) in bytes.into_iter().enumerate() {
+                rt_array_set(array, i as i64, RuntimeValue::from_int(b as i64));
+            }
+            return true;
+        }
+        if (*arr).is_u64_packed() {
+            let len = (*arr).len as usize;
+            let mut words: Vec<u64> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u64).collect();
+            words.sort_by(rt_sorted_u64_cmp);
+            for (i, w) in words.into_iter().enumerate() {
+                rt_array_set(array, i as i64, RuntimeValue::from_int(w as i64));
+            }
+            return true;
+        }
         let slice = (*arr).as_mut_slice();
         let providers = collection_providers();
         let report = primitive_sort::sort_runtime_values(slice, providers.simd_tier);
