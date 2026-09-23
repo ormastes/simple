@@ -483,6 +483,12 @@ impl LinuxOciRuntimeProviderV1:
         val index = self._find(request.pod_uid, request.attempt)
         val current = self.states[index]
         if current.phase == RUNTIME_PHASE_DESTROYED:
+            val saved = self._intent_for(request.pod_uid, request.attempt)
+            if saved.phase != RUNTIME_PHASE_DESTROYED and
+                    not self._save_intent(request, current.identity.operation_id,
+                        current.identity.native_id, RUNTIME_PHASE_DESTROYED):
+                return self._rejected("destroy", "intent-journal-update-failed",
+                    runtime_command_empty())
             return self._ok("destroy", current,
                 RuntimeCommandV1(operation: "destroy", program: "", args: []),
                 "idempotent already-destroyed workload")
@@ -699,17 +705,22 @@ impl LinuxOciRuntimeProviderV1:
         while index < self.intents.len():
             if self.intents[index].pod_uid == request.pod_uid and
                     self.intents[index].attempt == request.attempt:
+                val previous = self.intents[index]
                 self.intents[index] = RuntimeIntentV1(pod_uid: request.pod_uid,
                     attempt: request.attempt, provider_generation: self.provider_generation,
                     operation_id: operation_id, engine: self.engine,
                     native_id: native_id, node_boot_id: self.node_boot_id, phase: phase)
-                return self._write_intent_journal(request)
+                if self._write_intent_journal(request): return true
+                self.intents[index] = previous
+                return false
             index = index + 1
         self.intents.push(RuntimeIntentV1(pod_uid: request.pod_uid,
             attempt: request.attempt, provider_generation: self.provider_generation,
             operation_id: operation_id, engine: self.engine,
             native_id: native_id, node_boot_id: self.node_boot_id, phase: phase))
-        self._write_intent_journal(request)
+        if self._write_intent_journal(request): return true
+        self.intents.pop()
+        false
 
     fn _execute(command: RuntimeCommandV1) -> RuntimeExecResultV1:
         if self.scripted:
