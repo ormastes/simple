@@ -19,6 +19,9 @@ use os.services.evidence.artifact_snapshot.{
     SimpleOsEvidenceArtifactSnapshotV1,
     simpleos_evidence_artifact_snapshot_check
 }
+use os.services.evidence.performance_policy_owner.{
+    simpleos_evidence_performance_policy_check_v1
+}
 use os.services.evidence.ledger_transition.{
     SimpleOsEvidenceLedgerSnapshotV1,
     simpleos_evidence_prepare_ledger_transition
@@ -36,6 +39,13 @@ use os.services.evidence.owner_serialization_transition.{
 use std.common.crypto.ed25519.{pure_ed25519_verify}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.services.evidence.trusted_signer.{SimpleOsTrustedEvidenceSignerV1}
+use os.services.evidence.authority_owner.{
+    SIMPLEOS_EVIDENCE_POLICY_MAX_CHALLENGE_TTL_US_V1,
+    simpleos_evidence_authority_start_v1,
+    simpleos_evidence_authority_time_v1,
+    simpleos_evidence_authority_roots_v1
+}
 
 val SIMPLEOS_EVIDENCE_MAX_TRUSTED_SIGNERS: i64 = 16
 val SIMPLEOS_EVIDENCE_MAX_LIVE_CHALLENGES: i64 = 128
@@ -48,10 +58,6 @@ val SIMPLEOS_EVIDENCE_MAX_CONSUMER_BYTES: i64 = 128
 val _SIMPLEOS_EVIDENCE_MAX_TIME: i64 = 9223372036854775807
 val _SIMPLEOS_EVIDENCE_MAX_GENERATION: u64 = 18446744073709551615u64
 val _SIMPLEOS_EVIDENCE_OWNER_MUTEX: i64 = mutex_raw_create()
-
-struct SimpleOsTrustedEvidenceSignerV1:
-    key_id: text
-    public_key: [u8]
 
 struct SimpleOsEvidenceChallengeV1:
     session_id: u64
@@ -102,6 +108,7 @@ struct _SimpleOsEvidenceAdmittedRowV1:
     expires_unix_us: i64
 
 var _simpleos_evidence_initialized: bool = false
+var _simpleos_evidence_authoritative: bool = false
 var _simpleos_evidence_quarantined: bool = false
 var _simpleos_evidence_trusted_key_ids: [text] = []
 var _simpleos_evidence_trusted_public_keys: [[u8]] = []
@@ -210,6 +217,19 @@ fn _simpleos_evidence_roots_match_locked(
             return false
         if not simpleos_evidence_bytes_equal(
             roots[i].public_key, _simpleos_evidence_trusted_public_keys[i]):
+            return false
+        i = i + 1
+    true
+
+fn _simpleos_evidence_roots_same(
+    left: [SimpleOsTrustedEvidenceSignerV1],
+    right: [SimpleOsTrustedEvidenceSignerV1]) -> bool:
+    if left.len() != right.len(): return false
+    var i: i64 = 0
+    while i < left.len():
+        if left[i].key_id != right[i].key_id or
+            not simpleos_evidence_bytes_equal(
+                left[i].public_key, right[i].public_key):
             return false
         i = i + 1
     true
@@ -328,6 +348,25 @@ fn simpleos_evidence_trust_roots_check(
 
 fn simpleos_evidence_verifier_start(
     roots: [SimpleOsTrustedEvidenceSignerV1]) -> SimpleOsCapabilityLedgerCheckV1:
+    val authority_roots = simpleos_evidence_authority_roots_v1()
+    if authority_roots.len() > 0 and
+        not _simpleos_evidence_roots_same(roots, authority_roots):
+        return _simpleos_evidence_check_failure("trust-root-assertion-mismatch")
+    _simpleos_evidence_verifier_start_checked(roots, false)
+
+fn simpleos_evidence_verifier_start_authoritative(
+) -> SimpleOsCapabilityLedgerCheckV1:
+    val authority = simpleos_evidence_authority_start_v1()
+    if not authority.ok:
+        return _simpleos_evidence_check_failure("authority:" + authority.reason)
+    val roots = simpleos_evidence_authority_roots_v1()
+    if roots.len() == 0:
+        return _simpleos_evidence_check_failure("trust-root-owner-unavailable")
+    _simpleos_evidence_verifier_start_checked(roots, true)
+
+fn _simpleos_evidence_verifier_start_checked(
+    roots: [SimpleOsTrustedEvidenceSignerV1],
+    authoritative: bool) -> SimpleOsCapabilityLedgerCheckV1:
     val roots_check = simpleos_evidence_trust_roots_check(roots)
     if not roots_check.ok:
         return roots_check
@@ -340,6 +379,9 @@ fn simpleos_evidence_verifier_start(
             return _simpleos_evidence_finish_check(
                 _simpleos_evidence_check_failure("evidence-owner-state"))
         val same = _simpleos_evidence_roots_match_locked(roots)
+        if authoritative and not _simpleos_evidence_authoritative:
+            return _simpleos_evidence_finish_check(
+                _simpleos_evidence_check_failure("diagnostic-verifier-initialized"))
         if same:
             return _simpleos_evidence_finish_check(
                 SimpleOsCapabilityLedgerCheckV1(ok: true, reason: ""))
@@ -354,6 +396,7 @@ fn simpleos_evidence_verifier_start(
     _simpleos_evidence_trusted_key_ids = key_ids
     _simpleos_evidence_trusted_public_keys = public_keys
     _simpleos_evidence_initialized = true
+    _simpleos_evidence_authoritative = authoritative
     _simpleos_evidence_finish_check(
         SimpleOsCapabilityLedgerCheckV1(ok: true, reason: ""))
 
@@ -370,11 +413,32 @@ fn simpleos_evidence_pass_admission_available() -> bool:
     if not mutex_raw_lock(_SIMPLEOS_EVIDENCE_OWNER_MUTEX):
         return false
     val available = _simpleos_evidence_initialized
+        and _simpleos_evidence_authoritative
         and _simpleos_evidence_owner_state_valid_locked()
         and simpleos_evidence_all_admission_gates_admitted()
     _simpleos_evidence_finish_bool(available)
 
 fn simpleos_evidence_issue_challenge(
+    nonce: text,
+    now_unix_us: i64,
+    ttl_us: i64) -> SimpleOsEvidenceChallengeResultV1:
+    if _simpleos_evidence_authoritative:
+        return _simpleos_evidence_challenge_failure("caller-time-untrusted")
+    _simpleos_evidence_issue_challenge_checked(nonce, now_unix_us, ttl_us)
+
+fn simpleos_evidence_issue_challenge_authoritative(
+    nonce: text, ttl_us: i64) -> SimpleOsEvidenceChallengeResultV1:
+    if not _simpleos_evidence_authoritative:
+        return _simpleos_evidence_challenge_failure("authority-verifier-unavailable")
+    if ttl_us <= 0 or ttl_us >
+        SIMPLEOS_EVIDENCE_POLICY_MAX_CHALLENGE_TTL_US_V1:
+        return _simpleos_evidence_challenge_failure("challenge-time")
+    val time = simpleos_evidence_authority_time_v1()
+    if not time.ok:
+        return _simpleos_evidence_challenge_failure("authority:" + time.reason)
+    _simpleos_evidence_issue_challenge_checked(nonce, time.unix_us, ttl_us)
+
+fn _simpleos_evidence_issue_challenge_checked(
     nonce: text,
     now_unix_us: i64,
     ttl_us: i64) -> SimpleOsEvidenceChallengeResultV1:
@@ -514,6 +578,9 @@ fn _simpleos_evidence_verify_candidate_checked(
     if admission_gate_reason != "":
         return _simpleos_evidence_finish_verification(
             _simpleos_evidence_verification_failure(admission_gate_reason))
+    if not _simpleos_evidence_authoritative:
+        return _simpleos_evidence_finish_verification(
+            _simpleos_evidence_verification_failure("authority-verifier-unavailable"))
     val trusted_public_key = simpleos_evidence_bytes_copy(
         _simpleos_evidence_trusted_public_keys[signer_index])
     if not _simpleos_evidence_unlock_owner():
@@ -598,11 +665,40 @@ fn simpleos_evidence_verify_candidate(
     consumer: text,
     now_unix_us: i64
 ) -> SimpleOsEvidenceVerificationResultV1:
+    if _simpleos_evidence_authoritative:
+        return _simpleos_evidence_verification_failure("caller-time-untrusted")
     _simpleos_evidence_verify_candidate_checked(
         candidate, challenge, consumer, now_unix_us,
         _simpleos_evidence_check_failure("artifact-rehash-required"))
 
 fn simpleos_evidence_verify_candidate_with_snapshot(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    challenge: SimpleOsEvidenceChallengeV1,
+    consumer: text,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1,
+    now_unix_us: i64
+) -> SimpleOsEvidenceVerificationResultV1:
+    if _simpleos_evidence_authoritative:
+        return _simpleos_evidence_verification_failure("caller-time-untrusted")
+    _simpleos_evidence_verify_candidate_with_snapshot_checked(
+        candidate, challenge, consumer, snapshot, now_unix_us)
+
+fn simpleos_evidence_verify_candidate_with_snapshot_authoritative(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    challenge: SimpleOsEvidenceChallengeV1,
+    consumer: text,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1
+) -> SimpleOsEvidenceVerificationResultV1:
+    if not _simpleos_evidence_authoritative:
+        return _simpleos_evidence_verification_failure(
+            "authority-verifier-unavailable")
+    val time = simpleos_evidence_authority_time_v1()
+    if not time.ok:
+        return _simpleos_evidence_verification_failure("authority:" + time.reason)
+    _simpleos_evidence_verify_candidate_with_snapshot_checked(
+        candidate, challenge, consumer, snapshot, time.unix_us)
+
+fn _simpleos_evidence_verify_candidate_with_snapshot_checked(
     candidate: SimpleOsCapabilityLedgerCandidateV1,
     challenge: SimpleOsEvidenceChallengeV1,
     consumer: text,
@@ -615,10 +711,26 @@ fn simpleos_evidence_verify_candidate_with_snapshot(
             "candidate:" + candidate_check.reason)
     val snapshot_check = simpleos_evidence_artifact_snapshot_check(
         candidate, snapshot)
+    if snapshot_check.ok and _simpleos_evidence_authoritative:
+        val policy = simpleos_evidence_performance_policy_check_v1(
+            candidate, snapshot)
+        if not policy.ok:
+            return _simpleos_evidence_verification_failure(policy.reason)
     _simpleos_evidence_verify_candidate_checked(
         candidate, challenge, consumer, now_unix_us, snapshot_check)
 
 fn simpleos_evidence_row_admitted(row_key: text, now_unix_us: i64) -> bool:
+    if _simpleos_evidence_authoritative: return false
+    _simpleos_evidence_row_admitted_checked(row_key, now_unix_us)
+
+fn simpleos_evidence_row_admitted_authoritative(row_key: text) -> bool:
+    if not _simpleos_evidence_authoritative: return false
+    val time = simpleos_evidence_authority_time_v1()
+    if not time.ok: return false
+    _simpleos_evidence_row_admitted_checked(row_key, time.unix_us)
+
+fn _simpleos_evidence_row_admitted_checked(
+    row_key: text, now_unix_us: i64) -> bool:
     if row_key.len() == 0 or now_unix_us <= 0:
         return false
     if _simpleos_evidence_quarantined: return false
@@ -662,6 +774,39 @@ fn _simpleos_evidence_ledger_failure_locked(
         reason: reason)
 
 fn simpleos_evidence_consume_verified(
+    handle: SimpleOsVerifiedEvidenceHandleV1,
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    consumer: text,
+    now_unix_us: i64) -> SimpleOsCapabilityLedgerCommitResultV1:
+    if _simpleos_evidence_authoritative:
+        return _simpleos_evidence_authority_commit_failure(
+            "caller-time-untrusted")
+    _simpleos_evidence_consume_verified_checked(
+        handle, candidate, consumer, now_unix_us)
+
+fn simpleos_evidence_consume_verified_authoritative(
+    handle: SimpleOsVerifiedEvidenceHandleV1,
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    consumer: text
+) -> SimpleOsCapabilityLedgerCommitResultV1:
+    if not _simpleos_evidence_authoritative:
+        return _simpleos_evidence_authority_commit_failure(
+            "authority-verifier-unavailable")
+    val time = simpleos_evidence_authority_time_v1()
+    if not time.ok:
+        return _simpleos_evidence_authority_commit_failure(
+            "authority:" + time.reason)
+    _simpleos_evidence_consume_verified_checked(
+        handle, candidate, consumer, time.unix_us)
+
+fn _simpleos_evidence_authority_commit_failure(
+    reason: text) -> SimpleOsCapabilityLedgerCommitResultV1:
+    SimpleOsCapabilityLedgerCommitResultV1(
+        ok: false, ledger: simpleos_capability_ledger_v1(), ordered_keys: [],
+        failure: SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+        reason: reason)
+
+fn _simpleos_evidence_consume_verified_checked(
     handle: SimpleOsVerifiedEvidenceHandleV1,
     candidate: SimpleOsCapabilityLedgerCandidateV1,
     consumer: text,
@@ -741,6 +886,11 @@ fn simpleos_evidence_consume_verified(
             SimpleOsCapabilityLedgerFailure.AdmissionRequired,
             "verified-handle-candidate")
         return _simpleos_evidence_finish_commit(failed)
+    if not _simpleos_evidence_authoritative:
+        val failed = _simpleos_evidence_ledger_failure_locked(
+            SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+            "authority-verifier-unavailable")
+        return _simpleos_evidence_finish_commit(failed)
     val ledger_commit = simpleos_evidence_prepare_ledger_transition(
         _simpleos_evidence_ledger, candidate)
     if not ledger_commit.ok:
@@ -779,10 +929,15 @@ export SimpleOsEvidenceChallengeV1, SimpleOsVerifiedEvidenceHandleV1
 export SimpleOsEvidenceChallengeResultV1, SimpleOsEvidenceVerificationResultV1
 export simpleos_evidence_trust_roots_check
 export simpleos_evidence_verifier_start, simpleos_evidence_verifier_ready
+export simpleos_evidence_verifier_start_authoritative
 export simpleos_evidence_pass_admission_available
 export simpleos_evidence_issue_challenge, simpleos_evidence_verify_candidate
+export simpleos_evidence_issue_challenge_authoritative
 export simpleos_evidence_verify_candidate_with_snapshot
+export simpleos_evidence_verify_candidate_with_snapshot_authoritative
 export simpleos_evidence_consume_verified, simpleos_evidence_row_admitted
+export simpleos_evidence_consume_verified_authoritative
+export simpleos_evidence_row_admitted_authoritative
 export simpleos_evidence_ledger_snapshot
 export simpleos_evidence_owner_quarantined
 export SIMPLEOS_EVIDENCE_MAX_TRUSTED_SIGNERS

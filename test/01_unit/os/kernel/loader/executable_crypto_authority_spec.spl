@@ -11,6 +11,8 @@ use os.kernel.loader.artifact_manifest.{
 }
 use os.kernel.loader.executable_crypto_authority.{
     ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize,
+    executable_loader_trust_roots_boot_initialize_v1,
+    executable_loader_trust_roots_snapshot_v1,
     executable_manifest_signing_body_v1, executable_manifest_hash_v1,
     executable_loader_signature_authorized_v1
 }
@@ -43,11 +45,19 @@ fn manifest(image_hash: text) -> SimpleArtifactManifest:
     manifest_with_signature(entered, "ed25519:release-root", [image_hash])
 
 describe "loader-owned executable cryptographic authority":
-    it "accepts only the configured root and exact canonical admission body":
+    it "rejects a public first writer then accepts the boot root and exact body":
         val pair = pure_ed25519_keypair_from_seed(seed())
         expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(key_id: "attacker-root", public_key: [9u8; 32])
+        ])).to_equal(false)
+        expect(executable_loader_trust_roots_snapshot_v1().ok).to_equal(false)
+        expect(executable_loader_trust_roots_boot_initialize_v1([
             ExecutableTrustedSignerV1(key_id: "release-root", public_key: pair.1)
         ])).to_equal(true)
+        val installed = executable_loader_trust_roots_snapshot_v1()
+        expect(installed.ok).to_equal(true)
+        expect(installed.generation).to_equal(1u64)
+        expect(installed.roots[0].key_id).to_equal("release-root")
         val a = admission(sha256_u8_hex(pair.1))
         val m = manifest(a.image_hash)
         val body = executable_manifest_signing_body_v1(m, a, a.image_hash)
@@ -63,12 +73,19 @@ describe "loader-owned executable cryptographic authority":
 
     it "rejects conflicting trust-root reconfiguration and hashes canonical content":
         val pair = pure_ed25519_keypair_from_seed(seed())
-        expect(executable_loader_trust_roots_initialize([
+        expect(executable_loader_trust_roots_boot_initialize_v1([
             ExecutableTrustedSignerV1(key_id: "release-root", public_key: pair.1)
         ])).to_equal(true)
+        expect(executable_loader_trust_roots_boot_initialize_v1([
+            ExecutableTrustedSignerV1(key_id: "replacement", public_key: [9u8; 32])
+        ])).to_equal(false)
         expect(executable_loader_trust_roots_initialize([
             ExecutableTrustedSignerV1(key_id: "replacement", public_key: pair.1)
         ])).to_equal(false)
+        val installed = executable_loader_trust_roots_snapshot_v1()
+        expect(installed.ok).to_equal(true)
+        expect(installed.generation).to_equal(1u64)
+        expect(installed.roots[0].key_id).to_equal("release-root")
         val a = admission(sha256_u8_hex(pair.1))
         val m = manifest(a.image_hash)
         expect(executable_manifest_hash_v1(m, a, a.image_hash).len()).to_equal(64)
