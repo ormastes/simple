@@ -59,6 +59,11 @@ int64_t rt_thread_id(int64_t handle);
 void    rt_thread_free(int64_t handle);
 void    rt_thread_sleep(int64_t millis);
 void    rt_thread_yield(void);
+/* Raw scalar TLS. Unset/invalid reads return zero; handles are never reused. */
+int64_t rt_thread_local_new(void);
+int64_t rt_thread_local_get_i64(int64_t handle);
+void    rt_thread_local_set_i64(int64_t handle, int64_t value);
+void    rt_thread_local_free(int64_t handle);
 int64_t rt_pool_submit(int64_t fn_ptr, int64_t env_ptr);
 int64_t rt_pool_join(int64_t handle);
 int64_t rt_pool_is_done(int64_t handle);

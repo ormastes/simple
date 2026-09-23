@@ -275,45 +275,53 @@ run_measured_timeout() {
   measured_timeout=$2
   measured_grace=$3
   shift 3
-  if [ -n "$rss_time" ]; then
-    "$rss_time" -f '%M' -o "$metric_file" \
-      "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@"
-  elif [ "$rss_measurement" = proc-group-rss-kib ]; then
-    # The sampler must background the timeout wrapper, but a noninteractive
-    # POSIX shell otherwise replaces that asynchronous command's stdin with
-    # /dev/null. Snapshot the caller stream before `&`; the nested timeout
-    # wrapper then preserves the same stream for its session leader.
-    exec 4<&0
-    "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@" <&4 &
-    measured_pid=$!
-    exec 4<&-
-    peak_rss_kib=0
-    while kill -0 "$measured_pid" 2>/dev/null; do
-      measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
-        "/proc/$measured_pid/stat" 2>/dev/null || printf 'gone\n')
-      [ "$measured_state" != Z ] && [ "$measured_state" != gone ] || break
-      sample_rss_kib=$(proc_tree_rss_kib "$measured_pid" || printf '0\n')
-      case "$sample_rss_kib" in
-        [1-9][0-9]*)
-          [ "$sample_rss_kib" -le "$peak_rss_kib" ] || peak_rss_kib=$sample_rss_kib
-          ;;
-      esac
-      sleep 0.05
-    done
-    if wait "$measured_pid"; then measured_status=0; else measured_status=$?; fi
-    if [ "$peak_rss_kib" -gt 0 ]; then
-      printf '%s\n' "$peak_rss_kib" >"$metric_file"
-    else
-      printf 'unavailable\n' >"$metric_file"
-    fi
-    return "$measured_status"
-  else
-    printf 'unavailable\n' >"$metric_file"
-    "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@"
-  fi
+  case "$rss_time_style" in
+    gnu)
+      "$rss_time" -f '%M' -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    darwin|bsd-kib)
+      LC_ALL=C "$rss_time" -l -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    *)
+      if [ "$rss_measurement" = proc-group-rss-kib ]; then
+        # The sampler must background the timeout wrapper, but a noninteractive
+        # POSIX shell otherwise replaces that asynchronous command's stdin with
+        # /dev/null. Snapshot the caller stream before `&`; the nested timeout
+        # wrapper then preserves the same stream for its session leader.
+        exec 4<&0
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+          "$measured_timeout" "$measured_grace" "$@" <&4 &
+        measured_pid=$!
+        exec 4<&-
+        peak_rss_kib=0
+        while kill -0 "$measured_pid" 2>/dev/null; do
+          measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
+            "/proc/$measured_pid/stat" 2>/dev/null || printf 'gone\n')
+          [ "$measured_state" != Z ] && [ "$measured_state" != gone ] || break
+          sample_rss_kib=$(proc_tree_rss_kib "$measured_pid" || printf '0\n')
+          case "$sample_rss_kib" in
+            [1-9][0-9]*)
+              [ "$sample_rss_kib" -le "$peak_rss_kib" ] || peak_rss_kib=$sample_rss_kib
+              ;;
+          esac
+          sleep 0.05
+        done
+        if wait "$measured_pid"; then measured_status=0; else measured_status=$?; fi
+        if [ "$peak_rss_kib" -gt 0 ]; then
+          printf '%s\n' "$peak_rss_kib" >"$metric_file"
+        else
+          printf 'unavailable\n' >"$metric_file"
+        fi
+        return "$measured_status"
+      else
+        printf 'unavailable\n' >"$metric_file"
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+          "$measured_timeout" "$measured_grace" "$@"
+      fi
+      ;;
+  esac
 }
 
 read_max_rss_kib() {

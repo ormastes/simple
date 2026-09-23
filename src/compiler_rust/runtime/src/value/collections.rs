@@ -856,6 +856,47 @@ pub extern "C" fn rt_byte_array_new_len(len: u64) -> RuntimeValue {
     array
 }
 
+/// Second lane (rt-dual-implementation ratchet) of the C `rt_core_zero_array_alloc`
+/// static helper in `src/runtime/runtime_native.c`: allocate a typed Simple
+/// array and fill every slot with numeric zero (float zero when `floating`,
+/// int zero otherwise), mirroring the tagged-slot array ABI the C lane fills.
+fn rt_core_zero_array_alloc(len: i64, floating: bool) -> RuntimeValue {
+    let capacity = if len < 0 { 0 } else { len as u64 };
+    let array = rt_array_new(capacity);
+    if array.is_nil() {
+        return array;
+    }
+    for _ in 0..capacity {
+        let zero = if floating {
+            RuntimeValue::from_float(0.0)
+        } else {
+            RuntimeValue::from_int(0)
+        };
+        if !rt_array_push(array, zero) {
+            return RuntimeValue::NIL;
+        }
+    }
+    array
+}
+
+/// Second lane of the C `rt_f64_array_alloc` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_f64_array_alloc(len: i64) -> RuntimeValue {
+    rt_core_zero_array_alloc(len, true)
+}
+
+/// Second lane of the C `rt_f32_array_alloc` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_f32_array_alloc(len: i64) -> RuntimeValue {
+    rt_core_zero_array_alloc(len, true)
+}
+
+/// Second lane of the C `rt_i64_array_alloc` in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_i64_array_alloc(len: i64) -> RuntimeValue {
+    rt_core_zero_array_alloc(len, false)
+}
+
 /// Get the length of an array
 #[no_mangle]
 pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {

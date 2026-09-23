@@ -55,7 +55,7 @@ use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plu
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
-use std.nogc_sync_mut.io.http_sffi.{http_get}
+use std.nogc_sync_mut.io.http_get_core.{http_get_raw}
 use std.nogc_sync_mut.security.sanitize.{strip_html_tags}
 use std.common.math.special.{ln_f64}
 use std.common.perf.execution_metrics.{TerminationCause}
@@ -982,22 +982,22 @@ fn handle_simple_ctx_fetch_and_index(id: text, body: text) -> text:
     if source == "":
         source = "web:" + url
     val max_bytes = _ctx_int_param(body, "max_bytes", _CTX_FETCH_DEFAULT_MAX_BYTES, _CTX_FETCH_HARD_MAX_BYTES)
-    val resp = http_get(url)
-    if resp.status_code < 0 or resp.error != "":
-        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: transport error: " + resp.error)
-    if not resp.is_ok:
-        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: HTTP " + str(resp.status_code))
-    val (raw, capped) = ctx_cap_bytes(resp.body, max_bytes)
+    val (status_code, response_body, transport_error) = http_get_raw(url)
+    if status_code < 0 or transport_error != "":
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: transport error: " + transport_error)
+    if status_code < 200 or status_code >= 300:
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: HTTP " + str(status_code))
+    val (raw, capped) = ctx_cap_bytes(response_body, max_bytes)
     val plain = ctx_html_to_text(raw)
     val n = ctx_index_text(plain, source)
     if n < 0:
         return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: cannot write " + _ctx_chunks_path())
-    var msg = "Fetched " + url + ": " + str(resp.body.len()) + " byte(s)"
+    var msg = "Fetched " + url + ": " + str(response_body.len()) + " byte(s)"
     if capped:
         msg = msg + " (capped to " + str(max_bytes) + ")"
     msg = msg + ", " + str(plain.len()) + " byte(s) of text, " + str(n) + " chunk(s) under source '" + source + "'"
     _ctx_stats_bump("fetch_calls", 1)
-    tok_record(TOK_FEATURE_CTX, "simple_ctx_fetch_and_index", resp.body.len(), msg.len(), false)
+    tok_record(TOK_FEATURE_CTX, "simple_ctx_fetch_and_index", response_body.len(), msg.len(), false)
     make_tool_result(id, msg)
 
 # ---------------------------------------------------------------------------
