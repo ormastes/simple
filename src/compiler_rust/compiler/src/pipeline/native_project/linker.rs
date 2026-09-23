@@ -60,6 +60,47 @@ pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bo
         || stem == "ed25519_verify_helper"
 }
 
+fn wrap_elf32_multiboot(output: &Path, objcopy_bin: &str) -> Result<(), String> {
+    let file_name = output
+        .file_name()
+        .ok_or_else(|| format!("ELF32 multiboot output has no file name: {}", output.display()))?;
+    let mut intermediate_name = file_name.to_os_string();
+    intermediate_name.push(format!(".elf64-wrap.{}", std::process::id()));
+    let elf64 = output.with_file_name(intermediate_name);
+    if elf64.exists() {
+        return Err(format!(
+            "ELF32 multiboot intermediate already exists: {}",
+            elf64.display()
+        ));
+    }
+
+    std::fs::rename(output, &elf64)
+        .map_err(|e| format!("save ELF64 before requested ELF32 multiboot wrap: {e}"))?;
+    let objcopy = std::process::Command::new(objcopy_bin)
+        .args(["-O", "elf32-i386"])
+        .arg(&elf64)
+        .arg(output)
+        .output();
+    match objcopy {
+        Ok(result) if result.status.success() => std::fs::remove_file(&elf64)
+            .map_err(|e| format!("remove intermediate ELF64 after ELF32 multiboot wrap: {e}")),
+        result => {
+            let _ = std::fs::remove_file(output);
+            std::fs::rename(&elf64, output).map_err(|e| {
+                format!("ELF32 multiboot wrap failed and restoring ELF64 failed: {e}")
+            })?;
+            let detail = match result {
+                Ok(result) => format!("objcopy exited with {}", result.status),
+                Err(e) => format!("cannot run objcopy: {e}"),
+            };
+            Err(format!(
+                "requested ELF32 multiboot wrap failed ({detail}); preserved ELF64 at {}",
+                output.display()
+            ))
+        }
+    }
+}
+
 /// Translate a `SIMPLE_LINKER` value into the pair the C driver needs.
 ///
 /// Returns `(fuse_ld_name, probe_binary)`:
@@ -3002,8 +3043,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                 && (triple.contains("x86_64") || triple.contains("i686"))
                 && !boot_objects.is_empty()
             {
-                let elf64 = self.output.with_extension("elf64");
-                let _ = std::fs::rename(&self.output, &elf64);
                 let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]
                     .iter()
                     .find(|bin| {
@@ -3013,20 +3052,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                             .is_ok_and(|o| o.status.success())
                     })
                     .unwrap_or(&"objcopy");
-                let objcopy = std::process::Command::new(objcopy_bin)
-                    .args(["-O", "elf32-i386"])
-                    .arg(&elf64)
-                    .arg(&self.output)
-                    .output();
-                match objcopy {
-                    Ok(r) if r.status.success() => {
-                        let _ = std::fs::remove_file(&elf64);
-                    }
-                    _ => {
-                        let _ = std::fs::rename(&elf64, &self.output);
-                        eprintln!("WARNING: objcopy elf32 failed, keeping 64-bit ELF");
-                    }
-                }
+                wrap_elf32_multiboot(&self.output, objcopy_bin)?;
             }
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!(
@@ -3104,6 +3130,34 @@ mod linker_tests {
 
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_elf32_wrap_preserves_elf64_bytes_when_output_has_elf64_extension() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("kernel.elf64");
+        let failing_objcopy = temp.path().join("objcopy-fail");
+        let original = b"original-elf64-bytes\0\x7fELF";
+        std::fs::write(&output, original).unwrap();
+        std::fs::write(&failing_objcopy, "#!/bin/sh\nexit 9\n").unwrap();
+        let mut permissions = std::fs::metadata(&failing_objcopy).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&failing_objcopy, permissions).unwrap();
+
+        let error = wrap_elf32_multiboot(&output, failing_objcopy.to_str().unwrap()).unwrap_err();
+
+        assert!(error.contains("objcopy exited with exit status: 9"));
+        assert!(error.contains("preserved ELF64"));
+        assert_eq!(std::fs::read(&output).unwrap(), original);
+        let leftovers = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".elf64-wrap."))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
 
     #[test]
     fn linker_failure_diagnostics_preserve_both_streams() {
