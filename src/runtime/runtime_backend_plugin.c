@@ -234,12 +234,19 @@ int64_t spl_backend_plugin_batch_compile_v1(int64_t batch_handle,
     if (!batch || !mir || mir_len <= 0 || batch->finalized)
         return bridge_envelope(108, 0, NULL, 0, NULL, 0);
     simple_backend_compile_result_v1 module = {0};
+    simple_backend_owned_buffer_v1 diagnostic = {0};
     int32_t status = batch->vtable->compile_module(
         batch->provider_session, (simple_backend_slice_v1){mir, (uint64_t)mir_len}, &module);
+    /* Preserve the compile failure even if collecting its diagnostic fails.
+     * Successful modules keep the hot path free of extra provider calls. */
+    if (status) batch->vtable->diagnostics(batch->provider_session, &diagnostic);
     int64_t result = bridge_envelope(status, module.result_kind,
-        status ? NULL : module.payload.data, status ? 0 : module.payload.size, NULL, 0);
+        status ? NULL : module.payload.data, status ? 0 : module.payload.size,
+        diagnostic.data, diagnostic.size);
     if (module.payload.data)
         batch->vtable->release_buffer(batch->provider_session, module.payload);
+    if (diagnostic.data)
+        batch->vtable->release_buffer(batch->provider_session, diagnostic);
     return result;
 #endif
 }
@@ -257,7 +264,8 @@ int64_t spl_backend_plugin_batch_finalize_v1(int64_t batch_handle) {
     simple_backend_compile_result_v1 object = {0};
     simple_backend_owned_buffer_v1 diagnostic = {0};
     int32_t status = batch->vtable->finalize_object(batch->provider_session, &object);
-    if (!status) status = batch->vtable->diagnostics(batch->provider_session, &diagnostic);
+    int32_t diagnostic_status = batch->vtable->diagnostics(batch->provider_session, &diagnostic);
+    if (!status && diagnostic_status) status = diagnostic_status;
     int64_t result = bridge_envelope(status, object.result_kind,
         status ? NULL : object.payload.data, status ? 0 : object.payload.size,
         diagnostic.data, diagnostic.size);
