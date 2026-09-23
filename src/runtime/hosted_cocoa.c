@@ -435,6 +435,7 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
                         bitsPerPixel:32];
 
         if (!bmp || ![bmp bitmapData]) {
+            [bmp release];
             free(rgba);
             return false;
         }
@@ -442,11 +443,16 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
         NSImage *image = [[NSImage alloc]
             initWithSize:NSMakeSize((CGFloat)pw, (CGFloat)ph)];
         if (!image) {
+            [bmp release];
             free(rgba);
             return false;
         }
         [image addRepresentation:bmp];
         [wnd->ns_view setImage:image];
+        /* This translation unit uses manual reference counting. The image
+         * owns its representation and the view owns the displayed image. */
+        [bmp release];
+        [image release];
 
         free(rgba);
     }
