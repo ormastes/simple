@@ -1,0 +1,165 @@
+#!/bin/sh
+# Execute the real Linux outer runner with deterministic fake boundaries.
+# This is a runner-contract test; it does not claim native bootstrap success.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/source/scripts/resource" "$tmp/bin" "$tmp/runtime"
+cat >"$tmp/bin/uname" <<'EOF'
+#!/bin/sh
+echo Linux
+EOF
+cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
+#!/bin/sh
+timeout_seen=0
+for arg do case "$arg" in
+    --work-root=*) work=${arg#*=};;
+    --compiler-sha256=*) sha=${arg#*=};;
+    --timeout-seconds=900) timeout_seen=1;;
+esac; done
+[ "$timeout_seen" = 1 ] || exit 9
+mkdir -p "$work/outputs/compiler-tools/fixture"
+cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
+cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_test_runner"
+cli="$work/outputs/compiler-tools/fixture/simple_cli"
+runner="$work/outputs/compiler-tools/fixture/simple_test_runner"
+receipt="$work/outputs/compiler-tools/fixture/command-owners.env"
+cli_sha=$(sha256sum "$cli" | awk '{print $1}')
+runner_sha=$(sha256sum "$runner" | awk '{print $1}')
+{
+    echo schema=simple-bootstrap-command-owners-v3
+    echo status=frozen
+    echo phase=stage2
+    echo "compiler_cli_path=$cli"
+    echo "compiler_cli_sha256=$cli_sha"
+    echo "test_runner_path=$runner"
+    echo "test_runner_sha256=$runner_sha"
+} >"$receipt"
+receipt_sha=$(sha256sum "$receipt" | awk '{print $1}')
+if [ "$TEST_CASE" != receipt_missing ]; then
+    {
+        # These fields mirror the real bootstrap-phase-verification.shs
+        # base-phase summary; require_base_summary() in the outer runner
+        # requires exactly one of each.
+        echo "phase=stage2"
+        echo 'hash_policy=canonical'
+        echo "expected_compiler_sha256=${sha:-$cli_sha}"
+        echo "actual_compiler_sha256=${sha:-$cli_sha}"
+        echo 'task=compiler_cli_build|result=PASS|status=0'
+        echo 'task=test_runner_build|result=PASS|status=0'
+        echo 'terminal_failures=0'
+        echo 'overall=PASS'
+        echo "command_owner_receipt=$receipt"
+        if [ "$TEST_CASE" = receipt_hash ]; then
+            echo command_owner_receipt_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        else
+            echo "command_owner_receipt_sha256=$receipt_sha"
+        fi
+    } >"$work/summary.env"
+fi
+[ "$TEST_CASE" != tool_hash ] || echo mutation >>"$cli"
+EOF
+cat >"$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+cat >"$tmp/source/scripts/resource/run_capped.shs" <<'EOF'
+#!/bin/sh
+[ "${CAP_REQUIRE:-}" = 1 ] || exit 10
+exec "$@"
+EOF
+cat >"$tmp/tool" <<'EOF'
+#!/bin/sh
+case "$1" in
+run) echo 42;;
+native-build)
+    [ "$TEST_CASE" != stale ] || exit 0
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = --output ]; then shift; printf '#!/bin/sh\necho 42\n' >"$1"; chmod +x "$1"; break; fi
+        shift
+    done;;
+*)
+    case "$TEST_CASE" in
+        zero) echo 'Results: 0 total, 0 passed, 0 failed';;
+        missing) :;;
+        failed) echo 'Results: 2 total, 1 passed, 1 failed';;
+        skipped) echo 'Results: 2 total, 2 passed, 0 failed, 1 skipped';;
+        inconsistent) echo 'Results: 3 total, 2 passed, 0 failed';;
+        duplicate) printf 'Results: 0 total, 0 passed, 0 failed\nResults: 2 total, 2 passed, 0 failed\n';;
+        nonzero) echo 'Results: 2 total, 2 passed, 0 failed'; exit 7;;
+        timeout) exit 124;;
+        binding)
+            case " $* " in *" --assert-ran "*) ;; *) exit 8;; esac
+            for option in --no-cache --no-db --no-session-daemon --sequential; do
+                case " $* " in *" $option "*) ;; *) exit 8;; esac
+            done
+            [ "${SIMPLE_BINARY:-}" = "${0%/*}/simple_cli" ] || exit 8
+            [ "${SIMPLE_TEST_BINARY:-}" = "${0%/*}/simple_cli" ] || exit 8
+            echo 'Results: 2 total, 2 passed, 0 failed';;
+        *) echo 'Results: 2 total, 2 passed, 0 failed';;
+    esac;;
+esac
+EOF
+chmod +x "$tmp/tool" "$tmp/bin/uname" \
+    "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" \
+    "$tmp/source/scripts/resource/run_capped.shs"
+export TEST_TOOL="$tmp/tool" PATH="$tmp/bin:$PATH"
+failed=0
+checks=0
+for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout receipt_missing receipt_hash tool_hash; do
+    export TEST_CASE=$scenario
+    work="$tmp/$scenario"
+    mkdir -p "$work/post-phase2-fixture"
+    printf '#!/bin/sh\necho 42\n' >"$work/post-phase2-fixture/phase2-module-probe"
+    chmod +x "$work/post-phase2-fixture/phase2-module-probe"
+    status=0
+    sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
+        "--compiler=$tmp/tool" \
+        --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "--runtime-path=$tmp/runtime" "--work-root=$work" \
+        "--source-root=$tmp/source" >"$tmp/run.log" 2>&1 || status=$?
+    checks=$((checks + 1))
+    case "$scenario" in good|binding) expected=0;; *) expected=1;; esac
+    if { [ "$expected" = 0 ] && [ "$status" != 0 ]; } ||
+            { [ "$expected" = 1 ] && [ "$status" = 0 ]; }; then
+        echo "FAIL: $scenario unexpected status $status"
+        failed=$((failed + 1))
+    fi
+    if [ "$expected" = 1 ] && grep -qx 'overall=PASS' \
+            "$work/post-phase2-summary.env" 2>/dev/null; then
+        echo "FAIL: $scenario published PASS"
+        failed=$((failed + 1))
+    fi
+done
+# Invalid cap syntax must fail before the verifier can run.
+status=0
+export TEST_CASE=good
+SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX=32junkG \
+    sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
+        "--compiler=$tmp/tool" \
+        --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "--runtime-path=$tmp/runtime" "--work-root=$tmp/bad-cap" \
+        "--source-root=$tmp/source" >"$tmp/bad-cap.log" 2>&1 || status=$?
+checks=$((checks + 1))
+[ "$status" -ne 0 ] || { echo 'FAIL: malformed memory cap accepted'; failed=$((failed + 1)); }
+grep -q 'SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size' "$tmp/bad-cap.log" || {
+    echo 'FAIL: malformed memory cap did not reach the validation guard'
+    failed=$((failed + 1))
+}
+status=0
+SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX=00G \
+    sh "$root/scripts/bootstrap/run-linux-phase2-tests.shs" \
+        "--compiler=$tmp/tool" \
+        --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "--runtime-path=$tmp/runtime" "--work-root=$tmp/zero-cap" \
+        "--source-root=$tmp/source" >"$tmp/zero-cap.log" 2>&1 || status=$?
+checks=$((checks + 1))
+[ "$status" -ne 0 ] || { echo 'FAIL: zero memory cap accepted'; failed=$((failed + 1)); }
+grep -q 'SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size' "$tmp/zero-cap.log" || {
+    echo 'FAIL: zero memory cap did not reach the validation guard'
+    failed=$((failed + 1))
+}
+echo "$checks runner scenarios; $failed failures"
+[ "$failed" = 0 ]

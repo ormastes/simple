@@ -1954,7 +1954,15 @@ impl MirLowering:
             self.builder = b_set
             return receiver_local
 
-        if (method == "len" or method == "length") and args.len() == 0:
+        # Built-in collections implement Len.is_empty() as `self.len() == 0`.
+        # The native MIR path already has concrete runtime dispatch for len,
+        # but a resolved trait call to is_empty used to bypass that path and
+        # emit the trait declaration symbol directly.  That symbol is not a
+        # linked concrete function for built-in collection receivers.  Keep
+        # this route gated by `len_runtime_symbol_for_hir_type`: user-defined
+        # Len implementations (including explicit is_empty overrides) return
+        # an empty symbol and retain ordinary trait dispatch below.
+        if (method == "len" or method == "length" or method == "is_empty") and args.len() == 0:
             var len_symbol = ""
             if maybe_receiver_type_for_call != nil:
                 val found_receiver_type = maybe_receiver_type_for_call
@@ -1962,7 +1970,12 @@ impl MirLowering:
                     len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
             var receiver_local: LocalId = 0
             var receiver_lowered = false
-            if len_symbol == "":
+            # `rt_len` is an intentional recovery path only for unresolved
+            # len/length calls.  An unresolved user-defined `is_empty` must
+            # continue to its normal method-dispatch recovery below; unlike
+            # built-in collection calls it cannot be inferred from a generic
+            # runtime value.
+            if len_symbol == "" and method != "is_empty":
                 match resolution:
                     case Unresolved:
                         # Bug #137/#138 (follow-up): an untyped receiver (no HIR
@@ -2049,6 +2062,11 @@ impl MirLowering:
                 val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
                 self.builder = b_len
                 if val result_local = result:
+                    if method == "is_empty":
+                        var b_empty = self.builder
+                        val empty = b_empty.emit_binop(MirBinOp.Eq, mir_operand_copy(result_local), mir_operand_const_int(0), MirType.bool())
+                        self.builder = b_empty
+                        return empty
                     return result_local
                 return receiver_local
 
