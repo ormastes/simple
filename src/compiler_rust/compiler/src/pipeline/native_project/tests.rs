@@ -5051,6 +5051,89 @@ fn test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe() {
 }
 
 #[test]
+fn selective_alias_prefers_exact_owner_over_nested_same_named_wrapper() {
+    let owner = "compiler__loader__smf_mmap_native__native_munmap".to_string();
+    let wrapper = "compiler__loader__loader__smf_mmap_native__native_munmap".to_string();
+    let all_mangled = std::collections::HashMap::from([
+        ("native_munmap".to_string(), vec![wrapper, owner.clone()]),
+        (
+            "stderr_write".to_string(),
+            vec!["lib__nogc_sync_mut__io__stderr_ops__stderr_write".to_string()],
+        ),
+    ]);
+    let source = "use compiler.loader.smf_mmap_native.{native_munmap as owner_munmap}\n\
+                  use std.io.stderr_ops.{stderr_write}\n\
+                  fn native_munmap(address: i64, size: i64) -> bool:\n    owner_munmap(address, size)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(
+        &ast,
+        &all_mangled,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(use_map.get("owner_munmap"), Some(&owner));
+    let reduced_owner = "loader__owner__native_probe_value".to_string();
+    let reduced = std::collections::HashMap::from([(
+        "native_probe_value".to_string(),
+        vec![
+            "loader__loader__owner__native_probe_value".to_string(),
+            reduced_owner.clone(),
+        ],
+    )]);
+    let reduced_ast = simple_parser::Parser::new(
+        "use loader.owner.{native_probe_value as owner_probe_value}\n",
+    )
+    .parse()
+    .unwrap();
+    let reduced_use_map = super::imports::build_use_map_from_ast(
+        &reduced_ast,
+        &reduced,
+        &std::collections::HashMap::new(),
+    );
+    assert_eq!(reduced_use_map.get("owner_probe_value"), Some(&reduced_owner));
+    // The tier-inserted std/lib spelling has no exact path. Preserve its
+    // existing subsequence fallback while fixing the nested-owner collision.
+    assert_eq!(
+        use_map.get("stderr_write").map(String::as_str),
+        Some("lib__nogc_sync_mut__io__stderr_ops__stderr_write"),
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn selective_alias_nested_owner_archive_has_no_bare_alias_reference() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("test/fixtures/macos_alias_link");
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("libalias_probe.a");
+    NativeProjectBuilder::new(repo_root, archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            entry_closure: true,
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_root.clone())
+        .entry_file(source_root.join("main.spl"))
+        .build()
+        .unwrap();
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let stdout = String::from_utf8_lossy(&symbols.stdout);
+    assert!(stdout.contains("loader__owner__native_probe_value"));
+    assert!(stdout.contains("loader__loader__owner__native_probe_value"));
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "U _owner_probe_value" || line.trim() == "U owner_probe_value"),
+        "unresolved selective-import alias survived object emission:\n{stdout}"
+    );
+}
+
+#[test]
 fn test_build_use_map_glob_import_populates_symbol_entries() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");

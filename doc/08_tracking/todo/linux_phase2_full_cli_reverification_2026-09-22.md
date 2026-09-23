@@ -7,6 +7,22 @@ backend adapter, and executable-mapping receipt import providers) now has a
 focused regression, but the immutable admitted Phase 2 compiler still predates
 the remaining LLVM method and inference fixes.
 
+The 2026-09-23 cycle-3 rerun did not exercise these fixes: its source worktree
+was still at `8a637124600`, which lacks all four commits from PR #1340 and all
+four restored provider paths.  Its repeated 28-file result is therefore not a
+regression of the import patch.  The exhausted three-cycle full-matrix result
+must not be rerun until this patchset is integrated into the frozen Linux
+bootstrap source revision.
+
+The same retained cycle-3 log contains 15 method-resolution failures covered
+by `codex/phase2-cycle3-method-resolution-20260923`: one `str.char_count`, one
+`ord`, five scalar float (`floor`/`ceil`/`round`), one `Array.remove_at`, four
+`Array.write_span`, two `str.to_i64_opt`, and one erased-provider
+`source_to_addr` call.  Focused LLVM IR regressions and source compatibility
+changes cover those errors without rerunning the exhausted Phase 2 matrix.
+They remain pending immutable-capsule verification together with the import
+fixes above.
+
 Deferred verification:
 
 - Publish a new SHA-qualified Linux Phase 2 runtime capsule after rebuilding

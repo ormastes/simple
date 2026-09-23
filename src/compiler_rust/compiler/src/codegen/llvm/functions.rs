@@ -89,6 +89,22 @@ fn primitive_type_symbol_name(ty: crate::hir::TypeId) -> Option<&'static str> {
     })
 }
 
+/// The receiver-blind LLVM method table may use the collection helper only for
+/// an erased receiver. Exact/import user targets are resolved before this gate;
+/// owner suffix scans are deliberately excluded because they can capture an
+/// unrelated `Owner.set` and turn the method lookup into an O(calls×functions)
+/// walk.
+#[cfg(feature = "llvm")]
+fn uses_erased_collection_set_fallback(
+    receiver_ty: Option<crate::hir::TypeId>,
+    method: &str,
+    arg_count: usize,
+) -> bool {
+    method == "set"
+        && arg_count == 2
+        && matches!(receiver_ty, None | Some(crate::hir::TypeId::ANY))
+}
+
 #[cfg(feature = "llvm")]
 fn build_vreg_types(
     func: &MirFunction,
@@ -170,11 +186,19 @@ fn build_vreg_types(
                 MirInst::MethodCallStatic {
                     dest: Some(dest),
                     func_name,
-                    ..
+                    receiver,
+                    args,
                 } => {
                     if let Some(ty) = function_return_types.get(func_name.as_str()) {
                         if matches!(ty, &TypeId::F64 | &TypeId::F32) {
                             types_map.insert(*dest, *ty);
+                        }
+                    } else if args.is_empty() {
+                        let dotted = func_name.replace("_dot_", ".");
+                        if matches!(dotted.rsplit('.').next(), Some("floor" | "ceil" | "round")) {
+                            if let Some(ty @ (TypeId::F32 | TypeId::F64)) = types_map.get(receiver).copied() {
+                                types_map.insert(*dest, ty);
+                            }
                         }
                     }
                 }
@@ -2456,7 +2480,14 @@ impl LlvmBackend {
                     .or_else(|| resolved_direct.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                     .or_else(|| module.get_function(func_name))
                     .or_else(|| module.get_function(&dotted_direct));
-                if direct_func.is_some() && (func_name.contains('.') || func_name.contains("_dot_")) {
+                // `set` has an erased-collection runtime fallback below. A
+                // exact/import-mapped user method with this name is resolved
+                // before that fallback. Do not scan all module functions here:
+                // suffix discovery is both receiver-blind for Any and linear in
+                // module size on a hot codegen path.
+                if direct_func.is_some()
+                    && (func_name.contains('.') || func_name.contains("_dot_") || func_name == "set")
+                {
                     let mut all_args = vec![*receiver];
                     all_args.extend_from_slice(args);
                     let func = direct_func.unwrap();
@@ -2985,7 +3016,15 @@ impl LlvmBackend {
                     "get" => Some("rt_index_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
-                    "set" => Some("rt_collection_set"),
+                    // The name-only fallback is safe only for the exact Dict
+                    // method shape. User methods were considered above.
+                    "set" if uses_erased_collection_set_fallback(
+                        vreg_types.get(receiver).copied(),
+                        method,
+                        args.len(),
+                    ) && resolved_direct.is_none() => {
+                        Some("rt_collection_set")
+                    }
                     // Receiver-dispatched — see the matching arm in
                     // codegen/instr/closures_structs.rs. Name-keyed table with
                     // no receiver type, so `rt_dict_remove` here silently
@@ -3087,7 +3126,9 @@ impl LlvmBackend {
                         let mut val = self.get_vreg(arg, vreg_map)?;
                         // Membership needle must be boxed to match the tagged
                         // store; see build_wrap_membership_needle.
-                        if (rt_name == "rt_contains" && arg_idx == 1) || (rt_name == "rt_collection_set" && arg_idx > 0) {
+                        if (rt_name == "rt_contains" && arg_idx == 1)
+                            || (rt_name == "rt_collection_set" && arg_idx > 0)
+                        {
                             val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
                         }
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
@@ -3244,6 +3285,11 @@ impl LlvmBackend {
                         .or_else(|| module.get_function(&dotted_name));
                     let called_func = if let Some(func) = called_func {
                         Some(func)
+                    } else if func_name == "set" && resolved.is_some() {
+                        // An explicit cross-unit mapping is authoritative. Do
+                        // not let a local, receiver-blind `.set` suffix steal
+                        // it before the existing external declaration path.
+                        None
                     } else {
                         suffix_match()?
                     };
@@ -3894,6 +3940,18 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn erased_collection_set_fallback_is_exact_arity_and_any_only() {
+        // This control prevents one or many unrelated Owner.set symbols from
+        // changing erased Dict dispatch: user targets are resolved directly,
+        // never by a module-wide leaf-name scan.
+        assert!(uses_erased_collection_set_fallback(None, "set", 2));
+        assert!(uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "set", 2));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::I64), "set", 2));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "set", 1));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "push", 2));
+    }
+
+    #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let mut backend = LlvmBackend::new(target).unwrap();
@@ -4217,6 +4275,50 @@ mod tests {
             assert!(ir.contains(name), "missing {name}:\n{ir}");
         }
         backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_chained_float_rounding_preserves_vreg_type() {
+        for (ty, owner, separator, suffix) in [
+            (crate::hir::TypeId::F64, "f64", ".", "f64"),
+            (crate::hir::TypeId::F64, "f64", "_dot_", "f64"),
+            (crate::hir::TypeId::F32, "f32", ".", "f32"),
+            (crate::hir::TypeId::F32, "f32", "_dot_", "f32"),
+        ] {
+            let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+            let backend = LlvmBackend::new(target).unwrap();
+            backend.create_module(&format!("method_chained_{owner}_{separator}")).unwrap();
+            let mut func = MirFunction::new(
+                "probe".to_string(),
+                ty,
+                simple_parser::ast::Visibility::Public,
+            );
+            func.params.push(MirLocal {
+                name: "value".to_string(),
+                ty,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+            for (receiver, dest, method) in [
+                (VReg(0), VReg(1), "floor"),
+                (VReg(1), VReg(2), "ceil"),
+                (VReg(2), VReg(3), "round"),
+            ] {
+                func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                    dest: Some(dest),
+                    receiver,
+                    func_name: format!("{owner}{separator}{method}"),
+                    args: vec![],
+                });
+            }
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+            backend.compile_function(&func).unwrap();
+            let ir = backend.get_ir().unwrap();
+            for name in ["floor", "ceil", "round"] {
+                assert!(ir.contains(&format!("llvm.{name}.{suffix}")), "missing {name}:\n{ir}");
+            }
+            backend.verify().unwrap();
+        }
     }
 
     #[test]

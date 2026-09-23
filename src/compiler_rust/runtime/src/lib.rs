@@ -814,7 +814,7 @@ pub use value::{
 };
 
 // Re-export the seed-JIT lane flag for the driver (set around JIT main execution)
-pub use value::{rt_is_jit_runtime, rt_set_jit_runtime};
+pub use value::{rt_collection_set, rt_is_jit_runtime, rt_set_jit_runtime};
 
 // Re-export async runtime scheduler SFFI functions
 pub use async_runtime::{
@@ -910,6 +910,7 @@ pub use value::{
     rt_array_set_len_known_text,
     rt_array_set,
     rt_array_set_text,
+    rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
     rt_typed_words_u32_at,
