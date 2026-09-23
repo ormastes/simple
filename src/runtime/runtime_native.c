@@ -23,6 +23,7 @@
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
 #include "simple_gui_html_provider_abi_v1.h"
+#include "simple_gui_event_provider_abi_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2208,9 +2209,7 @@ static void rt_gui_html_refuse(const char *reason) {
     exit(70);
 }
 
-void rt_gui_present_html(int64_t tagged_html) {
-    RtCoreString *html = rt_core_as_string(tagged_html);
-    if (!html) rt_gui_html_refuse("invalid tagged text");
+static void rt_gui_html_load(void) {
 #if defined(_WIN32)
     rt_gui_html_refuse("dynamic HTML provider unsupported on this host");
 #else
@@ -2241,11 +2240,131 @@ void rt_gui_present_html(int64_t tagged_html) {
         }
         atomic_flag_clear_explicit(&rt_gui_html_init_lock, memory_order_release);
     }
+#endif
+}
+
+/* Event sessions are deliberately separate from the concurrent, standalone
+ * HTML v1 API. All session state is owned by the macOS main thread. */
+static bool rt_gui_event_active = false;
+static bool rt_gui_event_ready = false;
+/* Nonnegative = admitted standalone calls; -1 = exclusive event session.
+ * Reserve before provider admission, and release only after callbacks finish. */
+static atomic_int rt_gui_call_gate = ATOMIC_VAR_INIT(0);
+static _Thread_local bool rt_gui_event_in_callback = false;
+static int64_t (*rt_gui_event_poll)(uint8_t *, uint64_t, uint64_t) = NULL;
+static int64_t (*rt_gui_event_shutdown)(void) = NULL;
+static int64_t splc_utf8_valid_up_to(const uint8_t *bytes, int64_t length);
+
+static void rt_gui_event_owner(void) {
+#if defined(__APPLE__)
+    if (!pthread_main_np()) rt_gui_html_refuse("GUI session requires main thread");
+#else
+    rt_gui_html_refuse("GUI event sessions require macOS");
+#endif
+    if (rt_gui_event_in_callback) rt_gui_html_refuse("GUI callback reentry");
+}
+
+void rt_gui_present_html(int64_t tagged_html) {
+    if (rt_gui_event_in_callback) rt_gui_html_refuse("GUI callback reentry");
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+    int calls = atomic_load_explicit(&rt_gui_call_gate, memory_order_acquire);
+    do {
+        if (calls < 0 || calls == INT_MAX)
+            rt_gui_html_refuse("standalone HTML overlaps GUI session");
+    } while (!atomic_compare_exchange_weak_explicit(&rt_gui_call_gate, &calls,
+                calls + 1, memory_order_acq_rel, memory_order_acquire));
+    rt_gui_event_in_callback = true;
+    rt_gui_html_load();
     if (!rt_gui_html_library || !rt_gui_html_present ||
         rt_gui_html_present((const uint8_t *)html->data, html->len) != 1) {
         rt_gui_html_refuse("provider rejected frame");
     }
+    rt_gui_event_in_callback = false;
+    atomic_fetch_sub_explicit(&rt_gui_call_gate, 1, memory_order_release);
+}
+
+void rt_gui_begin_session(void) {
+    rt_gui_event_owner();
+    if (rt_gui_event_active) rt_gui_html_refuse("GUI session already active");
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&rt_gui_call_gate, &expected,
+                -1, memory_order_acq_rel, memory_order_acquire))
+        rt_gui_html_refuse("GUI session overlaps standalone HTML");
+    rt_gui_event_in_callback = true;
+    rt_gui_html_load();
+    rt_gui_event_in_callback = false;
+#if !defined(_WIN32)
+    if (!rt_gui_event_ready) {
+        union { void *symbol; int64_t (*call)(void); } version, shutdown;
+        union { void *symbol; int64_t (*call)(uint8_t *, uint64_t, uint64_t); } poll;
+        version.symbol = dlsym(rt_gui_html_library, "simple_gui_event_provider_abi_v1");
+        poll.symbol = dlsym(rt_gui_html_library, "simple_gui_poll_event_v1");
+        shutdown.symbol = dlsym(rt_gui_html_library, "simple_gui_shutdown_v1");
+        if (!version.call || !poll.call || !shutdown.call)
+            rt_gui_html_refuse("provider event capability missing");
+        rt_gui_event_in_callback = true;
+        int64_t abi = version.call();
+        rt_gui_event_in_callback = false;
+        if (abi != SIMPLE_GUI_EVENT_PROVIDER_ABI_VERSION_V1)
+            rt_gui_html_refuse("provider event ABI mismatch");
+        rt_gui_event_poll = poll.call;
+        rt_gui_event_shutdown = shutdown.call;
+        rt_gui_event_ready = true;
+    }
 #endif
+    rt_gui_event_active = true;
+}
+
+void rt_gui_session_present_html(int64_t tagged_html) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+    rt_gui_event_in_callback = true;
+    int64_t accepted = rt_gui_html_present((const uint8_t *)html->data, html->len);
+    rt_gui_event_in_callback = false;
+    if (accepted != 1) rt_gui_html_refuse("provider rejected frame");
+}
+
+int64_t rt_gui_poll_event(void) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    uint8_t packet[SIMPLE_GUI_EVENT_PACKET_CAPACITY_V1] = {0};
+    rt_gui_event_in_callback = true;
+    int64_t count = rt_gui_event_poll(packet, sizeof(packet), SIMPLE_GUI_EVENT_WAIT_MS_V1);
+    rt_gui_event_in_callback = false;
+    if (count < 0 || count > (int64_t)sizeof(packet))
+        rt_gui_html_refuse("provider event length invalid");
+    if (count == 0) {
+        int64_t empty = rt_string_new_literal((const uint8_t *)"", 0);
+        if (!rt_core_as_string(empty)) rt_gui_html_refuse("event text allocation failed");
+        return empty;
+    }
+    int64_t delimiter = 0;
+    while (delimiter < count && packet[delimiter] != '\n') {
+        uint8_t byte = packet[delimiter];
+        if (delimiter >= 31 || !((byte >= 'a' && byte <= 'z') || byte == '-'))
+            rt_gui_html_refuse("provider event kind invalid");
+        delimiter++;
+    }
+    if (delimiter == 0 || delimiter == count || memchr(packet, 0, (size_t)count) ||
+        splc_utf8_valid_up_to(packet, count) != count)
+        rt_gui_html_refuse("provider event packet invalid");
+    int64_t copied = rt_string_new(packet, (uint64_t)count);
+    if (!rt_core_as_string(copied)) rt_gui_html_refuse("event text allocation failed");
+    return copied;
+}
+
+void rt_gui_end_session(void) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    rt_gui_event_active = false;
+    rt_gui_event_in_callback = true;
+    int64_t closed = rt_gui_event_shutdown();
+    rt_gui_event_in_callback = false;
+    if (closed != 1) rt_gui_html_refuse("provider shutdown failed");
+    atomic_store_explicit(&rt_gui_call_gate, 0, memory_order_release);
 }
 
 static atomic_bool rt_core_invalid_array_reported = ATOMIC_VAR_INIT(false);

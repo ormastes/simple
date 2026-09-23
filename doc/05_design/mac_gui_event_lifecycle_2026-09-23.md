@@ -45,8 +45,11 @@ embedded NUL, invalid UTF-8, and malformed kinds are rejected before Simple
 receives the packet. The runtime copies accepted bytes into registered Simple
 text; no foreign allocation or Objective-C pointer crosses the boundary.
 
-One main-thread session owns provider UI state. Existing stand-alone HTML v1
-callers must not overlap the session API. Provider callbacks must not reenter
+One main-thread session owns provider UI state. An atomic admission gate counts
+in-flight standalone HTML calls or reserves one exclusive session. Overlap in
+either direction fails before provider work; the gate stays reserved through
+shutdown. Standalone HTML v1 calls may remain concurrent with each other.
+Provider callbacks must not reenter
 runtime GUI entrypoints. Shutdown removes observers/callbacks, closes owned
 windows, and releases their state before success. The dylib remains loaded for
 process lifetime, avoiding unload races with AppKit/WebKit deferred work.
@@ -61,6 +64,8 @@ wait budget and must wait for input or its expiry when idle, while pumping the
 main run loop. They must bound queued events and must not drop a close request
 under pressure. These provider bounds require live-provider verification;
 an in-process ABI cannot preempt a misbehaving provider callback.
+The existing caller renders before every poll, including idle polls; this
+change does not claim redraw-on-change or measured low idle CPU.
 
 ## Focused evidence plan
 
