@@ -1847,7 +1847,18 @@ bootstrap_stage_sanity() (
   candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
   frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
-  CANDIDATE_FRONTEND_BACKEND="${backend}" \
+  # The smoke exercises the FRONTEND through whichever worker binary the lane
+  # admits. When the Rust seed was built without the llvm cargo feature (the
+  # decoupled lane: SIMPLE_BOOTSTRAP_RUST_LLVM=0, LLVM served to the
+  # pure-Simple backends via LLVM-C.dll), the seed-side worker cannot honour
+  # --backend llvm, so the smoke drives it with cranelift. The llvm backend
+  # admission itself is the K1 composition gate downstream, unaffected here.
+  if [ "${llvm_features}" = "" ]; then
+    frontend_smoke_backend=cranelift
+  else
+    frontend_smoke_backend=${backend}
+  fi
+  CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
     CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
@@ -1864,7 +1875,7 @@ bootstrap_stage_sanity() (
   frontend_bootstrap_ran=false
   if [ "${frontend_status}" -eq 0 ]; then
     frontend_bootstrap_ran=true
-    CANDIDATE_FRONTEND_BACKEND="${backend}" \
+    CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
       CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
@@ -2160,7 +2171,18 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
-    llvm_features="--features llvm"
+    # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
+    # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
+    # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
+    # set SIMPLE_BOOTSTRAP_RUST_LLVM=0 to keep LLVM for the pure-Simple
+    # backends and build the seed without the llvm feature (the seed does not
+    # need it to drive the bootstrap).
+    if [ "${SIMPLE_BOOTSTRAP_RUST_LLVM:-1}" = "1" ]; then
+      llvm_features="--features llvm"
+    else
+      llvm_features=""
+      echo "LLVM ${LLVM_VERSION} reserved for the pure-Simple backends (SIMPLE_BOOTSTRAP_RUST_LLVM=0; Rust seed builds without the llvm feature)"
+    fi
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
       brew_prefix="$(brew --prefix 2>/dev/null || true)"
@@ -2592,10 +2614,17 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-driver ${llvm_features}
+  # spl_hosted_runtime is selected alongside simple-native-all because the
+  # authority tuple freezes deps/libspl_hosted_runtime-*.rlib: cargo < 1.100
+  # left it in deps/ as a byproduct of these invocations, but the cargo >=
+  # 1.100 build-dir layout only materializes artifacts of SELECTED packages,
+  # so the hosted rlib must be selected explicitly or the publish step has
+  # nothing to freeze. Same features as the simple-compiler dependency
+  # (win32-real on Windows), so feature unification is unchanged.
   run_rust_authority_cargo rust-native-all-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-native-all ${llvm_features}
+    --target "${PLATFORM}" -p simple-native-all -p spl_hosted_runtime ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
@@ -3153,6 +3182,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
       --cache-dir "${stage2_cache_absolute}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"
@@ -3228,6 +3258,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --runtime-path "${stage_runtime_absolute}" \
       --entry src/app/cli/bootstrap_main.spl -o "${stage3_bin}"
   )
@@ -3246,6 +3277,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_run_stage2_native() {
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
+      "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
+      "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
       "LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -3324,6 +3357,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${native_verbose_arg} \
     ${stage2_timeout_args} \
     --cache-dir "${stage2_cache_absolute}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \

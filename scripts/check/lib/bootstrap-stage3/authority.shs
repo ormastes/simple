@@ -503,7 +503,7 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # LLVM object stage returned 'llc not found' -- which surfaced only as
     # 'backend object-path status 1'. The mechanism already existed; it just
     # could not see its own configuration.
-    printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *apple-darwin*)
             printf ' %s' 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION'
@@ -1968,6 +1968,59 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 bootstrap_stage3_llvm_msvc_found=$(
                     bootstrap_stage3_llvm_msvc_find_lib                         "$bootstrap_stage3_llvm_system_token"                         "$bootstrap_stage3_llvm_libdir"
                 )
+                if [ -z "$bootstrap_stage3_llvm_msvc_found" ]; then
+                    # GNU toolchains keep the same system libraries as
+                    # lib<name>.a in the compiler driver search path (MinGW
+                    # resolves psapi.lib to libpsapi.a). Bind the exact
+                    # archive the linker will select, so the record names
+                    # what actually linked -- the same guarantee as the
+                    # MSVC/LIB branch, for hosts without an MSVC SDK.
+                    bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
+                    bootstrap_stage3_llvm_gnu_resolved=$(gcc -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    case "$bootstrap_stage3_llvm_gnu_resolved" in
+                        /*|[A-Za-z]:[\\/]*)
+                            # gcc answers with a native Windows path, which
+                            # the MSYS filesystem tests cannot see; convert
+                            # before testing and before recording.
+                            bootstrap_stage3_llvm_gnu_unix=$(cygpath -u "$bootstrap_stage3_llvm_gnu_resolved" 2>/dev/null || printf '%s' "$bootstrap_stage3_llvm_gnu_resolved")
+                            [ -f "$bootstrap_stage3_llvm_gnu_unix" ] &&
+                                bootstrap_stage3_llvm_msvc_found=$bootstrap_stage3_llvm_gnu_unix
+                            ;;
+                    esac
+                fi
+                if [ -z "$bootstrap_stage3_llvm_msvc_found" ]; then
+                    # A token nobody provides may be statically absorbed into
+                    # the runtime library itself: LLVM 18 links libxml2 in,
+                    # yet llvm-config --system-libs still names libxml2s.lib
+                    # for static consumers. Prove absorption from the runtime
+                    # library's import table -- when no DLL carrying the base
+                    # name is imported, the runtime is self-contained for this
+                    # token and a dynamic link cannot miss it.
+                    bootstrap_stage3_llvm_absorb_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
+                    bootstrap_stage3_llvm_absorb_dll=$(printf '%s' "$bootstrap_stage3_llvm_absorb_base" | sed 's/s$//')
+                    # LLVM-C.dll sits in bin/ on Windows, while libdir names
+                    # the static-library directory; check both spellings.
+                    bootstrap_stage3_llvm_runtime_dll=
+                    for bootstrap_stage3_llvm_rt_candidate in \
+                        "$bootstrap_stage3_llvm_libdir/LLVM-C.dll" \
+                        "$bootstrap_stage3_llvm_libdir/../bin/LLVM-C.dll"; do
+                        if [ -f "$bootstrap_stage3_llvm_rt_candidate" ]; then
+                            bootstrap_stage3_llvm_runtime_dll=$bootstrap_stage3_llvm_rt_candidate
+                            break
+                        fi
+                    done
+                    bootstrap_stage3_llvm_imports=
+                    if [ -f "$bootstrap_stage3_llvm_runtime_dll" ] &&
+                        command -v objdump >/dev/null 2>&1 &&
+                        bootstrap_stage3_llvm_imports=$(objdump -p "$bootstrap_stage3_llvm_runtime_dll" 2>/dev/null) &&
+                        printf '%s\n' "$bootstrap_stage3_llvm_imports" | grep -q 'DLL Name:' &&
+                        ! printf '%s\n' "$bootstrap_stage3_llvm_imports" |
+                            grep -qi "DLL Name: ${bootstrap_stage3_llvm_absorb_dll}[-0-9]*\.dll"; then
+                        printf 'llvm-system-lib-%s-absorbed-by-runtime=%s\n' \
+                            "$bootstrap_stage3_llvm_key" "$bootstrap_stage3_llvm_absorb_base"
+                        continue
+                    fi
+                fi
                 [ -n "$bootstrap_stage3_llvm_msvc_found" ] || {
                     echo "llvm authority: llvm-config --system-libs named '${bootstrap_stage3_llvm_system_token}', which is in neither the LLVM libdir (${bootstrap_stage3_llvm_libdir}) nor any LIB entry; is the MSVC environment set?" >&2
                     return 1
@@ -3956,6 +4009,9 @@ public static class Stage3MaterializedConsumer {
 
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    // Submodule gitlink paths (160000 commit) recorded by HeadLinks; AuditTree
+    // never descends into them, so their nested .git is not a violation.
+    static readonly HashSet<string> Gitlinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // Callers may tighten budgets, never increase the admitted ceilings.
     // Shared by HEAD and the physical walk: 137461 + 176143 entries at the
     // admitted source state. 400000 leaves bounded growth without bypassing
@@ -3965,8 +4021,13 @@ public static class Stage3MaterializedConsumer {
     // its previous per-list ceiling and handle-retention bound.
     const int MaxUntracked = 100000;
     const int MaxOutput = 16 * 1024 * 1024;
+    // The tracked HEAD diff is hashed, never parsed, and on a dirty tree with
+    // rebuilt binaries it far exceeds any memory buffer (a full-index binary
+    // diff of a ~100 MB seed is ~130 MB). Stream it through the hasher; this
+    // bound is a runaway guard only, not a buffer size.
+    static readonly long MaxDiffBytes = (long)Budget("BOOTSTRAP_STAGE3_GIT_MAX_DIFF_BYTES", 1024UL * 1024 * 1024);
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
-    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 28000);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
     static ulong bytes;
     static int entries;
     static System.Diagnostics.Process ActiveChild;
@@ -4035,6 +4096,54 @@ public static class Stage3MaterializedConsumer {
         var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
         all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
     }
+    // The tracked HEAD diff can exceed any memory buffer on a dirty tree
+    // (rebuilt seed binaries produce 100+ MB full-index binary diffs); only
+    // its digest is consumed downstream, so stream stdout through SHA-256
+    // instead of buffering. The digest still binds Git's exact diff bytes;
+    // stderr stays bounded and stdin closes immediately.
+    static string GitHash(string root, params string[] args) {
+        var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
+        all.AddRange(args);
+        Tick(); var start = new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("STAGE3_GIT"));
+        start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true;
+        start.RedirectStandardOutput = true; start.RedirectStandardError = true; start.RedirectStandardInput = true;
+        start.EnvironmentVariables["GIT_OPTIONAL_LOCKS"] = "0";
+        start.EnvironmentVariables["LC_ALL"] = "C";
+        start.EnvironmentVariables["GIT_CONFIG_NOSYSTEM"] = "1";
+        var argv = new List<string>(); foreach (string arg in all) argv.Add(Quote(arg));
+        start.Arguments = String.Join(" ", argv.ToArray());
+        using (var process = System.Diagnostics.Process.Start(start)) {
+            ActiveChild = process;
+            try {
+                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => {
+                    var hasher = System.Security.Cryptography.SHA256.Create();
+                    var buffer = new byte[65536]; int n; long total = 0;
+                    while ((n = process.StandardOutput.BaseStream.Read(buffer, 0, buffer.Length)) > 0) {
+                        if ((total += n) > MaxDiffBytes) throw new IOException("bound.command-output");
+                        hasher.TransformBlock(buffer, 0, n, null, 0);
+                    }
+                    hasher.TransformFinalBlock(new byte[0], 0, 0);
+                    return Hex(hasher.Hash);
+                });
+                var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
+                var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { process.StandardInput.Close(); });
+                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
+                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
+                return stdout.Result;
+            } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
+        }
+    }
+    // git check-ignore exits 0 when the path IS ignored (printing it) and 1
+    // when it is not; Command surfaces the non-zero exit as an IOException,
+    // so "failed:1" is the not-ignored answer and anything else still fails.
+    static bool IsGitIgnored(string root, string relative) {
+        try { Git(root, "check-ignore", "--", relative); return true; }
+        catch (IOException e) {
+            if (e.Message != null && e.Message.StartsWith("command.failed:1")) return false;
+            throw;
+        }
+    }
     static string[] Nul(byte[] b) {
         string s = Text(b); if (s.Length == 0) return new string[0];
         if (!s.EndsWith("\0")) throw new IOException("git.nul-format");
@@ -4049,7 +4158,10 @@ public static class Stage3MaterializedConsumer {
         var links = new Dictionary<string,string>(StringComparer.Ordinal);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var components = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "--full-tree", head))) {
+        // -r recurses so links at every depth are seen; without it only root
+        // children are listed and the receipt row count check below can never
+        // match a real checkout (all 66 materialized links live below root).
+        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
             if (++entries > MaxEntries) throw new IOException("bound.entries");
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
@@ -4220,7 +4332,7 @@ public static class Stage3MaterializedConsumer {
         }
     }
     static string Inventory(string root, string head, Dictionary<string,string> aliases) {
-        byte[] diff = Git(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
+        string diff_sha = GitHash(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
         var args = new List<string>(new string[] {"ls-files", "--others", "--exclude-standard", "-z", "--", "."});
         var collapsed = new List<string>();
         foreach (var pair in aliases) if (pair.Value == "directory") collapsed.Add(pair.Key);
@@ -4240,7 +4352,7 @@ public static class Stage3MaterializedConsumer {
         }
         byte[] flags = Command(root, Environment.GetEnvironmentVariable("STAGE3_SH"), Utf8.GetBytes(paths.Length == 0 ? "" : String.Join("\0", paths) + "\0"), "-c", "while IFS= read -r -d '' p; do if test -x \"$p\"; then printf 1; else printf 0; fi; done");
         if (flags.Length != paths.Length) throw new IOException("untracked.mode-count");
-        var records = new StringBuilder("tracked-diff-sha256=" + Hash(diff) + "\n");
+        var records = new StringBuilder("tracked-diff-sha256=" + diff_sha + "\n");
         var held = new List<SafeFileHandle>();
         try {
             for (int n=0; n<paths.Length; n++) {
@@ -4470,7 +4582,11 @@ bootstrap_stage3_materialized_git_state() (
     STAGE3_GIT=$(cygpath -aw "$(command -v git)") || exit 1
     STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe) || exit 1
     export STAGE3_ROOT STAGE3_ROOT_B64 STAGE3_RECEIPT STAGE3_RESULT STAGE3_OUTPUT STAGE3_GIT STAGE3_SH
-    /usr/bin/timeout -k 2s 30s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
+    # full-checkout measurement) must win the race against this outer kill:
+    # a too-tight timeout here reports a healthy, still-walking consumer as a
+    # generic bind failure.
+    /usr/bin/timeout -k 2s 330s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
 )
 
 bootstrap_stage3_git_state() {
