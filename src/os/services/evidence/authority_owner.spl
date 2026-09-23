@@ -13,7 +13,7 @@ use os.services.evidence.trusted_signer.{SimpleOsTrustedEvidenceSignerV1}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use os.services.evidence.authority_clock_transition.{
     simpleos_evidence_clock_transition_v1,
-    simpleos_evidence_authority_lock_outcome_v1
+    simpleos_evidence_unlock_requires_quarantine_write_v1
 }
 
 @unsafe(reason: "canonical wall-clock owner with typed negative failure", capabilities: [ffi])
@@ -55,11 +55,13 @@ fn _copy_root(root: ExecutableTrustedSignerV1) -> SimpleOsTrustedEvidenceSignerV
     SimpleOsTrustedEvidenceSignerV1(key_id: root.key_id, public_key: key)
 
 fn _unlock(ok: bool) -> bool:
+    val quarantined_before_unlock = _authority_quarantined
     val unlocked = mutex_raw_unlock(_AUTHORITY_MUTEX)
-    val outcome = simpleos_evidence_authority_lock_outcome_v1(
-        true, unlocked, _authority_quarantined)
-    _authority_quarantined = outcome.quarantined
-    ok and outcome.authoritative
+    # Successful unlock performs no state write: it cannot erase a quarantine
+    # published by the next lock owner. Unlock failure is monotonic quarantine.
+    if simpleos_evidence_unlock_requires_quarantine_write_v1(unlocked):
+        _authority_quarantined = true
+    ok and unlocked and not quarantined_before_unlock
 
 pub fn simpleos_evidence_authority_start_v1(
 ) -> SimpleOsEvidenceAuthorityStatusV1:

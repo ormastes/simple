@@ -29,10 +29,10 @@ is structural behavior only—not release evidence—while
 `SIMPLEOS_EVIDENCE_SERIALIZED_OWNER_ADMITTED` remains `false` pending an
 authoritative self-hosted concurrent execution verdict.
 
-Trust-root initialization is currently a structural first-writer mutex model,
-not a privileged boot/configuration authority. Performance campaign policy is
-also still supplied as copyable values, and freshness is caller-timestamped
-rather than read from a canonical time owner. Their independent
+Trust-root initialization is now boot-adapter-owned; the public compatibility
+entrypoint is assertion-only and cannot become a structural first writer.
+Performance policy is checked by an immutable service-local catalog and
+freshness is sampled by the serialized authority clock. Their independent
 `SIMPLEOS_EVIDENCE_TRUST_ROOT_OWNER_ADMITTED` and
 `SIMPLEOS_EVIDENCE_POLICY_OWNER_ADMITTED` and
 `SIMPLEOS_EVIDENCE_TIME_OWNER_ADMITTED` gates therefore remain false; merely enabling
@@ -42,8 +42,7 @@ The ledger therefore rejects every `PASS` promotion; complete `BLOCKED` rows
 remain usable.
 
 Closure requires authoritative self-hosted concurrent execution evidence for
-the mutex owner, a privileged immutable boot trust-root/configuration owner, a
-service-owned performance campaign policy, plus executable Ed25519 KAT and native constant-work evidence over
+the mutex owner and executable Ed25519 KAT and native constant-work evidence over
 `encode_simpleos_evidence_receipt_v1_signing_bytes`; authoritative capture-owner
 delivery of the bounded byte snapshots and freshness time; plus concurrent
 forgery, replay, key-revocation, failed-step, and restart tests.
@@ -69,8 +68,8 @@ legacy roots parameter is only an exact assertion and cannot select authority.
 Partial initialization, root-generation change, clock failure, rollback, lock
 failure, and unlock failure reject the operation.
 
-This deliberately does not admit any release gate. The loader's public
-first-writer initializer is not yet privileged, so trust/policy/time stay false
+This deliberately does not admit any release gate. The loader's package-owned
+boot trust-root installation is privileged, while trust/policy/time stay false
 and the first blocker remains `trust-root-owner-unavailable`; crypto and
 serialization also remain false. The verifier now has root-free and time-free
 authority entrypoints. Its legacy caller-root/time entrypoints remain
