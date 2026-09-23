@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-phase-toolchain.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/phase-unix-toolchain.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+mkdir "$work/bin"
+for name in clang clang++ gcc g++; do
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s" >>"$PHASE_DRIVER_LOG"\n' "$name" >"$work/bin/$name"
+    chmod +x "$work/bin/$name"
+done
+PHASE_DRIVER_LOG=$work/drivers.log
+PATH="$work/bin:$PATH"
+export PHASE_DRIVER_LOG PATH
+unset CC CXX
+run_direct() { "$@"; }
+probe() {
+    [ "$CC" = "$work/bin/clang" ] && [ "$CXX" = "$work/bin/clang++" ] || return 1
+    [ "$#" = 3 ] && [ "$1" = native-build ] && [ "$2" = --target ] && [ "$3" = aarch64-unknown-linux-gnu ] || return 1
+    "$CC"
+    "$CXX"
+}
+for host in Linux Darwin FreeBSD SimpleOS; do
+    (uname() { printf '%s\n' "$host"; }; bootstrap_phase_run_command run_direct probe native-build --target aarch64-unknown-linux-gnu)
+done
+[ "$(grep -c '^clang$' "$PHASE_DRIVER_LOG")" = 4 ]
+[ "$(grep -c '^clang++$' "$PHASE_DRIVER_LOG")" = 4 ]
+! grep -Eq '^g(cc|\+\+)$' "$PHASE_DRIVER_LOG"
+[ "${CC-unset}" = unset ] && [ "${CXX-unset}" = unset ]
+for bad in gcc g++ cl.exe; do
+    (
+        uname() { echo Linux; }
+        CXX=$bad
+        export CXX
+        if bootstrap_phase_run_command run_direct probe native-build >"$work/reject.log" 2>&1; then
+            echo 'FAIL: accepted non-clang CXX'; exit 1
+        fi
+        grep -q '^bootstrap-phase-toolchain: Unix phase C++ compiler must be clang++$' "$work/reject.log"
+    )
+done
+echo 'PASS: Unix native-build binds clang/clang++ and rejects GCC CXX overrides'
