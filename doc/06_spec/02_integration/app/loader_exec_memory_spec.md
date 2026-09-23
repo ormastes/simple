@@ -13,7 +13,7 @@ part of verification.
 |---|---|---|
 | copies real bytes into a loader-owned mapping | All supported hosts | Positive address, four bytes written at offset 64, exact readback, successful release |
 | rejects invalid sizes and function addresses deterministically | All supported hosts | Zero and negative sizes rejected, null call returns the expected error, null release rejected |
-| seals and executes an x86_64 function through the production loader | x86_64 only | Writable allocation, six bytes written, successful executable transition, `Ok(42)`, successful release |
+| seals and executes an x86_64 function through the production loader | x86_64 only | Writable allocation, six bytes written and read back, successful executable transition, `Ok(42)`, successful release |
 
 ## Copy bytes into a real mapping
 
@@ -36,9 +36,12 @@ allocations may legitimately succeed on operating systems with overcommit.
 ## Execute an x86_64 function
 
 1. Allocate a writable mapping and copy `mov eax, 42; ret` into it.
-2. Change the mapping to executable through `native_make_executable`.
-3. Call the mapped entry point through the production Result-returning API.
-4. Release the mapping, then require `Ok(42)` and successful release.
+2. Read back all six bytes; do not execute if the write was incomplete or the
+   bytes differ.
+3. Change the mapping to executable through `native_make_executable`; do not
+   call the entry point if the transition fails.
+4. Call the mapped entry point through the production Result-returning API.
+5. Release the mapping, then require `Ok(42)` and successful release.
 
 This no-argument code works with the x86_64 Windows and POSIX calling
 conventions. Other architectures register only the two architecture-independent
