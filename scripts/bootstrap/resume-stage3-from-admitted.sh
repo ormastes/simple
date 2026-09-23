@@ -20,6 +20,9 @@ source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
 bootstrap_resume_verdict_written=0
 bootstrap_resume_stage=init
 bootstrap_resume_log=
+bootstrap_resume_release_lock=1
+stage3_guard_unit=
+stage3_guard_evidence=
 bootstrap_resume_verdict() {
   bootstrap_resume_verdict_written=1
   line="VERDICT — $1"
@@ -31,10 +34,26 @@ bootstrap_resume_verdict() {
 bootstrap_resume_trap() {
   status=$?
   sig=${1:-none}
+  if [ "$sig" != none ]; then
+    trap - HUP INT TERM
+    case "$sig" in HUP) status=129 ;; INT) status=130 ;; TERM) status=143 ;; esac
+    if [ -n "${stage3_guard_unit:-}" ]; then
+      bootstrap_stage3_memory_signal_cleanup "$stage3_guard_unit" \
+        "$stage3_guard_evidence" "${lock:-}" || true
+      # The helper either removed the lock after verified shutdown or retained
+      # it on failure. Never let the generic EXIT path override that decision.
+      bootstrap_resume_release_lock=0
+    fi
+  fi
   if [ "${bootstrap_resume_verdict_written}" -eq 0 ]; then
     bootstrap_resume_verdict "ABORTED: stage=${bootstrap_resume_stage} exit=${status} signal=${sig} reason=${bootstrap_resume_stage}"
   fi
-  rm -rf "${lock:-}"
+  if [ "${bootstrap_resume_release_lock:-1}" -eq 1 ]; then
+    rm -rf "${lock:-}"
+  elif [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
+    echo "ERROR: retaining ${lock:-output lock}: Stage 3 descendants were not proven stopped" >&2
+  fi
+  [ "$sig" = none ] || exit "$status"
 }
 trap 'bootstrap_resume_trap none' EXIT
 trap 'bootstrap_resume_trap HUP' HUP
@@ -46,6 +65,7 @@ BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
 bootstrap_stage3_resume_output_path "$source_output" "$root" \
   "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
   bootstrap_stage3_error "OUTPUT_DIR is not a canonical allowlisted directory: $source_output"
@@ -594,9 +614,53 @@ seed_fingerprint=$(bootstrap_stage3_manifest_value inputs_fingerprint "$stamp")
 progress="$output/bootstrap-build-progress.events"
 memory_snapshot="$stage3/memory-snapshot-v1.$$.events"
 phase_profile="$stage3/phase-profile.$$.events"
+memory_admission="$stage3/memory-admission.$$.env"
 evidence_run_id="stage3-${platform}-$$"
 [ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
 [ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
+[ ! -e "$memory_admission" ] && [ ! -L "$memory_admission" ] || exit 1
+
+# The 2026-09-22 aarch64 recovery retained 37.3 GiB after its 841-surface
+# parse, then became the global-OOM victim while peer native builds filled the
+# user slice to 126.8 GiB.  Reserve enough host headroom for that observed
+# working set and reject native-build/QEMU overlap before starting the runner.
+: "${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB:=49152}"
+export SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
+# This is deliberately distinct from required free host headroom.  It is a
+# race-resistant per-process virtual-memory ceiling: even if a peer starts
+# after the final process scan, this compiler cannot consume the whole user
+# slice.  50 GiB is above the incident's 42.7-GiB virtual / 37.3-GiB resident
+# working set, while still leaving host recovery margin.
+: "${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB:=51200}"
+case "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" in
+  ''|*[!0-9]*|0) bootstrap_stage3_error "invalid Stage 3 process max MiB" ;;
+esac
+stage3_process_max_kib=$((SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB * 1024))
+bootstrap_stage3_memory_admission_preflight "$memory_admission" ||
+  bootstrap_stage3_error "Stage 3 memory headroom admission refused; see $memory_admission"
+bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" ||
+  bootstrap_stage3_error "concurrent heavy process admission refused; see $memory_admission"
+stage3_guard_watch=disabled-platform
+case "$platform" in
+  *-linux-*)
+    command -v systemd-run >/dev/null 2>&1 &&
+      command -v systemctl >/dev/null 2>&1 &&
+      command -v timeout >/dev/null 2>&1 &&
+      timeout -k 1 3 systemctl --user show-environment >/dev/null 2>&1 ||
+      bootstrap_stage3_error 'systemd user cgroup containment unavailable'
+    stage3_guard_watch=linux-proc-memavailable
+    stage3_guard_unit="simple-bootstrap-stage3-$(date +%s)-$$.service"
+    stage3_guard_evidence="$memory_admission"
+    [ "$(timeout -k 1 3 systemctl --user show "$stage3_guard_unit" \
+        --property=LoadState --value 2>/dev/null)" = not-found ] ||
+      bootstrap_stage3_error 'Stage 3 cgroup unit name collision'
+    ;;
+esac
+{
+  echo "required_host_headroom_mib=$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB"
+  echo "process_virtual_memory_max_mib=$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
+  echo "runtime_headroom_watch=$stage3_guard_watch"
+} >>"$memory_admission"
 
 # See bootstrap_stage3_diagnostic_env in
 # scripts/check/lib/bootstrap-stage3/authority.shs.  Computed once, word-split
@@ -689,32 +753,99 @@ bootstrap_planner_v2_verify_parent_compiler_binding \
   "$planner_admission" "$stage2" "$admitted" || exit 64
 
 set +e
-bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
-  "$home" "$tmp" "$path" RUST_LOG=error LIBRARY_PATH= \
-  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
-  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
-  SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$stage3_requested_route" \
-  SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$stage3_fallback_route" \
-  SIMPLE_FRONTEND_CACHE=0 \
-  MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
-  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_PACKAGE_INDEX_COLD_INIT=1 ${stage3_mc_env} \
-  ${stage3_cold_init_env} \
-  SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
-  SIMPLE_COMPILER_PHASE_PROFILE=1 \
-  SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
-  SIMPLE_MEM_SNAPSHOT_FILE="$memory_snapshot" \
-  SIMPLE_EVIDENCE_RUN_ID="$evidence_run_id" \
-  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-  SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS="$stage3_threads" \
-  SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \
-  SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
-  ${stage3_diagnostic_env} -- \
-  "$admitted" native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
-  ${stage3_timeout_args} --cache-dir "$stage3_cache" \
-  --mode dynload --runtime-path "$runtime" -o "$candidate" \
-  src/app/cli/bootstrap_main.spl
+worker="$root/scripts/bootstrap/lib/stage3-native-build-worker.sh"
+[ -x "$worker" ] || bootstrap_stage3_error "Stage 3 cgroup worker is not executable: $worker"
+stage3_timeout_seconds=${SIMPLE_NATIVE_FILE_TIMEOUT:-}
+if [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
+  systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
+    --property=KillMode=control-group \
+    --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}M" \
+    --property="MemoryMax=${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB}M" \
+    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+else
+  "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+fi
+stage3_guard_pid=$!
+stage3_guard_tripped=0
+stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB * 1024))
+while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_guard_pid" 2>/dev/null; do
+  stage3_guard_available_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)
+  case "$stage3_guard_available_kib" in
+    ''|*[!0-9]*)
+      stage3_guard_tripped=1
+      echo 'runtime_headroom_watch_result=probe-failed' >>"$memory_admission"
+      ;;
+    *)
+      if [ "$stage3_guard_available_kib" -le "$stage3_guard_reserve_kib" ]; then
+        stage3_guard_tripped=1
+        echo "runtime_headroom_watch_result=reserve-crossed" >>"$memory_admission"
+        echo "runtime_headroom_watch_available_kib=$stage3_guard_available_kib" >>"$memory_admission"
+      fi
+      ;;
+  esac
+  [ "$stage3_guard_tripped" -eq 0 ] || {
+    # Stop descendants before the supervising subshell. This preserves the
+    # host and makes the wrapper's nonzero result authoritative; cache files
+    # already atomically published remain reusable on the next admitted run.
+    if bootstrap_stage3_memory_terminate_unit "$stage3_guard_unit" \
+        "$memory_admission"; then
+      echo 'runtime_headroom_watch_shutdown=verified' >>"$memory_admission"
+      # systemd-run --wait normally exits with the now-terminal service. Keep
+      # wrapper shutdown bounded even if its D-Bus client wedges afterward.
+      stage3_supervisor_wait=0
+      while kill -0 "$stage3_guard_pid" 2>/dev/null &&
+            [ "$stage3_supervisor_wait" -lt 5 ]; do
+        sleep 1
+        stage3_supervisor_wait=$((stage3_supervisor_wait + 1))
+      done
+      if kill -0 "$stage3_guard_pid" 2>/dev/null; then
+        kill -TERM "$stage3_guard_pid" 2>/dev/null || true
+        sleep 1
+      fi
+      kill -0 "$stage3_guard_pid" 2>/dev/null &&
+        kill -KILL "$stage3_guard_pid" 2>/dev/null || true
+    else
+      echo 'runtime_headroom_watch_shutdown=unverified' >>"$memory_admission"
+      # The child may still own or mutate candidate/cache output.  Do not wait
+      # without a bound and do not release the output lock.  The retained lock
+      # is the fail-closed recovery signal for an operator to inspect.
+      bootstrap_resume_release_lock=0
+      bootstrap_resume_verdict \
+        'ABORTED: stage=stage3-native-build exit=125 signal=none reason=shutdown-unverified-lock-retained'
+      exit 125
+    fi
+    break
+  }
+  sleep 2
+done
+wait "$stage3_guard_pid"
 status=$?
+if [ -n "$stage3_guard_unit" ] &&
+   ! bootstrap_stage3_memory_unit_inactive "$stage3_guard_unit"; then
+  echo 'runtime_headroom_watch_shutdown=unverified-after-supervisor-exit' \
+    >>"$memory_admission"
+  bootstrap_resume_release_lock=0
+  bootstrap_resume_verdict \
+    'ABORTED: stage=stage3-native-build exit=125 signal=none reason=cgroup-still-populated-lock-retained'
+  exit 125
+fi
+if [ "$stage3_guard_tripped" -eq 0 ]; then
+  echo 'runtime_headroom_watch_result=completed' >>"$memory_admission"
+else
+  status=125
+fi
 set -e
 effective_status=0
 bootstrap_stage3_resume_effective_status "$status" "$stage3_log" \

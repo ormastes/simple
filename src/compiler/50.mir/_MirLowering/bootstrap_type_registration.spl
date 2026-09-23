@@ -1,12 +1,16 @@
 # Bootstrap-only HIR type registration for direct function lowering.
 
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_flat_symbol_table}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_module_enum_count, bootstrap_hir_module_enum_at,
     bootstrap_hir_module_struct_count, bootstrap_hir_module_struct_at,
-    bootstrap_hir_module_class_count, bootstrap_hir_module_class_at
+    bootstrap_hir_module_class_count, bootstrap_hir_module_class_at,
+    bootstrap_hir_module_count, bootstrap_hir_module_name_at, bootstrap_hir_entry_index,
+    bootstrap_hir_module_function_count, bootstrap_hir_module_function_at
 }
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{exit}
@@ -66,8 +70,39 @@ fn bootstrap_register_flat_type_defs(lowering: MirLowering, module_index: i64) -
         enum_index = enum_index + 1
     bootstrap_type_registration_finish(lw, "bootstrap flat MIR type registration failed")
 
+fn bootstrap_register_flat_class_providers(lowering: MirLowering, active_module: i64) -> MirLowering:
+    var lw = lowering
+    var provider_index = 0
+    while provider_index < bootstrap_hir_module_count():
+        if provider_index != active_module and bootstrap_hir_module_class_count(provider_index) > 0:
+            val provider = bootstrap_flat_symbol_table(provider_index)
+            val owner = bootstrap_hir_module_name_at(provider_index)
+            var links: Dict<i64, text> = {}
+            var function_index = 0
+            while function_index < bootstrap_hir_module_function_count(provider_index):
+                val func = bootstrap_hir_module_function_at(provider_index, function_index)
+                links[func.symbol.id] = mir_provider_function_name(owner, provider, func, provider_index == bootstrap_hir_entry_index())
+                function_index = function_index + 1
+            var class_index = 0
+            while class_index < bootstrap_hir_module_class_count(provider_index):
+                lw.register_provider_class(bootstrap_hir_module_class_at(provider_index, class_index), provider, links, false)
+                class_index = class_index + 1
+            function_index = 0
+            while function_index < bootstrap_hir_module_function_count(provider_index):
+                lw.register_provider_method(bootstrap_hir_module_function_at(provider_index, function_index), provider, links)
+                function_index = function_index + 1
+        provider_index = provider_index + 1
+    lw
+
 fn bootstrap_register_flat_class_defs(lowering: MirLowering, module_index: i64) -> MirLowering:
     var lw = lowering
+    val provider = lw.symbols
+    var links: Dict<i64, text> = {}
+    var function_index = 0
+    while function_index < bootstrap_hir_module_function_count(module_index):
+        val func = bootstrap_hir_module_function_at(module_index, function_index)
+        links[func.symbol.id] = mir_provider_function_name(bootstrap_hir_module_name_at(module_index), provider, func, module_index == bootstrap_hir_entry_index())
+        function_index = function_index + 1
     var class_index = 0
     while class_index < bootstrap_hir_module_class_count(module_index):
         val class_def = bootstrap_hir_module_class_at(module_index, class_index)
@@ -84,19 +119,33 @@ fn bootstrap_register_flat_class_defs(lowering: MirLowering, module_index: i64) 
         var field_map = lw.field_map
         field_map[lw.symbol_id_value(class_def.symbol)] = field_names
         lw.field_map = field_map
+        val class_symbol = lw.symbols.get_symbol_raw(class_def.symbol.id)
+        val class_key = if class_symbol != nil:
+            mir_class_identity(class_symbol)
+        else:
+            class_def.name
+        lw.register_provider_class(class_def, provider, links, true)
         var default_map = lw.struct_field_has_default
         default_map[class_def.name] = field_has_default
+        default_map[class_key] = field_has_default
         lw.struct_field_has_default = default_map
         var default_expr_map = lw.struct_field_default_expr
         default_expr_map[class_def.name] = field_default_expr
+        default_expr_map[class_key] = field_default_expr
         lw.struct_field_default_expr = default_expr_map
         var field_order = lw.struct_field_order
         field_order[class_def.name] = field_names
+        field_order[class_key] = field_names
         lw.struct_field_order = field_order
         var class_names = lw.class_type_names
         class_names[class_def.name] = true
+        class_names[class_key] = true
         lw.class_type_names = class_names
         class_index = class_index + 1
+    function_index = 0
+    while function_index < bootstrap_hir_module_function_count(module_index):
+        lw.register_provider_method(bootstrap_hir_module_function_at(module_index, function_index), provider, links)
+        function_index = function_index + 1
     lw
 
 fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
@@ -124,5 +173,15 @@ fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule
         var field_map = lw.field_map
         field_map[lw.symbol_id_value(class_def.symbol)] = field_names
         lw.field_map = field_map
+        val class_symbol = lw.symbols.get_symbol_raw(class_def.symbol.id)
+        val class_key = if class_symbol != nil:
+            mir_class_identity(class_symbol)
+        else:
+            class_def.name
+        lw.register_provider_class(class_def, lw.symbols, {}, true)
+        lw.struct_field_order[class_def.name] = field_names
+        lw.struct_field_order[class_key] = field_names
+        lw.class_type_names[class_def.name] = true
+        lw.class_type_names[class_key] = true
         lw.lower_class_type(class_def)
     lw

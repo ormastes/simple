@@ -17,6 +17,20 @@ fn _undersized_meta_cookies_clear(blob: [u8], length: i64) -> bool:
     if length > 9 and meta[9] != 0: return false
     true
 
+fn _undersized_render_cookies_clear(blob: [u8], length: i64) -> bool:
+    var meta: [i64] = [0; length]
+    if length > 7:
+        meta[7] = 310031
+    if length > 8:
+        meta[8] = 310032
+    if length > 9:
+        meta[9] = 1
+    var pixels: [u8] = [165u8; 3]
+    sfnt_render_glyph_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 66, 100, meta, pixels)
+    if length > 8 and meta[8] != 0: return false
+    if length > 9 and meta[9] != 0: return false
+    pixels[0] == 165u8 and pixels[1] == 165u8 and pixels[2] == 165u8
+
 fn main() -> i64:
     val blob = file_read_bytes(BUNGEE_PATH)
     var canary_meta: [i64] = [0; 6]
@@ -39,6 +53,12 @@ fn main() -> i64:
         not _undersized_meta_cookies_clear(blob, 19)):
         print("sfnt_glyf_bungee_native_status=fail-undersized-stale-measure")
         return 15
+    if (not _undersized_render_cookies_clear(blob, 8) or
+        not _undersized_render_cookies_clear(blob, 9) or
+        not _undersized_render_cookies_clear(blob, 10) or
+        not _undersized_render_cookies_clear(blob, 19)):
+        print("sfnt_glyf_bungee_native_status=fail-undersized-stale-render")
+        return 28
     var meta: [i64] = [0; 20]
     sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 66, 100, meta)
     if meta[7] != 310031:
@@ -64,6 +84,26 @@ fn main() -> i64:
     if meta[9] <= 0:
         print("sfnt_glyf_bungee_native_status=fail-alpha")
         return 5
+    # Read coverage from the caller-owned buffer independently of the producer
+    # receipt. Two identically empty buffers must not pass the index parity gate.
+    var observed_nonzero: i64 = 0
+    var coverage_index: i64 = 0
+    while coverage_index < pixels.len():
+        if pixels[coverage_index] > 0u8:
+            observed_nonzero = observed_nonzero + 1
+        coverage_index = coverage_index + 1
+    if observed_nonzero <= 0 or observed_nonzero != meta[9]:
+        print("sfnt_glyf_bungee_native_status=fail-caller-coverage")
+        return 25
+    # A rejected destination must retain every caller byte and clear receipts.
+    var short_pixels: [u8] = [165u8; 3]
+    sfnt_render_glyph_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 66, 100, meta, short_pixels)
+    if meta[8] != 0 or meta[9] != 0:
+        print("sfnt_glyf_bungee_native_status=fail-short-destination-receipt")
+        return 26
+    if short_pixels[0] != 165u8 or short_pixels[1] != 165u8 or short_pixels[2] != 165u8:
+        print("sfnt_glyf_bungee_native_status=fail-short-destination-write")
+        return 27
     val glyph_index = meta[6]
     var index_meta: [i64] = [0; 20]
     sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_INDEX, glyph_index, 100, index_meta)

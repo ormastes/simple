@@ -1,4 +1,15 @@
-/* Appended after verbatim production publication helpers by the Windows runner. */
+/* Windows-only fixture: the Windows runner appends this after production helpers. */
+#ifdef _WIN32
+#include <windows.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <wchar.h>
+
+/* Also let the C-runtime push guard parse this file as a standalone unit. */
+int64_t rt_file_publish_noreplace(const uint8_t *staged_ptr, uint64_t staged_len,
+                                  const uint8_t *destination_ptr, uint64_t destination_len);
+
 static int failures;
 static void require(int condition, const char *message) {
     if (!condition) {
@@ -70,3 +81,4 @@ int main(int argc, char **argv) {
     printf("Windows publication: %d failures\n", failures);
     return failures ? 1 : 0;
 }
+#endif /* _WIN32 */

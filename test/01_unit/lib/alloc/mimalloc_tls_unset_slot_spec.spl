@@ -1,0 +1,32 @@
+# @cover src/lib/nogc_sync_mut/mimalloc_tls.spl
+# @cover src/lib/nogc_async_mut/mimalloc_tls.spl
+# @cover src/lib/gc_async_mut/mimalloc_tls.spl
+# The self-hosted integer TLS runtime returns 0 when unset. No registered heap
+# may use that slot id. The older Rust RuntimeValue TLS ABI is not equivalent.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.runtime.thread_local.{rt_thread_local_new, rt_thread_local_get, rt_thread_local_free}
+use std.nogc_sync_mut.mimalloc_tls.{mimalloc_thread_init as nogc_sync_init, mimalloc_thread_destroy as nogc_sync_destroy}
+use std.nogc_async_mut.mimalloc_tls.{mimalloc_thread_init as nogc_async_init, mimalloc_thread_destroy as nogc_async_destroy}
+use std.gc_async_mut.mimalloc_tls.{mimalloc_thread_init as gc_async_init, mimalloc_thread_destroy as gc_async_destroy}
+
+describe "mimalloc TLS reserves the unset slot":
+    it "does not assign an unset TLS value to a heap":
+        step("Observe the runtime's unset TLS value")
+        val handle = rt_thread_local_new()
+        val unset_slot = rt_thread_local_get(handle)
+        rt_thread_local_free(handle)
+        expect(unset_slot).to_equal(0)
+
+        step("Initialize each allocator family without claiming the unset slot")
+        val nogc_sync = nogc_sync_init()
+        val nogc_async = nogc_async_init()
+        val gc_async = gc_async_init()
+        expect(nogc_sync.thread_id == unset_slot).to_equal(false)
+        expect(nogc_async.thread_id == unset_slot).to_equal(false)
+        expect(gc_async.thread_id == unset_slot).to_equal(false)
+
+        nogc_sync_destroy()
+        nogc_async_destroy()
+        gc_async_destroy()

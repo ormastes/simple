@@ -190,6 +190,13 @@ impl Lowerer {
         }
 
         let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        // The bootstrap parser may erase an annotated Result local to i64
+        // before expression lowering.  Recover the payload type from the
+        // binding annotation recorded by statement lowering before asking the
+        // generic field resolver, which would otherwise diagnose `i64.ok`.
+        if let Some(projected) = self.try_lower_annotated_result_projection(receiver, &lowered_receiver, field, ctx) {
+            return Ok(projected);
+        }
         // Flow analysis may permit `.0` on Option<Tuple>/Result<Tuple>, but
         // the lowered receiver is still the enum container.  Project the
         // Some/Ok payload before deriving the positional element type and
@@ -782,6 +789,26 @@ impl Lowerer {
             _ => return None,
         };
         let payload_ty = self.enum_variant_payload_type(recv_hir.ty, "Result", variant)?;
+        Some(self.build_result_projection(recv_hir, variant, payload_ty))
+    }
+
+    fn try_lower_annotated_result_projection(
+        &self,
+        receiver: &Expr,
+        recv_hir: &HirExpr,
+        field: &str,
+        ctx: &FunctionContext,
+    ) -> Option<HirExpr> {
+        let local_index = match receiver {
+            Expr::Identifier(name) => ctx.lookup(name)?,
+            _ => return None,
+        };
+        let (ok_ty, err_ty) = ctx.result_projection_types.get(&local_index)?;
+        let (variant, payload_ty) = match field {
+            "ok" => ("Ok", *ok_ty),
+            "err" => ("Err", *err_ty),
+            _ => return None,
+        };
         Some(self.build_result_projection(recv_hir, variant, payload_ty))
     }
 
