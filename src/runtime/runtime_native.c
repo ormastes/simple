@@ -16555,6 +16555,22 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
 
+/* collections.rs:1902 -- erased receiver.set(key, value). Real semantics for
+ * the one type Rust actually supports here (Dict): mutate in place and return
+ * the receiver, exactly like rt_dict_set. Rust routes every other receiver
+ * type (Array, Tuple, ...) to rt_method_not_found, which has no C-lane
+ * equivalent to call; that path traps loudly by name rather than silently
+ * returning a wrong value. */
+int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
+    RtCoreDict* d = rt_core_as_dict(receiver);
+    if (d != NULL) {
+        rt_core_dict_put(d, key, value);
+        return receiver;
+    }
+    rt_trap_unimplemented("rt_collection_set");
+    return 0;
+}
+
 /* Wave17: one-owner, exact-byte artifact bundle publication.  Handles are
  * random registry tokens, never descriptors.  The Linux implementation keeps
  * every lookup beneath an already-open destination root and publishes the
