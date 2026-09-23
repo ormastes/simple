@@ -1566,6 +1566,11 @@ mod tests {
 
     #[test]
     fn erased_dict_views_use_builtin_dispatch() {
+        // `set` remains outside this broad bare-name gate: user-defined
+        // `set(k, v)` methods must retain normal method resolution. The narrow
+        // dynamic codegen arm below is reached only by the pre-existing erased
+        // collection route, where it uses rt_collection_set.
+        assert!(!is_bare_builtin_collection_method("set", 2));
         assert!(is_bare_builtin_collection_method("keys", 0));
         assert!(is_bare_builtin_collection_method("values", 0));
         assert!(!is_bare_builtin_collection_method("keys", 1));
@@ -2553,19 +2558,7 @@ fn try_compile_builtin_method_call<M: Module>(
         // above, and falls through to `rt_dict_remove` for non-arrays.
         // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
         "remove" => "rt_collection_remove",
-        "set" => {
-            if args.len() >= 2 {
-                let key_val = get_vreg_or_default(ctx, builder, &args[0]);
-                let val_val = get_vreg_or_default(ctx, builder, &args[1]);
-                if let Some(&func_id) = ctx.runtime_funcs.get("rt_dict_set") {
-                    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                    let call = adapted_call(builder, func_ref, &[receiver_val, key_val, val_val]);
-                    let result = builder.inst_results(call)[0];
-                    return Ok(Some(super::helpers::safe_extend_to_i64(builder, result)));
-                }
-            }
-            return Ok(None);
-        }
+        "set" => "rt_collection_set",
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
         // `d.items()` on an erased (bare) receiver: same runtime call the
@@ -2661,7 +2654,9 @@ fn try_compile_builtin_method_call<M: Module>(
     let mut call_args = vec![receiver_val];
     for (arg_i, arg) in args.iter().enumerate() {
         let raw = get_vreg_or_default(ctx, builder, arg);
-        let val = if box_dict_key && arg_i == 0 && key_is_int {
+        let val = if runtime_func == "rt_collection_set" {
+            super::methods::wrap_value(ctx, builder, *arg, raw)
+        } else if box_dict_key && arg_i == 0 && key_is_int {
             builder.ins().ishl_imm(raw, 3)
         } else {
             raw

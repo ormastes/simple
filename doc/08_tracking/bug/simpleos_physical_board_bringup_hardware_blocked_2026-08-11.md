@@ -71,3 +71,21 @@ Explicitly hardware-blocked per the record's own title and
 .claude/rules/board-runnable.md — no physical SimpleOS board available
 in this environment either. Leaving OPEN.
 
+## Evidence gate added 2026-09-22 (software complete; hardware still blocked)
+
+`validate_simpleos_render_target_evidence` now refuses to return
+`board-verified` when a purported physical receipt retains QEMU/QMP,
+virtio/Venus, or vhost provenance in its platform, boot, display, driver, or
+capture fields. `simpleos_board_vulkan_admit` separately prevents the
+Venus/virtio-gpu transport from satisfying native board Vulkan.
+
+This closes an evidence-classification bug; it does not prove a board boot.
+After acquiring hardware, follow `doc/07_guide/os/simpleos_board_bringup.md`,
+retain the exact flashed image hash and write command, boot/reset path, board
+vendor/model/revision/serial hash, native controller and driver identity,
+positive submit/fence/readback facts, external HDMI/framebuffer capture, and
+serial/SSH transcript from the same boot. Run the focused render evidence specs
+against that receipt. Until those artifacts exist, keep this record OPEN.
+
+TODO(deferred-environment): when physical board access is available, collect the
+same-boot evidence listed above and rerun the focused render evidence specs.

@@ -15,6 +15,12 @@ manifest_value() {
   sed -n "s/^${key}=//p" "$file" | head -n 1
 }
 
+manifest_key_count() {
+  key=$1
+  file=$2
+  awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$file"
+}
+
 hash_file() {
   sha256sum "$1" | awk '{print $1}'
 }
@@ -32,20 +38,48 @@ validate_hosted_runtime_authority() {
   expected=$(manifest_value sha256 "$receipt")
   if [ -f "$capsule_receipt" ] && [ ! -L "$capsule_receipt" ]; then
     "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$authority" >/dev/null || return 1
+<<<<<<< HEAD
     case "$(manifest_value schema "$capsule_receipt")" in
       simple-phase2-runtime-capsule-v1|simple-phase2-runtime-capsule-v2) ;;
+=======
+    capsule_schema=$(manifest_value schema "$capsule_receipt")
+    case "$capsule_schema" in
+      simple-phase2-runtime-capsule-v1)
+        [ "$(manifest_key_count artifact_layout "$capsule_receipt")" = 0 ] || return 1
+        capsule_layout=posix ;;
+      simple-phase2-runtime-capsule-v2)
+        [ "$(manifest_key_count artifact_layout "$capsule_receipt")" = 1 ] || return 1
+        capsule_layout=$(manifest_value artifact_layout "$capsule_receipt") ;;
+>>>>>>> origin/main
       *) return 1 ;;
     esac
     [ "$(manifest_value status "$capsule_receipt")" = frozen ] || return 1
     [ "$(manifest_value compiler_sha256 "$capsule_receipt")" = "$expected_sha" ] || return 1
+<<<<<<< HEAD
     case "$(manifest_value artifact_layout "$capsule_receipt")" in
       windows-msvc) capsule_compiler="$authority/simple.exe"; native_all="$authority/simple_native_all.lib" ;;
       ''|posix) capsule_compiler="$authority/simple"; native_all="$authority/libsimple_native_all.a" ;;
       *) return 1 ;;
     esac
+=======
+    case "$capsule_layout" in
+      windows-msvc)
+        capsule_compiler="$authority/simple.exe"
+        native_all="$authority/simple_native_all.lib"
+        authority_stamp="$authority/simple.exe.inputs.sha256" ;;
+      posix)
+        capsule_compiler="$authority/simple"
+        native_all="$authority/libsimple_native_all.a"
+        authority_stamp="$authority/simple.inputs.sha256" ;;
+      *) return 1 ;;
+    esac
+    [ -f "$capsule_compiler" ] && [ ! -L "$capsule_compiler" ] || return 1
+>>>>>>> origin/main
     [ "$(hash_file "$capsule_compiler")" = "$expected_sha" ] || return 1
     [ -f "$native_all" ] && [ ! -L "$native_all" ] || return 1
     [ "$(hash_file "$native_all")" = "$(manifest_value native_all_sha256 "$capsule_receipt")" ] || return 1
+    [ -f "$authority_stamp" ] && [ ! -L "$authority_stamp" ] || return 1
+    [ "$(hash_file "$authority_stamp")" = "$(manifest_value seed_authority_stamp_sha256 "$capsule_receipt")" ] || return 1
     [ "$(hash_file "$authority/hosted-runtime.env")" = "$(manifest_value hosted_authority_receipt_sha256 "$capsule_receipt")" ] || return 1
     runtime_cache_identity=$(manifest_value capsule_identity_sha256 "$capsule_receipt")
   else
@@ -69,7 +103,11 @@ validate_hosted_runtime_authority() {
   [ ! -L "$authority" ] && [ ! -L "$authority/deps" ] || return 1
   [ -f "$hosted" ] && [ ! -L "$hosted" ] || return 1
   [ "$(hash_file "$hosted")" = "$expected" ] || return 1
+<<<<<<< HEAD
   [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+=======
+  [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+>>>>>>> origin/main
   if [ ! -f "$capsule_receipt" ]; then
   [ "$(stat -c '%a' "$authority" 2>/dev/null || stat -f '%Lp' "$authority")" = 500 ] || return 1
   [ "$(stat -c '%a' "$authority/deps" 2>/dev/null || stat -f '%Lp' "$authority/deps")" = 500 ] || return 1
@@ -393,6 +431,13 @@ run_task() {
   elif [ "$status" -eq 0 ]; then
     (
       cd "$source_root" || exit 125
+      HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1
+      SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task"
+      export HOME TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NATIVE_BUILD_CACHE_DIR
+      # Bootstrap-only dispatch controls belong only to the Stage 1 native
+      # producer below.  Do not let an operator's ambient shell silently
+      # redirect version checks or later phase verification.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
       if [ "$phase" = stage1 ]; then
         bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
       fi
@@ -403,14 +448,12 @@ run_task() {
         # current source (observed as `auto:` being rejected in a valid named
         # argument).  Phase verification must exercise the exact snapshotted
         # seed's bootstrap-only Rust builder and must never consult bin/simple.
-        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
-          SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 \
-          SIMPLE_BINARY="$compiler_snapshot" run_with_timeout "$@"
+        SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1
+        SIMPLE_BINARY="$compiler_snapshot"
+        export SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+        run_with_timeout "$@"
       else
-        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
-          run_with_timeout "$@"
+        run_with_timeout "$@"
       fi
     ) >"$log" 2>&1 || status=$?
     if [ "$phase" = stage1 ] && [ "$status" -eq 0 ]; then
@@ -741,20 +784,30 @@ run_compiler_unit_tests() {
   : >"$log"
   row_dir="$logs/${task}.rows"
   mkdir -p "$row_dir"
+<<<<<<< HEAD
   printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\tmax_rss_kib\n' >"$inventory"
+=======
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\n' >"$inventory"
+>>>>>>> origin/main
   started=$(date +%s)
   failed=0
   spec_count=0
   passed_count=0
   timeout_count=0
   crash_count=0
+<<<<<<< HEAD
   max_rss_kib=0
+=======
+>>>>>>> origin/main
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     spec_count=$((spec_count + 1))
     relative=${spec#"$source_root/"}
     row_output="$row_dir/$spec_count.json.log"
+<<<<<<< HEAD
     row_rss_file="$row_dir/$spec_count.max-rss-kib"
+=======
+>>>>>>> origin/main
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
     executed=0
@@ -767,12 +820,20 @@ run_compiler_unit_tests() {
     else
       (
         cd "$source_root" || exit 125
+        # These matrix rows bypass run_task, so apply the same bootstrap
+        # dispatch isolation before publishing the one intentional CLI owner.
+        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
+<<<<<<< HEAD
           SIMPLE_BIN="$compiler_cli" \
           run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
             "$test_runner" "$relative" \
+=======
+          "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+            "$spec_timeout_seconds" 15 "$test_runner" "$relative" \
+>>>>>>> origin/main
             --mode=interpreter --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon --sequential --json
       ) >"$row_output" 2>&1 || status=$?
@@ -802,20 +863,29 @@ run_compiler_unit_tests() {
       fi
       status=$row_json_status
     fi
+<<<<<<< HEAD
     row_max_rss_kib=$(read_max_rss_kib "$row_rss_file")
     case "$row_max_rss_kib" in
       [1-9][0-9]*)
         [ "$row_max_rss_kib" -le "$max_rss_kib" ] || max_rss_kib=$row_max_rss_kib ;;
     esac
+=======
+>>>>>>> origin/main
     result=FAIL
     case "$status" in
       0) result=PASS; passed_count=$((passed_count + 1)) ;;
       124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
       134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
     esac
+<<<<<<< HEAD
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
       "$row_skipped" "$row_output" "$row_max_rss_kib" >>"$inventory"
+=======
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
+      "$row_skipped" "$row_output" >>"$inventory"
+>>>>>>> origin/main
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
@@ -826,9 +896,14 @@ run_compiler_unit_tests() {
   ended=$(date +%s)
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
+<<<<<<< HEAD
   [ "$max_rss_kib" -gt 0 ] || max_rss_kib=unavailable
   printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
     "$task" "$result" "$failed" "$((ended - started))" "$max_rss_kib" "$log" "$inventory" "$spec_count" \
+=======
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" "$spec_count" \
+>>>>>>> origin/main
     "$passed_count" "$timeout_count" "$crash_count" \
     "$command_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
@@ -886,6 +961,9 @@ run_repository_full_tests() {
     else
       (
         cd "$source_root" || exit 125
+        # Keep ambient bootstrap routing out of direct repository-test rows;
+        # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
+        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \

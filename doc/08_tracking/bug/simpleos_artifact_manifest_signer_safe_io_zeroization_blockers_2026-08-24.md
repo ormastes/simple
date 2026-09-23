@@ -129,3 +129,23 @@ emit a versioned full record whose decoder rejects trailing data.
 
 No tests, builds, lints, optimizer, SPipe, benchmarks, or runtime verification
 were run. This record is based on read-only source inspection.
+
+## 2026-09-23 typed-owner progress
+
+The first prerequisite now has a local, unadmitted foundation:
+
+- `secure_memory.spl` owns typed `[u32]` and `[u64]` volatile overwrite plus
+  readback, with reports scoped to the allocation's current logical slots; and
+- poisoned regressions cover both typed owners, including repeated reuse of
+  the same caller-visible arrays.
+
+This does **not** close the signer bug. SHA-512, scalar reduction/multiply-add,
+and point and field operations still create growing or unregistered arrays;
+compiler, ABI, stack/register, GC movement, and provider copies remain outside the claim.
+Publishing a top-level “all secrets erased” receipt would still be false.
+
+TODO(simpleos-qemu-phase-ready): after the admitted SimpleOS phase environment
+exists, run the typed owner regressions and the RFC 8032 signer vectors in QEMU,
+then retain elapsed time and maximum RSS for repeated signing versus the
+pre-change artifact. Reject the candidate if cleanup adds per-round allocation
+or materially regresses signing latency/RSS.

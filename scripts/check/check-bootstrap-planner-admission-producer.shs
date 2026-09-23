@@ -64,7 +64,7 @@ checked=$((checked + 1))
 #   $1 destination, $2 provenance body, $3 planner-shim policy
 #      (strict = refuses an untyped reason; permissive = accepts anything)
 make_fixture() {
-    mf_dst=$1 mf_prov=$2 mf_policy=$3
+    mf_dst=$1 mf_prov=$2 mf_policy=$3 mf_suffix=${4:-}
     mkdir -p "$mf_dst/src/app/cli" "$mf_dst/src/runtime" \
         "$mf_dst/build/bootstrap/stage2/fixture-triple"
     cp -- "$root/src/app/cli/bootstrap_reason_planner.spl" \
@@ -75,7 +75,7 @@ make_fixture() {
     # shim with the same argv contract and authorization text as the real
     # planner. This exercises the producer's measure/exec/smoke/emit path
     # without needing a real stage2 compiler in the tree.
-    cat >"$mf_dst/build/bootstrap/stage2/fixture-triple/simple" <<'FIXTURE_CC'
+    cat >"$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix" <<'FIXTURE_CC'
 #!/bin/sh
 set -eu
 out=''
@@ -114,12 +114,12 @@ echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
 PLANNER
 chmod +x "$out"
 FIXTURE_CC
-    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
-    chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
-    mf_parent="$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix"
+    chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix"
+    mf_parent="$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix"
     mf_parent_sha=$(bootstrap_planner_v2_hash_file "$mf_parent")
     mf_evidence_dir="$mf_dst/build/bootstrap/provenance/fixture"
-    mf_admitted="$mf_evidence_dir/stage2-admitted/simple"
+    mf_admitted="$mf_evidence_dir/stage2-admitted/simple$mf_suffix"
     mkdir -p "$mf_evidence_dir/stage2-admitted"
     cp -- "$mf_parent" "$mf_admitted"
     chmod 500 "$mf_admitted"
@@ -259,9 +259,9 @@ FIXTURE_CC
 }
 
 run_producer() {
-    rp_root=$1
+    rp_root=$1 rp_suffix=${2:-}
     sh "$producer" --root="$rp_root" \
-        --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple" \
+        --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple$rp_suffix" \
         --runtime-dir="$rp_root/src/runtime" \
         --target=//bootstrap:stage4 --reason=self-host-convergence-check \
         --out="$rp_root/receipt.env"
@@ -278,7 +278,29 @@ run_custom_output_producer() {
         --out="$rp_root/custom-output-receipt.env"
 }
 
+check_noncanonical_candidate_path() {
+    noncanonical_root="$scratch/noncanonical-candidate"
+    # All candidate hashes and evidence agree: only the admitted leaf is wrong.
+    make_fixture "$noncanonical_root" 'stage2-provenance: pure-simple' strict .evil
+    noncanonical_root=$(CDPATH= cd -- "$noncanonical_root" && pwd -P)
+    if run_producer "$noncanonical_root" .evil >"$scratch/noncanonical.log" 2>&1; then
+        fail "producer admitted a hash-consistent noncanonical candidate path"
+    fi
+    grep -q 'parent-stage2-admission-candidate-path-invalid' "$scratch/noncanonical.log" ||
+        fail "noncanonical candidate path did not yield the typed diagnostic"
+    checked=$((checked + 1))
+}
+
+# Allows a newly added negative case to be verified without replaying already
+# passing producer fixtures during an incremental bootstrap repair.
+if [ "${1:-}" = --candidate-path-negative-only ]; then
+    check_noncanonical_candidate_path
+    echo "PASS — $checked fixture(s) checked (candidate-path negative)"
+    exit 0
+fi
+
 # --- fixture 1: the gate is satisfiable -------------------------------------
+if [ "${1:-}" != --windows-candidate-only ]; then
 ok_root="$scratch/ok"
 make_fixture "$ok_root" 'stage2-provenance: pure-simple' strict
 ok_root=$(CDPATH= cd -- "$ok_root" && pwd -P)
@@ -289,6 +311,24 @@ grep -q '^bootstrap-admission: produced ' "$scratch/ok.log" ||
 bootstrap_planner_v2_verify "$ok_root/receipt.env" "$ok_root" >/dev/null 2>&1 ||
     fail "verifier rejected the canonical producer's own receipt (gate unsatisfiable)"
 checked=$((checked + 1))
+fi
+
+# Windows-named candidate: exercise the real producer and receipt verifier,
+# without relying on the host OS or weakening any admission hash bindings.
+windows_root="$scratch/windows-candidate"
+make_fixture "$windows_root" 'stage2-provenance: pure-simple' strict .exe
+windows_root=$(CDPATH= cd -- "$windows_root" && pwd -P)
+run_producer "$windows_root" .exe >"$scratch/windows.log" 2>&1 ||
+    fail "producer refused .exe admission: $(tail -3 "$scratch/windows.log" | tr '\n' ' ')"
+bootstrap_planner_v2_verify "$windows_root/receipt.env" "$windows_root" >/dev/null 2>&1 ||
+    fail "verifier rejected Windows-named candidate receipt"
+checked=$((checked + 1))
+
+check_noncanonical_candidate_path
+if [ "${1:-}" = --windows-candidate-only ]; then
+    echo "PASS — $checked fixture(s) checked (Windows candidate paths)"
+    exit 0
+fi
 
 # --- configured output: admission follows the bootstrap output owner --------
 custom_root="$scratch/custom-output"

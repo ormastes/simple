@@ -49,9 +49,161 @@ jobs:
   code-idiom-gates:
     name: Code Idiom & Structural Ratchet Gates
     runs-on: ubuntu-latest
+    # `pull-requests: read` is required by the "Change classification
+    # (docs-only detection)" step below, which reads
+    # `GET /repos/.../pulls/{n}/files` through `gh api`. Nothing in this job
+    # writes anything (the receipt-admission step below only fetches refs and
+    # notes read-only), so this is a pure narrowing/clarification, not a
+    # widening, of what the default GITHUB_TOKEN already needed.
+    permissions:
+      contents: read
+      pull-requests: read
 
     steps:
       - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # DOCS-ONLY CHANGE CLASSIFICATION (independent of the receipt system
+      # below — no signed local-CI receipt is required or consulted here).
+      #
+      # The CI queue on this repo is saturated and docs-only PRs (doc/**,
+      # *.md, README*, LICENSE*) are a meaningful share of it, yet every gate
+      # below runs regardless, including several that scan Rust/Simple/C
+      # source, runtime ABI shape, and native build artifacts that a
+      # documentation-only change cannot possibly touch. This step reads the
+      # PR's OWN changed-file list from the GitHub API
+      # (`GET /repos/.../pulls/{n}/files`, which GitHub computes against the
+      # merge-base, exactly the semantics of `origin/<base>...HEAD` three-dot
+      # diff) and sets `docs_only=true` only when EVERY one of those paths is
+      # documentation and NONE is under `.github/**` (a workflow-adjacent
+      # change must never self-exempt).
+      #
+      # Deliberately NOT `git diff <base_sha> <head_sha>` (two-dot,
+      # tree-to-tree): on a repo where main advances every few minutes, that
+      # would include every change main gained since the branch point, as
+      # reversals, so it would almost never read docs-only except right after
+      # a branch update — the exact trap the receipt-admission step below
+      # avoids only because IT legitimately cannot attest merged-in code and
+      # is not the shape this classification needs. The GitHub files API
+      # sidesteps depth/fetch entirely and needs no `fetch-depth: 0` on the
+      # checkout above (which would otherwise add a full-history clone cost
+      # to every PR just to make a subset of PRs faster).
+      #
+      # No merge-delta re-check is needed either, unlike the receipt step:
+      # gates run against the tree base_tip (main's current commit) merged
+      # with the PR's OWN docs-only changes. A code-scoped gate's verdict on
+      # that merged tree is identical to its verdict on base_tip alone, since
+      # none of the gates this lets `docs_only` skip scan doc/** or *.md (see
+      # the exclusion list below). base_tip is main, and main only advances
+      # through PRs that themselves passed this same required check under the
+      # branch ruleset — by induction its gates are already known-good there,
+      # so a docs-only PR skipping them changes nothing about main's state.
+      # That induction is why this is scoped to `base.ref == main` below:
+      # develop/release branches are not gated the same way and get no skip.
+      #
+      # Fail-safe in every direction: any API failure, a returned count that
+      # disagrees with the PR's own declared `changed_files`, any event that
+      # is not `pull_request` against `main`, or an EMPTY changed-file list
+      # all leave `docs_only` at its default `false` — an empty diff is NEVER
+      # read as docs-only. `set +e` up front is deliberate: this is `shell:
+      # sh`, which GitHub runs as `sh -e {0}`, and an unguarded failing
+      # substitution or an `$?` read after a piped/redirected command would
+      # otherwise abort this step before `GITHUB_OUTPUT` is ever written —
+      # exactly the trap the receipt-admission step below documents at length
+      # for the same reason (see its own `decide() || true` and 2026-09-07
+      # incident note). A step that dies here still leaves gates running
+      # (empty output never equals `'true'`), but a dead step is a RED
+      # required job, which is strictly worse than doing nothing.
+      #
+      # This does not widen what a signed receipt can already skip (see MODE
+      # PRECEDENCE below); it lets the SAME class of skip apply on an
+      # ordinary PR that carries no receipt at all, which is the overwhelming
+      # majority of docs-only PRs today.
+      #
+      # What stays gated OUT of docs_only's reach, deliberately, because each
+      # one CAN fire on a documentation-only change (verified by reading each
+      # guard's actual scan roots, not by its name):
+      #   * Workspace root write guard       — root-placement policy; a stray
+      #     doc file in the wrong place is exactly what it exists to catch.
+      #   * Guard-wiring ratchet gate        — greps the WHOLE tree, docs
+      #     included (`rg -F ... --no-ignore --hidden`, no path restriction),
+      #     for guard-script filename mentions; a doc merely naming a script
+      #     changes its wired/unwired verdict.
+      #   * spipe submodule gitlink shape    — tree/index structural
+      #     integrity; kept unconditional out of caution.
+      #   * Plan-acceptance coverage ratchet — reads doc/03_plan/**.md content
+      #     directly and cross-checks it against acceptance specs; a plan
+      #     checkbox edited with no spec update is precisely what it flags.
+      # Every gate this DOES let docs_only skip was individually confirmed
+      # scoped to src/, test/, scripts/ or a specific generated report path —
+      # never doc/ and never an unrestricted repo-wide text scan.
+      # ---------------------------------------------------------------------
+      - name: Change classification (docs-only detection)
+        id: classify
+        if: ${{ !cancelled() }}
+        shell: sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DECLARED_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set +e
+          docs_only=false
+          reason="default: not confirmed docs-only"
+          tmp=${RUNNER_TEMP:-/tmp}
+
+          if [ "$EVENT_NAME" = pull_request ] && [ -n "$PR_NUMBER" ]; then
+              if [ "$BASE_REF" = main ]; then
+                  # Emit BOTH the new name and (for a rename/rename+edit) the
+                  # OLD name. The API reports a rename as one row with
+                  # filename=<new> and previous_filename=<old>; reading only
+                  # filename would see "doc/x.md" and never notice that
+                  # "src/x.spl" was deleted out from under several gates that
+                  # ratchet on baselines naming specific files (orphaned
+                  # docstrings, keyword-identifier bindings, pid-keyed build
+                  # artifacts). One row per changed file keeps $n an exact,
+                  # meaningful count against `declared` below.
+                  gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+                      --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' \
+                      > "$tmp/classify-rows" 2>"$tmp/classify-gh.err"
+                  gh_rc=$?
+                  if [ "$gh_rc" -eq 0 ]; then
+                      n=$(awk 'END {print NR}' "$tmp/classify-rows")
+                      awk -F'\t' '{ print $1; if ($2 != "") print $2 }' "$tmp/classify-rows" \
+                          > "$tmp/classify-changed"
+                      declared=${DECLARED_CHANGED_FILES:-0}
+                      if [ "$n" -gt 0 ] && [ "$n" = "$declared" ]; then
+                          nondoc=$(awk '
+                              /^\.github\// { print; exit }
+                              /^doc\// { next }
+                              /\.md$/ { next }
+                              /^README/ { next }
+                              /^LICENSE/ { next }
+                              { print; exit }' "$tmp/classify-changed")
+                          if [ -z "$nondoc" ]; then
+                              docs_only=true
+                              reason="$n file(s) changed per GitHub PR files API, all documentation"
+                          else
+                              reason="non-doc path present: $nondoc"
+                          fi
+                      else
+                          reason="file count $n disagrees with declared changed_files $declared (or is zero); fail-safe to non-docs"
+                      fi
+                  else
+                      reason="gh api pulls/$PR_NUMBER/files failed (exit $gh_rc): $(tail -n1 "$tmp/classify-gh.err" 2>/dev/null)"
+                  fi
+              else
+                  reason="base ref \"$BASE_REF\" is not main; the skip-safety induction only holds for main's ruleset"
+              fi
+          else
+              reason="event \"$EVENT_NAME\" is not a pull_request, or the PR number is missing"
+          fi
+
+          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
+          printf 'CHANGE-CLASSIFICATION: docs_only=%s (%s)\n' "$docs_only" "$reason"
 
       # ---------------------------------------------------------------------
       # LOCAL CI RECEIPT ADMISSION
@@ -430,7 +582,7 @@ jobs:
       # Relocated here from the repo-hygiene job so it actually runs (that job
       # aborted at its first step, leaving this gate dead). Command unchanged.
       - name: CPU-lane hot-loop hot-path gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-cpu-hotloop-idiom|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-cpu-hotloop-idiom|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-cpu-hotloop-idiom.shs
 
@@ -449,7 +601,7 @@ jobs:
       # executes the spec and exercises the real differential comparison) is
       # the local/push-host invocation, without --no-run.
       - name: dual_fs effect-comparison gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-dual-fs-effect-compare|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-dual-fs-effect-compare|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-dual-fs-effect-compare.shs --no-run
 
@@ -457,7 +609,7 @@ jobs:
       # never declare/call rt_* backend externs or construct backend classes.
       # Baseline-ratcheted (scripts/check/ui_backend_isolation_baseline.txt).
       - name: UI backend-isolation ratchet gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-ui-backend-isolation|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-ui-backend-isolation|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-ui-backend-isolation.shs
 
@@ -465,7 +617,7 @@ jobs:
       # the narrow app.ui.tui.screen facade and must not pull web/tauri/electron
       # or a hosted runtime bundle into the standalone binary.
       - name: TUI standalone-closure gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-tui-standalone-closure|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-tui-standalone-closure|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-tui-standalone-closure.shs
 
@@ -568,7 +720,7 @@ jobs:
       # (`PASS — 0 _partN re-export(s) across 9018 module(s)`).
       # See doc/08_tracking/bug/simpleos_b1_merge_clobber_e274cd33719_2026-08-31.md.
       - name: Dangling _partN re-export gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-no-dangling-reexports|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-no-dangling-reexports|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-no-dangling-reexports.shs
 
@@ -612,7 +764,7 @@ jobs:
           sh scripts/check/check-native-simd-kernels-real.shs
 
       - name: Orphaned docstring tail gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-orphaned-docstring-tail|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-orphaned-docstring-tail|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-orphaned-docstring-tail.shs
 
@@ -630,7 +782,7 @@ jobs:
       # symbols at the time (rt_array_at, rt_at, rt_mem_attr_set_owner); those
       # were added to the manifest in the same change rather than baselined.
       - name: JIT runtime-symbol manifest gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-jit-runtime-symbol-manifest|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-jit-runtime-symbol-manifest|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-jit-runtime-symbol-manifest.shs
 
@@ -659,7 +811,7 @@ jobs:
       # classify_run and asserts each verdict. If the classifier ever regresses
       # to scoring a crash as LINTED, this step goes red.
       - name: Lint-census classifier self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-lint-census-selftest|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-lint-census-selftest|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-lint-census.shs --self-test
 
@@ -683,7 +835,7 @@ jobs:
       # was checked against 14 branch sabotages and goes red on every one. If the
       # scorer ever regresses to reading a FAIL as a PASS, this step goes red.
       - name: Runnable-probe scorer self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-runnable-probes-selftest|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-runnable-probes-selftest|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-runnable-probes.shs --self-test
 
@@ -698,7 +850,7 @@ jobs:
       # "engine2d_vulkan_c_parity_selftest=pass". If the comparator ever
       # regresses to reading a mismatch as parity, this step goes red.
       - name: Engine2D Vulkan/C parity comparator self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-engine2d-vulkan-c-parity-selftest|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-engine2d-vulkan-c-parity-selftest|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-engine2d-vulkan-c-parity.shs --self-test
 
@@ -728,7 +880,7 @@ jobs:
       # and `docs`. Stated plainly so no one reads more into a green than is
       # there: a `sanity` pass does NOT attest extern registration.
       - name: Unregistered-extern report (report-only, not yet enforcing)
-        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' && steps.receipt.outputs.mode != 'docs' }}
+        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' && steps.receipt.outputs.mode != 'docs' && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-extern-registration.shs
 
@@ -747,7 +899,7 @@ jobs:
       # not cause. That baseline is a ratchet: it may only ever shrink. Do NOT
       # add a line to it to make a new collision pass.
       - name: Crypto verify symbol collision gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-crypto-verify-symbol-collisions|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-crypto-verify-symbol-collisions|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-crypto-verify-symbol-collisions.shs
 
@@ -771,7 +923,7 @@ jobs:
       # allocates but never reaches sys_free leaks silently -- nothing else in
       # the tree tests that the release path is CONNECTED rather than present.
       - name: Memory deallocation ownership gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-memory-deallocation-ownership|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-memory-deallocation-ownership|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-memory-deallocation-ownership.shs
 
@@ -791,7 +943,7 @@ jobs:
       # miscompile, not a link error, because -z muldefs makes duplicate C
       # symbols first-definition-wins.
       - name: rt_free ABI consistency gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-rt-free-abi|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-rt-free-abi|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-rt-free-abi.shs
 
@@ -801,7 +953,7 @@ jobs:
       # ("# Re-exported from ", trailing space included). Widening it to
       # "# Re-exported" admits ordinary prose comments into the facade scan.
       - name: Module-surface hint-scan fast-path gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-module-surface-hint-scan-fast-path|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-module-surface-hint-scan-fast-path|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-module-surface-hint-scan-fast-path.shs
 
@@ -815,7 +967,7 @@ jobs:
       # field instead of by position -- exactness preserved, ordering coupling
       # removed. This is precisely the decay an unwired guard accumulates.
       - name: Bootstrap progress-watcher coverage gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-bootstrap-progress-watch|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-bootstrap-progress-watch|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-bootstrap-progress-watch.shs
 
@@ -850,7 +1002,7 @@ jobs:
       # index it reports "FAIL — 34480 .spl file(s) checked, 1 violation(s)"
       # and exits 1.
       - name: Keyword-identifier binding gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-keyword-identifier-bindings|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-keyword-identifier-bindings|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-keyword-identifier-bindings.shs
 
@@ -874,7 +1026,7 @@ jobs:
       # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
       # ---------------------------------------------------------------------
       - name: LLM runtime and finetune setup-contract gates
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-llm-runtime-slang-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-runtime-torch-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-finetune-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-strict-host-prereq-doctor-contract|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-llm-runtime-slang-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-runtime-torch-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-finetune-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-strict-host-prereq-doctor-contract|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-llm-runtime-slang-setup-contract.shs
           sh scripts/check/check-llm-runtime-torch-setup-contract.shs
@@ -907,7 +1059,7 @@ jobs:
       # Same split as the runnable-probe scorer self-test above, for the same
       # reason: wire the falsifiable half now rather than wire nothing.
       - name: Engine-receipt discrimination scorer self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-sspec-lane-shape|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-sspec-lane-shape|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-sspec-lane-shape.shs
 
@@ -940,7 +1092,7 @@ jobs:
       # STALE baseline entry, because a baseline that no longer describes the
       # tree is how a ratchet silently stops ratcheting.
       - name: PID/clock-keyed build artifact ratchet
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-no-pid-keyed-build-artifacts|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-no-pid-keyed-build-artifacts|')) && steps.classify.outputs.docs_only != 'true' }}
         run: |
           sh scripts/check/check-no-pid-keyed-build-artifacts.shs
 
@@ -1079,7 +1231,7 @@ jobs:
       # trap. Fixed 2026-07-12 for x64, silently reverted by tree wipe
       # 6f86ff32a7d; riscv64/arm64 were never fixed. Host-only, no boot needed.
       - name: Freestanding string .len() ABI
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-freestanding-string-len-abi|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-freestanding-string-len-abi|')) && steps.classify.outputs.docs_only != 'true' }}
         run: sh scripts/check/check-freestanding-string-len-abi.shs
 
       # Derived syscall-shim linker aliases.
@@ -1091,7 +1243,7 @@ jobs:
       # static scan is host-only and runs in seconds; it fails if any such table
       # reappears or if the 128MB load base regresses.
       - name: SimpleOS x86_64 linker aliases are derived, not hand-maintained
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-simpleos-x86-64-linker-alias-derived|')) }}
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-simpleos-x86-64-linker-alias-derived|')) && steps.classify.outputs.docs_only != 'true' }}
         run: sh scripts/check/check-simpleos-x86-64-linker-alias-derived.shs
   advisory-gates:
     name: Advisory Gates (honestly RED, not yet blocking)

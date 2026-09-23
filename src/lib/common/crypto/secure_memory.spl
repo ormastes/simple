@@ -5,7 +5,7 @@
 @unsafe(reason: "raw array length mutation; wrapper validates length and exact success status", capabilities: [ffi])
 extern fn rt_array_set_len_known(collection: [u8], len: i64) -> i8
 @unsafe(reason: "raw i64-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
-extern fn rt_array_data_ptr(collection: [i64]) -> i64
+extern fn rt_array_data_ptr<T>(collection: [T]) -> i64
 @unsafe(reason: "raw u8-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
 extern fn rt_array_data_ptr_text(collection: [u8]) -> i64
 @unsafe(reason: "volatile secret-memory byte read after bounds and pointer validation", capabilities: [ffi, raw_ptr])
@@ -107,6 +107,38 @@ fn secure_zero_i64_slots(words: [i64]) -> SecureZeroReport:
         rt_array_data_ptr(words)
     _secure_zero_slots(data_ptr, words.len())
 
+fn secure_zero_u32_slots(words: [u32]) -> SecureZeroReport:
+    """Volatile-overwrite and read back every reachable u32 array slot.
+
+    The report covers only this exact owner-reachable allocation. It makes no
+    claim about compiler temporaries, stack/register copies, or prior arrays.
+    """
+    if words.len() == 0u64:
+        return SecureZeroReport(
+            slot_count: 0u64, overwritten_slots: 0u64,
+            residual_nonzero_slots: 0u64)
+    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_array_data_ptr(words)
+    if data_ptr == 0:
+        return SecureZeroReport(
+            slot_count: words.len(), overwritten_slots: 0u64,
+            residual_nonzero_slots: words.len())
+    # Generic Simple arrays use one runtime i64 storage slot per non-byte
+    # scalar, including u32. Clear the entire physical slot: four-byte pointer
+    # arithmetic would leave every later logical element and each upper half
+    # untouched while still allowing a misleading low-half readback.
+    _secure_zero_slots(data_ptr, words.len())
+
+fn secure_zero_u64_slots(words: [u64]) -> SecureZeroReport:
+    """Volatile-overwrite and read back every reachable u64 array slot."""
+    if words.len() == 0u64:
+        return SecureZeroReport(
+            slot_count: 0u64, overwritten_slots: 0u64,
+            residual_nonzero_slots: 0u64)
+    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_array_data_ptr(words)
+    _secure_zero_slots(data_ptr, words.len())
+
 fn secure_set_u8_length(bytes: [u8], length: i64) -> bool:
     if length < 0:
         return false
@@ -114,4 +146,6 @@ fn secure_set_u8_length(bytes: [u8], length: i64) -> bool:
         rt_array_set_len_known(bytes, length)
     status == 1i8
 
-export SecureZeroReport, secure_zero_u8_slots, secure_zero_u8_range, secure_zero_i64_slots, secure_set_u8_length
+export SecureZeroReport, secure_zero_u8_slots, secure_zero_u8_range
+export secure_zero_i64_slots, secure_zero_u32_slots, secure_zero_u64_slots
+export secure_set_u8_length

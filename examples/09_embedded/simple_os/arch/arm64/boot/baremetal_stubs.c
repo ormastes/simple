@@ -2671,6 +2671,51 @@ static void arm64_invalidate_dcache_range(uint64_t addr, uint64_t size)
 #define ARM64_NET_F_MAC 5U
 #define ARM64_NET_F_STATUS 16U
 #define ARM64_NET_POLL_LIMIT 1000000U
+#define ARM64_VIRTIO_MMIO_BASE 0x0a000000ULL
+#define ARM64_VIRTIO_MMIO_STRIDE 0x200ULL
+#define ARM64_VIRTIO_MMIO_SLOTS 32U
+#define ARM64_VIRTIO_MAGIC 0x74726976U
+
+/* VirtIO MMIO v2 register offsets.  Keep this transport-local: the ARM64
+ * boot runtime is freestanding and cannot borrow the hosted PCI definitions. */
+#define VMMIO_MAGIC_VALUE       0x000U
+#define VMMIO_MAGIC             VMMIO_MAGIC_VALUE
+#define VMMIO_VERSION           0x004U
+#define VMMIO_DEVICE_ID         0x008U
+#define VMMIO_DEVICE_FEATURES   0x010U
+#define VMMIO_DEVICE_FEATURES_SEL 0x014U
+#define VMMIO_DRIVER_FEATURES   0x020U
+#define VMMIO_DRIVER_FEATURES_SEL 0x024U
+#define VMMIO_QUEUE_SEL         0x030U
+#define VMMIO_QUEUE_NUM_MAX     0x034U
+#define VMMIO_QUEUE_NUM         0x038U
+#define VMMIO_QUEUE_READY       0x044U
+#define VMMIO_QUEUE_NOTIFY      0x050U
+#define VMMIO_INTERRUPT_STATUS  0x060U
+#define VMMIO_INTERRUPT_ACK     0x064U
+#define VMMIO_STATUS            0x070U
+#define VMMIO_QUEUE_DESC_LOW    0x080U
+#define VMMIO_QUEUE_AVAIL_LOW   0x090U
+#define VMMIO_QUEUE_USED_LOW    0x0a0U
+
+#define VIRTIO_STATUS_ACKNOWLEDGE 1U
+#define VIRTIO_STATUS_DRIVER      2U
+#define VIRTIO_STATUS_DRIVER_OK   4U
+#define VIRTIO_STATUS_FEATURES_OK 8U
+#define VIRTIO_STATUS_FAILED      128U
+#define VIRTQ_DESC_F_WRITE        2U
+
+struct arm64_virtq_desc {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+};
+
+struct arm64_virtq_used_elem {
+    uint32_t id;
+    uint32_t len;
+};
 
 struct arm64_net_avail {
     uint16_t flags;
@@ -2683,6 +2728,8 @@ struct arm64_net_used {
     uint16_t idx;
     struct arm64_virtq_used_elem ring[ARM64_NET_QUEUE_SIZE];
 };
+
+#include "arm64_virtio_net_queue_state.h"
 
 static struct arm64_virtq_desc g_arm64_net_rx_desc[ARM64_NET_QUEUE_SIZE]
     __attribute__((aligned(4096)));
@@ -2700,6 +2747,7 @@ static uint64_t g_arm64_net_base;
 static uint16_t g_arm64_net_rx_last_used;
 static uint16_t g_arm64_net_tx_last_used;
 static uint8_t g_arm64_net_rx_posted[ARM64_NET_QUEUE_SIZE];
+static uint8_t g_arm64_net_tx_posted[ARM64_NET_QUEUE_SIZE];
 static uint8_t g_arm64_net_mac[6];
 static uint64_t g_arm64_net_tx_completions;
 static uint64_t g_arm64_net_rx_frames;
@@ -2773,6 +2821,7 @@ RuntimeValue rt_arm64_virtio_net_init(void)
     arm64_net_zero(&g_arm64_net_rx_avail, sizeof(g_arm64_net_rx_avail));
     arm64_net_zero(&g_arm64_net_rx_used, sizeof(g_arm64_net_rx_used));
     arm64_net_zero(g_arm64_net_tx_desc, sizeof(g_arm64_net_tx_desc));
+    arm64_net_zero(g_arm64_net_tx_posted, sizeof(g_arm64_net_tx_posted));
     arm64_net_zero(&g_arm64_net_tx_avail, sizeof(g_arm64_net_tx_avail));
     arm64_net_zero(&g_arm64_net_tx_used, sizeof(g_arm64_net_tx_used));
     if (!arm64_net_setup_queue(mmio, 0U, g_arm64_net_rx_desc,
@@ -2823,7 +2872,25 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     if (!g_arm64_net_ready) return -19;
     if (!data_addr || len == 0ULL || len > 1514ULL) return -22;
     volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm64_net_base;
-    uint16_t slot = (uint16_t)(g_arm64_net_tx_avail.idx % ARM64_NET_QUEUE_SIZE);
+    arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_used,
+                                  sizeof(g_arm64_net_tx_used));
+    uint64_t completions_before = g_arm64_net_tx_completions;
+    int reap = arm64_net_tx_reap_used(&g_arm64_net_tx_used,
+                                      &g_arm64_net_tx_last_used,
+                                      g_arm64_net_tx_posted,
+                                      &g_arm64_net_tx_completions,
+                                      ARM64_NET_QUEUE_SIZE);
+    if (reap < 0) {
+        mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED;
+        g_arm64_net_ready = 0U;
+        return -5;
+    }
+    if (g_arm64_net_tx_completions != completions_before) {
+        uint32_t irq = mmio[VMMIO_INTERRUPT_STATUS / 4U];
+        if (irq) mmio[VMMIO_INTERRUPT_ACK / 4U] = irq;
+    }
+    uint16_t slot = arm64_net_tx_find_free(g_arm64_net_tx_posted);
+    if (slot == ARM64_NET_QUEUE_SIZE) return -11; /* EAGAIN: queue owned */
     uint8_t *dst = g_arm64_net_tx_buf[slot];
     arm64_net_zero(dst, ARM64_NET_HEADER_SIZE);
     const uint8_t *src = (const uint8_t *)(uintptr_t)(uint64_t)data_addr;
@@ -2831,8 +2898,8 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     g_arm64_net_tx_desc[slot].addr = (uint64_t)(uintptr_t)dst;
     g_arm64_net_tx_desc[slot].len = (uint32_t)(ARM64_NET_HEADER_SIZE + len);
     g_arm64_net_tx_desc[slot].flags = 0U;
-    g_arm64_net_tx_avail.ring[slot] = slot;
-    g_arm64_net_tx_avail.idx++;
+    g_arm64_net_tx_posted[slot] = 1U;
+    arm64_net_tx_publish(&g_arm64_net_tx_avail, slot);
     arm64_clean_dcache_range((uint64_t)(uintptr_t)dst, ARM64_NET_HEADER_SIZE + len);
     arm64_clean_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_desc[slot],
                              sizeof(g_arm64_net_tx_desc[slot]));
@@ -2843,13 +2910,21 @@ RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_v
     while (polls++ < ARM64_NET_POLL_LIMIT) {
         arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_used,
                                       sizeof(g_arm64_net_tx_used));
-        if (g_arm64_net_tx_used.idx != g_arm64_net_tx_last_used) {
-            g_arm64_net_tx_last_used = g_arm64_net_tx_used.idx;
-            g_arm64_net_tx_completions++;
+        completions_before = g_arm64_net_tx_completions;
+        reap = arm64_net_tx_reap_used(&g_arm64_net_tx_used,
+                                      &g_arm64_net_tx_last_used,
+                                      g_arm64_net_tx_posted,
+                                      &g_arm64_net_tx_completions, slot);
+        if (reap < 0) {
+            mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED;
+            g_arm64_net_ready = 0U;
+            return -5;
+        }
+        if (g_arm64_net_tx_completions != completions_before) {
             uint32_t irq = mmio[VMMIO_INTERRUPT_STATUS / 4U];
             if (irq) mmio[VMMIO_INTERRUPT_ACK / 4U] = irq;
-            return (RuntimeValue)len;
         }
+        if (reap > 0) return (RuntimeValue)len;
     }
     return -110;
 }

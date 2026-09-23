@@ -2,6 +2,7 @@
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_provider_function_name}
 use std.nogc_sync_mut.sffi.system.{env_get}
 # MIR Lowering - HIR to MIR Transformation
 #
@@ -377,14 +378,14 @@ impl MirLowering:
         # optimisation -- it reclaims nothing on its own.
         # `+ ""` is the fresh-copy idiom proven by the alias oracle; plain
         # interpolation "{s}" does NOT copy (measured verdict=0).
-        var mir_fn_name = fn_.name + ""
-        # Static impl methods (`static fn` — is_static, NOT is_method) need the
-        # same owner qualification: two impls each declaring `static fn code()`
-        # otherwise both emit a bare `code` symbol and llc rejects the module
-        # with "invalid redefinition of function".
-        if fn_.is_method or fn_.is_static:
-            val display_name = self.symbols.symbol_display_name(fn_.symbol, fn_.name)
-            mir_fn_name = display_name.replace("::", ".")
+        var function_owner = self.current_module_id
+        val function_symbol = self.symbols.get_symbol_raw(fn_.symbol.id)
+        if function_symbol != nil:
+            val declared_owner = function_symbol.defining_module ?? ""
+            if declared_owner != "":
+                function_owner = declared_owner
+        val fallback_name = mir_provider_function_name(function_owner, self.symbols, fn_)
+        val mir_fn_name = self.provider_callable_symbol_name(fn_.symbol, fallback_name) + ""
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, mir_fn_name, signature, fn_.span)
         if trace_enabled:
@@ -500,6 +501,12 @@ impl MirLowering:
                                     self.array_element_struct_syms[local.id] = element.name
                             case _:
                                 ()
+                case HirTypeKind.Any:
+                    # An Any parameter arrives as a tagged RuntimeValue. Keep
+                    # that representation fact after its MIR type erases to
+                    # i64 so comparison and rendering consumers do not treat
+                    # the tag bits as a raw scalar.
+                    self.mark_runtime_value_local(local.id)
                 case Isolated(inner):
                     # WP-F0 (resource ownership unblock, 2026-08-06): an
                     # iso-wrapped struct param (`x: iso S`) has type
@@ -524,14 +531,29 @@ impl MirLowering:
                     match inner.kind:
                         case Named(type_symbol, _):
                             val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
-                            val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                            var parameter_type_name = ""
+                            if parameter_type != nil:
+                                parameter_type_name = parameter_type.name
+                                match parameter_type.kind:
+                                    case Class: parameter_type_name = mir_class_identity(parameter_type)
+                                    case _: ()
+                            val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                             if is_named_struct:
-                                self.struct_value_syms[local.id] = parameter_type.name
+                                self.struct_value_syms[local.id] = parameter_type_name
                         case _:
                             ()
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
-                    val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                    var parameter_type_name = ""
+                    var is_class_param = false
+                    if parameter_type != nil:
+                        parameter_type_name = parameter_type.name
+                        match parameter_type.kind:
+                            case Class:
+                                parameter_type_name = mir_class_identity(parameter_type)
+                                is_class_param = self.class_type_names.has(parameter_type_name)
+                            case _: ()
+                    val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                     # bug s19_class_free_fn_mutation_dropped_native_2026-07-17:
                     # a plain (non-`mut`, non-`me`) `class`-typed param used to
                     # fall into the `elif is_named_struct` Bug #167 value-copy
@@ -549,7 +571,6 @@ impl MirLowering:
                     # caller's instance. Only a genuine `struct` param keeps
                     # the defensive per-call copy when it's neither a `me`
                     # receiver nor an explicit `mut` param.
-                    val is_class_param = parameter_type != nil and self.class_type_names.has(parameter_type.name)
                     if is_named_struct and (is_me_receiver or is_mut_param or is_class_param):
                         # Bind the receiver/mut-param/class-param directly to
                         # the raw incoming arg local (already mapped via
@@ -558,9 +579,9 @@ impl MirLowering:
                         # `mut s: S` store / a plain class-param mutation
                         # inside the callee body writes through to the exact
                         # same memory the caller passed.
-                        self.struct_value_syms[local.id] = parameter_type.name
+                        self.struct_value_syms[local.id] = parameter_type_name
                     elif is_named_struct:
-                        self.struct_value_syms[local.id] = parameter_type.name
+                        self.struct_value_syms[local.id] = parameter_type_name
                         # Bug #167: structs have VALUE semantics (mirrors the HIR
                         # interpreter's Value.Struct -- see backend/objects.spl,
                         # "instances get value semantics (copied on bind/assign)
@@ -599,7 +620,7 @@ impl MirLowering:
                         # copy now applies only to a genuine `struct` param
                         # that is neither a `me` receiver nor `mut`-marked,
                         # which is exactly Bug #167's original, correct scope.
-                        val copy_local = self.copy_struct_value_recursive(local, parameter_type.name, type_symbol, [parameter_type.name])
+                        val copy_local = self.copy_struct_value_recursive(local, parameter_type_name, type_symbol, [parameter_type_name])
                         self.bind_local(param_symbol_id, copy_local)
                 case _:
                     ()
@@ -664,10 +685,19 @@ impl MirLowering:
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
                 val tail_local = result ?? LocalId(id: 0)
+                var returned_tail_local = tail_local
+                match fn_.return_type.kind:
+                    case HirTypeKind.Any:
+                        # `-> Any` is a tagged ABI boundary. A raw scalar tail
+                        # must be boxed before the caller records the result as
+                        # a RuntimeValue local.
+                        returned_tail_local = self.box_runtime_value(tail_local)
+                    case _:
+                        ()
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
-                self.emit_pending_resource_drops(Some(tail_local))
+                self.emit_pending_resource_drops(Some(returned_tail_local))
                 bldr2 = self.builder
                 # Bug iso_transfer_sites_missing_move_return_assign_field
                 # (2026-08-06), item #1: a function's tail-expression return
@@ -686,12 +716,12 @@ impl MirLowering:
                 # matters beyond the simple `val c = a; a` tail-return case,
                 # which the checker's terminator arm alone already covers
                 # via record_use).
-                var tail_operand = mir_operand_copy(tail_local)
-                if self.local_hir_type_isolation_state(tail_local.id) == 1:
+                var tail_operand = mir_operand_copy(returned_tail_local)
+                if self.local_hir_type_isolation_state(returned_tail_local.id) == 1:
                     var b_rmove = self.builder
-                    val rmove_ty = self.local_mir_type_of(tail_local) ?? MirType.i64()
+                    val rmove_ty = self.local_mir_type_of(returned_tail_local) ?? MirType.i64()
                     val rmove_local = b_rmove.new_temp(rmove_ty)
-                    b_rmove.emit_move(rmove_local, tail_local)
+                    b_rmove.emit_move(rmove_local, returned_tail_local)
                     self.builder = b_rmove
                     bldr2 = self.builder
                     tail_operand = mir_operand_copy(rmove_local)
@@ -1768,4 +1798,3 @@ fn _simd_req_backend_text(backend: OptimizationBackend) -> text:
         case Metal:    "metal"
         case OpenCL:   "opencl"
         case Gpu:      "gpu"
-

@@ -1,0 +1,72 @@
+# @cover src/os/services/evidence/authority_owner.spl 90%
+"""
+# SimpleOS evidence admission authority
+
+Trust roots come only from the loader's immutable registry, admission policy is
+service-owned, and wall time is sampled by the authority owner. These owners do
+not enable PASS while the independent crypto and serialization gates remain
+unadmitted.
+"""
+
+use std.spec
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize,
+    executable_loader_trust_roots_boot_initialize_v1
+}
+use os.services.evidence.authority_owner.{
+    SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1,
+    SIMPLEOS_EVIDENCE_POLICY_MAX_CHALLENGE_TTL_US_V1,
+    simpleos_evidence_authority_start_v1,
+    simpleos_evidence_authority_time_v1,
+    simpleos_evidence_authority_roots_v1
+}
+use os.services.evidence.admission_gates.{
+    simpleos_evidence_admission_gate_reason,
+    simpleos_evidence_all_admission_gates_admitted
+}
+
+describe "SimpleOS evidence authority projection":
+    it "fails closed before the loader owns a trust root":
+        expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(
+                key_id: "public-first-writer", public_key: [9u8; 32])
+        ])).to_be(false)
+        val start = simpleos_evidence_authority_start_v1()
+        expect(start.ok).to_be(false)
+        expect(start.reason).to_equal("trust-root-owner-unavailable")
+        expect(simpleos_evidence_authority_roots_v1().len()).to_equal(0)
+
+    it "projects loader roots and owns bounded policy and canonical time":
+        expect(executable_loader_trust_roots_boot_initialize_v1([
+            ExecutableTrustedSignerV1(
+                key_id: "evidence-root-1", public_key: [7u8; 32])
+        ])).to_be(true)
+        val start = simpleos_evidence_authority_start_v1()
+        expect(start.ok).to_be(true)
+        expect(start.generation).to_equal(1u64)
+        val roots = simpleos_evidence_authority_roots_v1()
+        expect(roots.len()).to_equal(1)
+        expect(roots[0].key_id).to_equal("evidence-root-1")
+        expect(roots[0].public_key).to_equal([7u8; 32])
+        val time = simpleos_evidence_authority_time_v1()
+        expect(time.ok).to_be(true)
+        expect(time.unix_us).to_be_greater_than(0)
+        expect(time.generation).to_equal(start.generation)
+        expect(SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1).to_equal(
+            900000000)
+        expect(SIMPLEOS_EVIDENCE_POLICY_MAX_CHALLENGE_TTL_US_V1).to_equal(
+            300000000)
+        expect(simpleos_evidence_all_admission_gates_admitted()).to_be(false)
+        expect(simpleos_evidence_admission_gate_reason()).to_equal(
+            "trust-root-owner-unavailable")
+
+    it "rejects replacement loader roots without changing authority":
+        expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(
+                key_id: "attacker-root", public_key: [9u8; 32])
+        ])).to_be(false)
+        val repeated = simpleos_evidence_authority_start_v1()
+        expect(repeated.ok).to_be(true)
+        val roots = simpleos_evidence_authority_roots_v1()
+        expect(roots.len()).to_equal(1)
+        expect(roots[0].key_id).to_equal("evidence-root-1")

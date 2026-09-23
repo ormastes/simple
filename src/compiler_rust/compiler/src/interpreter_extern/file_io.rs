@@ -7,9 +7,13 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
+#[cfg(windows)]
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
+#[cfg(windows)]
+use std::sync::Arc;
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
@@ -18,6 +22,20 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 #[cfg(windows)]
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+#[cfg(windows)]
+static RAW_WINDOWS_FILES: LazyLock<Mutex<(i64, HashMap<i64, Arc<File>>)>> =
+    LazyLock::new(|| Mutex::new((1, HashMap::new())));
+
+#[cfg(windows)]
+pub(crate) fn windows_raw_fd_file(fd: i64) -> Option<Arc<File>> {
+    RAW_WINDOWS_FILES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .1
+        .get(&fd)
+        .cloned()
+}
 
 // Global lock handle counter and active locks
 static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
@@ -363,7 +381,33 @@ pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(fd)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_open_fd requires 3 arguments"));
+    }
+    let path = extract_path(args, 0)?;
+    let flags = args[1].as_int()?;
+    let access = flags & 0x3;
+    let mut options = OpenOptions::new();
+    options
+        .read(access != 1)
+        .write(access != 0)
+        .create((flags & 0x40) != 0)
+        .truncate((flags & 0x200) != 0)
+        .append((flags & 0x400) != 0);
+    let file = match options.open(path) {
+        Ok(file) => Arc::new(file),
+        Err(_) => return Ok(Value::Int(-1)),
+    };
+    let mut files = RAW_WINDOWS_FILES.lock().unwrap_or_else(|error| error.into_inner());
+    let token = files.0;
+    files.0 = files.0.checked_add(1).unwrap_or(1);
+    files.1.insert(token, file);
+    Ok(Value::Int(token))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_open_fd(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_open_fd is unavailable on this host"))
 }
@@ -382,7 +426,21 @@ pub fn rt_close_fd(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(status)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_close_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_close_fd requires 1 argument"));
+    }
+    let fd = args[0].as_int()?;
+    let removed = RAW_WINDOWS_FILES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .1
+        .remove(&fd);
+    Ok(Value::Int(if removed.is_some() { 0 } else { -1 }))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_close_fd(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_close_fd is unavailable on this host"))
 }

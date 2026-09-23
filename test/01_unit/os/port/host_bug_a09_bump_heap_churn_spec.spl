@@ -1,0 +1,32 @@
+use std.io_runtime.{file_read}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+describe "host bug A09 x86_64 baremetal heap churn":
+    it "reclaims and coalesces actual allocator blocks across more cumulative allocation than the arena":
+        step("reproduce reported failure")
+        val source = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        expect(source).to_contain("SIMPLEOS_HEAP_MAGIC")
+        expect(source).to_contain("simpleos_heap_release_tail")
+        expect(source).to_contain("invalid and double free are harmless")
+        expect(source).to_contain("if (ptr != 0) free((void *)(uintptr_t)ptr);")
+        expect(source).to_contain("pushfq; popq %0; cli")
+
+        step("exercise corrected behavior")
+        val command = "work=$(mktemp -d /tmp/host-bug-a09-heap.XXXXXX) || exit 1; trap 'rm -rf \"$work\"' EXIT; { printf '#include <stdint.h>\\n#include <stddef.h>\\n'; sed -n '/SIMPLEOS_HEAP_ALLOCATOR_BEGIN/,/SIMPLEOS_HEAP_ALLOCATOR_END/p' examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c; } > \"$work/heap.c\" && cc -std=gnu11 -O2 -ffreestanding -DSIMPLEOS_HEAP_TEST -Dmalloc=simpleos_test_malloc -Dfree=simpleos_test_free -Dcalloc=simpleos_test_calloc -Drealloc=simpleos_test_realloc \"$work/heap.c\" test/01_unit/os/port/host_bug_a09_bump_heap_churn_test.c -pthread -o \"$work/churn\" && \"$work/churn\""
+        val (stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", command], 120000)
+        expect(exit_code).to_equal(0)
+        expect(stdout).to_contain("allocator_latency live_blocks=8 operations=20000")
+        expect(stdout).to_contain("allocator_latency live_blocks=4096 operations=20000")
+        expect(stdout).to_contain("allocator_latency fragmented_live_blocks=4096 operations=20000")
+        expect(stdout).to_contain("churn_live_blocks=24")
+        expect(stdout).to_contain("locked_calls=0 largest_bytes=104857600")
+
+        step("reject adjacent invalid input")
+        expect(source).to_contain("count != 0 && size > (size_t)-1 / count")
+        expect(source).to_contain("if (size == 0) {")
+        expect(source).to_contain("simpleos_heap_free_unlocked(ptr);")
+        expect(source).to_contain("_heap_off = offset + needed")
+        expect(source).to_contain("_heap_free_head")
+        expect(source).to_contain("block->previous_span")
+        expect(source).to_contain("Preserve that contract when recycling dirty storage")

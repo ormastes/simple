@@ -106,6 +106,39 @@ that refusal is itself asserted.
 # TODO: (simpleorch container-oci) implement RuntimeProviderV1 create/start/wait/stop/destroy/recover for the Linux OCI lane; blocked on host privilege above, resume command in this file
 # TODO: (simpleorch container-evidence) flip the native-container receipts in test/02_integration/app/ci/pipeline_runner_spec.spl from VERDICT_BLOCKED to a real container receipt (attempt 1, run nonce in stdout) once the lane is unblocked
 
+## 2026-09-23 publication blockers
+
+The provider implementation exists, but publication remains blocked until a
+privileged owner supplies live-container evidence and the following fail-closed
+checks are implemented and covered without weakening the blocked receipt:
+
+- prove both `newuidmap` and `newgidmap`, subordinate uid/gid ranges, cgroup v2
+  delegation, and the selected network/isolation profile before reporting a
+  rootless provider launch-capable;
+- apply explicit CPU, memory, PID, network, and filesystem policy in the native
+  create argv and retain the effective policy in the receipt;
+- distinguish a positively identified absent container from transient inspect
+  failure so a journaled pre-create attempt can safely retry;
+- remove the per-run state directory on every pre-create/error return while
+  retaining an honest durable evidence location when recovery is required;
+- bound or compact the provider's in-memory state and intent tables without
+  discarding unflushed terminal records or invalidating active operation indices;
+- run create/start/wait/logs/destroy/restart recovery against the pinned
+  BusyBox fixture and retain the nonce, identity labels, exit status, and
+  cleanup receipt.
+
+Do not close this TODO from scripted executor coverage alone.
+
+### Live probe performance evidence still required (2026-09-23)
+
+The static repair keeps launch probing bounded to two timeout-limited `id`
+calls and seven bounded regular-file reads; it performs no directory walk or
+retry loop. This is structural evidence only. Once an admitted rootless Podman
+host is available, retain cold and warm probe latency plus maximum RSS for the
+exact provider binary, with the resolved effective cgroup path and fallback
+state. Until that receipt exists, do not claim a live startup, latency, or RSS
+performance result from the scripted fixtures.
+
 ## Engine choice and what "native" costs per host (added 2026-09-07)
 
 The default engine is **podman**, then docker, then bare runc

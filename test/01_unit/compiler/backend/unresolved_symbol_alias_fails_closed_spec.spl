@@ -20,14 +20,13 @@ did not fail: it jumped into some other function with whatever happened to be
 in the argument registers, and the kernel booted and behaved wrongly under
 exit 0.
 
-## Why this spec is a source-text scan, not a link
+## Executable reproducer
 
-Reproducing through an actual riscv64 kernel link needs a cross toolchain, a
-kernel tree and minutes of wall time, and it can only observe ONE unknown_N
-mapping at a time. The defect is a property of the argument list the linker
-driver constructs, and that property is decidable statically. Scanning the
-source catches the whole class in milliseconds -- including a NEW alias added
-later, which is the regression this is really guarding against.
+The first example keeps the broad source guard. The second builds two tiny
+RISC-V64 ELF objects: one calls undefined `unknown_0`, while the other defines
+the historically unrelated target `rt_riscv_uart_put`. It proves the old link
+argument aliases the two symbols, then proves the production policy fails
+closed when that argument is absent.
 
 ## The generalization
 
@@ -37,17 +36,40 @@ The undefined reference must remain visible so the link fails closed.
 """
 
 use std.spec.*
-use std.io_runtime.{process_run}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write, getpid, process_run}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 val LINK_SRC: text = "src/compiler/70.backend/backend/simpleos_native_linkers.spl"
 fn defsym_unknown_lines() -> text:
-    # `grep` here is a wrapped ugrep honouring .gitignore; the source file is
-    # tracked, so that is fine. Exit status is deliberately not read through a
-    # pipe -- `|| true` keeps a no-match (exit 1) from failing the shell, and
-    # the emptiness of the output is what the assertions test.
-    val out = process_run("sh", ["-c",
-        "/usr/bin/grep -rn -- '--defsym=unknown_' src/compiler/70.backend/ || true"])
+    # grep exit 1 means no match. Any other nonzero status is a broken scan,
+    # not evidence that the backend is clean.
+    val out = process_run("/usr/bin/grep", [
+        "-rn", "--", "--defsym=unknown_", "src/compiler/70.backend/"
+    ])
+    if out.2 != 0 and out.2 != 1:
+        return "__grep_scan_error__ exit={out.2} stderr={out.1}"
     out.0
+
+fn symbol_address(nm_output: text, symbol: text) -> text:
+    for line in nm_output.split("\n"):
+        if line.ends_with(" " + symbol):
+            val fields = line.split(" ")
+            if fields.len() > 0:
+                return fields[0]
+    ""
+
+fn rv64_fixture_dir() -> text:
+    "build/test/rv64_defsym_alias_{getpid()}"
+
+fn find_fixture_tool(config_env: text, candidates: [text]) -> text:
+    val configured = env_get(config_env) ?? ""
+    if configured != "":
+        return configured
+    for candidate in candidates:
+        val probe = process_run(candidate, ["--version"])
+        if probe.2 == 0:
+            return candidate
+    ""
 
 describe "an unresolved unknown_N symbol is never aliased onto a working function":
 
@@ -71,3 +93,70 @@ describe "an unresolved unknown_N symbol is never aliased onto a working functio
         expect(lines.contains("=rt_riscv_qemu_heap_size")).to_equal(false)
         expect(lines.contains("=rt_riscv_qemu_reserved_end")).to_equal(false)
         expect(lines.contains("=rt_riscv_noalloc_pmm_init")).to_equal(false)
+
+    it "reproduces the historical alias and rejects it without defsym":
+        val clang = find_fixture_tool("SIMPLE_TEST_CLANG", [
+            "clang-19", "clang-18", "clang-17", "clang-16", "clang"
+        ])
+        val lld = find_fixture_tool("SIMPLE_TEST_LLD", [
+            "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16", "ld.lld"
+        ])
+        val nm = find_fixture_tool("SIMPLE_TEST_NM", [
+            "llvm-nm-19", "llvm-nm-18", "llvm-nm-17", "llvm-nm-16", "llvm-nm", "nm"
+        ])
+        expect(clang.len()).to_be_greater_than(0)
+        expect(lld.len()).to_be_greater_than(0)
+        expect(nm.len()).to_be_greater_than(0)
+
+        val root = rv64_fixture_dir()
+        _ = dir_remove_all(root)
+        val created = dir_create_all(root)
+        val caller_written = file_write(root + "/caller.S", """
+.section .text.entry,"ax",@progbits
+.globl _start
+_start:
+  call unknown_0
+  ret
+""")
+        val target_written = file_write(root + "/target.S", """
+.text
+.globl rt_riscv_uart_put
+rt_riscv_uart_put:
+  ret
+""")
+        val caller = process_run(clang, ["--target=riscv64-none-elf", "-c", root + "/caller.S", "-o", root + "/caller.o"])
+        val target = process_run(clang, ["--target=riscv64-none-elf", "-c", root + "/target.S", "-o", root + "/target.o"])
+
+        step("Link the fixture with the historical parent argument")
+        val parent = process_run(lld, [
+            "-m", "elf64lriscv", "-e", "_start", "-o", root + "/parent.elf",
+            root + "/caller.o", root + "/target.o",
+            "--defsym=unknown_0=rt_riscv_uart_put"
+        ])
+        val symbols = process_run(nm, [root + "/parent.elf"])
+        val unknown_address = symbol_address(symbols.0, "unknown_0")
+        val target_address = symbol_address(symbols.0, "rt_riscv_uart_put")
+
+        step("Link the candidate fixture without an alias")
+        val candidate = process_run(lld, [
+            "-m", "elf64lriscv", "-e", "_start", "-o", root + "/candidate.elf",
+            root + "/caller.o", root + "/target.o"
+        ])
+        val cleaned = dir_remove_all(root)
+
+        # Cleanup occurs before assertions so an ordinary test failure does not
+        # accumulate per-process fixture directories.
+        expect(created).to_equal(true)
+        expect(caller_written).to_equal(true)
+        expect(target_written).to_equal(true)
+        expect(caller.2).to_equal(0)
+        expect(target.2).to_equal(0)
+        expect(parent.2).to_equal(0)
+        expect(symbols.2).to_equal(0)
+        expect(symbols.0).to_contain(" T unknown_0")
+        expect(symbols.0).to_contain(" T rt_riscv_uart_put")
+        expect(unknown_address.len()).to_be_greater_than(0)
+        expect(unknown_address).to_equal(target_address)
+        expect(candidate.2).to_be_greater_than(0)
+        expect(candidate.1).to_contain("undefined symbol: unknown_0")
+        expect(cleaned).to_equal(true)

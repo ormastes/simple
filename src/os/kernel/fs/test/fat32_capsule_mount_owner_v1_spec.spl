@@ -1,5 +1,12 @@
-use std.spec.{describe, it, expect, fail, pass_do_nothing}
+use std.spec.{describe, it, expect, fail, pass_do_nothing, step}
 use std.fs_driver.block_device.{BlockDevice}
+use os.kernel.fs.fat32.{
+    Fat32Filesystem, FileHandle, fat32_mount_publish, fat32_mount_clear
+}
+use os.kernel.fs.fat32_fd_table.{
+    fat32_fd_bind_capsule_mount_v1, fat32_fd_register,
+    fat32_fd_object_id, fat32_fd_sync_object, fat32_fd_clear_for_test
+}
 use os.kernel.fs.block_device_identity_owner_v1.{
     BlockDeviceRegionBindingV1, block_device_identity_create_v1,
     block_device_identity_unmount_v1
@@ -8,11 +15,14 @@ use os.kernel.fs.block_backend_capsule_owner_v1.{
     block_backend_capsule_register_v1, block_backend_capsule_teardown_v1
 }
 use os.kernel.fs.fat32_capsule_mount_owner_v1.{
+    FAT32_CAPSULE_MOUNT_OPERATION_CAPACITY_V1,
     Fat32CapsuleMountErrorV1, fat32_capsule_mount_publish_v1,
     fat32_capsule_mount_acquire_v1, fat32_capsule_mount_read_v1,
     fat32_capsule_mount_release_v1, fat32_capsule_mount_snapshot_v1,
     fat32_capsule_mount_close_v1
 }
+
+var g_fat32_capsule_test_flush_mode_v1: i32 = 0
 
 fn zero_sector_v1() -> [u8]:
     var bytes: [u8] = []
@@ -60,7 +70,11 @@ impl BlockDevice for Fat32CapsuleTestDeviceV1:
     fn write_sector(_lba: u64, data: [u8]) -> Result<bool, text>:
         Ok(data.len() == 512)
     fn sector_size() -> u32: 512u32
-    fn flush() -> Result<bool, text>: Ok(true)
+    fn flush() -> Result<bool, text>:
+        if g_fat32_capsule_test_flush_mode_v1 == 1: return Ok(false)
+        if g_fat32_capsule_test_flush_mode_v1 == 2:
+            return Err("injected flush failure")
+        Ok(true)
 
 fn fat32_capsule_binding_v1(owner: u64) -> BlockDeviceRegionBindingV1:
     BlockDeviceRegionBindingV1(
@@ -157,5 +171,56 @@ describe "transactional FAT32 capsule mount owner":
             fat32_capsule_mount_release_v1(operations[i]).unwrap()
             i = i + 1
         fat32_capsule_mount_close_v1(mount).unwrap()
+        block_backend_capsule_teardown_v1(capsule).unwrap()
+        block_device_identity_unmount_v1(identity).unwrap()
+
+    it "releases sync operations after successful, refused, and failed flushes":
+        # @req: REQ-OS-KERNEL-001
+        step("Bind a FAT32 descriptor to a real authenticated capsule mount")
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        g_fat32_capsule_test_flush_mode_v1 = 0
+        val binding = fat32_capsule_binding_v1(81005u64)
+        val identity = block_device_identity_create_v1(binding).unwrap()
+        val dev = Fat32CapsuleTestDeviceV1(boot: minimal_fat32_sector_v1())
+        val capsule = block_backend_capsule_register_v1(
+            dev, identity, binding).unwrap()
+        val mount = fat32_capsule_mount_publish_v1(
+            capsule.seal(), identity, binding, 81005u64).unwrap()
+        val fs = Fat32Filesystem.make_for_dirent_test(
+            32u32, 632u32, 512u32, 1u32, 69368u32, zero_sector_v1())
+        fat32_mount_publish(fs, dev)
+        fat32_fd_bind_capsule_mount_v1(mount)
+        fat32_fd_register(81005u64, 7, FileHandle(
+            fd: 0u64, start_cluster: 15u32, current_cluster: 15u32,
+            offset: 0u64, file_size: 11u64, is_open: true,
+            dirent_sector: 0u64, dirent_offset: 0))
+        val object_id = fat32_fd_object_id(81005u64, 7)
+        expect(object_id > 0u64).to_be(true)
+
+        step("Exceed the 64-slot capacity in each terminal flush mode")
+        var mode = 0
+        while mode < 3:
+            g_fat32_capsule_test_flush_mode_v1 = mode
+            var attempt = 0
+            while attempt <= FAT32_CAPSULE_MOUNT_OPERATION_CAPACITY_V1:
+                val result = fat32_fd_sync_object(object_id)
+                if mode == 0:
+                    expect(result.is_ok()).to_be(true)
+                    expect(result.unwrap()).to_be(true)
+                else:
+                    expect(result.is_err()).to_be(true)
+                    expect(result.unwrap_err()).to_equal(-5)
+                attempt = attempt + 1
+            mode = mode + 1
+
+        step("Close succeeds only if all sync reservations were released")
+        g_fat32_capsule_test_flush_mode_v1 = 0
+        val closed = fat32_capsule_mount_close_v1(mount)
+        expect(closed.is_ok()).to_be(true)
+        expect(closed.unwrap().operation_count).to_equal(
+            (FAT32_CAPSULE_MOUNT_OPERATION_CAPACITY_V1.to_u64() + 1u64) * 3u64)
+        fat32_fd_clear_for_test()
+        fat32_mount_clear()
         block_backend_capsule_teardown_v1(capsule).unwrap()
         block_device_identity_unmount_v1(identity).unwrap()

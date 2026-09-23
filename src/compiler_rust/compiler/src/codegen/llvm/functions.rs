@@ -2944,6 +2944,7 @@ impl LlvmBackend {
                     "get" => Some("rt_index_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
+                    "set" => Some("rt_collection_set"),
                     // Receiver-dispatched — see the matching arm in
                     // codegen/instr/closures_structs.rs. Name-keyed table with
                     // no receiver type, so `rt_dict_remove` here silently
@@ -3045,7 +3046,7 @@ impl LlvmBackend {
                         let mut val = self.get_vreg(arg, vreg_map)?;
                         // Membership needle must be boxed to match the tagged
                         // store; see build_wrap_membership_needle.
-                        if rt_name == "rt_contains" && arg_idx == 1 {
+                        if (rt_name == "rt_contains" && arg_idx == 1) || (rt_name == "rt_collection_set" && arg_idx > 0) {
                             val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
                         }
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;

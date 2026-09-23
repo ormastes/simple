@@ -22,6 +22,7 @@
 #include <io.h>
 #include <process.h>
 #include <windows.h>
+#include "platform/windows_raw_mapping.h"
 #if defined(_MSC_VER)
 /* rt_legacy_stop_group's SIGNATURE takes pid_t while its body is
  * `#if !defined(_WIN32)`, so the type leaks into the Windows build. MinGW
@@ -67,8 +68,7 @@ int64_t rt_thread_available_parallelism(void) {
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
     if (!addr || length <= 0) return -1;
 #if defined(_WIN32)
-    (void)length;
-    return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
+    return spl_windows_munmap_raw(addr, length);
 #else
     return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
 #endif

@@ -65,6 +65,7 @@ use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION,
 use std.common.crypto.sha256.{sha256_text}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
+use std.io_runtime.{platform_name}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
     FontExecutionPolicy,
@@ -125,6 +126,29 @@ fn engine2d_env_backend_override() -> text:
 
 fn engine2d_env_get(key: text) -> text:
     env_get(key)
+
+fn engine2d_platform_allows_hosted_gpu_probes(platform: text) -> bool:
+    """Whether a runtime platform identity can use hosted GPU services.
+
+    `platform_name()` is the canonical in-process target facade. Hosted Linux,
+    FreeBSD, and Windows report their OS names; SimpleOS reports a compiled-in
+    `*-baremetal-simpleos` identity. A SimpleOS image must reach its CPU
+    fallback without probing dynamic GPU runtimes or their Vulkan delegates.
+    """
+    val canonical = platform.trim().lower()
+    not canonical.contains("baremetal") and not canonical.contains("simpleos")
+
+fn engine2d_hosted_backend_probes_available() -> bool:
+    engine2d_platform_allows_hosted_gpu_probes(platform_name())
+
+fn engine2d_auto_probe_order_for_platform(platform: text) -> [text]:
+    """Return the automatic probe order for a canonical runtime platform."""
+    if not engine2d_platform_allows_hosted_gpu_probes(platform):
+        return ["software", "cpu"]
+    backend_default_priority_order()
+
+fn engine2d_auto_probe_order() -> [text]:
+    engine2d_auto_probe_order_for_platform(platform_name())
 
 fn engine2d_shutdown_has_typed_route(selected_name: text) -> bool:
     """True when Engine2D.shutdown() reaches the backend through a typed
@@ -1060,13 +1084,15 @@ class Engine2D with DrawIrRenderTarget:
         Returns:
             Backend name string
         """
+        val platform = platform_name()
+        val hosted_gpu_probes = engine2d_platform_allows_hosted_gpu_probes(platform)
         val override_name = engine2d_env_backend_override()
-        if override_name != "":
+        if hosted_gpu_probes and override_name != "":
             val override_canon = backend_canonical_name(override_name)
             val override_probe = Engine2D.probe_backend(1, 1, override_canon)
             if backend_probe_initialized(override_probe):
                 return override_canon
-        val order = backend_default_priority_order()
+        val order = engine2d_auto_probe_order_for_platform(platform)
         var idx = 0
         val order_len = order.len()
         while idx < order_len:
@@ -1202,6 +1228,8 @@ class Engine2D with DrawIrRenderTarget:
         """
         if _viable_auto_backend_cache != "":
             return _viable_auto_backend_cache
+        val platform = platform_name()
+        val hosted_gpu_probes = engine2d_platform_allows_hosted_gpu_probes(platform)
         val override_name = engine2d_env_backend_override()
         # Guard against a non-empty raw override that canonicalizes to "".
         # Measured live on baremetal (2026-08-11): engine2d_env_backend_override()
@@ -1212,7 +1240,7 @@ class Engine2D with DrawIrRenderTarget:
         # backend "" always fails with "Unknown backend: " and previously hid
         # the real priority-order auto-resolution below it entirely. Treat an
         # empty canonical name identically to "no override".
-        if override_name.len() > 0:
+        if hosted_gpu_probes and override_name.len() > 0:
             val override_canon = backend_canonical_name(override_name)
             if override_canon.len() > 0:
                 val override_probe = Engine2D.probe_backend(1, 1, override_canon)
@@ -1222,7 +1250,7 @@ class Engine2D with DrawIrRenderTarget:
                 print("[backend-resolve] override {override_canon} rejected: {override_probe.reason}")
             else:
                 print("[backend-resolve] override ignored: raw override_name.len()={override_name.len()} but canonicalized len=0 (see engine2d_env_backend_override ABI note)")
-        val order = backend_default_priority_order()
+        val order = engine2d_auto_probe_order_for_platform(platform)
         var idx = 0
         val order_len = order.len()
         while idx < order_len:
@@ -1250,7 +1278,7 @@ class Engine2D with DrawIrRenderTarget:
         """
         var available: [text] = []
 
-        val order = backend_default_priority_order()
+        val order = engine2d_auto_probe_order()
         var idx = 0
         val order_len = order.len()
         while idx < order_len:

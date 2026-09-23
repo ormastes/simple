@@ -11,6 +11,7 @@ use os.apps.dbd.dbd_protocol.{
     DBD_MIN_CREDENTIAL_BYTES, DBD_MAX_CREDENTIAL_BYTES
 }
 use os.tls13.server_types.{Tls13ServerConfig}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
 
 pub val DBD_MAX_CERT_CHAIN_ENTRIES: i64 = 4
 pub val DBD_MAX_CERTIFICATE_BYTES: i64 = 65536
@@ -41,13 +42,15 @@ pub class DbdProvisioningOwnerV1:
             credential_wiped: false, last_error: "dbd-provisioning-empty")
 
     me wipe_credential():
-        var i: u64 = 0u64
-        while i < self.credential.len():
-            self.credential[i] = 0u8
-            i = i + 1u64
-        self.credential_wiped = true
-        for byte in self.credential:
-            if byte != 0u8: self.credential_wiped = false
+        # `credential` is the provisioning owner's copy after `admit`.
+        # A plain element-write loop may disappear in optimized target code;
+        # use the sole volatile write/barrier/readback owner before releasing
+        # this array. Empty means no credential was ever admitted.
+        if self.credential.len() == 0u64:
+            self.credential_wiped = true
+        else:
+            val wipe = secure_zero_u8_slots(self.credential)
+            self.credential_wiped = wipe.verified()
         self.credential = []
 
     me wipe_tls_material():
@@ -77,8 +80,15 @@ pub class DbdProvisioningOwnerV1:
         principal: text, credential: [u8], cert_chain: [[u8]],
         private_key: [u8], signature_scheme: u16
     ) -> bool:
+        # Admission owns the mutable credential from entry, including every
+        # validation failure.  Taking it only after validation leaves the
+        # caller's rejected secret live on the principal/length early returns.
         if self.state == DbdProvisioningStateV1.Admitted:
+            val replacement_wipe = secure_zero_u8_slots(credential)
+            if not replacement_wipe.verified():
+                self.close()
             return false
+        self.credential = credential
         if principal.len() <= 0 or principal.len() > DBD_MAX_PRINCIPAL_BYTES:
             return self.quarantine("dbd-principal-invalid")
         if credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
@@ -99,13 +109,22 @@ pub class DbdProvisioningOwnerV1:
             signature_scheme == 0u16:
             return self.quarantine("dbd-private-key-boundary-invalid")
         self.principal = principal
-        self.credential = credential
         self.cert_chain = cert_chain
         self.private_key = private_key
         self.signature_scheme = signature_scheme
         if not self.provider.configure_bytes(principal, self.credential):
             return self.quarantine("dbd-credential-provider-rejected")
         self.wipe_credential()
+        # Never expose a configured digest verifier if the provisioning copy
+        # could not prove its volatile overwrite/readback. `ready` also checks
+        # this flag, but admission itself must revoke the verifier and enter a
+        # terminal state instead of leaving a configured provider behind.
+        if not self.credential_wiped:
+            self.wipe_tls_material()
+            self.provider.revoke()
+            self.state = DbdProvisioningStateV1.Quarantined
+            self.last_error = "dbd-credential-wipe-failed"
+            return false
         self.state = DbdProvisioningStateV1.Admitted
         self.last_error = ""
         true

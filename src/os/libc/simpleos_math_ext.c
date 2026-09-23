@@ -92,7 +92,38 @@ double sin(double x) {
 }
 
 double cos(double x) {
-    return sin(x + PI_2);
+    /* Evaluate the even kernel directly.  Delegating to sin(x + PI/2)
+     * makes cos(0) one ULP larger than 1.0 after phase-shift and polynomial
+     * rounding, violating an exact IEEE identity and cosine's range. */
+    if (x != x) return x; /* NaN */
+
+    x = _reduce_angle(x);
+    double sign = 1.0;
+    if (x > PI_2) {
+        x = PI - x;
+        sign = -1.0;
+    } else if (x < -PI_2) {
+        x = -PI - x;
+        sign = -1.0;
+    }
+    double x2 = x * x;
+    double term = 1.0;
+    double sum = 1.0;
+
+    term *= -x2 / (1.0 * 2.0);    sum += term;  /*  2 */
+    term *= -x2 / (3.0 * 4.0);    sum += term;  /*  4 */
+    term *= -x2 / (5.0 * 6.0);    sum += term;  /*  6 */
+    term *= -x2 / (7.0 * 8.0);    sum += term;  /*  8 */
+    term *= -x2 / (9.0 * 10.0);   sum += term;  /* 10 */
+    term *= -x2 / (11.0 * 12.0);  sum += term;  /* 12 */
+    term *= -x2 / (13.0 * 14.0);  sum += term;  /* 14 */
+    term *= -x2 / (15.0 * 16.0);  sum += term;  /* 16 */
+    term *= -x2 / (17.0 * 18.0);  sum += term;  /* 18 */
+    term *= -x2 / (19.0 * 20.0);  sum += term;  /* 20 */
+    term *= -x2 / (21.0 * 22.0);  sum += term;  /* 22 */
+    term *= -x2 / (23.0 * 24.0);  sum += term;  /* 24 */
+
+    return sign * sum;
 }
 
 double tan(double x) {

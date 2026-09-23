@@ -1,0 +1,96 @@
+# Executable cross-target probe for the runtime entry points required by the
+# in-guest Simple compiler payload.  Build this with --runtime-bundle
+# simple-core and run it in a SimpleOS guest; every assertion reaches the real
+# selected runtime provider rather than a copied test helper.
+
+extern fn abort()
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+extern fn rt_value_float(value: f64) -> i64
+extern fn rt_value_as_float(value: i64) -> f64
+extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote(value: i64) -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn require(ok: bool):
+    if not ok:
+        abort()
+
+require(rt_env_get_i64("SIMPLE_CORE_PAYLOAD_MISSING", 73) == 73)
+require(rt_env_set("SIMPLE_CORE_PAYLOAD_I64", "-29"))
+require(rt_env_get_i64("SIMPLE_CORE_PAYLOAD_I64", 73) == -29)
+require(rt_bytes_to_text([83u8, 105u8, 109u8, 112u8, 108u8, 101u8]) == "Simple")
+val alpha = rt_bytes_to_text([97u8, 108u8, 112u8, 104u8, 97u8])
+val alpha_again = rt_bytes_to_text([97u8, 108u8, 112u8, 104u8, 97u8])
+val alphabet = rt_bytes_to_text([97u8, 108u8, 112u8, 104u8, 97u8, 98u8, 101u8, 116u8])
+val beta = rt_bytes_to_text([98u8, 101u8, 116u8, 97u8])
+require(alpha < beta)
+require(beta > alpha)
+require(alpha == alpha_again)
+require(alpha <= alpha_again)
+require(alpha >= alpha_again)
+require(alpha < alphabet)
+
+val exact_bits = 0x4022800000000003
+val boxed = rt_value_float(0.1)
+require(spl_f64_to_bits(rt_value_as_float(boxed)) == 0x3FB999999999999A)
+require(spl_f64_to_bits(rt_value_as_float(exact_bits | 2)) == (exact_bits & -8))
+val negative_zero_bits = (-9223372036854775807 - 1)
+require(spl_f64_to_bits(rt_value_as_float(negative_zero_bits | 2)) == negative_zero_bits)
+
+val nan_bits = 0x7FF8000000000042
+val nan_box = rt_value_float(rt_value_as_float(nan_bits | 2))
+# The legacy-inline carrier necessarily clears its low tag bits; the heap box
+# must preserve the resulting NaN payload exactly.
+require(spl_f64_to_bits(rt_value_as_float(nan_box)) == (nan_bits & -8))
+
+# A heap-looking non-owner must take the inline fallback without dereference.
+val collision = rt_value_as_float(0x10001)
+require(spl_f64_to_bits(collision) == 0x10000)
+
+# Cross several registry growth thresholds, retain every handle, then recheck
+# the old entries after all rehashes. Checking only the newest insertion would
+# not detect a migration bug.
+var retained_boxes: [i64] = []
+var i = 0
+while i < 256:
+    val value = (i as f64) + 0.1
+    val retained = rt_value_float(value)
+    require(spl_f64_to_bits(rt_value_as_float(retained)) == spl_f64_to_bits(value))
+    retained_boxes.push(retained)
+    i = i + 1
+
+i = 0
+while i < retained_boxes.len():
+    val expected = (i as f64) + 0.1
+    require(spl_f64_to_bits(rt_value_as_float(retained_boxes[i])) == spl_f64_to_bits(expected))
+    i = i + 1
+
+# Exercise float scope reclamation and promotion. A reclaimed handle must take
+# the safe inline fallback without dereference; the promoted handle must keep
+# its exact bits after scope completion.
+require(rt_transient_array_scope_begin())
+val reclaimed = rt_value_float(12.25)
+val promoted = rt_value_float(19.75)
+require(rt_transient_array_scope_pause())
+require(rt_transient_heap_promote(promoted))
+require(rt_transient_array_scope_end())
+require(spl_f64_to_bits(rt_value_as_float(reclaimed)) == (reclaimed & -8))
+require(spl_f64_to_bits(rt_value_as_float(promoted)) == spl_f64_to_bits(19.75))
+
+# Churn the same registry through many completed scopes. This catches deletion
+# schemes that leave tombstones until absent-handle lookup becomes linear.
+i = 0
+while i < 512:
+    require(rt_transient_array_scope_begin())
+    val scoped = rt_value_float((i as f64) + 0.25)
+    require(spl_f64_to_bits(rt_value_as_float(scoped)) == spl_f64_to_bits((i as f64) + 0.25))
+    require(rt_transient_array_scope_pause())
+    require(rt_transient_array_scope_end())
+    require(spl_f64_to_bits(rt_value_as_float(scoped)) == (scoped & -8))
+    i = i + 1
+
+print("SIMPLE_CORE_PAYLOAD_RUNTIME_OK")
