@@ -63,6 +63,7 @@ pub mod cache_host_authority_v1;
 pub mod cuda_runtime;
 pub mod process_observation_v4_twins;
 pub mod debug;
+pub mod directx_submission_twins;
 pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
