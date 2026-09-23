@@ -1,4 +1,4 @@
-name: Windows Build (MSVC + MinGW)
+name: Windows Build (LLVM 23.1.1 clang-cl)
 
 on:
   push:
@@ -16,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  LLVM_VERSION: 23.1.1
+  LLVM_ARCHIVE_SHA256: c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462
+  LLVM_ROOT: ${{ github.workspace }}\.toolchains\llvm-23.1.1
 
 jobs:
   windows-build:
@@ -27,14 +30,77 @@ jobs:
             rust-target: x86_64-pc-windows-msvc
             linker-flavor: msvc
             name: Windows MSVC
-          - toolchain: mingw
-            rust-target: x86_64-pc-windows-gnu
-            linker-flavor: gnu
-            name: Windows MinGW
     runs-on: windows-latest
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache LLVM 23.1.1
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-${{ runner.os }}-${{ runner.arch }}-${{ env.LLVM_VERSION }}-${{ env.LLVM_ARCHIVE_SHA256 }}
+
+      - name: Install LLVM 23.1.1
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archiveName = 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+          $staging = Join-Path $env:RUNNER_TEMP 'simple-llvm-23.1.1-extract'
+          $uri = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang%2Bllvm-23.1.1-x86_64-pc-windows-msvc.tar.zst'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:LLVM_ARCHIVE_SHA256) {
+            throw "LLVM archive SHA-256 mismatch: $actualHash"
+          }
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          & 7z x $archive "-o$staging" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to decompress LLVM archive: exit $LASTEXITCODE"
+          }
+          $tar = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar'
+          & 7z x $tar "-o$staging" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to extract LLVM archive: exit $LASTEXITCODE"
+          }
+          $sourceRoot = Join-Path $staging 'clang+llvm-23.1.1-x86_64-pc-windows-msvc'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:LLVM_ROOT) | Out-Null
+          Move-Item -LiteralPath $sourceRoot -Destination $env:LLVM_ROOT
+
+      - name: Verify LLVM 23.1.1 authority
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checks = @(
+            @{ Tool = 'clang.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'clang-cl.exe'; Pattern = 'clang version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'llvm-ar.exe'; Pattern = 'LLVM version 23\.1\.1(?:\s|$)' },
+            @{ Tool = 'lld-link.exe'; Pattern = 'LLD 23\.1\.1(?:\s|$)' }
+          )
+          foreach ($check in $checks) {
+            $tool = Join-Path $env:LLVM_ROOT "bin\$($check.Tool)"
+            if (!(Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "missing LLVM 23.1.1 tool: $tool"
+            }
+            $versionLines = @(& $tool --version 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$($check.Tool) --version failed: exit $LASTEXITCODE"
+            }
+            $version = $versionLines -join "`n"
+            if ($version -notmatch $check.Pattern) {
+              $summary = ($versionLines | Select-Object -First 3) -join ' | '
+              throw "$($check.Tool) is not LLVM 23.1.1: $summary"
+            }
+            $toolHash = (Get-FileHash -LiteralPath $tool -Algorithm SHA256).Hash.ToLowerInvariant()
+            $summary = ($versionLines | Select-Object -First 3) -join ' | '
+            Write-Host "LLVM_TOOL_ATTESTATION tool=$($check.Tool) sha256=$toolHash version=$summary"
+          }
+          (Join-Path $env:LLVM_ROOT 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "SIMPLE_LLVM_PATH=$env:LLVM_ROOT\bin\LLVM-C.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # MSVC: set up Visual Studio developer environment
       - name: Setup MSVC
@@ -108,6 +174,15 @@ jobs:
             mv /usr/bin/link /usr/bin/link.bak
           fi
 
+      # The terminal shim rejects ambient cl.exe so CI uses the same Clang C
+      # authority admitted by the Windows bootstrap pipeline.
+      - name: Bind MSVC Clang compiler
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: |
+          "CC=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC_x86_64_pc_windows_msvc=$env:LLVM_ROOT\bin\clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build Rust seed
         working-directory: src/compiler_rust
         shell: bash
@@ -147,13 +222,19 @@ jobs:
             --entry-closure \
             -o build/bootstrap/simple_stage2.exe
 
+      # MinGW is used only as the target linker for this post-bootstrap
+      # PE/COFF relocation test; the seed C compiler remains verified clang-cl.
+      - name: Install MinGW relocation linker
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+
       - name: Verify Windows bootstrap global relocations
-        if: matrix.toolchain == 'mingw'
-        shell: bash
+        shell: msys2 {0}
         env:
           SIMPLE_BINARY: build/bootstrap/simple_stage2.exe
-        run: |
-          sh scripts/check/check-bootstrap-windows-global-relocation.shs
+        run: sh scripts/check/check-bootstrap-windows-global-relocation.shs
 
       # Stage 2 LLVM: compile Simple compiler using stage1 + LLVM lib backend
       - name: Stage 2 with LLVM lib backend
