@@ -624,3 +624,36 @@ rather than fixed. Status remains OPEN (P1).
 correct four-argument `rt_env_set` call sequence. That claim needs the redeploy
 this lane could not perform, and must not be assumed from the source-side
 `rt_env_set` signature alone.
+
+## 2026-09-21 ARM-host follow-up — source gate repaired, deployment still open
+
+The currently tracked `release/x86_64-unknown-linux-gnu/simple` is no longer
+the reported `04a38e21…` artifact: it hashes to `d0976e84…` and contains a
+four-argument `rt_env_set` provider by x86-64 disassembly. This is a Rust-built
+binary, so it is not proof of the required pure-Simple full CLI deployment.
+The ARM64 host cannot run it directly, and QEMU user mode lacks the x86-64
+dynamic loader on this host. The P1 therefore remains OPEN.
+
+The source ABI gate initially failed on stale assertions for the old MIR
+semantic-arity helper. Its current lowering uses text operand splitting and
+the existing unit spec covers both the semantic two-text call and raw four-word
+bridge. After the gate was updated, it exposed a real mismatch: the system
+SFFI generator specified `rt_env_set` as `void`, unlike the canonical `bool`
+provider and other generator specs. That declaration was corrected to `bool`.
+The source ABI gate now passes. An interpreter unit run attempted with the
+available ARM Rust bootstrap seed exited 1 amid unrelated repository warnings;
+it is not accepted as pure-Simple verification or deployment evidence.
+
+Follow-up review narrowed the gate's MIR assertions to the body of
+`expand_text_abi_args`: it now requires operand inspection, a successful split
+guard, and preservation of an unsplit operand there. The gate reports
+`env_runtime_abi_runtime=not_checked` unless its optional binary probe runs.
+Its check for the unit spec is source-presence evidence only; the failed seed
+test above remains failed, and this gate does not prove native behavior.
+
+SOSIX compatibility was checked separately. `src/os/sosix` has no public
+`env_set` or `rt_env_set` declaration, provider, or caller. Its only process
+environment use is the host configuration adapter's `rt_env_get(key: text) ->
+text?` read. The SFFI generator's setter result change therefore does not
+alter a SOSIX public signature or provider contract; SOSIX has no setter
+callers requiring adaptation.
