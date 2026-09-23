@@ -697,15 +697,16 @@ impl<'a> Parser<'a> {
 
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present.
                     // Skip auto-injection for constructors (methods named "new").
-                    // Methods whose first param is not `self` or `me` are implicitly static
-                    // (factory methods like `fn wrap(v: T) -> Foo<T>` don't need `self`).
+                    // Body receiver use is part of the declaration ABI. Resolve
+                    // it before import metadata observes the parameter list;
+                    // receiver-free factory methods remain implicitly static.
                     if !is_static && f.name != "new" {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {
                             // Instance method with explicit self/me — no injection needed
-                        } else if f.is_me_method {
-                            // `me method()` syntax — inject self for mutable methods
+                        } else if f.is_me_method || crate::ast::receiver::block_uses_self(&f.body) {
+                            // Mutable or implicit-receiver instance method.
                             let self_param = Parameter {
                                 span: f.span,
                                 name: "self".to_string(),
@@ -910,14 +911,15 @@ impl<'a> Parser<'a> {
 
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present.
                     // Skip auto-injection for constructors (methods named "new").
-                    // Methods whose first param is not `self` or `me` are implicitly static.
+                    // Receiver use in the body also makes this an instance
+                    // method; import arity and HIR must see the same signature.
                     if !is_static && f.name != "new" {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {
                             // Instance method with explicit self/me — no injection needed
-                        } else if f.is_me_method {
-                            // `me method()` syntax — inject self for mutable methods
+                        } else if f.is_me_method || crate::ast::receiver::block_uses_self(&f.body) {
+                            // Mutable or implicit-receiver instance method.
                             let self_param = Parameter {
                                 span: f.span,
                                 name: "self".to_string(),
