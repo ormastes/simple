@@ -6,9 +6,15 @@ evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-Open. Reproduced after two intervening module-surface freeze defects were fixed.
-The mandatory three-cycle fix/verify budget is exhausted; do not retry this
-rollout without a fresh scoped session.
+Fix implemented; native wrapper differential verification pending. PR #1072
+merged the nullable diagnostic-reader transport repair on 2026-09-18. The
+2026-09-22 focused audit recovered a concrete LLVM failure through an admitted
+Windows Stage 2 driver, but the full wrapper probe crashed after HIR before an
+executable was produced. This is not a fixed verdict. See
+`doc/09_report/stage2_object_path_diagnostic_evidence_2026-09-22.md`.
+
+The original three-cycle budget below describes the 2026-09-08 session. The
+2026-09-22 session also stops after three native compile attempts.
 
 ## Reproduction
 
@@ -370,6 +376,30 @@ atomic's initial value, the success code, and what an unresolved extern returns.
 Three states on one number is not a measurement. A diagnostic code space must
 make "I was never set" distinguishable from every real answer before its
 readout is worth anything.
+
+## 2026-09-22 — merged fix audited; native diagnostic recovery observed
+
+PR [#1072](https://github.com/ormastes/simple/pull/1072), merge
+`585b5799baed2292b294fb6b26391b3a63f6e909`, changes the bounded reader to
+`== nil` plus `??`. Its native A/B leg was explicitly left pending. The clean
+`origin/main` database already agrees; the old "Open" heading above did not.
+PR [#748](https://github.com/ormastes/simple/pull/748) separately repaired the
+stale object destination and reported both AArch64 Linux sanity passes green.
+
+An admitted Windows x86_64 Stage 2 compiler with SHA-256
+`be0ad06d6a68b466785eae2c1cb966f61c7026dd5fae8242591353760d72c7c2`
+successfully built and ran the hello-world fixture. A focused rejected LLVM
+compile surfaced the concrete `error: redefinition of global` diagnostic,
+rather than the opaque object-path status. The reader and AOT driver bytes
+match this compiler's admitted source snapshot and current main.
+
+This does **not** prove the wrapper A/B criterion: the driver has a raw-reader
+recovery branch as well. The existing whole-module wrapper probe failed with
+access violation `0xC0000005` immediately after HIR (18.656 s; sampled peak
+process-tree RSS 761,593,856 bytes). Missing-file, long-path and old-wrapper
+mutation runtime assertions were therefore not reached. Keep the pending
+status and use the report's bounded commands and retained evidence for the
+next scoped session; do not repeat the already-green hello and recovery checks.
 
 
 ## Triage 2026-09-20 (Windows worktree, no new fix cycle run)
