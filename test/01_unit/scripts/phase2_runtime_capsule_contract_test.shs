@@ -2,9 +2,20 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-tool="$root/scripts/bootstrap/phase2-runtime-capsule.shs"
+tool=${PHASE2_CAPSULE_TOOL:-"$root/scripts/bootstrap/phase2-runtime-capsule.shs"}
 tmp=$(mktemp -d)
-trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+windows_host=0
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) windows_host=1 ;; esac
+permissions() {
+  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -File "$(cygpath -w "$root/scripts/bootstrap/phase2-capsule-permissions.ps1")" \
+    -Action "$1" -Path "$(cygpath -w "$2")"
+}
+thaw() {
+  [ "$windows_host" = 0 ] || permissions thaw "$1"
+  chmod -R u+w "$1"
+}
+trap 'thaw "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 make_authority() {
@@ -35,13 +46,21 @@ chmod 755 "$tmp/compiler"
 make_authority "$tmp/authority"
 capsule=$($tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output")
 $tool verify "$capsule"
-[ "$(stat -c '%a' "$capsule")" = 500 ] || fail 'capsule is writable'
+if [ "$windows_host" = 1 ]; then
+  permissions verify "$capsule" || fail 'capsule ACL permits writes'
+  if touch "$capsule/extra" 2>/dev/null; then fail 'frozen directory accepted a new file'; fi
+  if mv "$capsule/deps/libspl_hosted_runtime-fixture.rlib" "$capsule/deps/renamed.rlib" 2>/dev/null; then
+    fail 'frozen directory allowed replacing its runtime'
+  fi
+else
+  [ "$(stat -c '%a' "$capsule" 2>/dev/null || stat -f '%Lp' "$capsule")" = 500 ] || fail 'capsule is writable'
+fi
 [ -f "$capsule/libsimple_native_all.a" ] || fail 'native_all missing'
 
 if $tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output" >/dev/null 2>&1; then
   fail 'overwrite was accepted'
 fi
-chmod -R u+w "$capsule"
+thaw "$capsule"
 rm "$capsule/libsimple_native_all.a"
 if $tool verify "$capsule" >/dev/null 2>&1; then fail 'missing native_all accepted'; fi
 
@@ -84,18 +103,18 @@ fresh_capsule() {
 }
 
 tampered=$(fresh_capsule tampered)
-chmod u+w "$tampered/simple"; printf x >>"$tampered/simple"
+thaw "$tampered"; printf x >>"$tampered/simple"
 if $tool verify "$tampered" >/dev/null 2>&1; then fail 'tampered compiler accepted'; fi
 
 tampered_receipt=$(fresh_capsule tampered-receipt)
-chmod u+w "$tampered_receipt" "$tampered_receipt/phase2-runtime-capsule.env"
+thaw "$tampered_receipt"
 sed 's/^native_all_sha256=.*/native_all_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
   "$tampered_receipt/phase2-runtime-capsule.env" >"$tmp/receipt.new"
 mv "$tmp/receipt.new" "$tampered_receipt/phase2-runtime-capsule.env"
 if $tool verify "$tampered_receipt" >/dev/null 2>&1; then fail 'tampered receipt accepted'; fi
 
 tampered_stamp=$(fresh_capsule tampered-stamp)
-chmod u+w "$tampered_stamp/simple.inputs.sha256"; printf x >>"$tampered_stamp/simple.inputs.sha256"
+thaw "$tampered_stamp"; printf x >>"$tampered_stamp/simple.inputs.sha256"
 if $tool verify "$tampered_stamp" >/dev/null 2>&1; then fail 'tampered authority stamp accepted'; fi
 
 renamed=$(fresh_capsule renamed)
@@ -104,19 +123,21 @@ mv "$renamed" "$renamed_path"
 if $tool verify "$renamed_path" >/dev/null 2>&1; then fail 'renamed capsule accepted'; fi
 
 writable=$(fresh_capsule writable)
-chmod u+w "$writable/libsimple_native_all.a"
+if [ "$windows_host" = 1 ]; then thaw "$writable"; else chmod u+w "$writable/libsimple_native_all.a"; fi
 if $tool verify "$writable" >/dev/null 2>&1; then fail 'writable leaf accepted'; fi
 
 writable_dir=$(fresh_capsule writable-dir)
-chmod u+w "$writable_dir"
+thaw "$writable_dir"
 if $tool verify "$writable_dir" >/dev/null 2>&1; then fail 'writable directory accepted'; fi
 
-symlinked=$(fresh_capsule symlinked)
-chmod u+w "$symlinked"; mv "$symlinked/deps" "$symlinked/deps.real"; ln -s deps.real "$symlinked/deps"
-if $tool verify "$symlinked" >/dev/null 2>&1; then fail 'symlink deps accepted'; fi
+if [ "$windows_host" = 0 ]; then
+  symlinked=$(fresh_capsule symlinked)
+  thaw "$symlinked"; mv "$symlinked/deps" "$symlinked/deps.real"; ln -s deps.real "$symlinked/deps"
+  if $tool verify "$symlinked" >/dev/null 2>&1; then fail 'symlink deps accepted'; fi
+fi
 
 duplicate=$(fresh_capsule duplicate)
-chmod u+w "$duplicate/deps"; cp "$duplicate/deps/libspl_hosted_runtime-fixture.rlib" "$duplicate/deps/libspl_hosted_runtime-duplicate.rlib"
+thaw "$duplicate"; cp "$duplicate/deps/libspl_hosted_runtime-fixture.rlib" "$duplicate/deps/libspl_hosted_runtime-duplicate.rlib"
 if $tool verify "$duplicate" >/dev/null 2>&1; then fail 'duplicate hosted runtime accepted'; fi
 
 mkdir -p "$tmp/concurrent"
@@ -130,4 +151,109 @@ if ! { [ "$r1" -eq 0 ] && [ "$r2" -ne 0 ]; } &&
   fail 'concurrent publication did not admit exactly one publisher'
 fi
 
-echo 'PASS: Phase2 runtime capsule is atomic, SHA-bound, complete, and fail-closed'
+# Preserve names consumed by the MSVC loader; an .a alias cannot stand in for
+# the admitted .lib or the executable's seed-input stamp.
+make_authority "$tmp/windows"
+mv "$tmp/windows/libsimple_native_all.a" "$tmp/windows/simple_native_all.lib"
+mv "$tmp/windows/simple.inputs.sha256" "$tmp/windows/simple.exe.inputs.sha256"
+printf backfill >"$tmp/windows/simple_compiler_backfill.lib"
+backfill_sha=$(sha256sum "$tmp/windows/simple_compiler_backfill.lib" | awk '{print $1}')
+sed -e 's/^backfill_status=.*/backfill_status=present/' -e "s/^backfill_sha256=.*/backfill_sha256=$backfill_sha/" \
+  "$tmp/windows/simple.exe.inputs.sha256" >"$tmp/windows/stamp.new"
+mv "$tmp/windows/stamp.new" "$tmp/windows/simple.exe.inputs.sha256"
+windows_capsule=$($tool publish "$tmp/compiler" "$tmp/windows" "$tmp/windows-output")
+$tool verify "$windows_capsule"
+for file in simple.exe simple_native_all.lib simple_compiler_backfill.lib simple.exe.inputs.sha256; do
+  [ -f "$windows_capsule/$file" ] || fail "missing Windows capsule artifact: $file"
+done
+[ ! -e "$windows_capsule/libsimple_native_all.a" ] || fail 'Windows archive renamed to POSIX'
+
+# Exercise publication and resolution with the canonical source snapshot
+# algorithm. These fixture receipts test the binding boundary, not admission.
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+mkdir -p "$tmp/source/src/compiler" "$tmp/source/src/app" "$tmp/source/src/lib" \
+  "$tmp/source/src/compositions" "$tmp/source/examples/10_tooling" "$tmp/admitted"
+printf 'fn main():\n    0\n' >"$tmp/source/src/compiler/main.spl"
+bootstrap_stage3_source_snapshot "$tmp/source-before.txt" "$tmp/source"
+bootstrap_stage3_directory_snapshot "$tmp/runtime-before.txt" "$tmp/windows"
+cp "$tmp/compiler" "$tmp/admitted/simple.exe"
+chmod +x "$tmp/admitted/simple.exe"
+{
+  echo schema=simple-bootstrap-stage2-admission-v2
+  echo status=admitted
+  echo candidate_path="$tmp/admitted/simple.exe"
+  echo candidate_sha256="$(sha256sum "$tmp/admitted/simple.exe" | awk '{print $1}')"
+  echo runtime_authority_path="$tmp/windows"
+  echo hosted_runtime_sha256="$hosted_sha"
+  echo source_snapshot_sha256="$(sha256sum "$tmp/source-before.txt" | awk '{print $1}')"
+  echo runtime_snapshot_path="$tmp/runtime-before.txt"
+  echo runtime_snapshot_sha256="$(sha256sum "$tmp/runtime-before.txt" | awk '{print $1}')"
+} >"$tmp/admitted/admission.env"
+binding_tool="$root/scripts/bootstrap/phase2-runtime-binding.shs"
+bound=$(sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output")
+resolved=$(sh "$binding_tool" resolve "$tmp/admitted/simple.exe" "$tmp/source" "$tmp/resolve")
+[ "$resolved" = "$bound" ] || fail 'binding resolved a different capsule'
+binding_sha=$(sha256sum "$tmp/admitted/runtime-capsule.env" | awk '{print $1}')
+reused=$(sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output")
+[ "$reused" = "$bound" ] && [ "$(sha256sum "$tmp/admitted/runtime-capsule.env" | awk '{print $1}')" = "$binding_sha" ] ||
+  fail 'verified retry changed the capsule binding'
+mkdir "$tmp/admitted/runtime-capsule.env.publish-lock"
+if sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output" >/dev/null 2>&1; then
+  fail 'concurrent binding writer bypassed publication lock'
+fi
+rmdir "$tmp/admitted/runtime-capsule.env.publish-lock"
+
+cp "$tmp/windows/simple_native_all.lib" "$tmp/native.saved"
+cp "$tmp/windows/simple.exe.inputs.sha256" "$tmp/stamp.saved"
+printf 'changed-native' >>"$tmp/windows/simple_native_all.lib"
+changed_native_sha=$(sha256sum "$tmp/windows/simple_native_all.lib" | awk '{print $1}')
+sed "s/^native_all_sha256=.*/native_all_sha256=$changed_native_sha/" "$tmp/stamp.saved" >"$tmp/windows/simple.exe.inputs.sha256"
+if sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/wrong-runtime-output" >/dev/null 2>&1; then
+  fail 'changed native archive and matching stamp reused old admission'
+fi
+[ ! -d "$tmp/wrong-runtime-output" ] || fail 'unadmitted runtime published a capsule'
+if sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output" >/dev/null 2>&1; then
+  fail 'retained capsule hid changed current runtime authority'
+fi
+cp "$tmp/native.saved" "$tmp/windows/simple_native_all.lib"
+cp "$tmp/stamp.saved" "$tmp/windows/simple.exe.inputs.sha256"
+
+printf '# changed\n' >>"$tmp/source/src/compiler/main.spl"
+if sh "$binding_tool" resolve "$tmp/admitted/simple.exe" "$tmp/source" "$tmp/stale-resolve" >/dev/null 2>&1; then
+  fail 'stale source admission resolved'
+fi
+printf 'fn main():\n    0\n' >"$tmp/source/src/compiler/main.spl"
+printf x >>"$tmp/admitted/simple.exe"
+if sh "$binding_tool" resolve "$tmp/admitted/simple.exe" "$tmp/source" "$tmp/wrong-compiler" >/dev/null 2>&1; then
+  fail 'changed admitted compiler resolved'
+fi
+cp "$tmp/compiler" "$tmp/admitted/simple.exe"
+cp "$tmp/admitted/admission.env" "$tmp/admission.saved"
+printf 'extra=changed\n' >>"$tmp/admitted/admission.env"
+if sh "$binding_tool" resolve "$tmp/admitted/simple.exe" "$tmp/source" "$tmp/wrong-admission" >/dev/null 2>&1; then
+  fail 'changed admission resolved'
+fi
+cp "$tmp/admission.saved" "$tmp/admitted/admission.env"
+cp "$tmp/runtime-before.txt" "$tmp/runtime.saved"
+cat "$tmp/runtime.saved" >>"$tmp/runtime-before.txt"
+if sh "$binding_tool" resolve "$tmp/admitted/simple.exe" "$tmp/source" "$tmp/wrong-snapshot" >/dev/null 2>&1; then
+  fail 'changed admitted runtime snapshot resolved'
+fi
+cp "$tmp/runtime.saved" "$tmp/runtime-before.txt"
+grep -Fq 'scripts/bootstrap/phase2-runtime-binding.shs" publish' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" ||
+  fail 'canonical bootstrap omits capsule publication'
+grep -Fq 'scripts/bootstrap/phase2-runtime-binding.shs" resolve' "$root/scripts/bootstrap/bootstrap-phase-verification.shs" ||
+  fail 'canonical verifier omits binding resolution'
+
+printf alias >"$tmp/windows/libsimple_native_all.a"
+if $tool publish "$tmp/compiler" "$tmp/windows" "$tmp/ambiguous-output" >/dev/null 2>&1; then
+  fail 'mixed archive authorities accepted'
+fi
+rm "$tmp/windows/libsimple_native_all.a"
+printf tamper >>"$tmp/windows/simple_compiler_backfill.lib"
+if $tool publish "$tmp/compiler" "$tmp/windows" "$tmp/backfill-output" >/dev/null 2>&1; then
+  fail 'stale Windows backfill stamp accepted'
+fi
+
+echo 'PASS: POSIX and Windows Phase2 capsules preserve names, enforce immutable bytes, and reject invalid authorities'
