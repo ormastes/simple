@@ -264,6 +264,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_COMMITS: ${{ github.event.pull_request.commits }}
           CI_JOB: code-idiom-gates
+          DOCS_ONLY: ${{ steps.classify.outputs.docs_only }}
         run: |
           mode=full
           skip_ids=""
@@ -282,6 +283,18 @@ jobs:
               git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 1 ))" origin "$BASE_SHA" "$HEAD_SHA"
               fetch_rc=$?
               [ "$fetch_rc" -eq 0 ] || { reason="could not fetch the PR endpoints (git exit $fetch_rc)"; return 0; }
+
+              # The independent PR-files classifier already proved every
+              # changed path is documentation against protected main. Preserve
+              # the conflict-class range, but do not fetch notes or walk every
+              # commit just to discover that no local receipt was supplied.
+              # Leave mode=full and skip_ids empty: only the separately audited
+              # docs-only step conditions may skip gates.
+              if [ "$DOCS_ONLY" = true ]; then
+                  range="$BASE_SHA..$HEAD_SHA"
+                  reason="docs-only PR: receipt lookup unnecessary; conflict-class guards still run"
+                  return 0
+              fi
 
               # Base-only policy, materialized OUTSIDE the workspace.
               base=$tmp/ci-base
@@ -1245,6 +1258,10 @@ jobs:
       - name: SimpleOS x86_64 linker aliases are derived, not hand-maintained
         if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-simpleos-x86-64-linker-alias-derived|')) && steps.classify.outputs.docs_only != 'true' }}
         run: sh scripts/check/check-simpleos-x86-64-linker-alias-derived.shs
+
+      - name: SimpleOS browser QEMU fixture build contract
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-simpleos-browser-qemu-build-contract.shs
   advisory-gates:
     name: Advisory Gates (honestly RED, not yet blocking)
     runs-on: ubuntu-latest
@@ -1945,6 +1962,11 @@ jobs:
 
       - name: check-stage2-sanity-artifact-binding.shs
         run: timeout 180 sh scripts/check/check-stage2-sanity-artifact-binding.shs || true
+
+      # Requires an admitted self-hosted Stage-3 binary; this checkout-only
+      # runner records the honest unavailable verdict until that lane provides it.
+      - name: check-stage3-hir-retained-parser-rss.shs
+        run: timeout 180 sh scripts/check/check-stage3-hir-retained-parser-rss.shs || true
 
 
   # Kernel-plugin migration lane guards. ADVISORY, and honestly so: each one

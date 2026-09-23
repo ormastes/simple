@@ -1,0 +1,50 @@
+#!/bin/sh
+# Executable regression for the harden-probe build selector and refusal paths.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+builder=$root/scripts/check/build-simpleos-nvfs-positioned-qemu.shs
+
+fail() { printf '%s\n' "check-simpleos-harden-probe-build-target: $*" >&2; exit 1; }
+require_line() {
+    printf '%s\n' "$1" | grep -Fxq "$2" || fail "missing-plan-line:$2"
+}
+
+default_plan=$(sh "$builder" --print-plan)
+require_line "$default_plan" 'mode=nvfs-positioned'
+require_line "$default_plan" 'target=x86_64-unknown-none'
+require_line "$default_plan" 'entry=examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl'
+require_line "$default_plan" "kernel=$root/build/os/simpleos_x86_64_nvfs_positioned.elf"
+require_line "$default_plan" "image=$root/build/os/simpleos_nvfs_root.img"
+require_line "$default_plan" 'build_timeout=240'
+
+harden_plan=$(sh "$builder" --print-plan --harden-probe)
+require_line "$harden_plan" 'mode=harden-probe'
+require_line "$harden_plan" 'target=x86_64-unknown-none'
+require_line "$harden_plan" 'entry=examples/09_embedded/simple_os/arch/x86_64/harden_probe_entry.spl'
+require_line "$harden_plan" "kernel=$root/build/os/simpleos_x86_64_harden_probe.elf"
+require_line "$harden_plan" "image=$root/build/os/fat32-x86_64-harden.img"
+require_line "$harden_plan" 'build_timeout=120'
+
+override_plan=$(SIMPLEOS_HARDEN_PROBE_KERNEL=/tmp/harden-probe-test.elf \
+    SIMPLEOS_HARDEN_PROBE_IMAGE=/tmp/harden-probe-test.img \
+    sh "$builder" --harden-probe --print-plan)
+require_line "$override_plan" 'kernel=/tmp/harden-probe-test.elf'
+require_line "$override_plan" 'image=/tmp/harden-probe-test.img'
+
+negative_log=${TMPDIR:-/tmp}/simpleos-harden-probe-negative.$$.log
+trap 'rm -f "$negative_log"' EXIT HUP INT TERM
+if sh "$builder" --not-a-real-target >"$negative_log" 2>&1; then
+    fail unsupported-option-accepted
+fi
+grep -Fq 'unsupported option: --not-a-real-target' "$negative_log" ||
+    fail unsupported-option-diagnostic-missing
+
+if env -u SIMPLE_RUNTIME_PATH -u SIMPLE_STAGE4_PROVENANCE -u SIMPLE_RUNTIME_RECEIPT \
+    sh "$builder" --harden-probe >"$negative_log" 2>&1; then
+    fail unadmitted-runtime-accepted
+fi
+grep -Fq 'SIMPLE_RUNTIME_PATH, SIMPLE_STAGE4_PROVENANCE, and SIMPLE_RUNTIME_RECEIPT are required' \
+    "$negative_log" || fail unadmitted-runtime-diagnostic-missing
+
+printf '%s\n' simpleos_harden_probe_build_target_status=pass

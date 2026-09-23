@@ -34,6 +34,32 @@ fn generated_c_source_compiler(target: simple_common::target::Target) -> String 
     }
 }
 
+pub(super) fn is_boot_c_translation_unit(path: &Path) -> bool {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("c") {
+        return false;
+    }
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    // The core has an .inc.c name for historical reasons but is still compiled
+    // directly and owns definitions not supplied by any wrapper TU. Keep that
+    // exception until a real .c owner includes it.
+    !name.ends_with(".inc.c") || name == "baremetal_runtime_core.inc.c"
+}
+
+pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bool {
+    stem == "baremetal_stubs"
+        || stem == "freestanding_runtime"
+        || stem == "boot_entry"
+        || stem == "baremetal_runtime_core.inc"
+        || stem == "rv64_display_backend"
+        || (ssh_live_boot && stem == "full_networking_runtime")
+        || stem == "curve25519_ring_helper"
+        || stem == "ed25519_scalar_helper"
+        || stem == "ed25519_sha512_helper"
+        || stem == "tls13_aes256_gcm_helper"
+        || stem == "tls13_sha256_helper"
+        || stem == "ed25519_verify_helper"
+}
+
 /// Translate a `SIMPLE_LINKER` value into the pair the C driver needs.
 ///
 /// Returns `(fuse_ld_name, probe_binary)`:
@@ -2465,7 +2491,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                 if let Ok(entries) = std::fs::read_dir(&boot_dir) {
                     for de in entries.flatten() {
                         let path = de.path();
-                        if path.extension().and_then(|e| e.to_str()) == Some("c") {
+                        if is_boot_c_translation_unit(&path) {
                             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                             if skip_boot_autodiscovery && stem != proof_runtime_stem {
                                 continue;
@@ -2488,15 +2514,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                             }
                             if minimal_boot
                                 && !skip_boot_autodiscovery
-                                && stem != "baremetal_stubs"
-                                && stem != "freestanding_runtime"
-                                && !(ssh_live_boot && stem == "full_networking_runtime")
-                                && stem != "curve25519_ring_helper"
-                                && stem != "ed25519_scalar_helper"
-                                && stem != "ed25519_sha512_helper"
-                                && stem != "tls13_aes256_gcm_helper"
-                                && stem != "tls13_sha256_helper"
-                                && stem != "ed25519_verify_helper"
+                                && !minimal_boot_source_allowed(&stem, ssh_live_boot)
                             {
                                 continue;
                             }

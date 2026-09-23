@@ -9,18 +9,19 @@ verifier, the allowed-signers trust root and the mode decision in
 `repo-hygiene.yml` have all landed, and the path works end to end **locally**.
 Verified on `c70a818a0`, a commit with **no** change-id header: sign exit 0
 binding `patch a251811056b6100759aab75b4863154ba3d3ad3f`, verify exit 0, tamper
-exit 1. Selftests: verifier 25/25, signer 18/18.
+exit 1. Current local selftests (2026-09-23): verifier 25/25, signer 33/33,
+including note attach, push, exact-byte round trip, and rejected-push handling.
 
 Three things you must know before relying on it:
 
-1. **Delivery is a manual step.** CI reads the receipt from a git note on
-   `refs/notes/ci-receipts`, and `sign-local-ci-receipt.shs` has **no
-   note-emission flag** (`git notes` and `--note` occur zero times in it). You
-   attach and push the note yourself — §7. This is the top usability gap.
+1. **Delivery is explicit but automated.** The signer supports `--note` and
+   `--push-note`; publishing a note is opt-in and occurs only after a successful
+   local verdict. See §7.
 2. **`config/check/ci_receipt_allowed_signers` ships with ZERO keys**, so
    nothing is admitted until a key is deliberately added — §5.
-3. **The fast path has never been exercised on a CI runner.** Every result above
-   is local. Nothing here is runner-proven.
+3. **A local PASS is not a GitHub required-check PASS.** The CI job must fetch
+   and verify the note against the base branch's signer trust root, then report
+   its own success on the current PR head. Do not merge on local output alone.
 
 Specification: `doc/05_design/infra/local_ci_receipt/design.md`.
 Order of work and acceptance bars: `doc/03_plan/infra/local_ci_receipt/plan.md`.
@@ -156,12 +157,11 @@ ssh -V        # OpenSSH_10.3p1 measured locally; runners are well past 8.0
 
 ## 5. Getting your key into `config/check/ci_receipt_allowed_signers`
 
-**The file ships with ZERO keys.** That is the intended fail-closed default: an
+**The file currently has ZERO keys.** That is the intended fail-closed default: an
 allowlist with no key admits nobody, every verification returns non-zero, and CI
-therefore runs the full gate set. `verify-local-ci-receipt.shs` pins this — its
-selftest case `c2` fails if the shipped file ever admits a signer. A receipt
-feature that starts out trusting somebody is a receipt feature that starts out
-broken.
+therefore runs the full gate set. The verifier selftest's `c2` case ensures an
+untrusted fixture signer is not admitted by the shipped file; a reviewed signer
+may be enrolled in a separate PR without weakening that invariant.
 
 Append exactly one line, key material taken verbatim from the `.pub` file:
 
@@ -299,7 +299,7 @@ Note the default `--tier` differs between the two scripts: the signer defaults t
 
 ---
 
-## 7. Where the receipt goes — publish it as a git note (manual step)
+## 7. Where the receipt goes — publish it as a git note
 
 CI reads the receipt from **a git note on `refs/notes/ci-receipts`, keyed by the
 PR head sha**. It cannot be a tracked file: the receipt binds `tree`, so
@@ -307,28 +307,30 @@ committing it into that tree changes the tree, and the bound tree could never
 equal the tested one. A note lives outside the commit tree, so attaching one
 perturbs nothing.
 
-**The signer does not do this for you.** `sign-local-ci-receipt.shs` has no
-note-emission flag — `git notes` and `--note` occur zero times in it. It writes
-`--out FILE` and `<out>.sig`, and stops. **This is the top usability gap in the
-feature.** Until a `--note` flag lands, run these three commands yourself, from
-the repo, after a successful sign:
+After the reviewed signer key has landed on the **base** branch and all `ci`
+rows have genuinely passed, the signer can attach and publish the exact bytes:
 
 ```bash
-cat doc/08_tracking/check/local_ci_receipt.v1.txt \
-    doc/08_tracking/check/local_ci_receipt.v1.txt.sig > /tmp/note
-git notes --ref=ci-receipts add -f -F /tmp/note <head-sha>
-git push origin refs/notes/ci-receipts
+sh scripts/check/sign-local-ci-receipt.shs \
+    --key <dedicated-private-key> --identity <enrolled-principal> \
+    --tier ci --run --rev <pr-head-sha> --changes <base-sha>..<pr-head-sha> \
+    --allowed-signers config/check/ci_receipt_allowed_signers \
+    --out <untracked-receipt-path> --note --push-note --note-remote origin
 ```
 
-Substitute your own `--out` path if you passed one. `<head-sha>` is the PR head
-commit — the same sha CI passes as `--rev`, not the merge tip.
+`--note` alone writes only the local notes ref; `--push-note` is the explicit
+remote mutation. Use `--results` instead of `--run` only for results from gates
+actually executed. A non-PASS receipt is never attached. If a concurrent note
+push makes the notes ref non-fast-forward, follow the signer's fetch/merge
+recovery message; do not force-push the shared notes ref. The `<pr-head-sha>`
+must be the current PR head, never the merge tip.
 
 Notes on the mechanics:
 
 - The note body is the concatenation `payload || signature`. CI splits it back
   apart on the **first line exactly equal to** `-----BEGIN SSH SIGNATURE-----`:
   everything strictly before is the payload, everything from that line on is the
-  signature. `cat receipt sig` produces exactly that shape; do not reformat it.
+  signature. The signer preserves the exact signed bytes; do not reformat it.
 - The note is author-writable, and that is fine. The sshsig signature inside it,
   checked against the **BASE** allowed-signers file, is what protects the
   contents.
@@ -336,9 +338,9 @@ Notes on the mechanics:
   no receipt, which means `full`. You will see
   `no refs/notes/ci-receipts on origin: this PR carries no receipt` or
   `no ci-receipt note on head <sha>`.
-- Re-push the note after **every** rebase or amend: the head sha changes, so the
-  old note no longer keys to anything CI looks up, and the tree changed too, so
-  the old receipt would be `escalate` at best. Re-sign, then re-attach.
+- Re-run the gates, re-sign, and publish a new note after **every** rebase or
+  amend: the head sha changes, so the old note no longer keys to anything CI
+  looks up. The old note is inert, not a substitute for a current receipt.
 
 `design.md` §6.2 rejects the alternatives for reasons that still hold: a tracked
 file is circular (§3.1); workflow artifacts are produced by CI rather than by the
@@ -519,8 +521,9 @@ decide is a FAILURE, never a pass. Absence of evidence is never evidence.**
 
 ## 11. Known limits and future work
 
-- **Publishing the note is manual** (§7): `sign-local-ci-receipt.shs` has no
-  `--note` flag. This is the top usability gap and the first thing to close.
+- **Publication is opt-in** (§7): `--note` attaches locally, while
+  `--push-note` publishes to the shared notes ref. The operator must still
+  select a trusted key and run all claimed gates before publishing.
 - **Never exercised on a CI runner.** Every result in this guide is local. The
   runner-side path — notes fetch, base-policy materialization, the mode
   decision — has no observed green run yet.

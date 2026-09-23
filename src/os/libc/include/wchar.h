@@ -3,7 +3,10 @@
 
 #include <stddef.h>
 
-typedef int wchar_t;
+#ifndef _WCHAR_T
+#define _WCHAR_T
+typedef __WCHAR_TYPE__ wchar_t;
+#endif
 typedef unsigned int wint_t;
 #define WEOF ((wint_t)-1)
 

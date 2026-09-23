@@ -31,7 +31,9 @@ The v2 capsule receipt binds its platform layout into the aggregate identity.
 MSVC capsules retain `simple.exe`, `simple_native_all.lib`,
 `simple_compiler_backfill.lib` when present, and `simple.exe.inputs.sha256`.
 POSIX capsules retain their existing names. Existing v1 POSIX capsules remain
-verifiable. Mixed archive authorities, stale native/backfill stamps, changed
+verifiable only when the `artifact_layout` key is absent; v1 cannot select a
+Windows layout, while every v2 receipt carries exactly one explicit layout.
+Mixed archive authorities, stale native/backfill stamps, changed
 hosted runtime bytes, duplicate receipt keys, and overwrite attempts fail closed.
 
 Git Bash's `chmod` cannot remove directory write permissions. On Windows,
@@ -57,6 +59,8 @@ backfill rejection, successful admission binding, and stale source/compiler/
 admission rejection. Its canonical invocation assertions cover the producer and
 consumer wiring. A fixture PASS is not an admitted compiler or full Phase 2 suite
 PASS; those require the bootstrap and phase test receipts from current source.
+`phase2_capsule_schema_layout_contract_test.shs` separately mutates v1 receipts
+to prove that empty and Windows layout fields cannot change their POSIX meaning.
 
 Publication occurs once per admitted compiler. The source snapshot check runs
 once when Phase 2 verification starts. Neither operation belongs to a compiler

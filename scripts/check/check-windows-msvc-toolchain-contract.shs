@@ -1,0 +1,93 @@
+#!/bin/sh
+# Guard the Windows MSVC bootstrap contract without requiring a Windows host.
+# The runtime is C-only: LLVM 23.1.x clang-cl compiles C, CXX is unset, and Cargo
+# invokes the native MSVC linker directly.
+
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/simple-msvc-toolchain-contract.XXXXXX")"
+trap 'rm -rf "$FIXTURE"' EXIT HUP INT TERM
+mkdir -p "$FIXTURE/bin"
+
+for tool in clang.exe lld-link.exe; do
+    : > "$FIXTURE/bin/$tool"
+done
+cat > "$FIXTURE/bin/clang-cl.exe" <<'COMPILER'
+#!/bin/sh
+printf '%s\n' 'clang version 23.1.1 (contract fixture)'
+COMPILER
+chmod +x "$FIXTURE/bin/clang-cl.exe"
+
+OUTPUT="$(
+    env -i PATH="$PATH" \
+        SIMPLE_LLVM_WIN_ROOT_23="$FIXTURE" \
+        OS=Windows_NT \
+        CC_x86_64_pc_windows_msvc=must-be-replaced \
+        CXX=must-be-cleared \
+        sh -c '. "$1/scripts/setup/llvm-toolchain-env.shs" || exit; printf "%s|%s|%s|%s|%s" "$CC" "${CXX+x}" "$LD" "$SIMPLE_WINDOWS_C_COMPILER_VERSION" "$CC_x86_64_pc_windows_msvc"' sh "$ROOT"
+)"
+
+EXPECTED_BIN="$FIXTURE/bin"
+if command -v cygpath >/dev/null 2>&1; then
+    EXPECTED_BIN="$(cygpath -m "$EXPECTED_BIN")"
+fi
+EXPECTED="$EXPECTED_BIN/clang-cl.exe||$EXPECTED_BIN/lld-link.exe|23.1.1|$EXPECTED_BIN/clang-cl.exe"
+[ "$OUTPUT" = "$EXPECTED" ] || {
+    echo "FAIL: Windows shell contract is '$OUTPUT', expected '$EXPECTED'" >&2
+    exit 1
+}
+
+expect_rejected() {
+    label=$1
+    shift
+    if env -i PATH="$PATH" OS=Windows_NT SIMPLE_LLVM_WIN_ROOT_23="$FIXTURE" \
+        "$@" sh -c '. "$1/scripts/setup/llvm-toolchain-env.shs"' sh "$ROOT" >"$FIXTURE/rejected.log" 2>&1; then
+        echo "FAIL: $label was accepted" >&2
+        exit 1
+    fi
+}
+expect_rejected 'legacy LLVM major' SIMPLE_LLVM_VERSION=18
+expect_rejected 'missing Windows authority' SIMPLE_LLVM_WIN_ROOT_23="$FIXTURE/missing"
+sed 's/23\.1\.1/22.1.0/' "$FIXTURE/bin/clang-cl.exe" > "$FIXTURE/bin/old.exe"
+mv "$FIXTURE/bin/old.exe" "$FIXTURE/bin/clang-cl.exe"
+chmod +x "$FIXTURE/bin/clang-cl.exe"
+expect_rejected 'non-23.1 compiler version'
+cat > "$FIXTURE/bin/clang-cl.exe" <<'COMPILER'
+#!/bin/sh
+printf '%s\n' 'clang version 23.1.1 (contract fixture)'
+exit 7
+COMPILER
+chmod +x "$FIXTURE/bin/clang-cl.exe"
+expect_rejected 'failed compiler version command'
+
+CARGO_CONFIG="$ROOT/src/compiler_rust/.cargo/config.toml"
+MSVC_SECTION="$(sed -n '/^\[target\.x86_64-pc-windows-msvc\]/,/^\[/p' "$CARGO_CONFIG")"
+printf '%s\n' "$MSVC_SECTION" | grep -Fx 'linker = "link.exe"' >/dev/null || {
+    echo 'FAIL: Cargo MSVC target must use linker = "link.exe"' >&2
+    exit 1
+}
+printf '%s\n' "$MSVC_SECTION" | grep -Eq '^[[:space:]]*linker[[:space:]]*=[[:space:]]*"clang-cl' && {
+    echo 'FAIL: Cargo MSVC target must not bind Rust linking to clang-cl' >&2
+    exit 1
+}
+if grep -F '[target.x86_64-pc-windows-gnu]' "$CARGO_CONFIG" >/dev/null; then
+    echo 'FAIL: Windows build policy must not retain the MinGW/GCC target override' >&2
+    exit 1
+fi
+
+CMAKE_TOOLCHAIN="$ROOT/src/runtime/cmake/toolchains/windows-x86_64-clangcl.cmake"
+grep -Fx 'set(CMAKE_C_COMPILER "${SIMPLE_WINDOWS_LLVM_ROOT}/bin/clang-cl.exe")' "$CMAKE_TOOLCHAIN" >/dev/null || {
+    echo 'FAIL: CMake MSVC toolchain must select the validated clang-cl prefix for C' >&2
+    exit 1
+}
+grep -F 'C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc' "$CMAKE_TOOLCHAIN" >/dev/null || {
+    echo 'FAIL: CMake MSVC toolchain lost its admitted LLVM 23.1.1 prefix' >&2
+    exit 1
+}
+if grep -Eq 'CMAKE_CXX_COMPILER|CMAKE_CXX_COMPILER_TARGET|CMAKE_CXX_FLAGS' "$CMAKE_TOOLCHAIN"; then
+    echo 'FAIL: CMake MSVC toolchain must leave CXX unset for the C-only runtime' >&2
+    exit 1
+fi
+
+echo 'PASS: Windows LLVM 23.1 C-only compiler and native Rust linker contract holds (5 executable selection cases)'
