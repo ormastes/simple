@@ -2,7 +2,7 @@
 
 - **ID:** `windows_materialized_symlink_alias_git_state_timeout_2026-09-09`
 - **Date:** 2026-09-09
-- **Status:** OPEN
+- **Status:** SOURCE-FIXED-PROOF-PENDING
 - **Severity:** P1
 - **Owner:** bootstrap provenance / Windows checkout materialization
 - **Component:** `scripts/check/lib/bootstrap-stage3/authority.shs`
@@ -218,7 +218,6 @@ alias-aware path still runs under the same `/usr/bin/timeout -k 2s 30s` bound
 that produced the original exit-124, and no post-fix run showing a retained
 Git-state receipt exists in the tree. The mechanism is verified present; the
 defect is not verified resolved. Status unchanged.
-
 ## Triage 2026-09-13
 
 Not exercisable on this host (linux/aarch64, seed sha256 prefix
@@ -228,3 +227,21 @@ Git-state receipt; there is no Windows path here to reproduce
 `bootstrap_stage3_git_state` against. Leaving OPEN — BUGFIX-6 lane
 cannot progress this without a Windows host. No code change.
 
+## 2026-09-22 bounded regression harness
+
+The focused fixture now has `STAGE3_MATERIALIZED_TEST_CASE=bounded`. It uses a
+fresh materialized five-link repository with `core.symlinks=false`, isolates
+each consumer's temporary directory, and checks the clean, untracked, dirty,
+inherited-receipt, and schema-mutation paths. A rejection must contain the
+expected typed diagnostic, so a timeout translated to exit 1 cannot count as a
+negative assertion. The bounded lane also puts the repository under a path
+with spaces, accesses an ordinary untracked path longer than 260 Windows
+characters, and records a conditional native-symlink control.
+
+The initial long-path formulation put the Git repository root itself beyond
+260 characters; Windows Git could not change directory into that root before
+the consumer started. The committed harness instead keeps the Git root short
+enough to initialize and places the exercised ordinary path beyond that limit.
+The bounded lane has only syntax evidence at this revision. A fresh one-case
+runtime run must retain the success receipt, elapsed and process-tree RSS
+measurements, and post-run fixture cleanup before this row can be closed.

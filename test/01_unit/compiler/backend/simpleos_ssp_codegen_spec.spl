@@ -1,0 +1,76 @@
+use std.spec.step
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.llvm_target.{llvm_explicit_target_config}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.hir.hir_types.{SymbolId}
+
+fn ssp_probe_module(naked: bool) -> MirModule:
+    val buffer_type = MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U8), 64))
+    val buffer_pointer = MirType.ptr(buffer_type, true)
+    val escape_signature = MirSignature(params: [buffer_pointer], return_type: MirType.unit(), is_variadic: false)
+    val buffer_local = LocalId(id: 1)
+    val escape_ref = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("ssp_escape"), MirType(kind: MirTypeKind.FuncPtr(escape_signature))))
+    val function = MirFunction(
+        symbol: SymbolId.new(1),
+        name: "main",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [MirLocal(id: buffer_local, name: Some("buffer"), type_: buffer_pointer, kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.Alloc(buffer_local, buffer_type), span: nil),
+                MirInst(kind: MirInstKind.Call(nil, escape_ref, [mir_operand_copy(buffer_local)]), span: nil)
+            ], terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        is_naked: naked
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(name: "ssp.probe", functions: functions, statics: {}, constants: {}, types: {})
+
+fn ssp_probe_ir(target_os: text, bare_metal: bool, naked: bool, hardening_preset: text) -> text:
+    MirToLlvm.create_explicit_target_with_hardening(
+        "ssp.probe", CodegenTarget.X86_64, "x86_64", "unknown", target_os,
+        "", false, "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        bare_metal, hardening_preset).translate_module(ssp_probe_module(naked))
+
+describe "SimpleOS LLVM stack protector policy":
+    it "admits hosted SimpleOS explicitly while keeping none-elf bare metal":
+        step("Resolve explicit hosted and bare-metal target contracts")
+        val hosted = llvm_explicit_target_config("x86_64-unknown-simpleos", false)
+        val bare = llvm_explicit_target_config("x86_64-unknown-simpleos", true)
+        val none_hosted = llvm_explicit_target_config("x86_64-unknown-none", false)
+        expect(hosted.is_ok()).to_equal(true)
+        expect(bare.is_ok()).to_equal(true)
+        expect(none_hosted.is_err()).to_equal(true)
+
+    it "marks hosted SimpleOS functions for strong stack protection":
+        step("Translate a hosted SimpleOS MIR function with an escaping 64-byte stack buffer")
+        val ir = ssp_probe_ir("simpleos", false, false, "hosted")
+        expect(ir).to_contain("@__simple_main() nounwind sspstrong")
+        expect(ir).to_contain("alloca [64 x i8]")
+        expect(ir).to_contain("call void @ssp_escape(ptr")
+
+    it "leaves SimpleOS kernel and cross-host Linux output uninstrumented":
+        step("Translate bare-metal and Linux MIR functions")
+        expect(ssp_probe_ir("simpleos", true, false, "baremetal").contains("sspstrong")).to_equal(false)
+        expect(ssp_probe_ir("simpleos", true, false, "hosted").contains("sspstrong")).to_equal(false)
+        expect(ssp_probe_ir("linux", false, false, "hosted").contains("sspstrong")).to_equal(false)
+
+    it "honors the embedded-with-heap SSP opt-out":
+        step("Translate hosted SimpleOS MIR with the embedded hardening policy")
+        val ir = ssp_probe_ir("simpleos", false, false, "embedded_with_heap")
+        expect(ir.contains("sspstrong")).to_equal(false)
+
+    it "keeps naked SimpleOS functions free of stack instrumentation":
+        step("Translate a naked hosted SimpleOS function")
+        val ir = ssp_probe_ir("simpleos", false, true, "hosted")
+        expect(ir).to_contain(" naked noinline")
+        expect(ir.contains("sspstrong")).to_equal(false)

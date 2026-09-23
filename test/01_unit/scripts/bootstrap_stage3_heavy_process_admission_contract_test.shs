@@ -1,0 +1,170 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage3-heavy-admission.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+printf '%s\n%s\n%s\n' \
+  'linux|134217728|90000000|1073741824|120259084288|10|fixture' \
+  'linux|134217728|90000000|1073741824|120259084288|10|fixture' \
+  'linux|134217728|90000000|1073741824|120259084288|10|fixture' \
+  >"$tmp/memory"
+cat >"$tmp/processes" <<'EOF'
+201|1|1024|/usr/bin/qemu-system-x86_64 -m 8G
+202|1|2048|/tmp/simple native-build --threads 1
+EOF
+
+SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Linux
+SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$tmp/memory"
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$tmp/processes"
+SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=0
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM \
+  SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE \
+  SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT \
+  SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS
+
+bootstrap_stage3_memory_admission_preflight "$tmp/evidence" ||
+  fail 'ample-memory fixture was refused'
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/evidence"
+status=$?
+set -e
+[ "$status" -eq 75 ] || fail "heavy overlap returned $status, expected 75"
+[ "$(bootstrap_stage3_manifest_value concurrent_qemu_count "$tmp/evidence")" = 1 ] ||
+  fail 'QEMU was not counted'
+[ "$(bootstrap_stage3_manifest_value concurrent_native_build_count "$tmp/evidence")" = 1 ] ||
+  fail 'native-build was not counted'
+
+# Discovery failure must never be interpreted as a zero-heavy-process result.
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$tmp/absent-process-snapshot"
+export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
+bootstrap_stage3_memory_admission_preflight "$tmp/no-scan-evidence" ||
+  fail 'process-scan failure unexpectedly changed memory-provider status'
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/no-scan-evidence"
+no_scan_status=$?
+set -e
+[ "$no_scan_status" -eq 75 ] ||
+  fail "unavailable process discovery returned $no_scan_status, expected 75"
+
+# A real ps command failure must be recorded unavailable, not hidden by awk.
+mkdir "$tmp/failing-ps"
+cat >"$tmp/failing-ps/ps" <<'EOF'
+#!/bin/sh
+exit 71
+EOF
+chmod +x "$tmp/failing-ps/ps"
+old_path=$PATH
+PATH="$tmp/failing-ps:$PATH"
+unset SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
+export PATH
+bootstrap_stage3_memory_admission_preflight "$tmp/failed-ps-evidence" ||
+  fail 'ps failure unexpectedly changed memory-provider status'
+PATH=$old_path
+export PATH
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/failed-ps-evidence"
+failed_ps_status=$?
+set -e
+[ "$failed_ps_status" -eq 75 ] ||
+  fail "failed ps returned $failed_ps_status, expected fail-closed 75"
+
+printf '%s\n' '301|1|100|unrelated process' >"$tmp/processes"
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$tmp/processes"
+export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
+bootstrap_stage3_memory_admission_preflight "$tmp/clear-evidence" ||
+  fail 'clear fixture failed memory preflight'
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/clear-evidence" ||
+  fail 'clear fixture was refused'
+
+# A TERM-resistant nested descendant remains in the unit cgroup even if its
+# parent exits/reparents it, and must not survive bounded cgroup escalation.
+if command -v systemd-run >/dev/null 2>&1 &&
+   systemctl --user show-environment >/dev/null 2>&1; then
+  unit="simple-bootstrap-stage3-contract-$$.service"
+  pidfile="$tmp/term-resistant.pid"
+  systemd-run --user --quiet --unit="$unit" --property=KillMode=control-group \
+    sh -c 'trap "" TERM; sh -c '\''trap "" TERM; echo $$ >"$1"; exec sleep 30'\'' sh "$1" & wait' \
+    sh "$pidfile"
+  fixture_wait=0
+  while [ ! -s "$pidfile" ] && [ "$fixture_wait" -lt 5 ]; do
+    sleep 1; fixture_wait=$((fixture_wait + 1))
+  done
+  [ -s "$pidfile" ] || fail 'cgroup fixture did not publish descendant PID'
+  tree_descendant=$(cat "$pidfile")
+  mkdir "$tmp/signal-lock"
+  bootstrap_stage3_memory_signal_cleanup "$unit" "$tmp/unit-shutdown.env" \
+    "$tmp/signal-lock" || fail 'signal cleanup did not prove inactive'
+  [ ! -e "$tmp/signal-lock" ] || fail 'verified signal cleanup retained lock'
+  kill -0 "$tree_descendant" 2>/dev/null &&
+    fail "cgroup descendant $tree_descendant survived"
+
+  # A dead systemd-run client or ordinary wrapper exit is not proof that its
+  # service cgroup is empty.
+  exit_unit="simple-bootstrap-stage3-contract-exit-$$.service"
+  systemd-run --user --quiet --unit="$exit_unit" \
+    --property=KillMode=control-group sleep 30
+  set +e
+  bootstrap_stage3_memory_unit_inactive "$exit_unit"
+  active_status=$?
+  set -e
+  [ "$active_status" -ne 0 ] || fail 'active unit accepted after client exit'
+  mkdir "$tmp/exit-lock"
+  bootstrap_stage3_memory_signal_cleanup "$exit_unit" \
+    "$tmp/exit-shutdown.env" "$tmp/exit-lock" ||
+    fail 'active client-exit fixture could not be cleaned'
+  [ ! -e "$tmp/exit-lock" ] || fail 'client-exit cleanup retained lock'
+
+  # A systemctl/query failure retains ownership rather than releasing output.
+  mkdir "$tmp/query-lock" "$tmp/failing-systemctl"
+  cat >"$tmp/failing-systemctl/systemctl" <<'EOF'
+#!/bin/sh
+exit 71
+EOF
+  chmod +x "$tmp/failing-systemctl/systemctl"
+  old_path=$PATH
+  PATH="$tmp/failing-systemctl:$PATH"
+  export PATH
+  set +e
+  bootstrap_stage3_memory_signal_cleanup \
+    simple-bootstrap-stage3-query-failure.service \
+    "$tmp/query-failure.env" "$tmp/query-lock"
+  query_status=$?
+  set -e
+  PATH=$old_path
+  export PATH
+  [ "$query_status" -ne 0 ] || fail 'systemctl query failure accepted'
+  [ -d "$tmp/query-lock" ] || fail 'query failure released output lock'
+fi
+
+grep -Fq 'bootstrap_resume_release_lock=0' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'unverified shutdown does not retain output lock'
+grep -Fq -- '--property=KillMode=control-group' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'resume launcher does not use kernel cgroup ownership'
+
+grep -Fq ': "${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB:=49152}"' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'resume launcher does not reserve 48 GiB headroom'
+grep -Fq 'bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission"' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'resume launcher does not enforce heavy-process exclusivity'
+grep -Fq ': "${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB:=51200}"' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'resume launcher does not define a 50 GiB per-process maximum'
+grep -Fq 'ulimit -v "$process_max_kib"' \
+  "$root/scripts/bootstrap/lib/stage3-native-build-worker.sh" ||
+  fail 'resume launcher does not enforce the per-process maximum'
+grep -Fq 'runtime_headroom_watch_result=reserve-crossed' \
+  "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
+  fail 'resume launcher does not monitor headroom after admission'
+
+echo 'PASS: Stage 3 recovery rejects native-build/QEMU overlap before launch'
