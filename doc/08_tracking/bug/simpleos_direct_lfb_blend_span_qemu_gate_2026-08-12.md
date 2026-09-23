@@ -96,3 +96,8 @@ units fail to compile for unrelated existing declarations/layout mismatches
 does not report PASS. No guest boot, direct route receipt, readback/checksum,
 or 8K timing is claimed. Status remains **OPEN** pending base compile repair,
 review, and a fresh guest evidence run.
+
+TODO(deferred-qemu): after a fresh SimpleOS image is available, run the direct
+route in QEMU with correlated serial and framebuffer readback, then measure an
+8K-width row workload. This host contract test proves bounded arithmetic and
+access behavior only; it is not guest, presentation, or 8K performance proof.

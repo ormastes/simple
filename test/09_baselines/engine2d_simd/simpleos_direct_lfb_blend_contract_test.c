@@ -59,7 +59,12 @@ static RuntimeValue box(uint32_t pixel) {
 }
 
 int main(void) {
-    uint32_t registry_a[4] = {0xff010203u, 0xff112233u, 0xff445566u, 0xff778899u};
+    uint32_t registry_a[12] = {
+        0xff010203u, 0xff112233u, 0xff445566u, 0xff778899u,
+        0xdeadbeefu, 0xdeadbeefu,
+        0xff102030u, 0xff203040u, 0xff304050u, 0xff405060u,
+        0xdeadbeefu, 0xdeadbeefu
+    };
     uint32_t caller_b[4] = {0xffaabbccu, 0xffddeeffu, 0xff102030u, 0xff405060u};
     RuntimeValue slots[3] = {box(0x00112233u), box(0xffabcdefu), box(0x804080c0u)};
     RuntimeArray src = {{HEAP_ARRAY, 0}, 3, 3, slots};
@@ -67,11 +72,11 @@ int main(void) {
     RuntimeValue xy = (RuntimeValue)((uint64_t)1u << 32);
     g_fb_addr = (uint64_t)(uintptr_t)registry_a;
     g_fb_width = 4;
-    g_fb_height = 1;
-    g_fb_pitch = 16;
+    g_fb_height = 2;
+    g_fb_pitch = 24;
 
     if (rt_gui_blend_span8(
-            (RuntimeValue)(uintptr_t)caller_b, 4, 1, 16,
+            (RuntimeValue)(uintptr_t)caller_b, 4, 2, 24,
             xy, src_handle, 0, 3) != 0)
         return 1;
     if (registry_a[1] != 0xff112233u || caller_b[1] != 0xffddeeffu)
@@ -79,18 +84,63 @@ int main(void) {
     if (dst_reads != 0 || dst_writes != 0) return 3;
 
     if (rt_gui_blend_span8(
-            (RuntimeValue)(uintptr_t)registry_a, 4, 1, 20,
+            (RuntimeValue)(uintptr_t)registry_a, 3, 2, 24,
+            xy, src_handle, 0, 3) != 0)
+        return 18;
+    if (rt_gui_blend_span8(
+            (RuntimeValue)(uintptr_t)registry_a, 4, 1, 24,
+            xy, src_handle, 0, 3) != 0)
+        return 19;
+    if (dst_reads != 0 || dst_writes != 0) return 20;
+
+    if (rt_gui_blend_span8(
+            (RuntimeValue)(uintptr_t)registry_a, 4, 2, 20,
             xy, src_handle, 0, 3) != 0)
         return 9;
     if (dst_reads != 0 || dst_writes != 0) return 10;
 
+    /* Reject clipping instead of partially writing before scalar fallback. */
     if (rt_gui_blend_span8(
-            (RuntimeValue)(uintptr_t)registry_a, 4, 1, 16,
+            (RuntimeValue)(uintptr_t)registry_a, 4, 2, 24,
+            (RuntimeValue)((uint64_t)2u << 32), src_handle, 0, 3) != 0)
+        return 11;
+    if (dst_reads != 0 || dst_writes != 0) return 12;
+
+    /* Reject malformed registered pitch before deriving a destination. */
+    g_fb_pitch = 15;
+    if (rt_gui_blend_span8(
+            (RuntimeValue)(uintptr_t)registry_a, 4, 2, 15,
+            xy, src_handle, 0, 3) != 0)
+        return 13;
+    if (dst_reads != 0 || dst_writes != 0) return 14;
+
+    /* Reject an otherwise matching registration whose address range wraps. */
+    g_fb_addr = UINTPTR_MAX - 2u;
+    g_fb_width = 1;
+    g_fb_height = 1;
+    g_fb_pitch = 4;
+    if (rt_gui_blend_span8(
+            (RuntimeValue)g_fb_addr, 1, 1, 4,
+            0, src_handle, 0, 1) != 0)
+        return 15;
+    if (dst_reads != 0 || dst_writes != 0) return 16;
+
+    /* A valid padded scanout writes the registered row, never its padding. */
+    g_fb_addr = (uint64_t)(uintptr_t)registry_a;
+    g_fb_width = 4;
+    g_fb_height = 2;
+    g_fb_pitch = 24;
+    xy = (RuntimeValue)(((uint64_t)1u << 32) | 1u);
+    if (rt_gui_blend_span8(
+            (RuntimeValue)(uintptr_t)registry_a, 4, 2, 24,
             xy, src_handle, 0, 3) != 1)
         return 4;
-    if (registry_a[1] != 0xff112233u) return 5;
-    if (registry_a[2] != 0xffabcdefu) return 6;
-    if (registry_a[3] != _bm_blend_pixel(0x804080c0u, 0xff778899u)) return 7;
+    if (registry_a[7] != 0xff203040u) return 5;
+    if (registry_a[8] != 0xffabcdefu) return 6;
+    if (registry_a[9] != _bm_blend_pixel(0x804080c0u, 0xff405060u)) return 7;
+    if (registry_a[4] != 0xdeadbeefu || registry_a[5] != 0xdeadbeefu ||
+        registry_a[10] != 0xdeadbeefu || registry_a[11] != 0xdeadbeefu)
+        return 17;
     if (dst_reads != 1 || dst_writes != 2) return 8;
     return 0;
 }
