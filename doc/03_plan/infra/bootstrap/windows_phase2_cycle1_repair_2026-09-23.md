@@ -29,11 +29,16 @@ no real Phase2 test Results/counts and no Stage3 admission exist for this lane.
    execution is claimed.
 3. Semver legacy enum spelling/type ownership and digit parsing repaired;
    Range appended without changing old ordinals; modern consumer explicitly
-   imports the same owner and handles Range. Final focused cycle compiled five
-   units and linked, but **one of 34 runtime checks failed**. Three-cycle cap
-   reached. `build/p2r/semver/HANDOFF.md` preserves all three outcomes and binary
-   hash. Fixture now prints assertion IDs; that diagnostic edit is unexecuted.
-   Do not mark semver accepted or launch another same-session cycle.
+   imports the same owner and handles Range. Initial session stopped at its
+   three-cycle cap with one of 34 runtime checks failing. A separately
+   authorized resumed diagnostic identified assertion 23: strict Greater
+   incorrectly accepted equal versions because of nested optional tuple
+   matching. Explicit nested optional matches repair the comparator while the
+   general compiler defect is tracked separately. The one corrective rerun
+   **passed 40 runtime checks**, two compiled/three cached/zero failed, 9.8s.
+   Evidence: `build/p2r/semver/resumed-fixed-20260923.log`; executable SHA256
+   `81effe4b6fdc6dd1453bb218aedb99b4a56534671d86e0f95821c671ab38a533`.
+   All original evidence and rejected binaries remain preserved in that folder.
 4. Cache persist failures used 288-character object paths and existing parents.
    A two-unit native probe persisted a 356-byte object at 109 characters with
    no cache warnings and executed successfully. Evidence:
