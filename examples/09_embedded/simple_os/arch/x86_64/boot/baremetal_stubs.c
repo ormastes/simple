@@ -580,6 +580,10 @@ static size_t _heap_tail_span = 0;
 static size_t _heap_free_blocks = 0;
 static size_t _heap_free_head = (size_t)-1;
 static volatile uint32_t _heap_lock = 0;
+#ifdef SIMPLEOS_HEAP_TEST
+static _Thread_local unsigned int _heap_test_lock_owned;
+extern void rt_baremetal_heap_test_payload_clear(size_t size, unsigned int lock_owned);
+#endif
 
 void *malloc(size_t sz);
 
@@ -645,6 +649,7 @@ static inline uint64_t simpleos_heap_lock_acquire(void)
 {
 #ifdef SIMPLEOS_HEAP_TEST
     while (__atomic_exchange_n(&_heap_lock, 1U, __ATOMIC_ACQUIRE)) {}
+    _heap_test_lock_owned = 1;
     return 0;
 #else
     uint64_t flags;
@@ -658,6 +663,7 @@ static inline void simpleos_heap_lock_release(uint64_t flags)
 {
 #ifdef SIMPLEOS_HEAP_TEST
     (void)flags;
+    _heap_test_lock_owned = 0;
     __atomic_store_n(&_heap_lock, 0U, __ATOMIC_RELEASE);
 #else
     __atomic_store_n(&_heap_lock, 0U, __ATOMIC_RELEASE);
@@ -726,13 +732,7 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
                 simpleos_heap_free_list_insert(next, offset + needed);
             }
             block->is_free = 0;
-            void *result = (uint8_t *)block + sizeof(SimpleOSHeapBlock);
-            /* The retired bump arena returned untouched BSS. Runtime object
-             * constructors consequently rely on fresh allocations being zero,
-             * including fields not present in every historical HeapHeader
-             * projection. Preserve that contract when recycling dirty storage. */
-            __builtin_memset(result, 0, aligned);
-            return result;
+            return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
         }
         offset = block->free_next;
     }
@@ -748,9 +748,20 @@ static void *simpleos_heap_alloc_unlocked(size_t size)
     block->free_previous = (size_t)-1;
     _heap_off += needed;
     _heap_tail_span = needed;
-    void *result = (uint8_t *)block + sizeof(SimpleOSHeapBlock);
-    __builtin_memset(result, 0, aligned);
-    return result;
+    return (uint8_t *)block + sizeof(SimpleOSHeapBlock);
+}
+
+/* The caller exclusively owns a reserved block until it publishes the return
+ * value. Preserve that contract when recycling dirty storage: clear payload
+ * only after releasing the metadata lock and restoring the caller's IRQ state.
+ * Other allocators cannot reuse this live block while it is being cleared. */
+static void simpleos_heap_zero_owned(void *ptr, size_t size)
+{
+    if (!ptr || size == 0) return;
+#ifdef SIMPLEOS_HEAP_TEST
+    rt_baremetal_heap_test_payload_clear(size, _heap_test_lock_owned);
+#endif
+    __builtin_memset(ptr, 0, size);
 }
 
 static void simpleos_heap_free_unlocked(void *ptr)
@@ -791,6 +802,11 @@ void *malloc(size_t size)
     uint64_t flags = simpleos_heap_lock_acquire();
     void *result = simpleos_heap_alloc_unlocked(size);
     simpleos_heap_lock_release(flags);
+    if (result) {
+        size_t aligned = 0;
+        simpleos_heap_align(size, &aligned);
+        simpleos_heap_zero_owned(result, aligned);
+    }
     return result;
 }
 
@@ -812,6 +828,11 @@ void *realloc(void *ptr, size_t size)
     if (!ptr) {
         void *result = simpleos_heap_alloc_unlocked(size);
         simpleos_heap_lock_release(flags);
+        if (result) {
+            size_t allocation_size = 0;
+            simpleos_heap_align(size, &allocation_size);
+            simpleos_heap_zero_owned(result, allocation_size);
+        }
         return result;
     }
     if (size == 0) {
@@ -854,16 +875,16 @@ void *realloc(void *ptr, size_t size)
                 block->span += remainder;
                 simpleos_heap_set_following_previous_span(offset, block->span);
             }
-            __builtin_memset((uint8_t *)ptr + old_size, 0, aligned - old_size);
             simpleos_heap_lock_release(flags);
+            simpleos_heap_zero_owned((uint8_t *)ptr + old_size, aligned - old_size);
             return ptr;
         }
     } else if (needed <= sizeof(_heap) - offset) {
         block->span = needed;
         _heap_off = offset + needed;
         _heap_tail_span = needed;
-        __builtin_memset((uint8_t *)ptr + old_size, 0, aligned - old_size);
         simpleos_heap_lock_release(flags);
+        simpleos_heap_zero_owned((uint8_t *)ptr + old_size, aligned - old_size);
         return ptr;
     }
     void *replacement = simpleos_heap_alloc_unlocked(size);
@@ -876,6 +897,7 @@ void *realloc(void *ptr, size_t size)
      * interrupts disabled would delay device service unnecessarily. */
     simpleos_heap_lock_release(flags);
     __builtin_memcpy(replacement, ptr, old_size);
+    simpleos_heap_zero_owned((uint8_t *)replacement + old_size, aligned - old_size);
     flags = simpleos_heap_lock_acquire();
     simpleos_heap_free_unlocked(ptr);
     simpleos_heap_lock_release(flags);
@@ -892,9 +914,7 @@ void *calloc(size_t count, size_t size)
 {
     if (count != 0 && size > (size_t)-1 / count) return NULL;
     size_t total = count * size;
-    void *ptr = malloc(total);
-    if (ptr) __builtin_memset(ptr, 0, total);
-    return ptr;
+    return malloc(total); /* malloc already clears the complete requested span. */
 }
 
 #ifdef SIMPLEOS_HEAP_TEST

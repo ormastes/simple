@@ -29,6 +29,24 @@ static int intact(const uint8_t *bytes, size_t count, uint8_t value)
 }
 
 static volatile int worker_failed = 0;
+static unsigned long clear_calls;
+static unsigned long locked_clear_calls;
+static size_t largest_clear;
+
+void rt_baremetal_heap_test_payload_clear(size_t size, unsigned int lock_owned)
+{
+    __atomic_fetch_add(&clear_calls, 1UL, __ATOMIC_RELAXED);
+    if (lock_owned) __atomic_fetch_add(&locked_clear_calls, 1UL, __ATOMIC_RELAXED);
+    size_t observed = __atomic_load_n(&largest_clear, __ATOMIC_RELAXED);
+    while (size > observed && !__atomic_compare_exchange_n(
+        &largest_clear, &observed, size, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+}
+
+static int all_zero(const uint8_t *bytes, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) if (bytes[i] != 0) return 0;
+    return 1;
+}
 
 typedef struct {
     long ticks;
@@ -145,6 +163,8 @@ int main(void)
     fill(tail, TAIL_INITIAL_BYTES, 61);
     uint8_t *tail_grown = (uint8_t *)realloc(tail, TAIL_GROWN_BYTES);
     if (tail_grown != tail || !intact(tail_grown, TAIL_INITIAL_BYTES, 61)) return 16;
+    if (!all_zero(tail_grown + TAIL_INITIAL_BYTES,
+                  TAIL_GROWN_BYTES - TAIL_INITIAL_BYTES)) return 29;
     size_t peak_high_water = rt_baremetal_heap_test_high_water();
     free(tail_grown);
 
@@ -169,10 +189,12 @@ int main(void)
     uint8_t *right = (uint8_t *)malloc(256);
     if (!left || !middle || !right) return 21;
     fill(left, 256, 31);
+    fill(middle, 512, 63);
     fill(right, 256, 47);
     free(middle);
     uint8_t *left_grown = (uint8_t *)realloc(left, 640);
     if (left_grown != left || !intact(left_grown, 256, 31) || !intact(right, 256, 47)) return 22;
+    if (!all_zero(left_grown + 256, 640 - 256)) return 30;
     free(left_grown);
     free(right);
 
@@ -186,18 +208,29 @@ int main(void)
         if (fresh[i] != 0) return 27;
     free(fresh);
 
+    unsigned long calls_before_calloc = clear_calls;
     uint8_t *zeroed = (uint8_t *)calloc(4096, 4);
     if (!zeroed) return 23;
+    if (clear_calls != calls_before_calloc + 1) return 31;
     for (size_t i = 0; i < 4096 * 4; ++i)
         if (zeroed[i] != 0) return 24;
     free(zeroed);
 
     uint8_t *grown = (uint8_t *)malloc(64);
     if (!grown) return 10;
+    uint8_t *growth_blocker = (uint8_t *)malloc(64);
+    if (!growth_blocker) return 32;
+    fill(growth_blocker, 64, 55);
     fill(grown, 64, 17);
     grown = (uint8_t *)realloc(grown, 128);
     if (!grown || !intact(grown, 64, 17)) return 11;
+    if (!all_zero(grown + 64, 64) || !intact(growth_blocker, 64, 55)) return 33;
     free(grown);
+    free(growth_blocker);
+
+    uint8_t *null_grown = (uint8_t *)realloc(NULL, 4096);
+    if (!null_grown || !all_zero(null_grown, 4096)) return 34;
+    free(null_grown);
 
     for (size_t i = 0; i < LIVE_COUNT; ++i) {
         if (!intact(live[i], LIVE_BYTES, (uint8_t)i)) return 12;
@@ -209,6 +242,9 @@ int main(void)
     if (pthread_create(&workers[0], 0, concurrent_allocator_worker, (void *)1) != 0 ||
         pthread_create(&workers[1], 0, concurrent_allocator_worker, (void *)2) != 0) return 17;
     if (pthread_join(workers[0], 0) != 0 || pthread_join(workers[1], 0) != 0 || worker_failed) return 18;
+    if (locked_clear_calls != 0 || largest_clear < TAIL_INITIAL_BYTES) return 35;
+    printf("payload_clear calls=%lu locked_calls=%lu largest_bytes=%zu\n",
+           clear_calls, locked_clear_calls, largest_clear);
     printf("allocator_latency live_blocks=8 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
            latency_8.ticks, latency_8.retained_committed);
     printf("allocator_latency live_blocks=4096 operations=20000 cpu_ticks=%ld retained_committed_bytes=%zu\n",
