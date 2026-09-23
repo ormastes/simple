@@ -99,7 +99,10 @@ fn expected_cached_object_identity() -> (Architecture, BinaryFormat) {
 }
 
 fn read_usable_cached_object(path: &Path) -> Option<Vec<u8>> {
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(io_path) = cache_object_io_path(path) else {
+        return None;
+    };
+    let Ok(bytes) = std::fs::read(io_path) else {
         return None;
     };
     let (expected_arch, expected_format) = expected_cached_object_identity();
@@ -111,6 +114,32 @@ fn read_usable_cached_object(path: &Path) -> Option<Vec<u8>> {
         })
         .unwrap_or(false);
     usable.then_some(bytes)
+}
+
+/// Use a verbatim Windows path for a cache leaf near MAX_PATH. The cache key
+/// and directory layout remain unchanged; only the path passed to filesystem
+/// calls changes. Canonicalizing the existing parent supplies the `\\?\` prefix.
+fn cache_object_io_path(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        if absolute.as_os_str().to_string_lossy().encode_utf16().count() < 248 {
+            return Ok(path.to_path_buf());
+        }
+        let parent = absolute.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "cache object has no parent")
+        })?;
+        let leaf = absolute.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "cache object has no filename")
+        })?;
+        return Ok(std::fs::canonicalize(parent)?.join(leaf));
+    }
+    #[cfg(not(windows))]
+    Ok(path.to_path_buf())
 }
 
 /// Initialize the rayon global thread pool with appropriate stack size and

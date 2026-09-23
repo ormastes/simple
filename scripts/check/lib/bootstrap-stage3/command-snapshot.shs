@@ -9,7 +9,10 @@ bootstrap_stage3_write_command_transcript() {
         [ ! -L "$bootstrap_stage3_command_cwd" ] &&
         [ "$(bootstrap_stage3_canonical_path \
             "$bootstrap_stage3_command_cwd")" = \
-            "$bootstrap_stage3_command_cwd" ] || return 1
+            "$bootstrap_stage3_command_cwd" ] || {
+        echo 'bootstrap-transcript-error: invalid command cwd' >&2
+        return 1
+    }
     bootstrap_stage3_transcript_tmp="${bootstrap_stage3_transcript}.tmp.$$"
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
@@ -21,7 +24,7 @@ bootstrap_stage3_write_command_transcript() {
         bootstrap_stage3_emit_host_env() {
             case "$1" in
                 *'
-'*) exit 1 ;;
+'*) echo 'bootstrap-transcript-error: newline in host environment' >&2; exit 1 ;;
             esac
             printf 'host-env:%s:%s\n' "${#1}" "$1"
         }
@@ -45,9 +48,17 @@ ${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
 ${SystemDrive:-${SYSTEMDRIVE:-}}
                 bootstrap_stage3_windows_program_data=\
 ${ProgramData:-${PROGRAMDATA:-}}
-                [ -n "$bootstrap_stage3_windows_system_root" ] &&
-                    [ -n "$bootstrap_stage3_windows_system_drive" ] &&
-                    [ -n "$bootstrap_stage3_windows_program_data" ] || exit 1
+                for bootstrap_stage3_windows_name in SystemRoot SystemDrive ProgramData; do
+                    case "$bootstrap_stage3_windows_name" in
+                        SystemRoot) bootstrap_stage3_windows_value=$bootstrap_stage3_windows_system_root ;;
+                        SystemDrive) bootstrap_stage3_windows_value=$bootstrap_stage3_windows_system_drive ;;
+                        ProgramData) bootstrap_stage3_windows_value=$bootstrap_stage3_windows_program_data ;;
+                    esac
+                    [ -n "$bootstrap_stage3_windows_value" ] || {
+                        echo "bootstrap-transcript-error: missing Windows variable $bootstrap_stage3_windows_name" >&2
+                        exit 1
+                    }
+                done
                 bootstrap_stage3_emit_host_env \
                     "TMP=$bootstrap_stage3_command_tmpdir"
                 bootstrap_stage3_emit_host_env \
@@ -63,44 +74,59 @@ ${ProgramData:-${PROGRAMDATA:-}}
         bootstrap_stage3_emit_host_env "LC_ALL=C"
         bootstrap_stage3_emit_host_env "LANG=C"
         bootstrap_stage3_seen_env=:
+        bootstrap_stage3_env_index=0
         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+            bootstrap_stage3_env_index=$((bootstrap_stage3_env_index + 1))
             case "$1" in
                 *'
-'*) exit 1 ;;
+'*) echo "bootstrap-transcript-error: newline in explicit env argument $bootstrap_stage3_env_index" >&2; exit 1 ;;
                 [A-Z_][A-Z0-9_]*=*) ;;
-                *) exit 1 ;;
+                *) echo "bootstrap-transcript-error: invalid explicit env name at argument $bootstrap_stage3_env_index" >&2; exit 1 ;;
             esac
             bootstrap_stage3_env_name=${1%%=*}
             case "$bootstrap_stage3_seen_env" in
-                *":$bootstrap_stage3_env_name:"*) exit 1 ;;
+                *":$bootstrap_stage3_env_name:"*) echo "bootstrap-transcript-error: duplicate explicit env name at argument $bootstrap_stage3_env_index" >&2; exit 1 ;;
             esac
             bootstrap_stage3_seen_env=\
 "$bootstrap_stage3_seen_env$bootstrap_stage3_env_name:"
             printf 'explicit-env:%s:%s\n' "${#1}" "$1"
             shift
         done
-        [ "${1-}" = -- ] || exit 1
+        [ "${1-}" = -- ] || {
+            echo 'bootstrap-transcript-error: missing command separator' >&2
+            exit 1
+        }
         shift
-        [ "$#" -gt 0 ] || exit 1
+        [ "$#" -gt 0 ] || {
+            echo 'bootstrap-transcript-error: missing command executable' >&2
+            exit 1
+        }
         case "$1" in
             *'
-'*) exit 1 ;;
+'*) echo 'bootstrap-transcript-error: newline in command executable' >&2; exit 1 ;;
         esac
         printf 'executable:%s:%s\n' "${#1}" "$1"
         shift
+        bootstrap_stage3_arg_index=0
         for bootstrap_stage3_command_arg in "$@"; do
+            bootstrap_stage3_arg_index=$((bootstrap_stage3_arg_index + 1))
             case "$bootstrap_stage3_command_arg" in
                 *'
-'*) exit 1 ;;
+'*) echo "bootstrap-transcript-error: newline in command argument $bootstrap_stage3_arg_index" >&2; exit 1 ;;
             esac
             printf 'argv:%s:%s\n' "${#bootstrap_stage3_command_arg}" \
                 "$bootstrap_stage3_command_arg"
         done
     ) >"$bootstrap_stage3_transcript_tmp" || {
         rm -f "$bootstrap_stage3_transcript_tmp"
+        echo 'bootstrap-transcript-error: command transcript create or write failed' >&2
         return 1
     }
-    mv "$bootstrap_stage3_transcript_tmp" "$bootstrap_stage3_transcript"
+    mv "$bootstrap_stage3_transcript_tmp" "$bootstrap_stage3_transcript" || {
+        rm -f "$bootstrap_stage3_transcript_tmp"
+        echo 'bootstrap-transcript-error: command transcript rename failed' >&2
+        return 1
+    }
 }
 
 bootstrap_stage3_verify_command_transcript() (
