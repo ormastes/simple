@@ -1,0 +1,46 @@
+use std.test.{describe, it, expect}
+use std.io.{file_read}
+
+describe "SimpleOS in-guest payload runtime ownership":
+    it "keeps every formerly missing runtime symbol in the pure-Simple bundle":
+        val env_source = file_read("src/runtime/simple_core/core_env.spl")
+        val array_source = file_read("src/runtime/simple_core/core_array.spl")
+        val string_source = file_read("src/runtime/simple_core/core_string.spl")
+        val value_source = file_read("src/runtime/simple_core/core_values.spl")
+        val process_source = file_read("src/runtime/simple_core/core_process.spl")
+        val libc_source = file_read("src/os/libc/simpleos_signal.c")
+        val archive_script = file_read("scripts/os/simpleos-core-archive.shs")
+        val payload_script = file_read("scripts/os/simpleos-native-build-riscv64.shs")
+
+        expect(env_source).to_contain("pub fn rt_env_get_i64(")
+        expect(array_source).to_contain("pub fn rt_bytes_to_text(")
+        expect(string_source).to_contain("pub fn rt_text_cmp_any(")
+        expect(value_source).to_contain("pub fn rt_value_as_float(")
+        expect(process_source).to_contain("pub fn rt_get_args(")
+        expect(string_source).to_contain("pub fn rt_string_new_literal(")
+        expect(libc_source).to_contain("int sigpending(sigset_t *set)")
+        expect(archive_script).to_contain("SIMPLE_NATIVE_BUILD_THREADS:-12")
+        expect(archive_script).to_contain("--threads \"$THREADS\"")
+        expect(payload_script).to_contain("--threads \"$THREADS\"")
+
+    it "has one pure-Simple dynamic comparator owner":
+        val source = file_read("src/runtime/simple_core/core_string.spl")
+        val first = source.find("pub fn rt_native_cmp(") ?? -1
+        expect(first).to_be_greater_than(-1)
+        expect(source.substring(first + 1).contains("pub fn rt_native_cmp(")).to_equal(false)
+
+    it "retains an executable production-provider probe":
+        val probe = file_read("test/02_integration/compiler/simple_core_payload_runtime_probe.spl")
+        expect(probe).to_contain("rt_env_get_i64")
+        expect(probe).to_contain("rt_bytes_to_text")
+        expect(probe).to_contain("rt_value_as_float")
+        expect(probe).to_contain("require(alpha < beta)")
+        expect(probe).to_contain("SIMPLE_CORE_PAYLOAD_RUNTIME_OK")
+
+    it "reclaims scoped float boxes without linear lookup":
+        val values = file_read("src/runtime/simple_core/core_values.spl")
+        val memory = file_read("src/runtime/simple_core/core_memory.spl")
+        expect(values).to_contain("core_values_float_hash")
+        expect(values).to_contain("core_values_float_erase")
+        expect(values).to_contain("_sffi_core_values_transient_note(ptr, 5)")
+        expect(memory).to_contain("float_reclaim_transient(ptr)")
