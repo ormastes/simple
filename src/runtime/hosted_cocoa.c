@@ -12,7 +12,13 @@
  *   - Real mode (macOS, __APPLE__): NSWindow + NSImageView backed by a
  *     CPU-side ARGB pixel buffer. Metal lands in a later phase.
  *
- * Build:
+ * Standalone diagnostic provider:
+ *   sh scripts/build/build_spl_cocoa.shs
+ * SIMPLE_COCOA_PROVIDER_ONLY excludes the tagged-value compatibility entry;
+ * that artifact exports rt_cocoa_window_new_raw and has no runtime dependency.
+ * Production demand loading awaits the canonical Darwin admission bridge.
+ *
+ * Transitional runtime build:
  *   cc -x objective-c -c -fPIC -O2 hosted_cocoa.c \
  *      -o hosted_cocoa.o -framework Cocoa
  */
@@ -23,39 +29,58 @@
 #include <string.h>
 
 #define COCOA_INVALID_HANDLE ((int64_t)(-1))
+#define COCOA_TITLE_MAX_BYTES INT64_C(1048576)
 
-/* -------------------------------------------------------------------------
- * Simple runtime helpers: decode a tagged-text RuntimeValue (int64_t) into
- * a raw byte pointer + length.  Linked against libsimple_native_all.
- * ---------------------------------------------------------------------- */
+/* The standalone provider receives only borrowed bytes. The caller keeps the
+ * bounded title alive for this call; the provider copies it before returning.
+ * Tagged RuntimeValue decoding stays in the transitional compatibility build
+ * until the core's admitted-provider bridge can replace that build. */
+int64_t rt_cocoa_window_new_raw(int64_t w, int64_t h,
+                                const char *title, int64_t title_len);
+
+#ifndef SIMPLE_COCOA_PROVIDER_ONLY
 extern const char *rt_string_data(int64_t rv);
 extern int64_t     rt_string_len(int64_t rv);
+#ifdef __APPLE__
+static bool is_main_thread(void);
+#endif
 
-/* Decode a Simple `text` RuntimeValue into a NUL-terminated C string
- * allocated with malloc.  Caller must free().  Returns strdup("untitled") on
- * any error. */
-static char *text_rv_to_cstr(int64_t rv) {
-    if (rv == 0) return strdup("untitled");
-    int64_t len = rt_string_len(rv);
-    if (len <= 0) return strdup("untitled");
-    if ((uint64_t)len >= (uint64_t)SIZE_MAX) return strdup("untitled");
-    const char *ptr = rt_string_data(rv);
-    if (!ptr) return strdup("untitled");
-    if (memchr(ptr, '\0', (size_t)len) != NULL) return strdup("untitled");
+int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
+#ifdef __APPLE__
+    if (w <= 0 || h <= 0 || !is_main_thread()) return COCOA_INVALID_HANDLE;
+    int64_t len = title_rv ? rt_string_len(title_rv) : 0;
+    const char *ptr = len > 0 && len <= COCOA_TITLE_MAX_BYTES
+        ? rt_string_data(title_rv) : NULL;
+    if (!ptr || memchr(ptr, '\0', (size_t)len)) { ptr = NULL; len = 0; }
+    return rt_cocoa_window_new_raw(w, h, ptr, len);
+#else
+    (void)w; (void)h; (void)title_rv;
+    return COCOA_INVALID_HANDLE;
+#endif
+}
+#endif
+
+#ifdef __APPLE__
+static char *raw_title_to_cstr(const char *ptr, int64_t len) {
+    if (len < 0 || len > COCOA_TITLE_MAX_BYTES) return NULL;
+    if (len == 0) return strdup("untitled");
+    if (!ptr || memchr(ptr, '\0', (size_t)len)) return NULL;
     char *buf = (char *)malloc((size_t)len + 1);
-    if (!buf) return strdup("untitled");
+    if (!buf) return NULL;
     memcpy(buf, ptr, (size_t)len);
     buf[(size_t)len] = '\0';
     return buf;
 }
+#endif
 
 /* =========================================================================
  * Non-macOS stub implementations
  * ====================================================================== */
 #ifndef __APPLE__
 
-int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
-    (void)w; (void)h; (void)title_rv;
+int64_t rt_cocoa_window_new_raw(int64_t w, int64_t h,
+                                const char *title, int64_t title_len) {
+    (void)w; (void)h; (void)title; (void)title_len;
     return COCOA_INVALID_HANDLE;
 }
 bool rt_cocoa_window_resize(int64_t win, int64_t w, int64_t h) {
@@ -241,11 +266,12 @@ static int64_t clipped_end(int64_t start, int64_t extent, int64_t limit) {
  * Window operations
  * ====================================================================== */
 
-int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
+int64_t rt_cocoa_window_new_raw(int64_t w, int64_t h,
+                                const char *title, int64_t title_len) {
     if (w <= 0 || h <= 0) return COCOA_INVALID_HANDLE;
     if (!is_main_thread())  return COCOA_INVALID_HANDLE;
 
-    char *title_cstr = text_rv_to_cstr(title_rv);
+    char *title_cstr = raw_title_to_cstr(title, title_len);
     if (!title_cstr) return COCOA_INVALID_HANDLE;
     CocoaWindow *wnd = (CocoaWindow *)calloc(1, sizeof(CocoaWindow));
     if (!wnd) {

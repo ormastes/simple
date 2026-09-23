@@ -1,0 +1,44 @@
+#!/bin/sh
+# Diagnostic standalone Cocoa artifact. This receipt is producer evidence, NOT
+# admission: production loading must use the canonical exact-artifact owner.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+[ "$(uname -s)" = Darwin ] || { echo 'macOS required' >&2; exit 2; }
+out=${1:-"$root/build/sffi"}
+mkdir -p "$out"
+stage=$(mktemp -d "$out/.cocoa-build.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT HUP INT TERM
+cc=${CC:-clang}
+"$cc" --version > "$stage/toolchain.txt"
+# Qualified LLVM 23 lowering: ld64.lld cannot link class-selector stubs.
+objc_flag=
+if printf 'int value;\n' | "$cc" -x objective-c -Werror \
+    -fno-objc-msgsend-class-selector-stubs -fsyntax-only - >/dev/null 2>&1; then
+    objc_flag=-fno-objc-msgsend-class-selector-stubs
+fi
+"$cc" -x objective-c -std=gnu11 -fno-objc-arc -O2 -Wall -Wextra -Werror \
+    -Wno-unused-function \
+    ${objc_flag:+"$objc_flag"} -DSIMPLE_COCOA_PROVIDER_ONLY \
+    -dynamiclib "$root/src/runtime/hosted_cocoa.c" -framework Cocoa -lobjc \
+    -Wl,-install_name,@rpath/libspl_cocoa.dylib -o "$stage/libspl_cocoa.dylib"
+codesign --force --sign - "$stage/libspl_cocoa.dylib"
+codesign --verify --strict "$stage/libspl_cocoa.dylib"
+otool -L "$stage/libspl_cocoa.dylib" | sed '1d' > "$stage/dependencies.txt"
+{
+    printf 'kind=diagnostic-producer-receipt\nadmission=not-established\n'
+    printf 'artifact=libspl_cocoa.dylib\nabi=legacy-cocoa-raw-title-v1\n'
+    printf 'title_max_bytes=1048576\nlifetime=process-pinned\n'
+    printf 'dependency_admission=not-established\n'
+    printf 'dependency_listing_sha256=%s\n' "$(shasum -a 256 "$stage/dependencies.txt" | awk '{print $1}')"
+    printf 'objective_c_flags=-fno-objc-arc %s\n' "$objc_flag"
+    printf 'source_sha256=%s\n' "$(shasum -a 256 "$root/src/runtime/hosted_cocoa.c" | awk '{print $1}')"
+    printf 'artifact_sha256=%s\n' "$(shasum -a 256 "$stage/libspl_cocoa.dylib" | awk '{print $1}')"
+    printf 'compiler=%s\n' "$cc"
+    sed 's/^/compiler_version=/' "$stage/toolchain.txt"
+    file "$stage/libspl_cocoa.dylib"
+    sed 's/^/dependency_observed=/' "$stage/dependencies.txt"
+    codesign -dvv "$stage/libspl_cocoa.dylib" 2>&1
+} > "$stage/libspl_cocoa.producer.txt"
+mv "$stage/libspl_cocoa.dylib" "$out/libspl_cocoa.dylib"
+mv "$stage/libspl_cocoa.producer.txt" "$out/libspl_cocoa.producer.txt"
+printf 'Diagnostic Cocoa provider: %s/libspl_cocoa.dylib\n' "$out"
