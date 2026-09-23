@@ -47,6 +47,8 @@ fn detect_platform() -> text:
         return "macos"
     if uname.starts_with("FreeBSD"):
         return "freebsd"
+    if uname.starts_with("SimpleOS"):
+        return "simpleos"
     if uname.starts_with("MINGW") or uname.starts_with("MSYS") or uname.starts_with("CYGWIN"):
         return "windows"
     if uname == "":
@@ -97,6 +99,13 @@ fn find_mold_for_native() -> text:
 fn native_link_hardening_flags(platform: text) -> text:
     if platform == "linux" or platform == "freebsd":
         return " -Wl,--allow-multiple-definition -Wl,--unresolved-symbols=ignore-all"
+    ""
+
+fn native_stack_protector_flags(platform: text) -> text:
+    # Clang's hosted ELF path has a C runtime stack-check failure handler.
+    # Cross-target bare-metal objects use their own explicit policy.
+    if platform == "linux" or platform == "freebsd" or platform == "simpleos":
+        return "-fstack-protector-strong "
     ""
 
 fn should_strip_llvm_constructors_for_platform(platform: text) -> bool:
@@ -382,6 +391,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     val march_flags = if march_target != "" then "-march={march_target} " else: ""
     val platform = detect_platform()
     val hardening_flags = native_link_hardening_flags(platform)
+    val stack_protector_flags = native_stack_protector_flags(platform)
 
     val mold_path = find_mold_for_native()
     var mold_link = ""
@@ -410,7 +420,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         linked_native_lib_path = strip_native_all_constructors(native_lib_path, platform, verbose)
         native_lib_flags = " {linked_native_lib_path} -lstdc++ -lm"
 
-    val clang_cmd = "{cc} -std=gnu11 {opt_flags}{lto_flags}{march_flags}{san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
+    val clang_cmd = "{cc} -std=gnu11 {opt_flags}{lto_flags}{march_flags}{san_flags}{stack_protector_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
     if verbose:
         debug("compile", "Compiling: {cc} -std=c++20 ...")
 
