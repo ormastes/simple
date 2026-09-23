@@ -67,6 +67,7 @@ typedef SSIZE_T ssize_t;
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
+#include "platform/windows_raw_mapping.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -733,20 +734,7 @@ int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_o
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
                     int64_t fd, int64_t offset) {
 #if defined(_WIN32)
-    (void)flags;
-    (void)offset;
-    if (length <= 0 || fd != -1) return -1;
-    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
-    DWORD protect;
-    if (prot == 0x0) protect = PAGE_NOACCESS;
-    else if (prot == 0x1) protect = PAGE_READONLY;
-    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-    else if (prot == 0x4) protect = PAGE_EXECUTE;
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else return -1;
-    void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length,
-                                MEM_COMMIT | MEM_RESERVE, protect);
-    return result ? (int64_t)(uintptr_t)result : -1;
+    return spl_windows_mmap_raw(addr, length, prot, flags, fd, offset);
 #else
     if (length <= 0 || offset < 0) return -1;
     /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
