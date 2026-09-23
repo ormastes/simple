@@ -141,6 +141,7 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #include <dirent.h>
 #include <netdb.h>
 #include <dlfcn.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -2197,6 +2198,9 @@ static atomic_bool rt_gui_html_ready = ATOMIC_VAR_INIT(false);
 static atomic_flag rt_gui_html_init_lock = ATOMIC_FLAG_INIT;
 static void *rt_gui_html_library = NULL;
 static int64_t (*rt_gui_html_present)(const uint8_t *, uint64_t) = NULL;
+#if !defined(_WIN32)
+static _Thread_local int rt_gui_html_initializing = 0;
+#endif
 
 static void rt_gui_html_refuse(const char *reason) {
     fprintf(stderr, "[simple-gui] HTML provider unavailable: %s\n", reason);
@@ -2210,9 +2214,13 @@ void rt_gui_present_html(int64_t tagged_html) {
 #if defined(_WIN32)
     rt_gui_html_refuse("dynamic HTML provider unsupported on this host");
 #else
+    if (rt_gui_html_initializing) rt_gui_html_refuse("provider initialization reentry");
     if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_acquire)) {
-        while (atomic_flag_test_and_set_explicit(&rt_gui_html_init_lock, memory_order_acquire)) { }
+        while (atomic_flag_test_and_set_explicit(&rt_gui_html_init_lock, memory_order_acquire)) {
+            sched_yield();
+        }
         if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_relaxed)) {
+            rt_gui_html_initializing = 1;
             const char *path = getenv("SIMPLE_GUI_HTML_PROVIDER_PATH");
             if (!path || path[0] != '/') rt_gui_html_refuse("absolute provider path required");
             void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -2229,6 +2237,7 @@ void rt_gui_present_html(int64_t tagged_html) {
             rt_gui_html_library = library;
             rt_gui_html_present = present.call;
             atomic_store_explicit(&rt_gui_html_ready, true, memory_order_release);
+            rt_gui_html_initializing = 0;
         }
         atomic_flag_clear_explicit(&rt_gui_html_init_lock, memory_order_release);
     }
@@ -5514,6 +5523,45 @@ static int rt_sorted_u64_cmp(const void* lhs, const void* rhs) {
     return (a > b) - (a < b);
 }
 
+/* Match the hosted rt_array_sorted comparator, not rt_sort's interpreter
+ * comparator: unsigned boxes compare as u64 (including against tagged ints),
+ * tagged ints precede floats, and all other mixed types compare Equal. */
+static int rt_sorted_value_cmp(int64_t a, int64_t b) {
+    RtCoreUInt* unsigned_a = rt_core_as_heap_uint(a);
+    RtCoreUInt* unsigned_b = rt_core_as_heap_uint(b);
+    if (unsigned_a && unsigned_b) {
+        return (unsigned_a->value > unsigned_b->value) -
+               (unsigned_a->value < unsigned_b->value);
+    }
+    if (unsigned_a && rt_core_is_int(b)) {
+        int64_t integer_b = rt_core_as_int(b);
+        if (integer_b < 0) return 1;
+        return (unsigned_a->value > (uint64_t)integer_b) -
+               (unsigned_a->value < (uint64_t)integer_b);
+    }
+    if (unsigned_b && rt_core_is_int(a)) {
+        int64_t integer_a = rt_core_as_int(a);
+        if (integer_a < 0) return -1;
+        return ((uint64_t)integer_a > unsigned_b->value) -
+               ((uint64_t)integer_a < unsigned_b->value);
+    }
+    int integer_a = rt_core_is_int(a);
+    int integer_b = rt_core_is_int(b);
+    int float_a = rt_core_is_float(a);
+    int float_b = rt_core_is_float(b);
+    if (integer_a && integer_b) {
+        int64_t x = rt_core_as_int(a), y = rt_core_as_int(b);
+        return (x > y) - (x < y);
+    }
+    if (float_a && float_b) {
+        double x = rt_core_as_float(a), y = rt_core_as_float(b);
+        return (x > y) - (x < y); /* NaN compares Equal, as in Rust. */
+    }
+    if (integer_a && float_b) return -1;
+    if (float_a && integer_b) return 1;
+    return 0;
+}
+
 /* Non-mutating `sorted`: preserve both the input and its storage shape.
  * Byte and u64-packed arrays carry RAW elements, not tagged RuntimeValues;
  * feeding those slots to rt_sort_cmp can interpret integers as pointers.
@@ -5556,7 +5604,7 @@ int64_t rt_array_sorted(int64_t receiver) {
             size_t j = middle;
             size_t out = left;
             while (i < middle && j < right) {
-                dst[out++] = rt_sort_cmp(src[i], src[j]) <= 0 ? src[i++] : src[j++];
+                dst[out++] = rt_sorted_value_cmp(src[i], src[j]) <= 0 ? src[i++] : src[j++];
             }
             while (i < middle) dst[out++] = src[i++];
             while (j < right) dst[out++] = src[j++];
@@ -5565,7 +5613,7 @@ int64_t rt_array_sorted(int64_t receiver) {
         int64_t* next = src;
         src = dst;
         dst = next;
-        if (width > n / 2) break;
+        if (width >= n - width) break;
         width *= 2;
     }
     if (src != data) memcpy(data, src, n * sizeof(int64_t));

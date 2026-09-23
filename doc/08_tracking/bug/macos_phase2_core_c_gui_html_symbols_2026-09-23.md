@@ -17,8 +17,10 @@ only addresses these five names; it does not claim the full CLI now links.
 Trace32 logging now calls the existing core-C `rt_stderr_write`/`flush` ABI.
 Core-C implements non-allocating scalar numeric sum and representation-aware
 sorted-copy array parity. Packed byte/u64 slots are sorted as raw scalars;
-generic tagged slots use a stable O(n log n) merge rather than the existing
-`rt_sort` insertion sort's O(n²) path. The HTML GUI symbol is a small optional dynamic-library bridge, not
+generic tagged slots use a stable O(n log n) merge with the hosted Rust
+sorted-copy ordering (tagged ints before floats, unsigned boxes by value,
+otherwise stable Equal) rather than the existing `rt_sort` insertion sort's
+O(n²) interpreter ordering. The HTML GUI symbol is a small optional dynamic-library bridge, not
 an eager AppKit dependency. It reads `SIMPLE_GUI_HTML_PROVIDER_PATH` on first
 use only and requires an absolute path to a library exporting
 `simple_gui_html_provider_abi_v1` and `simple_gui_present_html_v1`. The
@@ -49,13 +51,20 @@ For failure branches, rerun the fixture compilation with
 `-DSIMPLE_GUI_TEST_ABI_VERSION=2` or `-DSIMPLE_GUI_TEST_REJECT_FRAME=1`,
 and call the driver with an unset/nonexistent provider path or `invalid-tag`.
 The driver returns 0 only for accepted frames; refusal must be exit 70.
+The reentry fixture is compiled with `-DSIMPLE_GUI_TEST_REENTER=1`; link its
+driver with `-Wl,-exported_symbol,_rt_string_new` and
+`-Wl,-exported_symbol,_rt_gui_present_html` so `dlsym(RTLD_DEFAULT, ...)`
+can call back during the version handshake. It exits 70 with
+`provider initialization reentry` rather than hanging.
 
 On macOS, the sectioned standalone `runtime_native.c` compiled and linked
 with the C selfchecks. `rt_core_c_utf8_math_array_twin_parity_selfcheck`
-passed 115 checks including sum, invalid input, packed byte/u64 sorted-copy,
-stable text sorting, and original array preservation. The HTML test fixture passed a valid provider with one
+passed 123 checks including sum, invalid input, packed byte/u64 sorted-copy,
+mixed int/float and unsigned ordering, stable text relative order, and
+original array preservation. The HTML test fixture passed a valid provider with one
 version lookup/two frame calls; absent path, nonexistent library, ABI version
-2, rejected frame, and invalid tagged text each exited 70 with the expected
+2, rejected frame, invalid tagged text, and provider-version callback reentry
+each exited 70 with the expected
 reason. This is
 source/isolated-native evidence only. Full source-matched Phase2 CLI relink,
 compiler tests, and production HTML rendering are pending, as are other
@@ -67,7 +76,10 @@ owned copy of HTML and must not retain the pointer. Runtime shutdown retains
 one dynamic-library handle to avoid invalidating the cached function pointer.
 The provider's version callback must not reenter the HTML runtime entrypoint;
 present calls can be concurrent and the provider must handle GUI-thread
-routing or serialization.
+routing or serialization. The bridge refuses same-thread initialization
+reentry and yields while another thread completes the one-time load.
+The wait is one-time and cooperative, not a hard timeout against a provider
+that stalls inside `dlopen` or its version callback.
 
 The source-list parity gate remains red independently: its committed-tree
 check (`--rev HEAD`) finds the previously tracked
