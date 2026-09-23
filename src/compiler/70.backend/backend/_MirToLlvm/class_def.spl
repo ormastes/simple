@@ -14,6 +14,7 @@ use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, llvm_type_mapper_create_f
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use compiler.backend.linker.platform_defaults.{resolve_hardening}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
 @unsafe(reason: "raw native-symbol policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
@@ -29,6 +30,7 @@ class MirToLlvm:
     local_map: Dict
     target_arch: text
     target_os: text
+    stack_protector_enabled: bool
     type_mapper: LlvmTypeMapper
     string_globals: [text]
     string_global_text: text
@@ -275,11 +277,31 @@ class MirToLlvm:
         bare_metal: bool
     ) -> MirToLlvm:
         """Create from caller-owned target scalars, ignoring ambient policy."""
+        val hardening_preset = if bare_metal then "baremetal" else: "hosted"
+        MirToLlvm.create_explicit_target_with_hardening(
+            module_name, target, target_arch, target_vendor, target_os,
+            target_env, target_has_env, target_datalayout, bare_metal,
+            hardening_preset)
+
+    static fn create_explicit_target_with_hardening(
+        module_name: text,
+        target: CodegenTarget,
+        target_arch: text,
+        target_vendor: text,
+        target_os: text,
+        target_env: text,
+        target_has_env: bool,
+        target_datalayout: text,
+        bare_metal: bool,
+        hardening_preset: text
+    ) -> MirToLlvm:
+        """Create from caller-owned target scalars and an explicit hardening policy."""
         val builder = LlvmIRBuilder.create_explicit_from_scalars(
             module_name, target_arch, target_vendor, target_os,
             target_env, target_has_env, target_datalayout)
         MirToLlvm.create_with_builder(
-            target, builder, target_arch, target_os, bare_metal, false)
+            target, builder, target_arch, target_os, bare_metal, false,
+            hardening_preset)
 
     static fn create_with_policy(
         module_name: text,
@@ -293,7 +315,8 @@ class MirToLlvm:
         val target_os = config.triple.os
         MirToLlvm.create_with_builder(
             target, builder, target_arch, target_os,
-            bare_metal, allow_ambient_codegen_policy)
+            bare_metal, allow_ambient_codegen_policy,
+            if bare_metal then "baremetal" else: "hosted")
 
     static fn create_with_builder(
         target: CodegenTarget,
@@ -301,7 +324,8 @@ class MirToLlvm:
         target_arch: text,
         target_os: text,
         bare_metal: bool,
-        allow_ambient_codegen_policy: bool
+        allow_ambient_codegen_policy: bool,
+        hardening_preset: text
     ) -> MirToLlvm:
         val nit = if target.is_32bit(): "i32" else: "i64"
 
@@ -322,6 +346,7 @@ class MirToLlvm:
             local_map: {},
             target_arch: target_arch,
             target_os: target_os,
+            stack_protector_enabled: target_os == "simpleos" and not bare_metal and resolve_hardening(hardening_preset).ssp,
             type_mapper: llvm_type_mapper_create_for_target(target),
             string_globals: [],
             string_global_text: "",

@@ -74,6 +74,7 @@ double modf(double x, double *iptr);
 double copysign(double x, double y);
 double fmin(double x, double y);
 double fmax(double x, double y);
+double fma(double x, double y, double z);
 double hypot(double x, double y);
 
 /* Near-zero accurate variants */

@@ -414,7 +414,7 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv) {
     if (len <= 0) len = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
+    runtime_heap_header_init(&a->hdr, HEAP_ARRAY);
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -662,7 +662,7 @@ RuntimeValue rt_closure_new(RuntimeValue func_ptr, uint32_t capture_count) {
     RuntimeClosure *c = (RuntimeClosure *)malloc(
         sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
     if (!c) return NIL_VALUE;
-    c->hdr.type = HEAP_CLOSURE;
+    runtime_heap_header_init(&c->hdr, HEAP_CLOSURE);
     c->hdr.size = (uint32_t)(sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
     c->func_ptr = (int64_t)func_ptr;
     c->capture_count = (uint32_t)count;
@@ -719,7 +719,7 @@ RuntimeValue rt_string_builder_new(void) {
     if (!b) return NIL_VALUE;
     /* DISTINCT heap type so a builder handle can never be read back as a
      * RuntimeString by rt_string_len / rt_string_data. */
-    b->hdr.type = HEAP_STRING_BUILDER;
+    runtime_heap_header_init(&b->hdr, HEAP_STRING_BUILDER);
     b->hdr.size = (uint32_t)sizeof(RuntimeStringBuilder);
     b->len = 0;
     b->cap = 64;
@@ -799,7 +799,7 @@ RuntimeValue rt_generator_new(RuntimeValue slot_count) {
     uint32_t sc = (uint32_t)(int64_t)slot_count;
     RuntimeGenerator *g = (RuntimeGenerator *)malloc(sizeof(RuntimeGenerator) + sc * sizeof(RuntimeValue));
     if (!g) return NIL_VALUE;
-    g->hdr.type = HEAP_GENERATOR;
+    runtime_heap_header_init(&g->hdr, HEAP_GENERATOR);
     g->hdr.size = (uint32_t)(sizeof(RuntimeGenerator) + sc * sizeof(RuntimeValue));
     g->state = 0;
     g->ctx = NIL_VALUE;
@@ -1011,7 +1011,7 @@ typedef struct {
 RuntimeValue rt_shared_new(RuntimeValue value) {
     SharedBox *b = (SharedBox *)malloc(sizeof(SharedBox));
     if (!b) return NIL_VALUE;
-    b->hdr.type = HEAP_SHARED;
+    runtime_heap_header_init(&b->hdr, HEAP_SHARED);
     b->hdr.size = (uint32_t)sizeof(SharedBox);
     b->ref_count = 1;
     b->_pad = 0;
@@ -1062,7 +1062,7 @@ RuntimeValue rt_shared_downgrade(RuntimeValue shared) {
     /* Store the SharedBox pointer as a "weak" ref */
     SharedBox *w = (SharedBox *)malloc(sizeof(SharedBox));
     if (!w) return NIL_VALUE;
-    w->hdr.type = HEAP_WEAK;
+    runtime_heap_header_init(&w->hdr, HEAP_WEAK);
     w->hdr.size = (uint32_t)sizeof(SharedBox);
     w->ref_count = 0;
     w->value = shared; /* store original shared ref */
@@ -1072,7 +1072,7 @@ RuntimeValue rt_shared_downgrade(RuntimeValue shared) {
 RuntimeValue rt_unique_new(RuntimeValue value) {
     SharedBox *b = (SharedBox *)malloc(sizeof(SharedBox));
     if (!b) return NIL_VALUE;
-    b->hdr.type = HEAP_UNIQUE;
+    runtime_heap_header_init(&b->hdr, HEAP_UNIQUE);
     b->hdr.size = (uint32_t)sizeof(SharedBox);
     b->ref_count = 1;
     b->value = value;
@@ -1174,7 +1174,7 @@ typedef struct {
 RuntimeValue rt_future_new(void) {
     RuntimeFuture *f = (RuntimeFuture *)malloc(sizeof(RuntimeFuture));
     if (!f) return NIL_VALUE;
-    f->hdr.type = HEAP_FUTURE;
+    runtime_heap_header_init(&f->hdr, HEAP_FUTURE);
     f->hdr.size = (uint32_t)sizeof(RuntimeFuture);
     f->state = 0;
     f->result = NIL_VALUE;
@@ -1275,7 +1275,7 @@ RuntimeValue rt_random_hex(RuntimeValue len_rv) {
     if (len <= 0 || len > 1024) len = 16;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
     for (int64_t i = 0; i < len; i++) {
@@ -1489,7 +1489,7 @@ RuntimeValue rt_bytes_to_text(RuntimeValue arr_rv) {
     if (!a || a->len == 0) return rt_string_from_cstr("");
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + a->len + 1);
     if (!s) return NIL_VALUE;
-    s->hdr.type = HEAP_STRING;
+    runtime_heap_header_init(&s->hdr, HEAP_STRING);
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + a->len + 1);
     s->len = a->len;
     for (uint32_t i = 0; i < a->len; i++) {

@@ -105,6 +105,15 @@ row_image=$row_dir/kernel.Image
 row_log=$row_dir/kernel-build.log
 
 [ -f "$row_entry" ] || fail "missing entry $row_entry"
+# Duplicate declarations previously made the compiler retain a constant-true
+# marker instead of the framebuffer body, yielding a vacuous row with no
+# display references. Fail before codegen if that regression returns.
+[ "$(grep -c '^fn wm_vulkan_smoke_row() -> bool:' "$row_entry")" -eq 1 ] \
+    || fail "wm_vulkan_smoke_row must have exactly one production definition"
+grep -q 'riscv64_display_initialize()' "$row_entry" \
+    || fail "wm_vulkan_smoke_row does not initialize the production display"
+grep -q 'riscv64_display_present()' "$row_entry" \
+    || fail "wm_vulkan_smoke_row does not present the production scanout"
 mkdir -p "$row_dir"
 rm -f "$row_kernel" "$row_image"
 
@@ -114,7 +123,12 @@ rm -f "$row_kernel" "$row_image"
 # script AT the invocation, so `rc=$?` never runs and the diagnostic block never
 # prints, turning an honest compile failure into a silent exit 1.
 set +e
-"$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+# This focused WM row needs the startup/display owners only.  Without the
+# minimal-boot contract the native linker autodiscovers unrelated networking
+# TUs and non-standalone include fragments from the shared boot directory; a
+# failure there prevents the framebuffer row from reaching its own
+# linker/guest evidence. The required runtime-core owner remains included.
+SIMPLE_BOOT_MINIMAL=1 "$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
     --timeout "$NB_TIMEOUT" \
     --source "$GEN_DIR" \
     --entry "$row_entry" \

@@ -84,9 +84,22 @@ typedef int64_t RuntimeValue;
 #define HEAP_OBJECT 4
 
 typedef struct {
-    uint32_t type;
+    uint8_t  type;
+    uint8_t  gc_flags;
+    uint16_t reserved;
     uint32_t size;
 } HeapHeader;
+
+/* Every constructor must clear compact metadata because the allocator may
+ * return poisoned or previously byte-packed storage.  Size remains owned by
+ * each concrete object constructor. */
+static inline void runtime_heap_header_init(HeapHeader *header, uint8_t type) {
+    header->type = type;
+    header->gc_flags = 0;
+    header->reserved = 0;
+}
+
+#define BAREMETAL_GC_BYTE_PACKED 0x08u
 
 /* len MUST be uint64_t (data therefore at offset 16). Codegen inlines
  * `text.len()` as an i64 load at offset 8 and emits string objects with a
