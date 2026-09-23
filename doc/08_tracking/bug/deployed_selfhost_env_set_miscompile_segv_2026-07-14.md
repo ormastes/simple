@@ -692,3 +692,21 @@ another architecture, or a source-only gate is not substitute evidence:
 
 Until all five receipts exist, issue #497 and this P1 remain OPEN even though
 the focused source ABI gate passes.
+
+### 2026-09-23 review correction — raw bridge discrimination restored
+
+Independent review rejected the first source-gate result: the then-current
+`expand_text_abi_args` still applied the text split to arguments 0 and 1 of a
+raw four-word `rt_env_set(i64, i64, i64, i64)` bridge. That produced six call
+operands and attempted `rt_string_data`/`rt_string_len` extraction from integer
+words. Merely checking that the split body preserved an operand on helper
+failure was therefore a false-green contract.
+
+The lowering now consults `text_extern_semantic_arity` before allocating the
+expanded argument array. `rt_env_set`/`rt_set_env` expand only at their
+two-operand semantic facade; an already-lowered four-word bridge returns its
+original argument array unchanged. This guard is constant-time and
+allocation-free. The focused source gate pins both the registry value and its
+use before the split loop, while the existing MIR regression remains the
+behavioral oracle once the admitted Phase 4 test runner is available. The five
+release-closure receipts above remain required.
