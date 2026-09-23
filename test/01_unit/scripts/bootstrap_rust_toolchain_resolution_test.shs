@@ -6,7 +6,13 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-rust-sysroot.XXXXXX")
 fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
 trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
-mkdir -p "$fixture/tools" "$fixture/repo/src/compiler_rust" "$fixture/toolchain/bin"
+# Keep the authority target in a path that is both realistically awkward for
+# Windows launchers and long enough to catch any unquoted or truncating handoff
+# between `rustc --print sysroot`, canonicalisation, and the returned records.
+# The fixed component keeps this deterministic while mktemp supplies isolation.
+long_component=012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+toolchain="$fixture/toolchain with spaces/$long_component"
+mkdir -p "$fixture/tools" "$fixture/repo/src/compiler_rust" "$toolchain/bin"
 printf '[toolchain]\nchannel = "stable"\n' >"$fixture/repo/src/compiler_rust/rust-toolchain.toml"
 cat >"$fixture/tools/rustc" <<'EOF'
 #!/bin/sh
@@ -28,21 +34,23 @@ cat >"$fixture/tools/uname" <<'EOF'
 printf 'MINGW64_NT-fixture\n'
 EOF
 for binary in rustc.exe cargo.exe; do
-    printf '#!/bin/sh\nexit 0\n' >"$fixture/toolchain/bin/$binary"
-    chmod +x "$fixture/toolchain/bin/$binary"
+    printf '#!/bin/sh\nexit 0\n' >"$toolchain/bin/$binary"
+    chmod +x "$toolchain/bin/$binary"
 done
 chmod +x "$fixture/tools/rustc" "$fixture/tools/cygpath" "$fixture/tools/uname"
-printf '%s\n' "$fixture/toolchain" >"$fixture/tools/expected.txt"
+toolchain=$(CDPATH= cd -- "$toolchain" && pwd -P)
+printf '%s\n' "$toolchain" >"$fixture/tools/expected.txt"
 # Build a strict absolute PATH from the actual shell utility directory. Do not
 # reuse ambient Windows PATH aliases or relative entries in authority tests.
 utility_dir=$(CDPATH= cd -- "$(dirname -- "$(command -v sh)")" && pwd -P)
 test_path="$fixture/tools:$utility_dir:/usr/bin:/bin"
-printf '%s\n' "$fixture/toolchain" >"$fixture/tools/sysroot.txt"
+printf '%s\n' "$toolchain" >"$fixture/tools/sysroot.txt"
 RUSTUP_TOOLCHAIN=nightly RUSTFLAGS=must-not-leak \
     bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path" >"$fixture/posix.env"
-grep -Fx "rust-sysroot=$fixture/toolchain" "$fixture/posix.env" >/dev/null
-grep -Fx "rustc-path=$fixture/toolchain/bin/rustc.exe" "$fixture/posix.env" >/dev/null
-grep -Fx "cargo-path=$fixture/toolchain/bin/cargo.exe" "$fixture/posix.env" >/dev/null
+grep -Fx "rust-sysroot=$toolchain" "$fixture/posix.env" >/dev/null
+grep -Fx "rustc-path=$toolchain/bin/rustc.exe" "$fixture/posix.env" >/dev/null
+grep -Fx "cargo-path=$toolchain/bin/cargo.exe" "$fixture/posix.env" >/dev/null
+grep -F "/$long_component" "$fixture/posix.env" >/dev/null
 printf '%s\r\n' 'Z:\installed\rust stable' >"$fixture/tools/sysroot.txt"
 bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path" >"$fixture/windows.env"
 cmp -s "$fixture/posix.env" "$fixture/windows.env"
@@ -319,12 +327,12 @@ reject_sysroot() {
 }
 printf '../toolchain\n' >"$fixture/tools/sysroot.txt"
 reject_sysroot
-printf '%s\nnoise\n' "$fixture/toolchain" >"$fixture/tools/sysroot.txt"
+printf '%s\nnoise\n' "$toolchain" >"$fixture/tools/sysroot.txt"
 reject_sysroot
-printf '%s\n' "$fixture/toolchain" >"$fixture/tools/sysroot.txt"
-mv "$fixture/toolchain/bin/cargo.exe" "$fixture/toolchain/bin/cargo.absent"
+printf '%s\n' "$toolchain" >"$fixture/tools/sysroot.txt"
+mv "$toolchain/bin/cargo.exe" "$toolchain/bin/cargo.absent"
 reject_sysroot
-mv "$fixture/toolchain/bin/cargo.absent" "$fixture/toolchain/bin/cargo.exe"
+mv "$toolchain/bin/cargo.absent" "$toolchain/bin/cargo.exe"
 if bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path:relative" \
     >"$fixture/rejected.env" 2>"$fixture/rejected.log"; then
     echo 'FAIL: relative PATH admitted' >&2; exit 1
