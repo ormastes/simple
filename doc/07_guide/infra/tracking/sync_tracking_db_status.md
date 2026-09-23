@@ -1,5 +1,40 @@
 # Syncing tracking DB status columns with their record files
 
+## Audit registration before changing lifecycle state
+
+Run the read-only registration owner from a complete checkout:
+
+```sh
+sh scripts/check/check-tracking-doc-registration.shs --selftest
+sh scripts/check/check-tracking-doc-registration.shs
+```
+
+It scans bug and TODO Markdown recursively, recognizes explicit unresolved
+Status values without requiring an `OPEN (Pn)` spelling, and reports orphan
+documents, missing exact bug documents, malformed row widths, and duplicate
+IDs. It ignores fenced examples and generated indexes. Numeric TODO rows may
+point directly to source; they do not need a dedicated Markdown document.
+A marker-only TODO note is reported for owner triage without assigning a status.
+
+Bug document identity is its basename. An underscore/hyphen date near-match is
+only a diagnostic candidate, not an automatic alias or permission to merge IDs.
+Multiple rows citing one cluster document are not automatically duplicates.
+Review source-only legacy bug records before deciding whether to author an
+explicit mapping. The current database schema has no alias or platform columns.
+
+Exit 0 means a complete scan without findings, exit 1 means findings remain,
+and exit 2 means the scan was incomplete. The inherited registration backlog
+currently makes the full audit fail; the fixture suite can pass independently.
+The audit is an operator command, not a newly enabled CI merge gate.
+See [the dated audit](../../../09_report/tracking_registration_audit_2026-09-21.md)
+for exact records and the scope of platform classification.
+
+Missing documents, deleted source paths, changed TODO wording, or source fixes
+do not establish implementation completion. Preserve lifecycle values while
+repairing registration. Do not run the status mutation command below as part
+of a registration-only audit. Closure requires the owning record's acceptance
+evidence and an explicit lifecycle decision.
+
 `scripts/check/sync-tracking-db-status.shs` — `sh scripts/check/sync-tracking-db-status.shs [--root DIR] [--dry-run] [--selftest]`
 
 ## What it does
