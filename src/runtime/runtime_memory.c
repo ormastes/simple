@@ -91,8 +91,7 @@ static int rt_transient_raw_grow(void) {
     /* Match the canonical native owner: retired module allocations need a
      * same-capacity rehash, not a permanently larger bookkeeping table. */
     if (rt_transient_raw_cap != 0 &&
-        rt_transient_raw_tombs > rt_transient_raw_len &&
-        (rt_transient_raw_len + 1) * 10 < rt_transient_raw_cap * 5) {
+        (rt_transient_raw_len + 1) * 10 < rt_transient_raw_cap * 6) {
         next_cap = rt_transient_raw_cap;
     }
     if (next_cap > SIZE_MAX / sizeof(RtTransientRawAlloc)) return 0;
@@ -465,8 +464,7 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     int ok = rt_struct_alloc_cap != 0 || rt_struct_alloc_resize(256);
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
             >= rt_struct_alloc_cap * 7) {
-        if (rt_struct_alloc_tombs > rt_struct_alloc_len &&
-            (rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 5) {
+        if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
         } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);

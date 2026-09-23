@@ -25,7 +25,10 @@
 #endif
 #include <stdio.h>
 
-enum { MODULES = 512, MODULE_LIVE = 48, GROWTH_LIVE = 512 };
+enum {
+    MODULES = 512, MODULE_LIVE = 48, GROWTH_LIVE = 512,
+    STEADY_LIVE = 96, STEADY_BATCH = 32, STEADY_ROUNDS = 64
+};
 static int failures;
 
 static void require(int ok, const char *message) {
@@ -72,6 +75,36 @@ int main(void) {
            raw_capacity * sizeof(*raw_lookup((uintptr_t)pool)));
     require(rt_struct_alloc_cap <= 256, "struct registry stays within initial byte budget");
     require(raw_capacity <= 256, "raw registry stays within initial byte budget");
+
+    /* A moderately full table must reuse retired slots rather than doubling
+     * after tombstones accumulate across distinct module allocations. */
+    for (size_t i = 0; i < STEADY_LIVE; i++) {
+        void *ptr = pool + 1 + (MODULES - 2) * MODULE_LIVE + i;
+        require(rt_struct_alloc_register(ptr, 8) && raw_register(ptr, 8),
+                "steady allocation registers");
+    }
+    for (size_t round = 0; round < STEADY_ROUNDS && !failures; round++) {
+        for (size_t i = 0; i < STEADY_BATCH; i++) {
+            void *ptr = pool + 1 + round * MODULE_LIVE + i;
+            require(rt_struct_alloc_register(ptr, 8) && raw_register(ptr, 8),
+                    "steady churn allocation registers");
+        }
+        for (size_t i = 0; i < STEADY_BATCH; i++) {
+            void *ptr = pool + 1 + round * MODULE_LIVE + i;
+            rt_struct_alloc_unregister(ptr);
+            raw_erase(ptr);
+        }
+    }
+    require(rt_struct_alloc_len == STEADY_LIVE + 1 &&
+                raw_length == STEADY_LIVE + 1,
+            "moderate live owners survive churn");
+    require(rt_struct_alloc_cap <= 256 && raw_capacity <= 256,
+            "moderate live churn does not grow bookkeeping capacity");
+    for (size_t i = 0; i < STEADY_LIVE; i++) {
+        void *ptr = pool + 1 + (MODULES - 2) * MODULE_LIVE + i;
+        rt_struct_alloc_unregister(ptr);
+        raw_erase(ptr);
+    }
 
     /* Compaction must still grow for genuine live demand and preserve sizes. */
     for (size_t i = 0; i < GROWTH_LIVE; i++) {
