@@ -184,8 +184,10 @@ Reproduction: this block contains the complete executable scenario source.
 step("Read the Linux comparison wrapper")
 val linux_compare = file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")
 
-step("Assert Chrome raw capture reason is preferred over the generic gate reason")
-expect(linux_compare).to_contain("render_log_reason_from_rdoc_env \"$RDOC_HTML_EVIDENCE_ENV\" rdoc_external_host_capture_reason_raw rdoc_external_host_gate_reason")
+step("Assert Chrome raw capture reason is preferred before generic fallbacks")
+expect(linux_compare).to_contain("chrome_rdoc_reason=\"$(render_log_value_of rdoc_external_host_capture_reason_raw \"$RDOC_HTML_EVIDENCE_ENV\")\"")
+expect(linux_compare).to_contain("chrome_rdoc_reason=\"$(render_log_value_of rdoc_capture_reason \"$RDOC_HTML_EVIDENCE_ENV\")\"")
+expect(linux_compare).to_contain("render_log_reason_from_rdoc_env \"$RDOC_HTML_EVIDENCE_ENV\" rdoc_external_host_gate_reason rdoc_external_host_capture_reason_raw")
 
 step("Read the GUI RenderDoc aggregate wrapper")
 val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
