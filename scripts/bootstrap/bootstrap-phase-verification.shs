@@ -236,7 +236,7 @@ if [ "$phase" = stage2 ]; then
     die "Phase2 verification requires a SHA-qualified runtime capsule"
 fi
 
-: >"$summary"
+: >"$summary" || die "cannot initialize verification summary"
 {
   echo "schema=bootstrap-phase-verification-v1"
   echo "phase=$phase"
@@ -254,7 +254,7 @@ fi
     echo "phase1_admission_sha256=$p1a_marker_sha"
     echo "phase1_admitted_compiler_path=$p1a_seed"
   fi
-} >>"$summary"
+} >>"$summary" || die "cannot initialize verification summary headers"
 
 rss_time=""
 rss_measurement=unavailable
@@ -608,13 +608,15 @@ run_task() {
       "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
       "$expected_executable" "$artifact_status" "$artifact_sha256" \
       "$stage4_snapshot_before" "$stage4_snapshot_after" "$executed" "$test_passed" \
-      "$test_failed" "$test_skipped" >>"$summary"
+      "$test_failed" "$test_skipped" >>"$summary" ||
+      die "cannot append verification summary"
   else
     printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|command_owner_before=%s|command_owner_after=%s|stage4_tooling_before=%s|stage4_tooling_after=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
       "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
       "$command_owner_before" "$command_owner_after" "$stage4_tooling_before" "$stage4_tooling_after" \
       "$stage4_snapshot_before" "$stage4_snapshot_after" \
-      "$test_executed" "$test_passed" "$test_failed" "$test_skipped" >>"$summary"
+      "$test_executed" "$test_passed" "$test_failed" "$test_skipped" >>"$summary" ||
+      die "cannot append verification summary"
   fi
   [ "$status" -eq 0 ]
 }
@@ -792,13 +794,14 @@ validate_stage4_tooling_receipt() {
 }
 
 matrix_failed=0
+matrix_unsupported=0
 run_matrix_task() {
   task=$1
   shift
   matrix_task_passed=0
   if [ "$strategy" = normal ] && [ "$matrix_failed" -ne 0 ]; then
     printf 'task=%s|result=BLOCKED|status=blocked-upstream|elapsed_seconds=0|log=-\n' \
-      "$task" >>"$summary"
+      "$task" >>"$summary" || die "cannot append verification summary"
     return 0
   fi
   if ! run_task "$task" "$@"; then
@@ -812,8 +815,9 @@ run_matrix_task() {
 record_unsupported_task() {
   task=$1
   reason=$2
+  matrix_unsupported=$((matrix_unsupported + 1))
   printf 'task=%s|result=UNSUPPORTED|status=%s|elapsed_seconds=0|log=-\n' \
-    "$task" "$reason" >>"$summary"
+    "$task" "$reason" >>"$summary" || die "cannot append verification summary"
 }
 
 # Each inventory row owns its process, timeout, evidence and (when parallel)
@@ -1563,15 +1567,21 @@ for tool in simple_mcp_server simple_lsp_mcp_server; do
     fi
   else
     printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
-      "$tool" >>"$summary"
+      "$tool" >>"$summary" || die "cannot append verification summary"
   fi
 done
 
-failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' "$summary" || :)
-echo "terminal_failures=$failures" >>"$summary"
-if [ "$failures" -eq 0 ]; then
-  echo "overall=PASS" >>"$summary"
+summary_read_status=0
+failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' "$summary") || summary_read_status=$?
+[ "$summary_read_status" -le 1 ] || die "cannot read verification summary"
+echo "terminal_failures=$failures" >>"$summary" || die "cannot append verification summary"
+echo "unsupported_tasks=$matrix_unsupported" >>"$summary" || die "cannot append verification summary"
+# A rewritten/truncated evidence file cannot erase failures already observed
+# by this process. Keep unsupported state separate from fail-fast scheduling,
+# so independent supported tasks still produce their normal evidence.
+if [ "$failures" -eq 0 ] && [ "$matrix_failed" -eq 0 ] && [ "$matrix_unsupported" -eq 0 ]; then
+  echo "overall=PASS" >>"$summary" || die "cannot append verification summary"
   exit 0
 fi
-echo "overall=FAIL" >>"$summary"
+echo "overall=FAIL" >>"$summary" || die "cannot append verification summary"
 exit 1

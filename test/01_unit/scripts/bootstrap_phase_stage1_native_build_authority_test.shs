@@ -58,6 +58,13 @@ if [ "${1:-}" = native-build ]; then
 printf 'generic=%s|rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
   "$(basename "$0")" "${SIMPLE_NATIVE_BUILD_RUST:-}" \
   "${SIMPLE_BINARY:-}" "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_EXECUTIONS"
+case "${PHASE1_SUMMARY_FAULT:-}" in
+  mask|mask-readonly)
+    sed '/|result=UNSUPPORTED|/d' "$PHASE1_SUMMARY" >"$PHASE1_SUMMARY.mask"
+    mv "$PHASE1_SUMMARY.mask" "$PHASE1_SUMMARY"
+    [ "$PHASE1_SUMMARY_FAULT" != mask-readonly ] || chmod a-w "$PHASE1_SUMMARY"
+    ;;
+esac
 exit 0
 TOOL
   chmod +x "$output"
@@ -69,6 +76,7 @@ seed_sha=$(sha256sum "$tmp/fake-seed" | awk '{print $1}')
 . "$root/test/01_unit/scripts/fixtures/phase1_authority_fixture.shs"
 phase1_authority_fixture "$root" "$tmp/source" "$tmp/fake-seed"
 
+if [ "${1:-}" != --summary-only ]; then
 : >"$tmp/good.invocations"
 : >"$tmp/good.executions"
 status=0
@@ -129,6 +137,55 @@ grep -Fq 'task=simple_lsp_mcp_server_help|result=BLOCKED|status=not-built' \
 [ ! -s "$tmp/silent.executions" ] || fail "stale server residue executed"
 [ ! -e "$tmp/silent/outputs/simple_mcp_server" ] || fail "stale MCP artifact survived"
 [ ! -e "$tmp/silent/outputs/simple_lsp_mcp_server" ] || fail "stale LSP artifact survived"
+fi
+
+# The verifier must retain UNSUPPORTED in memory even if a child overwrites
+# the summary while producing/help-checking otherwise valid phase artifacts.
+for fault in mask mask-readonly; do
+  mkdir "$tmp/$fault"
+  : >"$tmp/$fault.invocations"
+  : >"$tmp/$fault.executions"
+  status=0
+  PHASE1_SUMMARY_FAULT="$fault" PHASE1_SUMMARY="$tmp/$fault/summary.env" \
+  PHASE1_INVOCATIONS="$tmp/$fault.invocations" \
+  PHASE1_EXECUTIONS="$tmp/$fault.executions" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage1 --compiler="$tmp/fake-seed" \
+      --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+      --source-root="$tmp/source" --work-root="$tmp/$fault" \
+      --timeout-seconds=30 >"$tmp/$fault.log" 2>&1 || status=$?
+  chmod u+w "$tmp/$fault/summary.env"
+  [ "$status" -ne 0 ] || fail "$fault summary admitted unsupported Phase1"
+  if [ "$fault" = mask ]; then
+    grep -Fqx 'overall=FAIL' "$tmp/$fault/summary.env" || fail 'masked summary lost in-memory failure'
+    grep -Eq '^unsupported_tasks=[1-9][0-9]*$' "$tmp/$fault/summary.env" || fail 'unsupported latch missing'
+  fi
+done
+
+# A previous PASS must not survive a failed attempt to initialize the summary.
+# Canonical sh already refuses the failed special-builtin redirection; preserve
+# that refusal and ensure it happens before any producer work is launched.
+mkdir "$tmp/readonly"
+printf 'overall=PASS\n' >"$tmp/readonly/summary.env"
+chmod a-w "$tmp/readonly/summary.env"
+if ( : >>"$tmp/readonly/summary.env" ) 2>/dev/null; then
+  echo 'SKIP: filesystem/privilege does not enforce read-only summary writes'
+else
+  : >"$tmp/readonly.invocations"
+  : >"$tmp/readonly.executions"
+  status=0
+  PHASE1_INVOCATIONS="$tmp/readonly.invocations" \
+  PHASE1_EXECUTIONS="$tmp/readonly.executions" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage1 --compiler="$tmp/fake-seed" \
+      --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+      --source-root="$tmp/source" --work-root="$tmp/readonly" \
+      --timeout-seconds=30 >"$tmp/readonly.log" 2>&1 || status=$?
+  chmod u+w "$tmp/readonly/summary.env"
+  [ "$status" -ne 0 ] || fail "read-only stale PASS summary admitted Phase1"
+  [ ! -s "$tmp/readonly.invocations" ] || fail "read-only summary still launched producer work"
+fi
+chmod u+w "$tmp/readonly/summary.env"
 
 # The compiler-unit and repository-full runners deliberately bypass run_task.
 # Execute those function bodies with hostile exported dispatch controls and a
@@ -143,18 +200,26 @@ shift 2
 exec "$@"
 EOF
 chmod +x "$direct/source/scripts/bootstrap/run-process-group-timeout.shs"
+cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
+  "$direct/source/scripts/bootstrap/validate-test-runner-json.pl"
 cat >"$direct/runner" <<'EOF'
 #!/bin/sh
 [ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}" ] || exit 80
 [ "${SIMPLE_BINARY:-}" = "$EXPECTED_SIMPLE_BINARY" ] || exit 81
 case " $* " in
   *' --json '*)
-    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0}}'
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     ;;
 esac
 EOF
 chmod +x "$direct/runner"
 {
+  sed -n '/^proc_tree_rss_kib()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_measured_timeout()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^read_max_rss_kib()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
   sed -n '/^run_compiler_unit_tests()/,/^}/p' \
     "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
   sed -n '/^run_repository_full_tests()/,/^}/p' \
@@ -170,6 +235,8 @@ cache="$direct/cache"
 home="$direct/home"
 mkdir -p "$home"
 spec_timeout_seconds=30
+rss_time=""
+rss_measurement=unavailable
 compiler_cli="$direct/receipt-bound-simple"
 summary="$direct/summary.env"
 : >"$summary"

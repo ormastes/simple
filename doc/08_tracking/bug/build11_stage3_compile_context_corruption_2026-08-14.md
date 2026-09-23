@@ -1,9 +1,80 @@
 # Build11 Stage 3 CompileContext corruption after clean parse
 
-Status: OPEN (P1) — but the TITLE'S CLAIM IS NOW DISPROVED at the named
-boundary; see "2026-08-17 measured evidence" immediately below before spending
-another cycle on this doc's queued repairs. All four of them are already landed.
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: fix-implemented-verification-pending (P1)
+
+## 2026-09-22 frozen-source reconciliation
+
+Audited at `e0dd873da1b` in a private checkout. The database's `closed`
+classification was unsupported: this report still requires an admitted native
+Stage 3 run. The database now agrees that verification remains pending.
+Historical seed-produced success weakens the corruption hypothesis; it does
+not disprove corruption in a later compiler generation or close bootstrap.
+
+The historical queued repairs remain in source: iterative statement parsing
+in `parser_stmts.spl::parse_if_stmt`, iterative bridge conversion in
+`convert_nodes.spl::convert_flat_if_stmt`, and the restored
+`defer_unsupported_marker` declaration. No speculative production edit is
+needed. RSS failure remains owned by
+`stage3_current_source_hir_rss_termination_2026-08-14.md`; do not count the
+same bootstrap failure as proof of independent context corruption.
+
+The original `stage3_context_tuple_return_native_probe.spl` is unchanged.
+The adjacent native probe adds zero-error, repeated reinstall, false-result,
+replacement-context, retained marker, and independent-driver controls. Both
+compare actual scalar values and exit nonzero on mismatch; the original
+requires direct/getter counts of 1, and the adjacent probe requires counts
+0, 1, 3, 11, 12 and independent 0 with markers 37/91.
+
+### Required verification TODO (no native PASS claimed)
+
+Required artifact: an admitted pure-Simple compiler plus its matching runtime,
+source revision, SHA-256 and verified phase receipt. The available deployed
+Windows executable identifies as a Rust seed and is excluded. No admitted
+artifact was available in this lane, so elapsed time and process-tree peak RSS
+for compiler/probe execution are **unmeasured**, with no performance claim.
+
+In the private frozen checkout, set `PHASE_COMPILER` to that verified artifact
+and run each command below once for each admitted backend (Cranelift and LLVM).
+Use separate output/cache directories per producer hash, phase and backend.
+These shell commands show the Cranelift case; change `BACKEND` to `llvm` for
+the other backend. On Windows run the corresponding `.exe` paths through the
+bounded Windows process supervisor; this POSIX spelling is not Windows evidence.
+
+```sh
+export SIMPLE_NO_STUB_FALLBACK=1
+BACKEND=cranelift
+mkdir -p build/native_probe/build11/$BACKEND
+for PROBE in stage3_context_tuple_return_native_probe stage3_context_tuple_return_adjacent_native_probe; do
+  "$PHASE_COMPILER" native-build --backend "$BACKEND" \
+    --source test/02_integration/compiler --entry-closure \
+    --entry "test/02_integration/compiler/$PROBE.spl" \
+    -o "build/native_probe/build11/$BACKEND/$PROBE" || exit 1
+  "build/native_probe/build11/$BACKEND/$PROBE" || exit 1
+done
+```
+
+Expected stdout includes `stage3_context_tuple_return_status=pass` and
+`stage3_context_tuple_return_adjacent_status=pass`; exit zero without these
+markers is failure. Retain compiler and executable logs and hashes. Before
+testing the new checkout, establish a baseline by building/running the unchanged
+original probe at `e0dd873da1b` with the same compiler/runtime/settings.
+Use an external supervisor that bounds the entire process tree: build <=120 s
+and <=2 GiB aggregate resident memory; execution <=10 s and <=256 MiB.
+These are stop limits, not measured results or production bootstrap budgets.
+Record wall time and sampled aggregate process-tree peak RSS for both baseline
+and candidate. A >10% increase on the unchanged original probe requires
+investigation before acceptance. Do not compare adjacent and original fixture
+cost as a production regression: they perform different work.
+
+Platform review: the tuple/reinstall boundary is shared frontend/MIR behavior.
+Windows x86_64 COFF, Linux x86_64 ELF, macOS ARM64 Mach-O and Linux ARM64 ELF
+must execute the same probes where their admitted backend exists. All are
+pending here; RISC-V, 32-bit and other backend/CPU combinations remain untested.
+A seed interpreter pass or source inspection cannot substitute for these runs.
+Full Stage 3 acceptance additionally requires the canonical receipt-bound
+bootstrap transaction and sanity under the separate RSS issue's budget.
+
+The remaining sections retain historical observations and superseded diagnoses.
 
 ## 2026-08-17 measured evidence (no bootstrap cycle consumed)
 
@@ -499,4 +570,3 @@ main per the 2026-08-17 evidence section, and what remains blocked is
 a genuine Stage 3 bootstrap admission cycle, which this lane cannot
 run (no self-hosted binary, shared/loaded host, budget). Leaving OPEN,
 no new bootstrap attempt made.
-
