@@ -67,6 +67,31 @@ fn trait_typed_parameter_preserves_owner_for_virtual_dispatch() {
 }
 
 #[test]
+fn erased_filesystem_receiver_prefers_implemented_trait_slots() {
+    let mir = compile_to_mir(
+        "trait AUnimplementedIo:\n    fn open(path: text) -> i64\n    fn read(handle: i64, size: i64) -> i64\n    fn stat(path: text) -> i64\n\ntrait FileSystem:\n    fn open(path: text) -> i64\n    fn read(handle: i64, size: i64) -> i64\n    fn stat(path: text) -> i64\n\nstruct Fat32:\n    marker: i64\n\nimpl FileSystem for Fat32:\n    fn open(self, path: text) -> i64: 11\n    fn read(self, handle: i64, size: i64) -> i64: 22\n    fn stat(self, path: text) -> i64: 33\n\nfn probe(fs: Any) -> i64:\n    fs.open(\"/font.ttf\") + fs.read(1, 2) + fs.stat(\"/font.ttf\")\n",
+    )
+    .expect("filesystem-shaped erased dispatch must lower to MIR");
+    let probe = mir.functions.iter().find(|function| function.name == "probe").unwrap();
+    let slots: Vec<u32> = probe
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            MirInst::MethodCallVirtual { vtable_slot, .. } => Some(*vtable_slot),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(slots, vec![0, 1, 2]);
+    assert!(
+        slots
+            .iter()
+            .all(|slot| *slot != crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT),
+        "implemented FileSystem methods must never lower to the duck-dispatch sentinel"
+    );
+}
+
+#[test]
 fn value_bound_unsafe_capability_does_not_become_global_load() {
     let mir = compile_to_mir(
         "@unsafe(reason: \"raw provider\", capabilities: [ffi])\nextern fn rt_probe() -> i64\nfn owner() -> i64:\n    val value = unsafe(capabilities: [ffi]):\n        rt_probe()\n    value\n",
