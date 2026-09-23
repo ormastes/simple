@@ -26,5 +26,13 @@ int main(void) {
         UINT64_C(0x7ff8000000000001)) return 5;
     if (bits(sqrt(from_bits(UINT64_C(0xfff8000000001234)))) !=
         UINT64_C(0xfff8000000001234)) return 6;
+    if (bits(sqrt(from_bits(UINT64_C(0x0000000000000001)))) !=
+        UINT64_C(0x1e60000000000000)) return 7;
+    if (bits(sqrt(from_bits(UINT64_C(0x0010000000000000)))) !=
+        UINT64_C(0x2000000000000000)) return 8;
+    if (bits(sqrt(from_bits(UINT64_C(0x000fffffffffffff)))) !=
+        UINT64_C(0x1fffffffffffffff)) return 9;
+    if (bits(sqrt(from_bits(UINT64_C(0x7fefffffffffffff)))) !=
+        UINT64_C(0x5fefffffffffffff)) return 10;
     return 0;
 }
