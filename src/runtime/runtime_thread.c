@@ -85,6 +85,70 @@ static SRWLOCK g_handle_srwlock = SRWLOCK_INIT;
 #define HANDLE_WRUNLOCK() ReleaseSRWLockExclusive(&g_handle_srwlock)
 #endif
 
+/* Raw-i64 TLS for the Simple runtime owner. This is not the Rust tagged
+ * RuntimeValue interface: unset/invalid is zero. A handle identifies a slot
+ * generation, so freeing/reusing a slot cannot expose another owner's value.
+ * The bounded native TLS is reclaimed at thread exit; values are borrowed
+ * bits, never owned allocations. No explicit allocation or registry lock on
+ * the get/set path (native TLS/atomics have platform-dependent costs). */
+#define RT_TLS_SLOTS 128
+typedef struct {
+    int64_t handle;
+    int64_t value;
+} RtTlsValue;
+static _Atomic(int64_t) g_tls_active[RT_TLS_SLOTS];
+/* Updated only under HANDLE_WRLOCK; an exhausted generation is retired. */
+static uint64_t g_tls_generation[RT_TLS_SLOTS];
+#ifdef SPL_THREAD_WINDOWS
+__declspec(thread) static RtTlsValue g_tls_values[RT_TLS_SLOTS];
+#else
+static __thread RtTlsValue g_tls_values[RT_TLS_SLOTS];
+#endif
+
+int64_t rt_thread_local_new(void) {
+    int64_t handle = 0;
+    HANDLE_WRLOCK();
+    for (uint64_t slot = 0; slot < RT_TLS_SLOTS; slot++) {
+        if (atomic_load_explicit(&g_tls_active[slot], memory_order_relaxed)) continue;
+        uint64_t generation = g_tls_generation[slot];
+        if (generation >= ((uint64_t)INT64_MAX - slot - 1) / RT_TLS_SLOTS) continue;
+        generation++;
+        handle = (int64_t)(generation * RT_TLS_SLOTS + slot + 1);
+        g_tls_generation[slot] = generation;
+        atomic_store_explicit(&g_tls_active[slot], handle, memory_order_release);
+        break;
+    }
+    HANDLE_WRUNLOCK();
+    return handle;
+}
+
+int64_t rt_thread_local_get(int64_t handle) {
+    if (handle <= 0) return 0;
+    uint64_t slot = ((uint64_t)handle - 1) % RT_TLS_SLOTS;
+    /* This load is the lifetime linearization point for concurrent free. */
+    if (atomic_load_explicit(&g_tls_active[slot], memory_order_acquire) != handle) return 0;
+    return g_tls_values[slot].handle == handle ? g_tls_values[slot].value : 0;
+}
+
+void rt_thread_local_set(int64_t handle, int64_t value) {
+    if (handle <= 0) return;
+    uint64_t slot = ((uint64_t)handle - 1) % RT_TLS_SLOTS;
+    if (atomic_load_explicit(&g_tls_active[slot], memory_order_acquire) != handle) return;
+    g_tls_values[slot].handle = handle;
+    g_tls_values[slot].value = value;
+}
+
+void rt_thread_local_free(int64_t handle) {
+    if (handle <= 0) return;
+    uint64_t slot = ((uint64_t)handle - 1) % RT_TLS_SLOTS;
+    HANDLE_WRLOCK();
+    if (atomic_load_explicit(&g_tls_active[slot], memory_order_relaxed) == handle) {
+        atomic_store_explicit(&g_tls_active[slot], 0, memory_order_release);
+        g_tls_values[slot] = (RtTlsValue){0, 0};
+    }
+    HANDLE_WRUNLOCK();
+}
+
 static void init_freelist(void) {
     if (!g_freelist_initialized) {
         /* Push all free slots onto the freelist (skip index 0 = invalid) */

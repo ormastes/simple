@@ -59,6 +59,16 @@ int64_t rt_thread_id(int64_t handle);
 void    rt_thread_free(int64_t handle);
 void    rt_thread_sleep(int64_t millis);
 void    rt_thread_yield(void);
+/* Raw i64 TLS: up to 128 live slots; new returns 0 on exhaustion. Unset,
+ * invalid and freed handles read as 0; set(0) clears. Values are borrowed
+ * bits (all i64 values round-trip), not tagged RuntimeValue or owned pointers.
+ * Free invalidates the handle on all threads; stale per-thread bits remain
+ * inaccessible until overwritten/thread exit. Native TLS costs 2048 bytes
+ * per thread. Operations overlapping free linearize at handle validation. */
+int64_t rt_thread_local_new(void);
+int64_t rt_thread_local_get(int64_t handle);
+void    rt_thread_local_set(int64_t handle, int64_t value);
+void    rt_thread_local_free(int64_t handle);
 int64_t rt_pool_submit(int64_t fn_ptr, int64_t env_ptr);
 int64_t rt_pool_join(int64_t handle);
 int64_t rt_pool_is_done(int64_t handle);
