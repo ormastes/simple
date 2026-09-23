@@ -1,0 +1,127 @@
+# NVFS POSIX mirror allocation follows the canonical block-device owner.
+use std.spec
+use std.spec.step
+use std.fs_driver.types.{Path, OpenFlags}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.nvfs_arena.{nvfs_arena_set_block_device, nvfs_raw_read_sector}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.block_device.{BlockDevice}
+
+var _mirror_test_write_attempts: i64 = 0
+
+struct CountingMirrorDevice:
+    inner: MemBlockDevice
+
+impl BlockDevice for CountingMirrorDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        self.inner.read_sector(lba)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        _mirror_test_write_attempts = _mirror_test_write_attempts + 1
+        var inner = self.inner
+        val result = inner.write_sector(lba, data)
+        self.inner = inner
+        result
+
+    fn sector_size() -> u32:
+        self.inner.sector_size()
+
+    fn sector_count() -> u64:
+        self.inner.sector_count()
+
+    fn mirror_identity() -> u64:
+        self.inner.mirror_identity()
+
+fn _mirror_write(drv: NvfsPosixDriver, path: text, byte: u8) -> bool:
+    var driver = drv
+    val opened = driver.open(Path(raw: path), OpenFlags.write_only().with_create())
+    if opened.is_err():
+        return false
+    val handle = opened.unwrap()
+    val result = driver.write(handle, 0, [byte])
+    val _ = driver.close(handle)
+    if result.is_err():
+        return false
+    result.unwrap() == 1
+
+fn _mirror_write_fails(drv: NvfsPosixDriver, path: text, byte: u8) -> bool:
+    var driver = drv
+    val opened = driver.open(Path(raw: path), OpenFlags.write_only().with_create())
+    if opened.is_err():
+        return false
+    val handle = opened.unwrap()
+    val result = driver.write(handle, 0, [byte])
+    val _ = driver.close(handle)
+    result.is_err()
+
+fn _sector_first(lba: u64) -> u8:
+    val bytes = nvfs_raw_read_sector(lba)
+    if bytes.len() == 0:
+        return 0u8
+    bytes[0]
+
+fn _committed_first(drv: NvfsPosixDriver, path: text) -> u8:
+    var driver = drv
+    val opened = driver.open(Path(raw: path), OpenFlags.read_only())
+    if opened.is_err():
+        return 0u8
+    val handle = opened.unwrap()
+    val result = driver.inner.pread_bytes_handle(handle, 0, 1)
+    val _ = driver.close(handle)
+    if result.is_err():
+        return 0u8
+    val bytes = result.unwrap()
+    if bytes.len() != 1:
+        return 0u8
+    bytes[0]
+
+describe "NVFS POSIX mirror device owner":
+    it "replaces the device without inheriting its allocator and retains same-device progress":
+        step("six writes fill the first 256-sector device's mirror range")
+        val old_device = MemBlockDevice.new(256u64, 512u32)
+        nvfs_arena_set_block_device(old_device)
+        val driver = NvfsPosixDriver.new("mirror-owner")
+        expect(_mirror_write(driver, "/mirror-old-0", 0x10u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-old-1", 0x11u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-old-2", 0x12u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-old-3", 0x13u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-old-4", 0x14u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-old-5", 0x15u8)).to_equal(true)
+        expect(_sector_first(65u64)).to_equal(0x10u8)
+        expect(_sector_first(225u64)).to_equal(0x15u8)
+        expect(_mirror_write_fails(driver, "/mirror-old-boundary", 0x16u8)).to_equal(true)
+        expect(_committed_first(driver, "/mirror-old-boundary")).to_equal(0x16u8)
+
+        step("replacement starts at LBA 65, and old backing bytes stay unchanged")
+        val new_device = MemBlockDevice.new(256u64, 512u32)
+        nvfs_arena_set_block_device(new_device)
+        expect(_mirror_write(driver, "/mirror-new-0", 0x20u8)).to_equal(true)
+        expect(_sector_first(65u64)).to_equal(0x20u8)
+        val old_sector = old_device.read_sector(65u64)
+        expect(old_sector.is_ok()).to_equal(true)
+        val old_bytes = old_sector.unwrap()
+        expect(old_bytes[0]).to_equal(0x10u8)
+
+        step("re-registering the same device retains the next LBA")
+        nvfs_arena_set_block_device(new_device)
+        expect(_mirror_write(driver, "/mirror-new-1", 0x21u8)).to_equal(true)
+        expect(_sector_first(65u64)).to_equal(0x20u8)
+        expect(_sector_first(97u64)).to_equal(0x21u8)
+        expect(_mirror_write(driver, "/mirror-new-2", 0x22u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-new-3", 0x23u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-new-4", 0x24u8)).to_equal(true)
+        expect(_mirror_write(driver, "/mirror-new-5", 0x25u8)).to_equal(true)
+        expect(_mirror_write_fails(driver, "/mirror-new-boundary", 0x26u8)).to_equal(true)
+
+        step("a retired device cannot be reactivated with a reset cursor")
+        nvfs_arena_set_block_device(old_device)
+        expect(_mirror_write_fails(driver, "/mirror-old-reactivate", 0x30u8)).to_equal(true)
+        expect(_sector_first(65u64)).to_equal(0x10u8)
+
+        step("capacity rejection has zero physical write attempts")
+        _mirror_test_write_attempts = 0
+        val small_device = CountingMirrorDevice(inner: MemBlockDevice.new(64u64, 512u32))
+        nvfs_arena_set_block_device(small_device)
+        expect(_mirror_write_fails(driver, "/mirror-small", 0x30u8)).to_equal(true)
+        expect(_mirror_test_write_attempts).to_equal(0)
+        expect(_committed_first(driver, "/mirror-small")).to_equal(0x30u8)
