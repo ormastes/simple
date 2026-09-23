@@ -2480,6 +2480,7 @@ static uint64_t g_arm_fat32_reserved = 0;
 static uint64_t g_arm_fat32_fats = 0;
 static uint64_t g_arm_fat32_fat_size = 0;
 static uint64_t g_arm_fat32_root_cluster = 0;
+static uint32_t g_arm_virtio_blk_request_owner = 0;
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val);
 
@@ -2496,6 +2497,30 @@ RuntimeValue rt_arm_virtio_blk_queue_base(void)
 RuntimeValue rt_arm_virtio_blk_dma_base(void)
 {
     return (RuntimeValue)(uint64_t)(uintptr_t)g_arm_virtio_blk_dma_storage;
+}
+
+RuntimeValue rt_arm_virtio_blk_request_owner_load(void)
+{
+    return (RuntimeValue)__atomic_load_n(&g_arm_virtio_blk_request_owner,
+                                         __ATOMIC_ACQUIRE);
+}
+
+RuntimeValue rt_arm_virtio_blk_request_owner_compare_exchange(
+    RuntimeValue expected_val, RuntimeValue desired_val)
+{
+    uint32_t expected = (uint32_t)(uint64_t)expected_val;
+    uint32_t desired = (uint32_t)(uint64_t)desired_val;
+    return __atomic_compare_exchange_n(&g_arm_virtio_blk_request_owner,
+                                       &expected, desired, 0,
+                                       __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
+RuntimeValue rt_arm_virtio_blk_request_owner_store(RuntimeValue value)
+{
+    __atomic_store_n(&g_arm_virtio_blk_request_owner,
+                     (uint32_t)(uint64_t)value, __ATOMIC_RELEASE);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_arm_virtio_blk_set_mmio_base(RuntimeValue base_val)

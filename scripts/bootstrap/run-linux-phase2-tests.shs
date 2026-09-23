@@ -1,0 +1,271 @@
+#!/bin/sh
+# Run a bounded post-bootstrap test matrix against an admitted Linux Phase 2
+# compiler.  The Phase 2 compiler is compiler-only, so this runner first asks
+# bootstrap-phase-verification.shs to build receipt-owned full-CLI and test
+# runner binaries, then executes real interpreter, native compiler, and loader
+# probes with those binaries.
+
+set -eu
+
+die() {
+    echo "linux-phase2-tests: $*" >&2
+    exit 2
+}
+
+list_tasks() {
+    cat <<'EOF'
+base_phase_matrix
+interpreter_module_load
+native_module_build
+native_module_execute
+interpreter_regression
+loader_regression
+EOF
+}
+
+if [ "${1:-}" = --list-tasks ]; then
+    [ "$#" -eq 1 ] || die "--list-tasks accepts no other options"
+    list_tasks
+    exit 0
+fi
+
+[ "$(uname -s 2>/dev/null || :)" = Linux ] ||
+    die "this runner is native-Linux-only"
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) ||
+    die "cannot locate repository root"
+source_root=$root
+compiler=
+compiler_sha256=
+runtime_path=
+work_root=
+timeout_seconds=${SIMPLE_LINUX_PHASE2_TEST_TIMEOUT:-900}
+memory_max=${SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX:-32G}
+strategy=normal
+
+for arg in "$@"; do
+    case "$arg" in
+        --compiler=*) compiler=${arg#*=} ;;
+        --compiler-sha256=*) compiler_sha256=${arg#*=} ;;
+        --runtime-path=*) runtime_path=${arg#*=} ;;
+        --work-root=*) work_root=${arg#*=} ;;
+        --source-root=*) source_root=${arg#*=} ;;
+        --strategy=*) strategy=${arg#*=} ;;
+        --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
+        *) die "unknown option: $arg" ;;
+    esac
+done
+
+[ -n "$compiler" ] || die "--compiler is required"
+[ -x "$compiler" ] || die "compiler is not executable: $compiler"
+[ -n "$compiler_sha256" ] || die "--compiler-sha256 is required"
+case "$compiler_sha256" in
+    ''|*[!0123456789abcdefABCDEF]*)
+        die "--compiler-sha256 must be a 64-character hexadecimal digest" ;;
+esac
+[ "${#compiler_sha256}" -eq 64 ] ||
+    die "--compiler-sha256 must be a 64-character hexadecimal digest"
+[ -n "$runtime_path" ] || die "--runtime-path is required"
+[ -d "$runtime_path" ] || die "runtime path is not a directory: $runtime_path"
+[ -n "$work_root" ] || die "--work-root is required"
+case "$strategy" in normal|full) ;; *) die "strategy must be normal or full" ;; esac
+case "$timeout_seconds" in
+    ''|*[!0-9]*|0) die "SIMPLE_LINUX_PHASE2_TEST_TIMEOUT must be a positive integer" ;;
+esac
+memory_number=${memory_max%[MG]}
+case "$memory_max:$memory_number" in
+    *[!0-9MG:]*|*[MG]*[MG]:*|*:) die "SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size" ;;
+esac
+case "$memory_number" in ''|*[!0-9]*) die "SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size" ;; esac
+case "$memory_number" in *[1-9]*) ;; *) die "SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size" ;; esac
+case "$memory_max" in *[MG]) ;; *) die "SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX must be a positive M/G size" ;; esac
+
+compiler=$(CDPATH= cd -- "$(dirname -- "$compiler")" && pwd -P)/$(basename -- "$compiler") ||
+    die "cannot resolve compiler path"
+runtime_path=$(CDPATH= cd -- "$runtime_path" && pwd -P) ||
+    die "cannot resolve runtime path"
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P) ||
+    die "cannot resolve source root"
+mkdir -p "$work_root" || die "cannot create work root"
+work_root=$(CDPATH= cd -- "$work_root" && pwd -P) || die "cannot resolve work root"
+
+verification_root="$work_root/verification"
+logs="$work_root/post-phase2-logs"
+fixture="$work_root/post-phase2-fixture"
+summary="$work_root/post-phase2-summary.env"
+home="$work_root/post-phase2-home"
+tmp="$work_root/post-phase2-tmp"
+cache="$work_root/post-phase2-cache"
+mkdir -p "$logs" "$fixture" "$home" "$tmp" "$cache" ||
+    die "cannot isolate test state"
+
+# Only this caller-owned output subtree is cleared.  The verifier retains
+# phase-qualified native caches for bounded retries and writes fresh tools.
+rm -rf "$verification_root/outputs/compiler-tools" ||
+    die "cannot clear stale compiler-tool outputs"
+
+: >"$summary"
+# Keep an interrupted or rejected run from looking like a successful receipt.
+trap 'status=$?; if [ "$status" -ne 0 ]; then echo "overall=FAIL" >>"$summary"; fi' 0
+echo "schema=linux-phase2-post-bootstrap-tests-v1" >>"$summary"
+echo "required_memory_max=$memory_max" >>"$summary"
+
+base_status=0
+(
+    cd "$source_root" || exit 125
+    CAP_MEM_MAX="$memory_max" CAP_REQUIRE=1 sh scripts/resource/run_capped.shs \
+        sh scripts/bootstrap/bootstrap-phase-verification.shs \
+        --phase=stage2 \
+        --compiler="$compiler" \
+        --compiler-sha256="$compiler_sha256" \
+        --strategy="$strategy" \
+        --hash-policy=canonical \
+        --work-root="$verification_root" \
+        --cache-root="$cache/verification" \
+        --runtime-path="$runtime_path" \
+        --source-root="$source_root" \
+        --timeout-seconds="$timeout_seconds"
+) || base_status=$?
+base_result=PASS
+[ "$base_status" -eq 0 ] || base_result=FAIL
+printf 'task=base_phase_matrix|result=%s|status=%s|summary=%s\n' \
+    "$base_result" "$base_status" "$verification_root/summary.env" >>"$summary"
+[ "$base_status" -eq 0 ] || die "base phase verification failed; see $verification_root/summary.env"
+
+find_one_tool() {
+    name=$1
+    matches="$tmp/$name.matches"
+    find "$verification_root/outputs/compiler-tools" -type f -name "$name" \
+        -print 2>/dev/null | LC_ALL=C sort >"$matches"
+    count=$(wc -l <"$matches" | tr -d ' ')
+    [ "$count" = 1 ] || die "expected exactly one $name artifact, found $count"
+    sed -n '1p' "$matches"
+}
+
+manifest_value() {
+    key=$1
+    file=$2
+    sed -n "s/^${key}=//p" "$file" | head -n 1
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+compiler_cli=$(find_one_tool simple_cli)
+test_runner=$(find_one_tool simple_test_runner)
+[ -x "$compiler_cli" ] || die "full CLI artifact is not executable"
+[ -x "$test_runner" ] || die "test runner artifact is not executable"
+base_summary="$verification_root/summary.env"
+command_owner_receipt=$(manifest_value command_owner_receipt "$base_summary")
+command_owner_receipt_sha=$(manifest_value command_owner_receipt_sha256 "$base_summary")
+[ -n "$command_owner_receipt" ] && [ -f "$command_owner_receipt" ] && \
+    [ ! -L "$command_owner_receipt" ] || die "base verifier produced no regular command-owner receipt"
+case "$command_owner_receipt" in
+    "$verification_root/outputs/compiler-tools/"*) ;;
+    *) die "command-owner receipt escaped verification outputs" ;;
+esac
+[ "$(hash_file "$command_owner_receipt")" = "$command_owner_receipt_sha" ] ||
+    die "command-owner receipt hash mismatch"
+[ "$(manifest_value schema "$command_owner_receipt")" = simple-bootstrap-command-owners-v3 ] ||
+    die "invalid command-owner receipt schema"
+[ "$(manifest_value status "$command_owner_receipt")" = frozen ] ||
+    die "command-owner receipt is not frozen"
+[ "$(manifest_value phase "$command_owner_receipt")" = stage2 ] ||
+    die "command-owner receipt is not Stage 2"
+[ "$(manifest_value compiler_cli_path "$command_owner_receipt")" = "$compiler_cli" ] ||
+    die "command-owner CLI path mismatch"
+[ "$(manifest_value test_runner_path "$command_owner_receipt")" = "$test_runner" ] ||
+    die "command-owner test-runner path mismatch"
+[ "$(hash_file "$compiler_cli")" = "$(manifest_value compiler_cli_sha256 "$command_owner_receipt")" ] ||
+    die "command-owner CLI hash mismatch"
+[ "$(hash_file "$test_runner")" = "$(manifest_value test_runner_sha256 "$command_owner_receipt")" ] ||
+    die "command-owner test-runner hash mismatch"
+
+cat >"$fixture/phase2_loader_dep.spl" <<'EOF'
+fn phase2_answer() -> i64:
+    6 * 7
+EOF
+cat >"$fixture/main.spl" <<'EOF'
+use phase2_loader_dep.{phase2_answer}
+
+fn main():
+    print phase2_answer()
+EOF
+
+require_result_summary() {
+    # Require exactly one complete uncached result. A zero exit by itself can
+    # still mean empty discovery, an unsupported spec, or skipped examples.
+    awk '
+        /^Results:/ {
+            summaries++
+            if ($0 !~ /^Results: [0-9]+ total, [0-9]+ passed, 0 failed(, 0 (skipped|pending|cached|timed out))*$/ ||
+                $2 + 0 <= 0 || $2 + 0 != $4 + 0) invalid = 1
+        }
+        END { exit (summaries != 1 || invalid) }
+    ' "$1"
+}
+
+run_task() {
+    task=$1
+    shift
+    log="$logs/$task.log"
+    started=$(date +%s)
+    status=0
+    (
+        cd "$source_root" || exit 125
+        HOME="$home" TMPDIR="$tmp" SIMPLE_LIB="$source_root/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$compiler_cli" \
+            SIMPLE_TEST_BINARY="$compiler_cli" \
+            SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+            CAP_MEM_MAX="$memory_max" CAP_REQUIRE=1 \
+            "$source_root/scripts/resource/run_capped.shs" \
+                "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+                    "$timeout_seconds" 15 "$@"
+    ) >"$log" 2>&1 || status=$?
+    if [ "$status" -eq 0 ]; then
+        case "$task" in
+            interpreter_module_load|native_module_execute)
+                [ "$(tr -d '\r\n' <"$log")" = 42 ] || status=1 ;;
+            native_module_build) [ -x "$probe" ] || status=1 ;;
+            interpreter_regression|loader_regression)
+                require_result_summary "$log" || status=1 ;;
+        esac
+    fi
+    ended=$(date +%s)
+    result=PASS
+    [ "$status" -eq 0 ] || result=FAIL
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s\n' \
+        "$task" "$result" "$status" "$((ended - started))" "$log" >>"$summary"
+    [ "$status" -eq 0 ] || return "$status"
+}
+
+run_task interpreter_module_load "$compiler_cli" run "$fixture/main.spl" \
+    --mode=interpreter --clean ||
+    die "interpreter module-load probe failed"
+[ "$(tr -d '\r\n' <"$logs/interpreter_module_load.log")" = 42 ] ||
+    die "interpreter module-load probe did not print 42"
+
+probe="$fixture/phase2-module-probe"
+rm -f "$probe" || die "cannot remove stale native probe"
+run_task native_module_build "$compiler_cli" native-build "$fixture/main.spl" \
+    --threads 1 --cache-dir "$cache/native-module-build" --output "$probe" ||
+    die "native module build failed"
+[ -x "$probe" ] || die "native module build produced no executable"
+run_task native_module_execute "$probe" || die "native module probe failed"
+[ "$(tr -d '\r\n' <"$logs/native_module_execute.log")" = 42 ] ||
+    die "native module probe did not print 42"
+
+run_task interpreter_regression "$test_runner" \
+    test/01_unit/compiler/interpreter/block_scoped_use_resolves_spec.spl \
+    --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+    --no-session-daemon --sequential || die "interpreter regression failed"
+
+run_task loader_regression "$test_runner" \
+    test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl \
+    --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+    --no-session-daemon --sequential || die "loader regression failed"
+
+echo "overall=PASS" >>"$summary"
+echo "linux_phase2_tests_status=pass"
+echo "linux_phase2_tests_summary=$summary"

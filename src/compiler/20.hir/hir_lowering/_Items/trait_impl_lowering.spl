@@ -175,7 +175,26 @@ impl HirLowering:
         for bound in impl_.where_clause:
             where_clause = where_clause.push(self.lower_trait_bound(bound))
 
-        val type_ = self.lower_type(impl_.type_)
+        # A module-local impl must retain its local canonical owner even when
+        # an earlier import owns the same bare spelling in the lexical scope.
+        val impl_owner_name = parser_type_kind_named_name(impl_.type_.kind)
+        val local_impl_owner = self.symbols.lookup_qualified_type_raw(
+            self.module_filename, impl_owner_name)
+        if local_impl_owner >= 0:
+            self.symbols.bind_local_type_if_free(impl_owner_name, SymbolId(id: local_impl_owner))
+        val lowered_impl_type = self.lower_type(impl_.type_)
+        val type_ = if local_impl_owner >= 0:
+            # Keep specialization arguments from the parsed/lowered type;
+            # only replace its owner identity.
+            match lowered_impl_type.kind:
+                case HirTypeKind.Named(_, args):
+                    HirType(kind: HirTypeKind.Named(
+                        SymbolId(id: local_impl_owner), args),
+                        span: impl_.type_.span)
+                case _:
+                    lowered_impl_type
+        else:
+            lowered_impl_type
         val trait_ = if impl_.has_trait_: self.lower_type(impl_.trait_) else: nil
 
         # #158 generics sweep: an impl block for a generic struct/class (e.g.
