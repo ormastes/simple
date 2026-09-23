@@ -1,0 +1,63 @@
+name: DirectX D3D11 Lifecycle
+
+on:
+  pull_request:
+    paths:
+      - 'src/runtime/runtime_directx_core.c'
+      - 'src/runtime/tests/directx_submission_lifecycle_harness.c'
+      - 'scripts/check/check-windows-directx-d3d11-lifecycle.shs'
+      - '.github/workflows/directx-d3d11-lifecycle.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/runtime/runtime_directx_core.c'
+      - 'src/runtime/tests/directx_submission_lifecycle_harness.c'
+      - 'scripts/check/check-windows-directx-d3d11-lifecycle.shs'
+      - '.github/workflows/directx-d3d11-lifecycle.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    name: D3D11 submission lifecycle — Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up MSVC and Windows SDK
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install pinned LLVM 23.1.1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'LLVM-23.1.1-win64.msi'
+          gh release download llvmorg-23.1.1 --repo llvm/llvm-project --pattern 'LLVM-23.1.1-win64.msi' --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM release download failed' }
+          $expected = '11af43ba261a1158090dd6f0da40d7a34f32dbfb4a76b43240bffa1ebb140984'
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "LLVM installer SHA-256 mismatch: $actual" }
+          & msiexec.exe /i $installer /qn /norestart
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "LLVM install failed: $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath 'C:\Program Files\LLVM\bin\clang-cl.exe')) {
+            throw 'LLVM clang-cl was not installed'
+          }
+
+      - name: Compile and exercise D3D11 submission lifecycle
+        shell: bash
+        run: |
+          DIRECTX_CLANG_CL="$(cygpath -u 'C:\Program Files\LLVM\bin\clang-cl.exe')" \
+            sh scripts/check/check-windows-directx-d3d11-lifecycle.shs
+
+      - name: Upload lifecycle receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: d3d11-lifecycle-receipt
+          path: build/windows-directx-d3d11-lifecycle/toolchain-receipt.txt
+          if-no-files-found: error
