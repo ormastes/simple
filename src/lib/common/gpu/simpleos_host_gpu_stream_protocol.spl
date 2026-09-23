@@ -21,6 +21,7 @@ val SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE: i64 = 2
 val SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST: i64 = 3
 val SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE: i64 = 4
 val SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE: i64 = 5
+val SIMPLEOS_HOST_GPU_STREAM_CHECKSUM_MODULUS: i64 = 2147483647
 
 struct SimpleOsHostGpuStreamHeader:
     message_type: i64
@@ -132,21 +133,29 @@ fn simpleos_host_gpu_stream_header_decode(bytes: [u8]) -> SimpleOsHostGpuStreamH
     SimpleOsHostGpuStreamHeaderDecode(ok: true, reason: "ok", header: header)
 
 fn simpleos_host_gpu_stream_response_correlates(request: SimpleOsHostGpuStreamHeader, response: SimpleOsHostGpuStreamHeader) -> bool:
+    # Correlation is a public admission boundary, not merely an identity helper.
+    # Callers that construct headers directly must not bypass the same bounded
+    # field checks applied by the wire decoder.
+    if not _stream_header_valid(request) or not _stream_header_valid(response):
+        return false
     if request.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST:
         return response.message_type == SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE and response.generation == request.generation and response.run_id_hash == 0 and response.frame_id == 0 and response.backend_code == request.backend_code
     val submit_response = response.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE or response.message_type == SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE
     request.message_type == SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST and submit_response and response.generation == request.generation and response.run_id_hash == request.run_id_hash and response.frame_id == request.frame_id and response.backend_code == request.backend_code
 
 fn simpleos_host_gpu_stream_checksum_step(checksum: i64, byte: u8) -> i64:
-    (checksum + byte.to_i64()) % 2147483647
+    if checksum < 0 or checksum >= SIMPLEOS_HOST_GPU_STREAM_CHECKSUM_MODULUS:
+        return -1
+    (checksum + byte.to_i64()) % SIMPLEOS_HOST_GPU_STREAM_CHECKSUM_MODULUS
 
 fn simpleos_host_gpu_stream_checksum_valid(checksum: i64, expected: i64) -> bool:
-    checksum >= 0 and checksum == expected
+    checksum >= 0 and checksum < SIMPLEOS_HOST_GPU_STREAM_CHECKSUM_MODULUS and checksum == expected
 
 export SIMPLEOS_HOST_GPU_STREAM_HEADER_BYTES, SIMPLEOS_HOST_GPU_STREAM_VERSION
 export SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST, SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE
 export SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST, SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE
 export SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE
+export SIMPLEOS_HOST_GPU_STREAM_CHECKSUM_MODULUS
 export SimpleOsHostGpuStreamHeader, SimpleOsHostGpuStreamHeaderDecode
 export simpleos_host_gpu_stream_header_encode, simpleos_host_gpu_stream_header_decode
 export simpleos_host_gpu_stream_response_correlates
