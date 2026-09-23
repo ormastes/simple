@@ -1,0 +1,58 @@
+#!/bin/sh
+# Regression for the SimpleOS compiler-payload link failure recorded in
+# simpleos_toolchain_payload_link_missing_legacy_runtime_2026-09-22.md.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
+sysroot="$root/build/os/sysroot"
+nm_tool=${NM:-llvm-nm}
+selfcheck="$root/build/os/simpleos-fma-selfcheck"
+
+mkdir -p "$root/build/os"
+"${HOST_CC:-clang}" -std=c11 -O2 -fno-builtin -I "$root/src/os/libc/include" \
+    "$root/src/os/libc/test/simpleos_fma_selfcheck.c" \
+    "$root/src/os/libc/simpleos_math.c" "$root/src/os/libc/simpleos_math_ext.c" \
+    -o "$selfcheck"
+"$selfcheck"
+
+SIMPLE_BUILD_JOBS=${SIMPLE_BUILD_JOBS:-12}
+SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos
+export SIMPLE_BUILD_JOBS SIMPLEOS_TARGET_TRIPLE
+sh "$root/src/os/port/llvm/sysroot.shs"
+
+runtime="$sysroot/lib/libsimple_runtime.a"
+libc="$sysroot/lib/libsimpleos_c.a"
+receipt="$sysroot/share/simpleos/target-triple.txt"
+
+for artifact in "$runtime" "$libc" "$receipt"; do
+    if [ ! -s "$artifact" ]; then
+        echo "FAIL: missing SimpleOS sysroot artifact: $artifact" >&2
+        exit 1
+    fi
+done
+
+runtime_defs=$($nm_tool -g --defined-only "$runtime")
+libc_defs=$($nm_tool -g --defined-only "$libc")
+
+for symbol in rt_is_debug_mode_enabled spl_thread_cpu_count rt_getpid \
+    rt_thread_sleep spl_panic spl_strdup rt_is_dir spl_str_concat; do
+    if ! printf '%s\n' "$runtime_defs" | grep -Eq "[[:space:]]$symbol$"; then
+        echo "FAIL: libsimple_runtime.a does not define $symbol" >&2
+        exit 1
+    fi
+done
+
+if ! printf '%s\n' "$libc_defs" | grep -Eq '[[:space:]]sched_yield$'; then
+    echo "FAIL: libsimpleos_c.a does not define sched_yield" >&2
+    exit 1
+fi
+
+if [ "$(tr -d '\r\n' < "$receipt")" != x86_64-unknown-simpleos ]; then
+    echo "FAIL: target receipt does not identify the x86_64 SimpleOS sysroot" >&2
+    exit 1
+fi
+
+# TODO(simpleos-qemu): after an admitted SimpleOS phase environment exists,
+# relink /usr/bin/simple from this sysroot and execute its compiler smoke in
+# scripts/check/check-simpleos-compiler-filesystem-qemu.shs.
+echo "PASS: SimpleOS sysroot provides the nine-symbol compiler payload closure"
