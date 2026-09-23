@@ -1,0 +1,72 @@
+# @req REQ-MIMALLOC-TLS-LIFETIME
+# Native OS-thread acceptance fixture; all assertions must execute.
+# Direct native entry avoids conflating adapter evidence with an SSpec runner.
+use std.nogc_sync_mut.mimalloc_tls.{
+    mimalloc_thread_init, mimalloc_thread_heap,
+    mimalloc_thread_destroy, mimalloc_thread_registry_count
+}
+use std.concurrent.thread.{thread_spawn}
+
+fn fresh_thread_probe() -> i64:
+    # Parent has a live registration. An unbound worker must not destroy it.
+    assert(mimalloc_thread_registry_count() == 1)
+    val fallback = mimalloc_thread_heap()
+    assert(fallback.pages_by_class.len() > 0)
+    mimalloc_thread_destroy()
+    assert(mimalloc_thread_registry_count() == 1)
+    val child = mimalloc_thread_init()
+    assert(child.thread_id > 0)
+    assert(mimalloc_thread_registry_count() == 2)
+    val replacement = mimalloc_thread_init()
+    assert(replacement.thread_id > child.thread_id)
+    assert(mimalloc_thread_registry_count() == 2)
+    mimalloc_thread_destroy()
+    mimalloc_thread_destroy()
+    assert(mimalloc_thread_registry_count() == 1)
+    replacement.thread_id
+
+fn churn() -> i64:
+    var last: i64 = 0
+    for i in 0..1000:
+        val record = mimalloc_thread_init()
+        assert(record.thread_id > last)
+        last = record.thread_id
+        mimalloc_thread_destroy()
+    last
+
+fn main() -> i32:
+    mimalloc_thread_destroy()
+    assert(mimalloc_thread_registry_count() == 0)
+    val parent = mimalloc_thread_init()
+    assert(parent.thread_id > 0)
+    var worker = thread_spawn(\: fresh_thread_probe())
+    val child_id = worker.join()
+    assert(child_id != nil)
+    assert(mimalloc_thread_registry_count() == 1)
+    val heap = mimalloc_thread_heap()
+    assert(heap.pages_by_class.len() == parent.heap.pages_by_class.len())
+    mimalloc_thread_destroy()
+    assert(mimalloc_thread_registry_count() == 0)
+
+    var last: i64 = 0
+    for i in 0..1000:
+        val record = mimalloc_thread_init()
+        assert(record.thread_id > last)
+        last = record.thread_id
+        assert(mimalloc_thread_registry_count() == 1)
+        val replacement = mimalloc_thread_init()
+        assert(replacement.thread_id > last)
+        last = replacement.thread_id
+        assert(mimalloc_thread_registry_count() == 1)
+        mimalloc_thread_destroy()
+        assert(mimalloc_thread_registry_count() == 0)
+
+    # Concurrent initialization/removal must preserve all live registrations.
+    var a = thread_spawn(\: churn())
+    var b = thread_spawn(\: churn())
+    assert(a.join() != nil)
+    assert(b.join() != nil)
+    assert(mimalloc_thread_registry_count() == 0)
+    print "mimalloc TLS nogc_sync_mut: PASS"
+    0
+
