@@ -38,6 +38,8 @@ lazy_static::lazy_static! {
     // TLS registry: maps handle id -> per-slot HashMap<thread_id_string, Value>
     static ref TLS_REGISTRY: Arc<Mutex<HashMap<i64, HashMap<String, Value>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    static ref TLS_REGISTRY_I64: Arc<Mutex<HashMap<i64, HashMap<String, i64>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     static ref NEXT_TLS_HANDLE: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
     static ref SFFI_MUTEXES: Mutex<HashMap<i64, InterpreterMutex>> =
         Mutex::new(HashMap::new());
@@ -52,6 +54,9 @@ pub fn clear_concurrency_registries() {
     CHANNELS.lock().unwrap().clear();
     *NEXT_HANDLE_ID.lock().unwrap() = 1;
     *NEXT_CHANNEL_ID.lock().unwrap() = 1;
+    TLS_REGISTRY.lock().unwrap().clear();
+    TLS_REGISTRY_I64.lock().unwrap().clear();
+    *NEXT_TLS_HANDLE.lock().unwrap() = 1;
     SFFI_MUTEXES.lock().unwrap().clear();
     *NEXT_SFFI_MUTEX_ID.lock().unwrap() = 1;
 }
@@ -880,6 +885,46 @@ pub fn rt_get_concurrent_backend(_args: &[Value]) -> Result<Value, CompileError>
 mod tests {
     use super::*;
 
+    #[test]
+    fn scalar_tls_is_raw_zero_while_generic_tls_is_nil() {
+        let handle = match rt_thread_local_new(&[]).expect("new TLS") {
+            Value::Int(handle) => handle,
+            other => panic!("expected handle, got {other:?}"),
+        };
+        let key = [Value::Int(handle)];
+        assert_eq!(rt_thread_local_get(&key).expect("tagged get"), Value::Nil);
+        assert_eq!(rt_thread_local_get_i64(&key).expect("scalar get"), Value::Int(0));
+
+        rt_thread_local_set_i64(&[Value::Int(handle), Value::Int(i64::MAX)]).expect("scalar set");
+        assert_eq!(rt_thread_local_get_i64(&key).expect("scalar get"), Value::Int(i64::MAX));
+        assert_eq!(rt_thread_local_get(&key).expect("tagged get"), Value::Nil);
+
+        rt_thread_local_set(&[Value::Int(handle), Value::text("value".to_string())])
+            .expect("tagged set");
+        assert_eq!(rt_thread_local_get_i64(&key).expect("scalar get"), Value::Int(i64::MAX));
+        rt_thread_local_free(&key).expect("free TLS");
+        assert_eq!(rt_thread_local_get_i64(&key).expect("freed scalar get"), Value::Int(0));
+        assert_eq!(rt_thread_local_get(&key).expect("freed tagged get"), Value::Nil);
+    }
+
+    #[test]
+    fn scalar_and_generic_tls_are_released_between_interpreter_test_runs() {
+        let handle = match rt_thread_local_new(&[]).expect("new TLS") {
+            Value::Int(handle) => handle,
+            other => panic!("expected handle, got {other:?}"),
+        };
+        let key = [Value::Int(handle)];
+        rt_thread_local_set(&[Value::Int(handle), Value::text("old".to_string())])
+            .expect("tagged set");
+        rt_thread_local_set_i64(&[Value::Int(handle), Value::Int(42)]).expect("scalar set");
+
+        clear_concurrency_registries();
+        assert_eq!(rt_thread_local_get(&key).expect("cleared tagged get"), Value::Nil);
+        assert_eq!(rt_thread_local_get_i64(&key).expect("cleared scalar get"), Value::Int(0));
+        assert_eq!(TLS_REGISTRY.lock().unwrap().len(), 0);
+        assert_eq!(TLS_REGISTRY_I64.lock().unwrap().len(), 0);
+    }
+
     fn new_pure_std_channel() -> i64 {
         set_concurrent_registry(ConcurrentProviderRegistry::new(ConcurrentBackend::PureStd));
         clear_concurrency_registries();
@@ -945,7 +990,7 @@ pub fn rt_thread_local_new(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(handle))
 }
 
-/// Get the value stored for this thread in the given TLS handle. Returns 0 if unset.
+/// Get the tagged value stored for this thread. Returns NIL if unset.
 pub fn rt_thread_local_get(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::Runtime(
@@ -965,7 +1010,7 @@ pub fn rt_thread_local_get(args: &[Value]) -> Result<Value, CompileError> {
         .get(&handle)
         .and_then(|slot| slot.get(&tls_thread_key()))
         .cloned()
-        .unwrap_or(Value::Int(0));
+        .unwrap_or(Value::Nil);
     Ok(value)
 }
 
@@ -992,6 +1037,42 @@ pub fn rt_thread_local_set(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Interpreter counterpart of the raw-i64 TLS ABI, distinct from tagged values.
+pub fn rt_thread_local_get_i64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::Runtime(
+            "rt_thread_local_get_i64 expects 1 argument (tls: i64)".to_string(),
+        ));
+    }
+    let handle = match &args[0] {
+        Value::Int(h) => *h,
+        _ => return Err(CompileError::Runtime("rt_thread_local_get_i64 expects integer handle".to_string())),
+    };
+    let registry = TLS_REGISTRY_I64.lock().unwrap();
+    Ok(Value::Int(registry.get(&handle)
+        .and_then(|slot| slot.get(&tls_thread_key()))
+        .copied()
+        .unwrap_or(0)))
+}
+
+pub fn rt_thread_local_set_i64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::Runtime(
+            "rt_thread_local_set_i64 expects 2 arguments (tls: i64, value: i64)".to_string(),
+        ));
+    }
+    let (handle, value) = match (&args[0], &args[1]) {
+        (Value::Int(handle), Value::Int(value)) => (*handle, *value),
+        _ => return Err(CompileError::Runtime("rt_thread_local_set_i64 expects integer handle and value".to_string())),
+    };
+    let tagged_registry = TLS_REGISTRY.lock().unwrap();
+    if tagged_registry.contains_key(&handle) {
+        TLS_REGISTRY_I64.lock().unwrap()
+            .entry(handle).or_default().insert(tls_thread_key(), value);
+    }
+    Ok(Value::Nil)
+}
+
 /// Free a TLS handle and all per-thread values stored in it.
 pub fn rt_thread_local_free(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
@@ -1008,6 +1089,7 @@ pub fn rt_thread_local_free(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
     TLS_REGISTRY.lock().unwrap().remove(&handle);
+    TLS_REGISTRY_I64.lock().unwrap().remove(&handle);
     Ok(Value::Nil)
 }
 
