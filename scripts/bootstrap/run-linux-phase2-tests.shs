@@ -115,11 +115,33 @@ base_status=0
         --runtime-path="$runtime_path" \
         --source-root="$source_root"
 ) || base_status=$?
+require_base_summary() {
+    awk -F'[=|]' -v sha="$compiler_sha256" '
+        $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
+        $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
+        $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
+        $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
+        $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
+        $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
+        $1 == "task" {
+            if ($3 != "result" || $4 != "PASS") bad = 1
+            if ($2 == "compiler_cli_build") cli++
+            if ($2 == "test_runner_build") runner++
+        }
+        END {
+            exit (bad || phases != 1 || policies != 1 || expected != 1 ||
+                actual != 1 || failures != 1 || outcomes != 1 || cli != 1 || runner != 1)
+        }
+    ' "$verification_root/summary.env"
+}
+if [ "$base_status" -eq 0 ] && ! require_base_summary; then
+    base_status=95
+fi
 base_result=PASS
 [ "$base_status" -eq 0 ] || base_result=FAIL
 printf 'task=base_phase_matrix|result=%s|status=%s|summary=%s\n' \
     "$base_result" "$base_status" "$verification_root/summary.env" >>"$summary"
-[ "$base_status" -eq 0 ] || die "base phase verification failed; see $verification_root/summary.env"
+[ "$base_status" -eq 0 ] || die "base phase verification or receipt failed; see $verification_root/summary.env"
 
 find_one_tool() {
     name=$1
