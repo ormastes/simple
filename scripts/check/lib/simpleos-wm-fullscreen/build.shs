@@ -1,3 +1,47 @@
+wm_native_build_with_progress() {
+    wm_build_log=$1
+    shift
+    "$@" >"$wm_build_log" 2>&1 &
+    BUILD_PID=$!
+    wm_poll_seconds=${SIMPLEOS_WM_PROGRESS_POLL_SECONDS:-5}
+    (
+        WM_PROGRESS_SLEEP_PID=""
+        wm_progress_sleep_cleanup() {
+            if [ -n "$WM_PROGRESS_SLEEP_PID" ]; then
+                kill "$WM_PROGRESS_SLEEP_PID" 2>/dev/null || true
+                wait "$WM_PROGRESS_SLEEP_PID" 2>/dev/null || true
+                WM_PROGRESS_SLEEP_PID=""
+            fi
+        }
+        trap wm_progress_sleep_cleanup EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        wm_elapsed=0
+        while kill -0 "$BUILD_PID" 2>/dev/null; do
+            sleep "$wm_poll_seconds" &
+            WM_PROGRESS_SLEEP_PID=$!
+            wait "$WM_PROGRESS_SLEEP_PID" 2>/dev/null || true
+            WM_PROGRESS_SLEEP_PID=""
+            kill -0 "$BUILD_PID" 2>/dev/null || break
+            wm_elapsed=$((wm_elapsed + wm_poll_seconds))
+            if [ "$wm_elapsed" -ge "${SIMPLEOS_WM_PROGRESS_INTERVAL_SECONDS:-60}" ]; then
+                printf '[WM-BUILD] %s native-build active attempt=%s log_bytes=%s\n' \
+                    "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" \
+                    "$(wc -c <"$wm_build_log")" >&2
+                wm_elapsed=0
+            fi
+        done
+    ) &
+    BUILD_POLL_PID=$!
+    wait "$BUILD_PID"
+    wm_result=$?
+    BUILD_PID=""
+    kill "$BUILD_POLL_PID" 2>/dev/null || true
+    wait "$BUILD_POLL_PID" 2>/dev/null || true
+    BUILD_POLL_PID=""
+    return "$wm_result"
+}
+
 # Build the kernel (same flow as os.qemu_runner.build_os for the
 # wm-simple-web check target) unless a fresh artifact already exists.
 kernel_stale=false
@@ -75,11 +119,14 @@ SPL
     while :; do
     KERNEL_BUILD_ATTEMPTS=$((KERNEL_BUILD_ATTEMPTS + 1))
     rm -f "$KERNEL_CANDIDATE"
+    printf '[WM-BUILD] %s native-build attempt=%s log=%s\n' "$(date -u +%FT%TZ)" "$KERNEL_BUILD_ATTEMPTS" "$BUILD_DIR/native-build.out" >&2
     set +e
     SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_COMPILER_PHASE_PROFILE=1 \
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
     SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1 \
     PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        wm_native_build_with_progress "$BUILD_DIR/native-build.out" \
         "$TIMEOUT_BIN" --kill-after=10s "${NATIVE_BUILD_TIMEOUT_SECONDS}s" \
         "$SIMPLE_BIN" native-build \
         --source build/os/generated --source "$ENTRY" \
@@ -88,8 +135,7 @@ SPL
         --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_CANDIDATE" \
-        --linker-script "$LINKER_SCRIPT" \
-        >"$BUILD_DIR/native-build.out" 2>&1
+        --linker-script "$LINKER_SCRIPT"
     build_code=$?
     set -e
     if [ "$build_code" -eq 124 ] || [ "$build_code" -eq 137 ]; then
