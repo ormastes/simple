@@ -16,6 +16,7 @@ components that are intended to ship with Simple distributions.
 | stb_truetype | `src/runtime/stb_truetype.h` | https://github.com/nothings/stb | MIT |
 | liburing subset | `src/runtime/vendor/liburing/` | https://github.com/axboe/liburing | MIT for dual-licensed liburing files; `io_uring.h` keeps its upstream SPDX identifier `(GPL-2.0 WITH Linux-syscall-note) OR MIT` |
 | musl sqrt adaptation | `src/os/libc/simpleos_math.c`, `src/os/libc/MUSL_SQRT_LICENSE` | https://musl.libc.org/ | MIT; incorporated notice is in `src/os/libc/MUSL_SQRT_LICENSE` |
+| musl fma/scalbn adaptation | `src/os/libc/simpleos_math_ext.c` | https://git.musl-libc.org/cgit/musl | MIT; exact notice retained in `src/os/libc/MUSL_FMA_LICENSE` |
 
 ## Distribution Notes
 

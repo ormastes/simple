@@ -18,6 +18,13 @@ static void wr64(uint8_t *p, uint64_t v) {
     for (unsigned i = 0; i < 8; ++i) p[i] = (uint8_t)(v >> (8 * i));
 }
 
+static const uint8_t cli_abi_digest[32] = {
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x90, 0xab, 0xcd, 0xef, 0xde, 0xad, 0xbe, 0xef,
+};
+
 int32_t simple_provider_query_v1(uint64_t request_address, uint64_t result_address) {
     const uint8_t *request = (const uint8_t *)(uintptr_t)request_address;
     uint8_t *result = (uint8_t *)(uintptr_t)result_address;
@@ -25,7 +32,7 @@ int32_t simple_provider_query_v1(uint64_t request_address, uint64_t result_addre
     if (!request || !result || rd32(request) != 44 ||
             rd64(request + 4) != cli_interface || rd32(request + 12) != 1 ||
             rd64(request + 20) == 0) return -9;
-    memset(result, 0, 60);
+    memset(result, 0, 84);
     wr32(result, 0);
     wr32(result + 4, 1);
     wr32(result + 8, 0);
@@ -34,7 +41,7 @@ int32_t simple_provider_query_v1(uint64_t request_address, uint64_t result_addre
     wr64(result + 24, UINT64_C(0x50525631));
     wr64(result + 32, UINT64_C(0x1111));
     wr64(result + 40, UINT64_C(0x2222));
-    wr64(result + 48, UINT64_C(0x3333));
+    memcpy(result + 48, cli_abi_digest, sizeof(cli_abi_digest));
     return 0;
 }
 

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Clang C only. Prove table-byte boundedness with the two production owners.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+OUT=${SIMPLE_REGISTRY_CHURN_OUTPUT:-"$ROOT/build/native_probe/allocation-registry-churn"}
+CC=${CC:-clang}
+mkdir -p "$OUT"
+case "$(uname -s)" in
+    Linux) discard='-Wl,--gc-sections' ;;
+    Darwin) discard='-Wl,-dead_strip' ;;
+    *) echo 'ERROR: this runner needs Linux or macOS; use clang-cl for the Windows fixture'; exit 2 ;;
+esac
+for provider in native memory; do
+    define=
+    [ "$provider" != memory ] || define=-DRT_REGISTRY_MEMORY_PROVIDER
+    # shellcheck disable=SC2086
+    "$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections $define \
+        "$ROOT/src/runtime/test/rt_allocation_registry_churn_selfcheck.c" \
+        $discard -pthread -lm -o "$OUT/$provider" >"$OUT/$provider.build.log" 2>&1
+    "$OUT/$provider" >"$OUT/$provider.run.log" 2>&1 || {
+        cat "$OUT/$provider.run.log"
+        exit 1
+    }
+    cat "$OUT/$provider.run.log"
+done
