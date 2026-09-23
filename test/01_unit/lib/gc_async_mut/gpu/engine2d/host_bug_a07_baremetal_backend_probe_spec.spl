@@ -1,0 +1,71 @@
+# Purpose and audience: regression evidence for the SimpleOS baremetal backend resolver.
+# @req REQ-SSPEC-UNIT
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 100%
+# @tag: unit, simpleos, baremetal, engine2d, backend, perf
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{platform_name}
+use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.engine2d.engine.{
+    Engine2D,
+    engine2d_auto_probe_order,
+    engine2d_auto_probe_order_for_platform,
+    engine2d_hosted_backend_probes_available,
+    engine2d_platform_allows_hosted_gpu_probes
+}
+
+describe "host bug A07 baremetal backend probing":
+    it "reproduces the reported post-ROCm service boundary":
+        # @req REQ-SSPEC-UNIT
+        step("reproduce reported failure")
+        val platform = platform_name()
+        expect(engine2d_hosted_backend_probes_available()).to_equal(
+            engine2d_platform_allows_hosted_gpu_probes(platform))
+        val order = engine2d_auto_probe_order()
+        expect(order.len()).to_be_greater_than(0)
+        val selected = Engine2D.detect_best_backend()
+        expect(selected.len()).to_be_greater_than(0)
+        val viable = Engine2D.detect_best_backend_viable()
+        expect(viable.len()).to_be_greater_than(0)
+
+    it "uses only CPU-safe production selection on a SimpleOS guest":
+        # @req REQ-SSPEC-UNIT
+        step("select through the compiled-in SimpleOS platform detector")
+        if not engine2d_hosted_backend_probes_available():
+            val actual_order = engine2d_auto_probe_order()
+            expect(actual_order).to_equal(["software", "cpu"])
+            expect(Engine2D.detect_best_backend()).to_equal("software")
+            expect(Engine2D.detect_best_backend_viable()).to_equal("software")
+            expect(Engine2D.list_backends()).to_equal(["software", "cpu"])
+
+    it "exercises corrected behavior for the SimpleOS runtime identity":
+        # @req REQ-SSPEC-UNIT
+        step("exercise corrected behavior")
+        val order = engine2d_auto_probe_order_for_platform("x86_64-baremetal-simpleos")
+        expect(order.len()).to_equal(2)
+        expect(order[0]).to_equal("software")
+        expect(order[1]).to_equal("cpu")
+
+    it "rejects invalid probes and preserves each hosted profile":
+        # @req REQ-SSPEC-UNIT
+        step("reject adjacent invalid input")
+        val expected_hosted = ["metal", "cuda", "rocm", "qualcomm", "vulkan",
+            "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd",
+            "software", "cpu"]
+        expect(engine2d_auto_probe_order_for_platform("linux")).to_equal(expected_hosted)
+        expect(engine2d_auto_probe_order_for_platform("freebsd")).to_equal(expected_hosted)
+        expect(engine2d_auto_probe_order_for_platform("windows")).to_equal(expected_hosted)
+        if engine2d_hosted_backend_probes_available():
+            expect(engine2d_auto_probe_order()).to_equal(expected_hosted)
+        val hosted_order = engine2d_auto_probe_order_for_platform("freebsd")
+        # The baremetal profile holds only the two CPU-safe candidates, so
+        # automatic selection avoids allocating/probing eleven hosted lanes.
+        expect(hosted_order.len() - engine2d_auto_probe_order_for_platform(
+            "x86_64-baremetal-simpleos").len()).to_equal(11)
+        expect(engine2d_platform_allows_hosted_gpu_probes("windows")).to_equal(true)
+        expect(engine2d_platform_allows_hosted_gpu_probes("linux")).to_equal(true)
+        expect(engine2d_platform_allows_hosted_gpu_probes("x86_64-baremetal-simpleos")).to_equal(false)
+        val invalid = Engine2D.probe_backend(1, 1, "")
+        expect(invalid.backend_name).to_equal("")
+        expect(invalid.status).to_equal(BackendStatus.Unavailable)
