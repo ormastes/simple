@@ -17,42 +17,30 @@
 use std.spec.step
 
 use std.spec
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 
-val SIMPLE_BIN: text = "src/compiler_rust/target/bootstrap/simple"
-val LINKER_SCRIPT: text = "examples/09_embedded/simple_os/arch/x86_64/linker.ld"
-val BUILD_SOURCES: text = "--source src/os --source src/lib --source examples/09_embedded/simple_os"
-val BUILD_SOURCES_LIB_ONLY: text = "--source src/lib --source examples/09_embedded/simple_os"
-val BUILD_PREFIX: text =
-    "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=\"$(pwd)/src\" PATH=\"/usr/bin:$PATH\" {SIMPLE_BIN} native-build"
-val QEMU_BASE: text =
-    "qemu-system-x86_64 -machine q35 -cpu qemu64 -serial stdio -display none -no-reboot"
-val DEBUG_EXIT: text = "-device isa-debug-exit,iobase=0xf4,iosize=0x04"
-
 fn artifact_exists(path: text) -> bool:
     rt_file_exists(path)
 
-fn _run_shell(command: text) -> (text, text, i64):
-    rt_process_run("/bin/sh", ["-c", command])
-
-fn _build_target(entry: text, output: text, memory_sensitive: bool) -> bool:
-    val sources = if memory_sensitive:
-        BUILD_SOURCES
-    else:
-        BUILD_SOURCES_LIB_ONLY
-    val command = "{BUILD_PREFIX} {sources} --backend cranelift --entry-closure --entry {entry} --target x86_64-unknown-none -o {output} --linker-script {LINKER_SCRIPT}"
-    val result = _run_shell(command)
+fn _build_target(lane: text) -> bool:
+    val result = rt_process_run("sh", ["scripts/check/build-simpleos-browser-qemu.shs", lane])
     if result[2] != 0:
         print result[0]
         print result[1]
         return false
     true
 
-fn _run_qemu(kernel: text, memory: text, extra: text, timeout_secs: text) -> text:
-    val command = "timeout {timeout_secs} {QEMU_BASE} -m {memory} -kernel {kernel} {DEBUG_EXIT} {extra} 2>&1 | tr -d '\\000'"
-    val result = _run_shell(command)
+fn _run_qemu(kernel: text, memory: text, extra: [text], timeout_secs: text) -> text:
+    var args = ["-k", "2s", timeout_secs, "qemu-system-x86_64",
+        "-machine", "q35", "-cpu", "qemu64", "-serial", "stdio",
+        "-display", "none", "-no-reboot", "-m", memory, "-kernel", kernel,
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+    for argument in extra:
+        args.push(argument)
+    val result = rt_process_run("timeout", args)
     result[0] + result[1]
 
 describe "Browser engine in QEMU baremetal ELF execution":
@@ -62,14 +50,10 @@ describe "Browser engine in QEMU baremetal ELF execution":
         # @req REQ-SSPEC-SYSTEM
         step("boots the browser probe ELF")
         val output_path = "build/os/simpleos_browser_probe_32.elf"
-        expect(_build_target(
-            "examples/09_embedded/simple_os/arch/x86_64/browser_probe_entry.spl",
-            output_path,
-            false
-        )).to_equal(true)
+        expect(_build_target("browser-probe")).to_equal(true)
         expect(artifact_exists(output_path)).to_equal(true)
 
-        val output = _run_qemu(output_path, "384M", "", "5s")
+        val output = _run_qemu(output_path, "384M", [], "5s")
         expect(output.contains("[probe] browser spl_start")).to_equal(true)
         expect(output.contains("FAULT @")).to_equal(false)
 
@@ -77,14 +61,10 @@ describe "Browser engine in QEMU baremetal ELF execution":
         # @req REQ-SSPEC-SYSTEM
         step("boots the desktop probe ELF")
         val output_path = "build/os/simpleos_desktop_probe_32.elf"
-        expect(_build_target(
-            "examples/09_embedded/simple_os/arch/x86_64/desktop_probe_entry.spl",
-            output_path,
-            true
-        )).to_equal(true)
+        expect(_build_target("desktop-probe")).to_equal(true)
         expect(artifact_exists(output_path)).to_equal(true)
 
-        val output = _run_qemu(output_path, "384M", "", "5s")
+        val output = _run_qemu(output_path, "384M", [], "5s")
         expect(output.contains("[probe] desktop spl_start")).to_equal(true)
         expect(output.contains("FAULT @")).to_equal(false)
 
@@ -92,14 +72,10 @@ describe "Browser engine in QEMU baremetal ELF execution":
         # @req REQ-SSPEC-SYSTEM
         step("builds and boots the browser software smoke ELF")
         val output_path = "build/os/simpleos_browser_soft_32.elf"
-        expect(_build_target(
-            "examples/09_embedded/simple_os/arch/x86_64/browser_soft_entry.spl",
-            output_path,
-            false
-        )).to_equal(true)
+        expect(_build_target("browser-soft")).to_equal(true)
         expect(artifact_exists(output_path)).to_equal(true)
 
-        val output = _run_qemu(output_path, "384M", "-vga std", "15s")
+        val output = _run_qemu(output_path, "384M", ["-vga", "std"], "15s")
         expect(output.contains("[browser-soft] start")).to_equal(true)
         expect(output.contains("[PASS] browser_soft_entry")).to_equal(true)
         expect(output.contains("TEST PASSED")).to_equal(true)
@@ -109,23 +85,23 @@ describe "Browser engine in QEMU baremetal ELF execution":
         # @req REQ-SSPEC-SYSTEM
         step("runs the lean desktop wrapper through launcher and wm markers")
         val output_path = "build/os/simpleos_desktop_e2e_32.elf"
-        expect(_build_target(
-            "examples/09_embedded/simple_os/arch/x86_64/desktop_e2e_entry.spl",
-            output_path,
-            true
-        )).to_equal(true)
+        expect(_build_target("desktop-e2e")).to_equal(true)
         expect(artifact_exists(output_path)).to_equal(true)
 
-        val output = _run_qemu(output_path, "512M", "-vga std", "15s")
-        if output.contains("[vfs] mount_failed") and output.contains("[desktop-e2e] shortcut:fail"):
-            print "SKIP: desktop launcher E2E requires a mounted app disk image"
-            expect(output.contains("[desktop-e2e] launcher:ready")).to_equal(true)
-        else:
-            expect(output.contains("[desktop-e2e] spl_start")).to_equal(true)
-            expect(output.contains("[desktop-e2e] launcher:ready")).to_equal(true)
-            expect(output.contains("[desktop-e2e] shortcut:ok")).to_equal(true)
-            expect(output.contains("[desktop-e2e] wm:ok")).to_equal(true)
-            expect(output.contains("[desktop-e2e] resident fallback done")).to_equal(true)
-            expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
-            expect(output.contains("TEST PASSED")).to_equal(true)
-            expect(output.contains("TEST FAILED")).to_equal(false)
+        val disk = env_get("SIMPLEOS_BROWSER_DESKTOP_IMAGE") ?? ""
+        expect(artifact_exists(disk)).to_equal(true)
+        expect(disk.contains(",")).to_equal(false)
+        val output = _run_qemu(output_path, "512M", [
+            "-vga", "std",
+            "-drive", "file={disk},if=none,format=raw,id=browserdisk,snapshot=on",
+            "-device", "nvme,drive=browserdisk,serial=browser-e2e"
+        ], "15s")
+        expect(output.contains("[vfs] mount_failed")).to_equal(false)
+        expect(output.contains("[desktop-e2e] spl_start")).to_equal(true)
+        expect(output.contains("[desktop-e2e] launcher:ready")).to_equal(true)
+        expect(output.contains("[desktop-e2e] shortcut:ok")).to_equal(true)
+        expect(output.contains("[desktop-e2e] wm:ok")).to_equal(true)
+        expect(output.contains("[desktop-e2e] resident fallback done")).to_equal(true)
+        expect(output.contains("[desktop-e2e] remote-grouping:ok")).to_equal(true)
+        expect(output.contains("TEST PASSED")).to_equal(true)
+        expect(output.contains("TEST FAILED")).to_equal(false)

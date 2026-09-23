@@ -110,3 +110,42 @@ describe "BOOT-20 imported enum owner survives a plain single-hop import":
                 owner_errors = owner_errors + 1
         expect(owner_errors).to_equal(0)
         expect(lowering.errors.len()).to_equal(0)
+
+    it "does not carry an imported enum alias owner into the next consumer":
+        # @req REQ-STAGE3-HIR-RSS
+        # Two separate owners deliberately export the same local enum name.
+        # The second consumer must register its own owner row after
+        # begin_module clears the first consumer's scoped interpolation row.
+        step("lower two enum import consumers with independent owner rows")
+        val log = boot20_owner_spec_logger()
+        val first_owner_source = "pub enum Kind:\n    First"
+        val second_owner_source = "pub enum Kind:\n    Second"
+        val first_consumer_source = "use stage3rows.first.\{Kind\}\n\nfn first_consumer():\n    ()"
+        val second_consumer_source = "use stage3rows.second.\{Kind\}\n\nfn second_consumer():\n    ()"
+        val first_owner = parse_full_frontend(first_owner_source, "stage3rows.first", "stage3rows.first", log)
+        val second_owner = parse_full_frontend(second_owner_source, "stage3rows.second", "stage3rows.second", log)
+        val first_consumer = parse_full_frontend(first_consumer_source, "stage3rows.first_consumer", "stage3rows.first_consumer", log)
+        val second_consumer = parse_full_frontend(second_consumer_source, "stage3rows.second_consumer", "stage3rows.second_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["stage3rows.first"] = first_owner
+        modules["stage3rows.second"] = second_owner
+        modules["stage3rows.first_consumer"] = first_consumer
+        modules["stage3rows.second_consumer"] = second_consumer
+        val sources = [
+            SourceFile(path: "stage3rows/first.spl", content: first_owner_source, module_name: "stage3rows.first"),
+            SourceFile(path: "stage3rows/second.spl", content: second_owner_source, module_name: "stage3rows.second"),
+            SourceFile(path: "stage3rows/first_consumer.spl", content: first_consumer_source, module_name: "stage3rows.first_consumer"),
+            SourceFile(path: "stage3rows/second_consumer.spl", content: second_consumer_source, module_name: "stage3rows.second_consumer")
+        ]
+        val surfaces = boot20_owner_spec_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("stage3rows.first_consumer", surfaces)
+        lowering.begin_module("stage3rows/first_consumer.spl")
+        lowering.lower_module(first_consumer)
+        expect(lowering.imported_enum_owner_rows.len()).to_equal(1)
+        expect(lowering.imported_enum_owner_rows[0]).to_contain("stage3rows.first")
+        lowering.begin_module("stage3rows/second_consumer.spl")
+        expect(lowering.imported_enum_owner_rows.len()).to_equal(0)
+        lowering.lower_module(second_consumer)
+        expect(lowering.imported_enum_owner_rows.len()).to_equal(1)
+        expect(lowering.imported_enum_owner_rows[0]).to_contain("stage3rows.second")
+        expect(lowering.errors.len()).to_equal(0)

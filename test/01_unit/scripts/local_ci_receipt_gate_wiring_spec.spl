@@ -57,6 +57,13 @@ fn ci_rows(manifest: text) -> [text]:
             rows.push(trimmed)
     rows
 
+fn ci_inputs(manifest: text, gate_id: text) -> text:
+    for row in ci_rows(manifest):
+        val fields = row.split(",")
+        if fields[0].trim() == gate_id:
+            return fields[6].trim()
+    ""
+
 describe "Local CI receipt gate wiring":
     it "declares the ci_job and inputs columns the receipt admission reads":
         # @req REQ-SSPEC-UNIT
@@ -152,6 +159,40 @@ describe "Local CI receipt gate wiring":
         # The catch-all: anything matching no allow rule disqualifies docs mode.
         expect(workflow).to_contain("{ print; exit }' \"$tmp/ci-all-changed\"")
         expect(workflow).to_contain("mode=docs")
+
+    it "keeps conflict guards when the independent docs fast path skips receipt lookup":
+        # @req REQ-SSPEC-UNIT
+        step("keeps conflict guards when the independent docs fast path skips receipt lookup")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        expect(workflow).to_contain(r"DOCS_ONLY: ${{ steps.classify.outputs.docs_only }}")
+        expect(workflow).to_contain("if [ \"$DOCS_ONLY\" = true ]; then")
+        expect(workflow).to_contain("range=\"$BASE_SHA..$HEAD_SHA\"")
+        expect(workflow).to_contain("Leave mode=full and skip_ids empty")
+
+    it "scopes only audited receipt escalation rows and keeps global guards unbounded":
+        # @req REQ-SSPEC-UNIT
+        step("scopes only audited receipt escalation rows and keeps global guards unbounded")
+        val manifest = rt_file_read_text(MANIFEST_PATH) ?? ""
+        val scoped = [
+            "ci-crypto-verify-symbol-collisions",
+            "ci-dual-fs-effect-compare",
+            "ci-keyword-identifier-bindings",
+            "ci-module-surface-hint-scan-fast-path",
+            "ci-no-pid-keyed-build-artifacts",
+            "ci-plan-acceptance-coverage",
+            "ci-rt-free-abi",
+            "ci-tui-standalone-closure"
+        ]
+        for gate_id in scoped:
+            val inputs = ci_inputs(manifest, gate_id)
+            expect(inputs == "").to_be(false)
+            expect(inputs == "*").to_be(false)
+            expect(inputs).to_contain("scripts/check")
+            expect(inputs).to_contain("scripts/hooks")
+            expect(inputs).to_contain("config/check")
+            expect(inputs).to_contain(".github")
+        expect(ci_inputs(manifest, "ci-guard-wiring")).to_equal("*")
+        expect(ci_inputs(manifest, "ci-workspace-root-guard")).to_equal("*")
 
     it "dispatches the receipt row byte-identically to its manifest command":
         # @req REQ-SSPEC-UNIT
