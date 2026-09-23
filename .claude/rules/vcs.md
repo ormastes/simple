@@ -34,6 +34,9 @@ alwaysApply: false
   git push origin --delete <topic>
   ```
 
+  Group commits into a few single-concern commits before the first push and
+  before each re-push — see `doc/07_guide/infra/vcs/pr_commit_grouping.md`.
+
   **Required checks:** `Code Idiom & Structural Ratchet Gates` (runs on
   `pull_request`) and `SPipe Self Review Admission` (`.github/workflows/review-admission.yml`).
   The admission workflow's `pull_request_target` types are `[synchronize, edited,

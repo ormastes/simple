@@ -14,6 +14,9 @@ are not repeated here:
 This page covers only what those two do not: **why a correct recipe still fails
 repeatedly, and the loop that gets around it.**
 
+See also: `doc/07_guide/infra/vcs/pr_commit_grouping.md` — group commits into a
+few logical, single-concern commits before opening or pushing to a PR.
+
 ## Why it is a race
 
 Three properties compose into one:

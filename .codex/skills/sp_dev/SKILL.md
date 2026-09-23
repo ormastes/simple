@@ -98,6 +98,16 @@ same unchanged green command. Stop after three verify/fix cycles for one
 feature and report any remaining failure; convergence ends the lane instead of
 starting another confirmation loop.
 
+## Commit grouping before PR/push
+
+Before opening a PR, and before each push to an open PR, group commits into a
+few logical, single-concern commits. Drop/squash `wip`, `fix typo`, `address
+review`, `retry`, `reseal`, `sync` commits and revert-then-redo pairs; check
+`git cherry origin/main HEAD` (or patch-id) for commits whose change is
+already on `main` and drop those too. One PR should cover one concern and stay
+under ~60 changed files. Non-interactive recipes (no interactive editor here)
+and the tracking-DB reseal-last rule: `doc/07_guide/infra/vcs/pr_commit_grouping.md`.
+
 Bootstrap/tooling lanes that produce a Stage 4 full CLI must retain the bounded
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` gate against the exact
 fresh binary. Require the test-runner, lint, duplicate-check, and aggregate pass

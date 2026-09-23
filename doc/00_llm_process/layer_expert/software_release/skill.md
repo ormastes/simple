@@ -17,3 +17,10 @@ receipt. The sole-owner fallback is explicit, expiring, audit-bound, and allowed
 only for verifier unavailability with reason `no eligible independent reviewer`.
 Only a pinned dedicated verifier/broker GitHub App may project the admission
 status or custom environment protection; missing App IDs block live apply.
+
+**PR commit grouping.** Before opening a PR, and before each push to an open
+PR, squash agent-session noise (`wip`, `fix typo`, `retry`, `reseal`, `sync`,
+revert-then-redo pairs) into a few single-concern commits, and drop any commit
+whose patch is already on `main` (`git cherry origin/main HEAD`). Ungrouped
+commit history has directly cost multi-hour PR-split rework (#1228, #1375).
+Recipe: `doc/07_guide/infra/vcs/pr_commit_grouping.md`.

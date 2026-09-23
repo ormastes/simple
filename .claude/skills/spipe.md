@@ -474,6 +474,20 @@ You cannot approve your own PR (`Review Can not approve your own pull
 request`), and `required_approving_review_count` is 0, so approval never
 unblocks anything.
 
+### Commit grouping before PR/push
+
+Before opening a PR, and again before every push to an open PR, group your
+commits into a few logical, single-concern commits. Drop/squash `wip`, `fix
+typo`, `address review`, `retry`, `reseal`, `sync` commits and
+revert-then-redo pairs; check `git cherry origin/main HEAD` for commits whose
+change is already on `main` and drop those too. A raw agent-session commit log
+is what turned #1228 (39 commits, 9 already on `main` or superseded) and
+#1375 (100 commits/525 files) into hours-long untangling jobs that each had to
+be split into multiple PRs. Full recipe, including the non-interactive
+`--fixup`/`--autosquash` and `git reset --soft <merge-base>` paths (no
+interactive editor here) and the tracking-DB reseal-last rule:
+`doc/07_guide/infra/vcs/pr_commit_grouping.md`.
+
 ## Resolving a PR queue (measured 2026-09-07, ~35 PRs landed)
 
 Written after taking the queue from 31 open to 0. Every rule cost something.
