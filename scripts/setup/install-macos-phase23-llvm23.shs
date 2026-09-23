@@ -1,0 +1,57 @@
+#!/bin/sh
+# Refresh the runner image's Homebrew metadata, then admit only reviewed bottles.
+# Bottle authority: Homebrew/homebrew-core@7383a810b541351e197e114b3de06490b5357dbc
+# Formula/l/{llvm,lld}.rb; arm64_sequoia is the macos-15 runner platform.
+set -eu
+fail() { echo "LLVM provisioning: $*" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || fail 'macOS arm64 required'
+case $(sw_vers -productVersion) in 15.*) ;; *) fail 'macOS 15 required' ;; esac
+[ "$(brew --prefix)" = /opt/homebrew ] || fail 'standard Homebrew prefix required'
+available_kib=$(df -Pk /opt/homebrew | awk 'END {print $4}')
+[ "$available_kib" -ge 6291456 ] || fail 'at least 6 GiB free disk required for bottles'
+
+# GitHub runner images can disable auto-update and ship stale formula metadata.
+# Update once explicitly, then prevent an implicit update between admission and install.
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+unset HOMEBREW_NO_INSTALL_UPGRADE HOMEBREW_FORCE_API_AUTO_UPDATE
+brew update
+metadata=$(mktemp "${TMPDIR:-/tmp}/simple-llvm-bottles.XXXXXX")
+trap 'rm -f "$metadata"' EXIT HUP INT TERM
+brew info --json=v2 llvm lld >"$metadata"
+ruby -rjson - "$metadata" <<'RUBY'
+metadata = JSON.parse(File.read(ARGV.fetch(0)))
+expected = {
+  'llvm' => [1, '4ca75cd24ea8f06f85ad16113dc274bbd2496e3330cb0765e69b142a39749876'],
+  'lld' => [0, '0a3b3975ef21e47f18f7c20823f3e927bf006d92483733bea8434cf8c981efe2']
+}
+formulae = metadata.fetch('formulae')
+abort 'expected exactly LLVM and LLD metadata' unless formulae.size == 2
+expected.each do |name, (revision, digest)|
+  matches = formulae.select { |f| f['name'] == name }
+  abort "missing or duplicate #{name} metadata" unless matches.size == 1
+  formula = matches.first
+  abort "unadmitted #{name} source/version" unless formula['tap'] == 'homebrew/core' &&
+    formula.dig('versions', 'stable') == '23.1.1' && formula['revision'] == revision
+  bottle = formula.dig('bottle', 'stable', 'files', 'arm64_sequoia')
+  abort "unadmitted #{name} bottle" unless bottle && bottle['sha256'] == digest &&
+    bottle['url'] == "https://ghcr.io/v2/homebrew/core/#{name}/blobs/sha256:#{digest}"
+  puts "admitted_bottle=#{name} version=23.1.1 revision=#{revision} sha256=#{digest}"
+end
+RUBY
+# Bind installation to the admitted bytes, even if formula metadata later changes.
+brew fetch --force-bottle --bottle-tag=arm64_sequoia llvm lld
+set --
+for name in llvm lld; do
+    bottle=$(brew --cache --bottle-tag=arm64_sequoia "$name")
+    case $bottle in /*.tar.gz) ;; *) fail "invalid $name cache path" ;; esac
+    digest=$(ruby -rjson -e '
+      f = JSON.parse(File.read(ARGV[0])).fetch("formulae").find { |x| x["name"] == ARGV[1] }
+      puts f.fetch("bottle").fetch("stable").fetch("files").fetch("arm64_sequoia").fetch("sha256")
+    ' "$metadata" "$name")
+    actual=$(shasum -a 256 "$bottle" | awk '{print $1}')
+    [ "$actual" = "$digest" ] || fail "downloaded $name bottle hash differs from admission"
+    set -- "$@" "$bottle"
+done
+# Reinstall prevents a preinstalled same-version source build being accepted.
+# Local verified bottles supply the formula and bytes; Homebrew installs dependencies.
+brew reinstall --force-bottle "$@"
