@@ -2,7 +2,7 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use super::lowering_di::builtin_type_name;
-use crate::hir::{BinOp, DispatchMode, HirExpr, HirType, TypeId};
+use crate::hir::{BinOp, DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -150,6 +150,87 @@ impl<'a> MirLowerer<'a> {
         simple_runtime::value::hash_variant_discriminant(variant_name) as i64
     }
 
+    /// Erased-at-HIR Result receivers still need the interpreter's Option
+    /// contract. Build the same receiver-once projection used by typed HIR,
+    /// using existing MIR Option constructors instead of a new runtime ABI.
+    fn lower_result_option_projection(&mut self, receiver: &HirExpr, variant: &str) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let local_idx = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: "$result_option_subject".to_string(),
+                ty: receiver.ty,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let subject = HirExpr {
+            kind: HirExprKind::Local(local_idx),
+            ty: receiver.ty,
+        };
+        let condition = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_check_variant".to_string(),
+                args: vec![
+                    subject.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(2),
+                        ty: TypeId::I64,
+                    },
+                    HirExpr {
+                        kind: HirExprKind::Integer(Self::enum_variant_discriminant(variant)),
+                        ty: TypeId::I64,
+                    },
+                ],
+            },
+            ty: TypeId::BOOL,
+        };
+        let some = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global("Option::Some".to_string()),
+                    ty: TypeId::ANY,
+                }),
+                args: vec![HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_payload".to_string(),
+                        args: vec![subject],
+                    },
+                    ty: TypeId::ANY,
+                }],
+            },
+            ty: TypeId::ANY,
+        };
+        let none = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global("Option::None".to_string()),
+                    ty: TypeId::ANY,
+                }),
+                args: vec![],
+            },
+            ty: TypeId::ANY,
+        };
+        self.lower_expr(&HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx,
+                value: Box::new(receiver.clone()),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(some),
+                        else_branch: Some(Box::new(none)),
+                    },
+                    ty: TypeId::ANY,
+                }),
+            },
+            ty: TypeId::ANY,
+        })
+    }
+
     pub(super) fn lower_method_call_expr(
         &mut self,
         receiver: &HirExpr,
@@ -190,14 +271,14 @@ impl<'a> MirLowerer<'a> {
                         .or_else(|| self.enum_payload_type_for_method_receiver(effective_ty))
                     {
                         return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
+                            "rt_unwrap_or_trap",
                             std::slice::from_ref(receiver),
                             payload_ty,
                         );
                     }
                     if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
                         return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
+                            "rt_unwrap_or_trap",
                             std::slice::from_ref(receiver),
                             TypeId::ANY,
                         );
@@ -222,52 +303,14 @@ impl<'a> MirLowerer<'a> {
                         );
                     }
                 }
-                // Std Result helpers `ok()`/`err()`: the same variant-payload
-                // extraction as unwrap/unwrap_err for the Ok/Err variant.
-                // std wraps the payload in Option, but every in-tree call
-                // site either guards with is_ok/is_err or immediately chains
-                // .unwrap(), so the raw payload is the operationally correct
-                // lowering (and matches what unwrap/unwrap_err already do).
-                // Without these arms, builtin-typed receivers fall through to
-                // the codegen builtin fail-closed branch and the module is
-                // rejected (observed live in the stage2 entry-closure build).
-                "ok" => {
-                    if let Some(payload_ty) = self
-                        .enum_variant_payload_type_for_method_receiver(receiver.ty, "Ok")
-                        .or_else(|| self.enum_variant_payload_type_for_method_receiver(effective_ty, "Ok"))
-                    {
-                        return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
-                            std::slice::from_ref(receiver),
-                            payload_ty,
-                        );
-                    }
-                    if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
-                        return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
-                            std::slice::from_ref(receiver),
-                            TypeId::ANY,
-                        );
-                    }
-                }
-                "err" => {
-                    if let Some(payload_ty) = self
-                        .enum_variant_payload_type_for_method_receiver(receiver.ty, "Err")
-                        .or_else(|| self.enum_variant_payload_type_for_method_receiver(effective_ty, "Err"))
-                    {
-                        return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
-                            std::slice::from_ref(receiver),
-                            payload_ty,
-                        );
-                    }
-                    if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
-                        return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
-                            std::slice::from_ref(receiver),
-                            TypeId::ANY,
-                        );
-                    }
+                "ok" | "err"
+                    if self.type_registry.is_some_and(|registry| {
+                        registry.get_type_name(receiver.ty) == Some("Result")
+                            || registry.get_type_name(effective_ty) == Some("Result")
+                    }) =>
+                {
+                    let variant = if method == "ok" { "Ok" } else { "Err" };
+                    return self.lower_result_option_projection(receiver, variant);
                 }
                 "is_some" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")

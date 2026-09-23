@@ -344,16 +344,17 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
-        // Special handling for rt_enum_payload - returns tagged RuntimeValue
-        // that needs unboxing when the payload type is a native type
-        if name == "rt_enum_payload" && args.len() == 1 {
+        // Both enum payload readers and checked unwrap return the payload in
+        // the runtime's tagged slot. Decode a native scalar only after the
+        // checked helper has had the chance to trap on None/Err.
+        if matches!(name, "rt_enum_payload" | "rt_unwrap_or_trap") && args.len() == 1 {
             let arg_reg = self.lower_expr(&args[0])?;
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(dest),
-                    target: CallTarget::from_name("rt_enum_payload"),
+                    target: CallTarget::from_name(name),
                     args: vec![arg_reg],
                 });
                 dest

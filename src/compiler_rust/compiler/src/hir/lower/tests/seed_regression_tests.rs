@@ -273,6 +273,188 @@ fn annotated_result_local_projects_ok_payload() {
 }
 
 #[test]
+fn array_index_declared_element_keeps_field_layout() {
+    let source = concat!(
+        "struct Action:\n",
+        "    pad: i64\n",
+        "    priority: i64\n",
+        "    action_id: text\n",
+        "\n",
+        "struct Decoy:\n",
+        "    action_id: i64\n",
+        "\n",
+        "fn probe() -> text:\n",
+        "    var ready: [Action] = [Action(pad: 0, priority: 1, action_id: \"go\")]\n",
+        "    return ready[0].action_id\n",
+    );
+    let module = parse_and_lower(source).expect("array index must retain Action owner");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    assert!(matches!(
+        function.body.last(),
+        Some(HirStmt::Return(Some(HirExpr {
+            kind: HirExprKind::FieldAccess { field_index: 2, .. },
+            ty: TypeId::STRING,
+        })))
+    ));
+}
+
+#[test]
+fn array_map_placeholder_uses_declared_element_field_layout() {
+    let source = concat!(
+        "struct Param:\n",
+        "    pad: i64\n",
+        "    type_: text\n",
+        "\n",
+        "struct Decoy:\n",
+        "    type_: i64\n",
+        "\n",
+        "fn probe(params: [Param]):\n",
+        "    params.map(_.type_)\n",
+    );
+    let module = parse_and_lower(source).expect("map placeholder must inherit array element type");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let Some(HirStmt::Expr(HirExpr {
+        kind: HirExprKind::MethodCall { args, .. },
+        ..
+    })) = function.body.last()
+    else {
+        panic!("expected map call, got {:?}", function.body.last());
+    };
+    let Some(HirExpr {
+        kind: HirExprKind::Lambda { params, body, .. },
+        ..
+    }) = args.first()
+    else {
+        panic!("expected placeholder lambda, got {args:?}");
+    };
+    assert_eq!(module.types.get_type_name(params[0].1), Some("Param"));
+    assert!(matches!(body.kind, HirExprKind::FieldAccess { field_index: 1, .. }));
+    assert_eq!(body.ty, TypeId::STRING);
+}
+
+#[test]
+fn result_ok_call_unwrap_retains_nominal_payload_field_layout() {
+    let source = concat!(
+        "struct Outcome:\n",
+        "    pad: i64\n",
+        "    transformed: i64\n",
+        "\n",
+        "impl Outcome:\n",
+        "    fn unwrap() -> text:\n",
+        "        \"hostile\"\n",
+        "\n",
+        "struct Decoy:\n",
+        "    transformed: bool\n",
+        "\n",
+        "fn make() -> Result<Outcome, text>:\n",
+        "    Ok(Outcome(pad: 1, transformed: 7))\n",
+        "\n",
+        "fn probe() -> i64:\n",
+        "    val typed_result = make()\n",
+        "    val typed_outcome = typed_result.ok().unwrap()\n",
+        "    typed_outcome.transformed\n",
+    );
+    let module = parse_and_lower(source).expect("Result.ok().unwrap() must keep Outcome owner");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let owner = function
+        .locals
+        .iter()
+        .find(|local| local.name == "typed_outcome")
+        .unwrap();
+    assert_eq!(module.types.get_type_name(owner.ty), Some("Outcome"));
+    let HirStmt::Let {
+        value: Some(projected), ..
+    } = &function.body[1]
+    else {
+        panic!("expected typed_outcome binding, got {:?}", function.body[1]);
+    };
+    let HirExprKind::LetIn { body, .. } = &projected.kind else {
+        panic!("Result.ok().unwrap() must bind the Result once: {projected:?}");
+    };
+    let HirExprKind::If {
+        condition,
+        then_branch,
+        else_branch: Some(else_branch),
+    } = &body.kind
+    else {
+        panic!("Result.ok().unwrap() must check the outer variant: {body:?}");
+    };
+    assert!(format!("{condition:?}").contains("rt_enum_check_variant"));
+    assert!(matches!(then_branch.kind, HirExprKind::BuiltinCall { ref name, .. } if name == "rt_enum_payload"));
+    assert!(format!("{else_branch:?}").contains("rt_unwrap_or_trap"));
+    assert!(!format!("{projected:?}").contains("method: \"unwrap\""));
+    assert!(matches!(
+        function.body.last(),
+        Some(HirStmt::Expr(HirExpr {
+            kind: HirExprKind::FieldAccess { field_index: 1, .. },
+            ty: TypeId::I64,
+        }))
+    ));
+}
+
+#[test]
+fn result_ok_err_methods_return_options_and_guard_wrong_variant() {
+    let source = concat!(
+        "fn good() -> Result<i64, text>:\n    Ok(7)\n\n",
+        "fn bad() -> Result<i64, text>:\n    Err(\"no\")\n\n",
+        "fn probe() -> bool:\n",
+        "    val present = good().ok()\n",
+        "    val absent = bad().ok()\n",
+        "    val error = bad().err()\n",
+        "    present.is_some() and absent.is_none() and error.is_some()\n",
+    );
+    let module = parse_and_lower(source).expect("Result methods must lower to Option projections");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    for stmt in function.body.iter().take(3) {
+        let HirStmt::Let {
+            value: Some(projected), ..
+        } = stmt
+        else {
+            panic!("expected projection: {stmt:?}")
+        };
+        assert_eq!(module.types.get_type_name(projected.ty), Some("Option"));
+        let HirExprKind::LetIn { body, .. } = &projected.kind else {
+            panic!("receiver must be evaluated once: {projected:?}")
+        };
+        let HirExprKind::If {
+            condition,
+            then_branch,
+            else_branch: Some(else_branch),
+        } = &body.kind
+        else {
+            panic!("projection must guard the outer Result: {body:?}")
+        };
+        let check = format!("{condition:?}");
+        assert!(
+            check.contains("rt_enum_check_variant") && check.contains("Integer(2)"),
+            "{check}"
+        );
+        assert!(format!("{then_branch:?}").contains("Option::Some"));
+        assert!(format!("{else_branch:?}").contains("Option::None"));
+    }
+}
+
+#[test]
+fn nested_enum_result_projection_unwraps_only_outer_result() {
+    let source = concat!(
+        "fn make() -> Result<Option<i64>, text>:\n    Ok(Option.Some(11))\n\n",
+        "fn probe() -> Option<i64>:\n    make().ok().unwrap()\n",
+    );
+    let module = parse_and_lower(source).expect("nested Option payload must remain intact");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let HirStmt::Expr(projected) = function.body.last().unwrap() else {
+        panic!("expected expression")
+    };
+    let body = format!("{projected:?}");
+    assert_eq!(
+        body.matches("rt_enum_payload").count(),
+        1,
+        "nested payload must not be extracted twice: {body}"
+    );
+    assert_eq!(module.types.get_type_name(projected.ty), Some("Option"));
+}
+
+#[test]
 fn annotated_result_local_projects_err_payload() {
     let source = "fn declared_err() -> Result<i64, text>:\n    Err(\"provider-error\")\n\nfn main() -> text:\n    val declared: Result<i64, text> = declared_err()\n    return declared.err\n";
     let module = parse_and_lower(source).expect("annotated Result.err must lower");
