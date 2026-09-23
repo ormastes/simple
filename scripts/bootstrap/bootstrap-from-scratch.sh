@@ -1553,7 +1553,7 @@ bootstrap_stage2_sanity_output_preflight() (
   bssop_base=$1
   [ -n "${bssop_base}" ] || return 0
   for bssop_suffix in \
-    '' .frontend-driver.log \
+    '' .frontend-driver.log .frontend-failure.log \
     .frontend-bootstrap-0.log .frontend-bootstrap-0.log.bounded.env \
     .frontend-bootstrap-0.log.stage2-mir-retention .frontend-bootstrap-0.log.stage2-mir-retention.bounded.env \
     .frontend-bootstrap-0.log.stage2-module-path-naming .frontend-bootstrap-0.log.stage2-module-path-naming.bounded.env \
@@ -1711,8 +1711,19 @@ bootstrap_stage_sanity() (
   # 180s) can raise it; without this the scrub always restored the 180s
   # default and the probe timed out with raw_status=124.
   sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
     esac
     unset "${sanity_env_name}"
@@ -1992,8 +2003,16 @@ bootstrap_native_build_main() {
     --entry src/app/cli/main.spl \
     --runtime-path "${bootstrap_runtime_authority_path}" \
     -o "${output}"
+  # An outer bootstrap guard already owns the session (including the Rust
+  # phase). Keep this subtree monitor in that admitted session. Presence of
+  # either variable selects strict inheritance so partial contracts fail closed.
+  bootstrap_native_session_mode=new
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    bootstrap_native_session_mode=inherit
+  fi
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
-    --session-mode=new \
+    --session-mode="${bootstrap_native_session_mode}" \
+    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
     --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
@@ -2246,6 +2265,9 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_toolchain_authority}" |
       sed -n 's/^cargo-path=//p'
   )
+  rust_authority_dylib="${rust_authority_root}/rust-helper-lib-$(
+    printf '%s\n' "${rust_toolchain_authority}" | sed -n 's/^rust-llvm-dylib-sha256=//p'
+  )"
   [ -x "${rustc_abs}" ] && [ -x "${cargo_abs}" ] || {
     echo "error: Rust toolchain binaries missing under sysroot: ${rust_sysroot}" >&2
     exit 1
@@ -2377,7 +2399,60 @@ prepare_rust_authority_workspace() {
     echo "error: could not create private offline Cargo configuration" >&2
     exit 1
   }
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_prepare \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || {
+      echo "error: Rust macOS helper/library authority invalid" >&2
+      exit 1
+    }
+    printf '%s\n' "${rust_toolchain_authority}" \
+      >"${rust_authority_root}/rust-toolchain-authority.env"
+    if printf '%s\n' "${rust_toolchain_authority}" | grep -qx 'rust-helper-library-mode=private-dylib'; then
+      printf 'rust-helper-capsule-path=%s\nrust-helper-copied-dylib-sha256=%s\n' \
+        "${rust_authority_dylib}" \
+        "$(bootstrap_stage3_hash_file "${rust_authority_dylib}/libLLVM.dylib")" \
+        >>"${rust_authority_root}/rust-toolchain-authority.env"
+    else
+      printf 'rust-helper-capsule-path=absent\nrust-helper-copied-dylib-sha256=absent\n' \
+        >>"${rust_authority_root}/rust-toolchain-authority.env"
+    fi
+  fi
   rust_authority_workspace_prepared=1
+}
+
+# Forward only explicitly selected tools; unset tools keep target-aware Cargo
+# defaults (notably clang-cl and llvm-lib on Windows MSVC).
+run_rust_authority_env() {
+  rust_env_log=$1
+  shift
+  if [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
+  if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
+  if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
+  if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_validate \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1
+    for rust_env_arg in "$@"; do
+      case "$rust_env_arg" in DYLD_*=*) echo 'error: unadmitted Rust DYLD assignment' >&2; return 1 ;; esac
+    done
+    if printf '%s\n' "${rust_toolchain_authority}" | grep -qx 'rust-helper-library-mode=private-dylib'; then
+      set -- "DYLD_LIBRARY_PATH=${rust_authority_dylib}" "$@"
+    fi
+    set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$cc_abs}" "$@"
+    if [ "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS+x}${RUSTFLAGS+x}" != '' ]; then
+      set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" "$@"
+    fi
+  fi
+  run_logged "$rust_env_log" env -i "$@"
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_validate \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1
+    if grep -Fq 'stripping debug info with `rust-objcopy` failed' \
+      "${log_dir}/${rust_env_log}.log"; then
+      echo "error: Rust objcopy stripping failed despite Cargo success" >&2
+      return 1
+    fi
+  fi
 }
 
 run_rust_authority_cargo() {
@@ -2402,7 +2477,7 @@ run_rust_authority_cargo() {
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
     if [ "${rust_authority_lto}" = off ]; then
-      run_logged "${rust_authority_log}" env -i \
+      run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
@@ -2422,7 +2497,7 @@ run_rust_authority_cargo() {
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
         "${cargo_abs}" "$@"
     else
-      run_logged "${rust_authority_log}" env -i \
+      run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
@@ -2443,7 +2518,7 @@ run_rust_authority_cargo() {
         "${cargo_abs}" "$@"
     fi
   elif [ "${rust_authority_lto}" = off ]; then
-    run_logged "${rust_authority_log}" env -i \
+    run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
@@ -2459,7 +2534,7 @@ run_rust_authority_cargo() {
       TEMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
-    run_logged "${rust_authority_log}" env -i \
+    run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
@@ -2564,7 +2639,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
-    "${rust_generation_nonce}" || {
+    "${rust_generation_nonce}" "${PLATFORM}" || {
     echo "error: could not prepare immutable Rust authority generation" >&2
     exit 1
   }
@@ -2819,7 +2894,7 @@ else
       "${archive_prefix}simple_native_all${archive_suffix}" \
       "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
       "${legacy_generation_nonce}" "${rust_target_lock_handle}" \
-      "${legacy_observed_fingerprint}" || {
+      "${legacy_observed_fingerprint}" "${PLATFORM}" || {
       echo "error: complete legacy Rust authority migration failed" >&2
       exit 1
     }
@@ -2853,6 +2928,25 @@ else
   stage2_hosted_runtime_relative_path=\
 ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_hosted_runtime_sha256=${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
+  case "${PLATFORM}" in
+    *apple-darwin*)
+      # Cocoa has one dynamic owner. Audit the just-frozen native-all archive
+      # before spending a Stage 2 compile on duplicate static definitions.
+      # LLVM nm must match the pinned bitcode toolchain (Apple nm cannot read
+      # the Rust LLVM 23 archive members).
+      bootstrap_cocoa_tool_dir=$("${LLVM_CONFIG:-llvm-config}" --bindir) || exit 1
+      case "${bootstrap_cocoa_tool_dir}" in /*) ;; *) exit 1 ;; esac
+      [ -x "${bootstrap_cocoa_tool_dir}/llvm-nm" ] || {
+        echo "error: pinned LLVM nm is unavailable for Cocoa ownership audit" >&2
+        exit 1
+      }
+      run_logged macos-cocoa-owner sh "${repo_root}/scripts/bootstrap/run-process-group-timeout.shs" 60 2 \
+        env "NM=${bootstrap_cocoa_tool_dir}/llvm-nm" \
+        sh "${repo_root}/scripts/check/check-macos-cocoa-runtime-owner.shs" \
+        "${stage2_runtime_authority}/libsimple_runtime.dylib" \
+        "${stage2_runtime_authority}/libsimple_native_all.a"
+      ;;
+  esac
   bootstrap_stage3_compare_bind || {
     echo "error: could not bind canonical Stage 3 comparator" >&2
     exit 1
@@ -3011,6 +3105,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # mirroring stage3_timeout_args in resume-stage3-from-admitted.sh, whose
   # stage2 args-hash formula must stay word-for-word identical to this one.
   stage2_timeout_args=
+  bootstrap_stage2_darwin_env=
+  case "${PLATFORM}" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
   case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
     '') ;;
     *[!0-9]*)
@@ -3036,6 +3132,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
@@ -3161,6 +3263,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \

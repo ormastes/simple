@@ -1,0 +1,142 @@
+#!/bin/sh
+# A tiny offline Cargo build exercises rustc's executable debug-stripping path.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$root"
+[ "$(uname -s)" = Darwin ] || { echo 'SKIP: macOS Rust helper contract'; exit 0; }
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+reject() {
+    if bootstrap_stage3_rust_macos_helper_validate "$1" "$2" >"$work/negative-$3.log" 2>&1; then
+        fail "accepted $3"
+    fi
+    printf 'rejected=%s\n' "$3"
+}
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/macos-rust-objcopy.XXXXXX")
+echo "evidence=$work"
+if [ "${1:-}" = --static-rustc ]; then
+    [ "$#" -eq 2 ] || fail 'usage: --static-rustc /canonical/path/to/rustc'
+    authority=$(bootstrap_stage3_rust_macos_helper_authority "$2") || fail 'static authority'
+    printf '%s\n' "$authority" >"$work/authority.env"
+    grep -qx 'rust-helper-library-mode=absent' "$work/authority.env" || fail 'static helper mode'
+    capsule="$work/must-remain-absent"
+    bootstrap_stage3_rust_macos_helper_prepare "$authority" "$capsule" || fail 'static admission'
+    sed -n '/^run_rust_authority_env() {/,/^}/p' \
+        "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/production-env.shs"
+    . "$work/production-env.shs"
+    os=macos
+    rust_toolchain_authority=$authority
+    rust_authority_dylib=$capsule
+    log_dir=$work
+    cc_abs=/usr/bin/clang
+    run_logged() {
+        static_label=$1
+        shift
+        printf '%s\n' "$@" >"$work/$static_label.args"
+        "$@" >"$work/$static_label.log" 2>&1
+    }
+    DYLD_LIBRARY_PATH=/unadmitted run_rust_authority_env static /usr/bin/env || fail 'static forwarding'
+    if grep -q '^DYLD_' "$work/static.log"; then fail 'ambient DYLD inherited'; fi
+    if grep -q '^DYLD_' "$work/static.args"; then fail 'static helper given loader path'; fi
+    if run_rust_authority_env injected DYLD_LIBRARY_PATH=/unadmitted /usr/bin/env \
+        >"$work/injected-result.log" 2>&1; then fail 'explicit DYLD accepted'; fi
+    grep -Fq 'unadmitted Rust DYLD assignment' "$work/injected-result.log" || fail 'wrong injection rejection'
+    mkdir "$capsule"
+    reject "$authority" "$capsule" stray-static-capsule
+    printf 'STATUS: PASS static Rust helper admitted without library or DYLD\n'
+    exit 0
+fi
+authority=$(bootstrap_stage3_resolve_rust_toolchain "$root" "$PATH") || fail 'toolchain authority'
+printf '%s\n' "$authority" >"$work/authority.env"
+field() { printf '%s\n' "$authority" | sed -n "s/^$1=//p"; }
+rustc=$(field rustc-path)
+cargo=$(field cargo-path)
+objcopy=$(field rust-objcopy-path)
+llvm=$(field rust-llvm-dylib-path)
+llvm_sha=$(field rust-llvm-dylib-sha256)
+capsule="$work/rust-helper-lib-$llvm_sha"
+# Measure the real preparation function in a fresh shell; it streams one dylib.
+/usr/bin/time -lp sh -c '
+    . "$1/scripts/check/lib/bootstrap-stage3/authority.shs"
+    bootstrap_stage3_rust_macos_helper_prepare "$(cat "$2")" "$3"
+' sh "$root" "$work/authority.env" "$capsule" >"$work/copy.log" 2>&1 || fail 'prepare'
+stat -f 'copied_bytes=%z' "$capsule/libLLVM.dylib"
+capsule_inode=$(stat -f %i "$capsule/libLLVM.dylib")
+bootstrap_stage3_rust_macos_helper_prepare "$authority" "$capsule" || fail 'reuse'
+[ "$(stat -f %i "$capsule/libLLVM.dylib")" = "$capsule_inode" ] || fail 'cache recopied'
+env -i PATH="$PATH" DYLD_LIBRARY_PATH="$capsule" DYLD_PRINT_LIBRARIES=1 \
+    "$objcopy" --version >"$work/helper-version.log" 2>"$work/helper-libraries.log"
+grep -F " $capsule/libLLVM.dylib" "$work/helper-libraries.log" >/dev/null || fail 'wrong loaded LLVM'
+# This is intentionally a build script: a staticlib alone never invokes the
+# executable stripping path that failed while building compiler_backfill.
+mkdir "$work/src" "$work/home" "$work/cargo-home"
+printf '%s\n' '[package]' 'name = "rust-objcopy-probe"' 'version = "0.0.0"' \
+    'edition = "2021"' '[lib]' 'crate-type = ["staticlib"]' '[profile.bootstrap]' \
+    'inherits = "release"' 'strip = "debuginfo"' 'debug = true' >"$work/Cargo.toml"
+printf '%s\n' 'fn main() { println!("cargo:rerun-if-changed=build.rs"); }' >"$work/build.rs"
+printf '%s\n' '#[no_mangle]' \
+    'pub extern "C" fn rust_objcopy_probe(value: u64) -> u64 { value + 1 }' >"$work/src/lib.rs"
+env -i PATH="$PATH" HOME="$work/home" CARGO_HOME="$work/cargo-home" \
+    CARGO_TARGET_DIR="$work/target-unbound" RUSTC="$rustc" \
+    "$cargo" build --offline --manifest-path "$work/Cargo.toml" --profile bootstrap \
+    >"$work/unbound.log" 2>&1 || fail 'unbound Cargo fixture'
+if grep -Fq 'stripping debug info with `rust-objcopy` failed' "$work/unbound.log"; then
+    echo 'unbound_helper=strip-failure-reproduced'
+else
+    echo 'unbound_helper=toolchain-not-affected'
+fi
+# Exercise the actual production forwarding function, without executing the
+# bootstrap entrypoint or touching any shared Cargo cache.
+sed -n '/^run_rust_authority_env() {/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/production-env.shs"
+[ -s "$work/production-env.shs" ] || fail 'production function missing'
+. "$work/production-env.shs"
+os=macos
+rust_toolchain_authority=$authority
+rust_authority_dylib=$capsule
+log_dir=$work
+cc_abs=/usr/bin/clang
+run_logged() {
+    probe_label=$1
+    shift
+    /usr/bin/time -lp "$@" >"$work/$probe_label.log" 2>&1
+}
+run_rust_authority_env bound PATH="$PATH" HOME="$work/home" CARGO_HOME="$work/cargo-home" \
+    CARGO_TARGET_DIR="$work/target-bound" RUSTC="$rustc" \
+    "$cargo" build --offline --manifest-path "$work/Cargo.toml" --profile bootstrap \
+    || fail 'bound Cargo fixture'
+if grep -E 'rust-objcopy.*failed|Library not loaded|SIGABRT' "$work/bound.log"; then
+    fail 'Cargo hid a helper failure'
+fi
+[ -s "$work/target-bound/bootstrap/librust_objcopy_probe.a" ] || fail 'staticlib absent'
+bootstrap_stage3_rust_macos_helper_validate "$authority" "$capsule" || fail 'post-build identity'
+run_logged() {
+    printf '%s\n' 'warning: stripping debug info with `rust-objcopy` failed: fixture' >"$work/$1.log"
+}
+if run_rust_authority_env strip-warning "$cargo" --version >"$work/strip-warning-result.log" 2>&1; then
+    fail 'accepted a stripping failure warning with exit zero'
+fi
+grep -Fq 'Rust objcopy stripping failed despite Cargo success' "$work/strip-warning-result.log" \
+    || fail 'stripping warning was not the rejection cause'
+echo 'rejected=strip-warning-with-exit-zero'
+reject "$(printf '%s\n' "$authority" | sed 's/^rust-helper-llvm-version=.*/rust-helper-llvm-version=0.0.0/')" "$capsule" wrong-version
+reject "$(printf '%s\n' "$authority" | sed "s|^rust-llvm-dylib-path=.*|rust-llvm-dylib-path=$work/missing|")" "$capsule" missing-library
+ln -s "$llvm" "$work/linked-library"
+reject "$(printf '%s\n' "$authority" | sed "s|^rust-llvm-dylib-path=.*|rust-llvm-dylib-path=$work/linked-library|")" "$capsule" symlink-library
+reject "$(printf '%s\n' "$authority" | sed 's/^rust-objcopy-sha256=.*/rust-objcopy-sha256=wrong/')" "$capsule" changed-helper
+chmod 755 "$capsule"
+reject "$authority" "$capsule" writable-directory
+printf 'unadmitted\n' >"$capsule/libc++.1.dylib"
+chmod 555 "$capsule"
+reject "$authority" "$capsule" extra-library
+chmod 755 "$capsule"
+mv "$capsule/libc++.1.dylib" "$work/unadmitted-library"
+chmod 555 "$capsule"
+chmod 644 "$capsule/libLLVM.dylib"
+reject "$authority" "$capsule" writable-library
+printf 'tampered\n' >>"$capsule/libLLVM.dylib"
+chmod 444 "$capsule/libLLVM.dylib"
+reject "$authority" "$capsule" changed-library
+[ "$(bootstrap_stage3_hash_file "$llvm")" = "$llvm_sha" ] || fail 'global library changed'
+printf 'STATUS: PASS macos-rust-objcopy-authority\n'

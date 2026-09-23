@@ -1,0 +1,36 @@
+#!/bin/sh
+# Verify real artifacts: Cocoa is dynamically provided, never embedded in native-all.
+set -eu
+if [ "$(uname -s)" != Darwin ]; then
+    echo 'macOS required' >&2
+    exit 2
+fi
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 <libsimple_runtime.dylib> <libsimple_native_all.a>" >&2
+    exit 2
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runtime=$1
+archive=$2
+test_out=$(mktemp -d "${TMPDIR:-/tmp}/simple-cocoa-owner.XXXXXXXX")
+echo "Cocoa ownership evidence: $test_out"
+"${NM:-nm}" -gU "$runtime" > "$test_out/runtime.symbols"
+"${NM:-nm}" -gU "$archive" > "$test_out/archive.symbols" 2> "$test_out/archive-nm.stderr"
+failed=0
+for name in window_new window_resize window_close layer_create layer_fill_rect layer_present layer_free layer_read_pixel layer_blend_rect layer_blur layer_gradient_v event_pump; do
+    symbol="_rt_cocoa_$name"
+    if ! awk -v name="$symbol" '$NF == name { found++ } END { exit found != 1 }' "$test_out/runtime.symbols"; then
+        echo "runtime dylib must export exactly one $symbol" >&2
+        failed=1
+    fi
+    if awk -v name="$symbol" '$NF == name { found=1 } END { exit !found }' "$test_out/archive.symbols"; then
+        echo "native archive must not define $symbol" >&2
+        failed=1
+    fi
+done
+[ "$failed" -eq 0 ] || exit 1
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+    "$root/src/runtime/test/cocoa_dynload_owner_selfcheck.c" \
+    -o "$test_out/cocoa-owner"
+"$test_out/cocoa-owner" "$runtime"
+echo 'macOS Cocoa runtime ownership: PASS'

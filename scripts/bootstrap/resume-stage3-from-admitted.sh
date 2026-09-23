@@ -446,6 +446,8 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
+bootstrap_stage2_darwin_env=
+case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 stage2_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=$(stage2_env_value RUST_LOG)" \
   "LIBRARY_PATH=$stage2_library_path" \
@@ -462,6 +464,12 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
   "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
   "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  ${bootstrap_stage2_darwin_env:+"CC=$(stage2_env_value CC)"} \
+  ${bootstrap_stage2_darwin_env:+"CXX=$(stage2_env_value CXX)"} \
+  ${bootstrap_stage2_darwin_env:+"AR=$(stage2_env_value AR)"} \
+  ${bootstrap_stage2_darwin_env:+"LD=$(stage2_env_value LD)"} \
+  ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=$(stage2_env_value LLVM_CONFIG)"} \
+  ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=$(stage2_env_value SIMPLE_LLVM_REQUIRED_VERSION)"} \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
@@ -770,7 +778,23 @@ bootstrap_stage_sanity() (
   version_expect_status=0
   version_expected=$(bootstrap_stage3_canonical_version "$sanity_repo_root") || \
     version_expect_status=1
-  for name in $(env | sed 's/=.*//'); do unset "$name"; done
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
+  for name in $(env | sed 's/=.*//'); do
+    case "$name" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
+      ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+    esac
+    unset "$name"
+  done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
   evidence_tmp="$evidence.tmp.$$"
