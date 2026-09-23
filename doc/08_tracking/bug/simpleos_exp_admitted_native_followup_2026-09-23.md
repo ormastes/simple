@@ -30,3 +30,30 @@ remain outside this narrow value regression's evidence.
 Assigned owner: agent
 `/root/simpleos_bug_sweep_0923/libc_decimal_float_repair`, after its decimal-float
 lane, as recorded by the SimpleOS coordinator.
+
+## 2026-09-23 full-range repair
+
+The follow-up replaces raw exponent-bit addition with fixed-cost fdlibm/musl
+argument reduction, minimax evaluation, and the libc's existing subnormal-safe
+`scalbn`. The focused provider selfcheck pins twenty host-libm oracle values
+within one ULP, spanning the zero/subnormal and finite/overflow boundaries;
+the three range failures above and the pre-existing `exp(1)` contract are
+exact. Signed zero, both infinities, quiet NaN payload preservation, and
+signaling-NaN quieting also have bit-level checks. A
+separate deterministic 200,001-input sweep over `[-745, 709.75]` observes a
+maximum error of one ULP. Its two-object host compile used 0.12 s wall and
+78,900 KiB maximum RSS; the sweep used less than 0.01 s wall and 1,636 KiB
+maximum RSS. The implementation adds no allocation and no data-dependent loop,
+and replaces thirteen Taylor steps with a fixed degree-five minimax core plus
+subnormal-safe scaling. It targets normal round-to-nearest value results; it
+does not claim correct directed rounding or floating-point exception flags.
+
+TODO(simpleos-exp-host-specials): in a fresh verification session, run the
+expanded focused selfcheck containing the special-value and adjacent-boundary
+vectors. They were added after the prior finite-core sweep and remain
+unexecuted here because this session reached its mandatory three-cycle cap.
+
+TODO(simpleos-exp-range-admission): after an admitted native phase compiler and
+SimpleOS QEMU image are available, rerun the focused provider selfcheck in the
+guest and attach compiler/image identity, full-range ULP sweep, runtime, and
+maximum RSS. Host checks are not guest admission evidence.

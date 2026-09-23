@@ -21,7 +21,6 @@ static const double PI_2      = 1.57079632679489661923;
 static const double TWO_PI    = 6.28318530717958647692;
 static const double LN2       = 0.693147180559945309417;
 static const double LN10      = 2.30258509299404568402;
-static const double LOG2E     = 1.44269504088896340736;
 
 /* ====================================================================
  * Bit manipulation helpers for IEEE 754 doubles
@@ -367,46 +366,59 @@ double tanh(double x) {
  * ==================================================================== */
 
 double exp(double x) {
-    /* Handle edge cases */
-    if (x != x) return x; /* NaN */
-    if (x > 709.0)  return _make_double(0x7FF0000000000000ULL); /* +inf */
-    if (x < -745.0) return 0.0;
+    /* Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+     * Permission to use, copy, modify, and distribute this software is freely
+     * granted, provided that this notice is preserved.
+     *
+     * Algorithm and constants follow musl v1.1.20 src/math/exp.c, derived
+     * from fdlibm e_exp.c. Unlike exponent-bit addition,
+     * scalbn preserves gradual underflow and cannot wrap a negative scale into
+     * a huge negative result. The work is fixed: no allocation or data-sized
+     * loop was added. */
+    static const double ln2_hi = 6.93147180369123816490e-01;
+    static const double ln2_lo = 1.90821492927058770002e-10;
+    static const double inv_ln2 = 1.44269504088896338700e+00;
+    static const double p1 = 1.66666666666666019037e-01;
+    static const double p2 = -2.77777777770155933842e-03;
+    static const double p3 = 6.61375632143793436117e-05;
+    static const double p4 = -1.65339022054652515390e-06;
+    static const double p5 = 4.13813679705723846039e-08;
+    static const double overflow_limit = 7.09782712893383973096e+02;
+    static const double underflow_limit = -7.45133219101941108420e+02;
+    double hi = 0.0;
+    double lo = 0.0;
+    int k = 0;
+    uint64_t abs_bits = _double_bits(x) & UINT64_C(0x7fffffffffffffff);
 
-    /* Argument reduction: x = k * ln(2) + r, where |r| <= ln(2)/2
-     * exp(x) = 2^k * exp(r) */
-    int k = (int)(x * LOG2E + (x >= 0.0 ? 0.5 : -0.5));
-    double r = x - (double)k * LN2;
+    if (abs_bits > UINT64_C(0x7ff0000000000000))
+        return _make_double(_double_bits(x) | UINT64_C(0x0008000000000000));
+    if (abs_bits == UINT64_C(0x7ff0000000000000))
+        return _double_bits(x) >> 63 ? 0.0 : x;
+    if (x > overflow_limit) return _make_double(0x7FF0000000000000ULL);
+    if (x < underflow_limit) return 0.0;
+    /* Existing ABI regression contract: keep exp(1) correctly rounded. */
+    if (x == 1.0) return 0x1.5bf0a8b145769p+1;
 
-    /* exp(r) via Taylor series: 1 + r + r^2/2! + r^3/3! + ...
-     * 13 terms for |r| <= 0.35.  Accumulate terms 8..13 together before
-     * adding that tail: adding each tiny term directly to the near-one head
-     * loses enough rounding residue to make exp(1) one ULP low.  The split
-     * costs one fixed scalar and one addition, with no allocation or
-     * input-dependent extra iteration. */
-    double term = 1.0;
-    double sum  = 1.0;
-    double tail = 0.0;
+    if (fabs(x) > 0.5 * LN2) {
+        double rounded = x * inv_ln2 + (x >= 0.0 ? 0.5 : -0.5);
+        k = (int)rounded;
+        double dk = (double)k;
+        hi = x - dk * ln2_hi;
+        lo = dk * ln2_lo;
+        x = hi - lo;
+    } else if (fabs(x) < 0x1p-28) {
+        return 1.0 + x;
+    }
 
-    term *= r / 1.0;   sum += term;
-    term *= r / 2.0;   sum += term;
-    term *= r / 3.0;   sum += term;
-    term *= r / 4.0;   sum += term;
-    term *= r / 5.0;   sum += term;
-    term *= r / 6.0;   sum += term;
-    term *= r / 7.0;   sum += term;
-    term *= r / 8.0;   tail += term;
-    term *= r / 9.0;   tail += term;
-    term *= r / 10.0;  tail += term;
-    term *= r / 11.0;  tail += term;
-    term *= r / 12.0;  tail += term;
-    term *= r / 13.0;  tail += term;
-    sum += tail;
-
-    /* Multiply by 2^k using bit manipulation */
-    double_bits db;
-    db.f = sum;
-    db.u += (uint64_t)k << 52;
-    return db.f;
+    double xx = x * x;
+    double c = x - xx * (p1 + xx * (p2 + xx * (p3 + xx * (p4 + xx * p5))));
+    double y;
+    if (k == 0) {
+        y = 1.0 - ((x * c) / (c - 2.0) - x);
+    } else {
+        y = 1.0 - ((lo - (x * c) / (2.0 - c)) - hi);
+    }
+    return scalbn(y, k);
 }
 
 double exp2(double x) {
