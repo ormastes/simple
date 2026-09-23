@@ -154,6 +154,27 @@ Performance/durability blocker:
 Until all evidence exists, `DBD_CAPABILITY_STATE` must remain blocked and the
 daemon must fail closed instead of accepting network clients.
 
+## Durable DBFS authority integrated at source scope (2026-09-23)
+
+DBD no longer accepts root/durable-sync/transactional-replace booleans from its
+launcher. It snapshots the canonical mounted-DBFS owner twice, pins that exact
+generation, and rejects a remount before recovery or commit. A successful
+commit now returns `DbdDbfsCommitReceiptV1` only after exclusive staging,
+complete write, backing-device sync, atomic namespace replacement, namespace
+sync, and an exact bounded readback of the published bytes. Post-publication
+close, remount, or readback failures quarantine the adapter and report an
+uncertain outcome; they cannot be acknowledged as an abort or success.
+
+The underlying `DbFsDriver` path remains admitted only when its serialized
+device owner is registered. Its `fsync` advances the durable checkpoint only
+after the same stored `BlockDevice.flush()` returns success. The deterministic
+`dbfs_durable_commit_spec.spl` crash device separates volatile from durable
+media and covers acknowledged recovery, flush failure retaining the prior
+checkpoint, torn checkpoint rejection, and corrupt-slot failure. The DBD unit
+contract covers removal of caller claims, generation pinning, receipt issuance,
+exact readback, and fail-closed quarantine. Runtime/native/QEMU execution is
+deferred until the admitted phase environment is ready.
+
 ## Boot credential owner closed at source scope (2026-09-23)
 
 The canonical `/SERVERS.ELF` launch path now feeds the bounded credential file

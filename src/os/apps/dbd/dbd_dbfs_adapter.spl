@@ -19,6 +19,7 @@ use os.services.vfs.dbfs_mount_capability.{
     dbfs_vfs_mount_capability_snapshot_v1,
     dbfs_vfs_mount_capability_snapshot_current_v1
 }
+use std.common.hash.adler32.{adler32}
 
 pub val DBD_DBFS_MAX_RECOVERY_BYTES: i64 = 1024 * 1024
 pub val DBD_DBFS_STORAGE_ROOT_V1: text = SERVER_DATA_DATABASE_ROOT_PATH_V1
@@ -43,6 +44,14 @@ pub enum DbdDbfsAdapterState:
     MountedDurable
     Quarantined
     Closed
+
+pub struct DbdDbfsCommitReceiptV1:
+    """Evidence returned only after durable publication and exact readback."""
+    driver_instance_id: i64
+    mount_generation: u64
+    commit_generation: i64
+    byte_count: i64
+    checksum: i64
 
 pub class DbdDbfsAdapter:
     state: DbdDbfsAdapterState
@@ -181,7 +190,7 @@ pub class DbdDbfsAdapter:
             return Err(self.last_error)
         Ok(bytes)
 
-    pub me commit_and_sync(path: text, bytes: [u8]) -> Result<(), text>:
+    pub me commit_and_sync(path: text, bytes: [u8]) -> Result<DbdDbfsCommitReceiptV1, text>:
         if self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
         if self.filesystem_vfs and not self.filesystem_vfs_mount_current():
@@ -248,8 +257,31 @@ pub class DbdDbfsAdapter:
                 self.state = DbdDbfsAdapterState.Quarantined
                 self.last_error = "dbfs-vfs-mount-changed-during-commit"
                 return Err(self.last_error)
+            val verified = file_open_direct(path, 0u32)
+            if verified.is_err():
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-postflush-verify-open-failed"
+                return Err(self.last_error)
+            val verify_fd = verified.unwrap()
+            val verify_stat = file_fstat_bounded(verify_fd as u64)
+            val verify_read = if verify_stat.is_ok() and
+                    verify_stat.unwrap().size == bytes.len().to_u64():
+                file_read_direct(verify_fd, verify_stat.unwrap().size)
+            else:
+                Err("dbfs-commit-postflush-size-mismatch")
+            val verify_closed = file_close_direct(verify_fd)
+            if verify_read.is_err() or not verify_closed or verify_read.unwrap() != bytes:
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-postflush-verify-failed"
+                return Err(self.last_error)
+            val committed_generation = self.generation
             self.generation = self.generation + 1
-            return Ok(())
+            return Ok(DbdDbfsCommitReceiptV1(
+                driver_instance_id: 0,
+                mount_generation: self.filesystem_vfs_generation,
+                commit_generation: committed_generation,
+                byte_count: bytes.len().to_i64(),
+                checksum: adler32(bytes)))
         val driver = match self.driver:
             Some(value): value
             nil: return Err("dbfs-root-driver-unavailable")
@@ -304,8 +336,30 @@ pub class DbdDbfsAdapter:
         self.open_handles = self.open_handles - 1
         if self.state == DbdDbfsAdapterState.Quarantined:
             return Err(self.last_error)
+        val verify_stat = driver.stat_path(Path(raw: path))
+        val verify_open = driver.open_path(Path(raw: path), OpenFlags.read_only())
+        if verify_stat.is_err() or verify_open.is_err() or
+                verify_stat.unwrap().size != bytes.len().to_i64():
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-postflush-verify-open-failed"
+            return Err(self.last_error)
+        val verify_handle = verify_open.unwrap()
+        self.open_handles = self.open_handles + 1
+        val verify_read = driver.read_bytes_handle(verify_handle, bytes.len().to_i64())
+        val verify_closed = driver.close_handle(verify_handle)
+        if verify_closed.is_ok(): self.open_handles = self.open_handles - 1
+        if verify_read.is_err() or verify_closed.is_err() or verify_read.unwrap() != bytes:
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-postflush-verify-failed"
+            return Err(self.last_error)
+        val committed_generation = self.generation
         self.generation = self.generation + 1
-        Ok(())
+        Ok(DbdDbfsCommitReceiptV1(
+            driver_instance_id: self.driver_instance_id,
+            mount_generation: 0u64,
+            commit_generation: committed_generation,
+            byte_count: bytes.len().to_i64(),
+            checksum: adler32(bytes)))
 
     pub fn commit_outcome_uncertain() -> bool:
         """Whether the last failed commit crossed its atomic publish point.
@@ -320,7 +374,9 @@ pub class DbdDbfsAdapter:
             self.last_error == "dbfs-commit-namespace-sync-failed" or
             self.last_error == "dbfs-commit-namespace-close-failed" or
             self.last_error == "dbfs-vfs-mount-changed-during-commit" or
-            self.last_error == "dbfs-commit-postpublish-close-failed")
+            self.last_error == "dbfs-commit-postpublish-close-failed" or
+            self.last_error == "dbfs-commit-postflush-verify-open-failed" or
+            self.last_error == "dbfs-commit-postflush-verify-failed")
 
     pub me quarantine(reason: text) -> bool:
         if reason.trim() == "" or self.open_handles != 0:
@@ -390,25 +446,15 @@ pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
         case _:
             DbdDbfsAdapter.detached("mounted-root-is-not-dbfs")
 
-pub fn dbd_dbfs_adapter_from_filesystem_vfs(
-    dbfs_root: bool, durable_sync: bool, transactional_replace: bool
-) -> DbdDbfsAdapter:
+pub fn dbd_dbfs_adapter_from_filesystem_vfs() -> DbdDbfsAdapter:
     """Admit the least-authority filesystem-process VFS projection.
 
     The caller cannot promote a FAT32/RamFS mount: all three facts originate
     in the mounted VFS owner.  Replacement is acknowledged only after the
     DBFS VFS has synced the temporary file and committed its namespace rename.
     """
-    if not dbfs_root:
-        return DbdDbfsAdapter.detached("filesystem-vfs-root-is-not-dbfs")
-    if not durable_sync:
-        return DbdDbfsAdapter.detached("filesystem-vfs-durable-sync-unavailable")
-    if not transactional_replace:
-        return DbdDbfsAdapter.detached("filesystem-vfs-transactional-replace-unavailable")
-    # The booleans are compatibility claims from the launch coordinator, not
-    # authority.  Admit only a stable snapshot published by the mounted DBFS
-    # owner; a caller cannot manufacture readiness, and a concurrent remount
-    # cannot be mistaken for the observed generation.
+    # Admit only a stable snapshot published by the mounted DBFS owner. There
+    # is intentionally no caller-provided readiness input.
     val before = dbfs_vfs_mount_capability_snapshot_v1()
     val after = dbfs_vfs_mount_capability_snapshot_v1()
     if not dbfs_vfs_mount_capability_snapshot_current_v1(before, after):
