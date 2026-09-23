@@ -65,6 +65,26 @@ pub class DbdDbfsAdapter:
     filesystem_vfs_transactional_replace: bool
     filesystem_vfs_generation: u64
 
+    me verification_handle_acquired_v1():
+        self.open_handles = self.open_handles + 1
+
+    me finish_postflush_verification_v1(
+        size_matches: bool, read_matches: bool, close_succeeded: bool
+    ) -> Result<(), text>:
+        if close_succeeded:
+            self.open_handles = self.open_handles - 1
+        else:
+            # Retain the lease count: the backing owner still owns a handle
+            # whose release was not proved. close/reset remain unavailable.
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-postflush-verify-close-failed"
+            return Err(self.last_error)
+        if not size_matches or not read_matches:
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-postflush-verify-failed"
+            return Err(self.last_error)
+        Ok(())
+
     pub static fn detached(reason: text) -> DbdDbfsAdapter:
         DbdDbfsAdapter(
             state: DbdDbfsAdapterState.Detached,
@@ -347,7 +367,7 @@ pub class DbdDbfsAdapter:
             self.last_error = "dbfs-commit-postflush-verify-open-failed"
             return Err(self.last_error)
         val verify_handle = verify_open.unwrap()
-        self.open_handles = self.open_handles + 1
+        self.verification_handle_acquired_v1()
         val verify_stat = driver.stat_path(Path(raw: path))
         val size_matches = (verify_stat.is_ok() and
             verify_stat.unwrap().size == bytes.len().to_i64())
@@ -356,17 +376,10 @@ pub class DbdDbfsAdapter:
         else:
             Err(FsError.Corrupt)
         val verify_closed = driver.close_handle(verify_handle)
-        if verify_closed.is_ok(): self.open_handles = self.open_handles - 1
-        if verify_closed.is_err():
-            # Retain the lease count: the driver still owns a handle whose
-            # release was not proved. close/reset must remain unavailable.
-            self.state = DbdDbfsAdapterState.Quarantined
-            self.last_error = "dbfs-commit-postflush-verify-close-failed"
-            return Err(self.last_error)
-        if not size_matches or verify_read.is_err() or verify_read.unwrap() != bytes:
-            self.state = DbdDbfsAdapterState.Quarantined
-            self.last_error = "dbfs-commit-postflush-verify-failed"
-            return Err(self.last_error)
+        val read_matches = verify_read.is_ok() and verify_read.unwrap() == bytes
+        val verified = self.finish_postflush_verification_v1(
+            size_matches, read_matches, verify_closed.is_ok())
+        if verified.is_err(): return Err(verified.unwrap_err())
         val committed_generation = self.generation
         self.generation = self.generation + 1
         Ok(DbdDbfsCommitReceiptV1(
@@ -433,6 +446,11 @@ pub class DbdDbfsAdapter:
             self.last_error = "dbfs-root-driver-unavailable"
         true
 
+pub struct DbdDbfsVerificationFailureProbeV1:
+    adapter: DbdDbfsAdapter
+    receipt: Option<DbdDbfsCommitReceiptV1>
+    reason: text
+
 pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
     match driver:
         case DriverInstance.DbFs(dbfs):
@@ -472,3 +490,20 @@ pub fn dbd_dbfs_adapter_from_filesystem_vfs() -> DbdDbfsAdapter:
     mismatch, so this path must not mint a durable adapter or receipt.
     """
     DbdDbfsAdapter.detached("filesystem-vfs-dbfs-operation-authority-unavailable")
+
+pub fn dbd_dbfs_verification_close_failure_probe_v1(
+    source: DbdDbfsAdapter
+) -> DbdDbfsVerificationFailureProbeV1:
+    """Exercise the real negative verifier transition without minting authority.
+
+    This diagnostic has no success input: it models a handle acquisition,
+    failed stat/size verification, and failed close. Therefore it can only
+    quarantine an adapter and can never construct a commit receipt.
+    """
+    var adapter = source
+    adapter.verification_handle_acquired_v1()
+    val failed = adapter.finish_postflush_verification_v1(false, false, false)
+    DbdDbfsVerificationFailureProbeV1(
+        adapter: adapter,
+        receipt: None,
+        reason: if failed.is_err(): failed.unwrap_err() else: "unexpected-success")

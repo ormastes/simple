@@ -18,7 +18,8 @@ use std.spec.step
 use os.apps.dbd.dbd_dbfs_adapter.{
     DbdDbfsAdapter, DbdDbfsAdapterState, dbd_dbfs_adapter_from_driver,
     dbd_dbfs_adapter_from_filesystem_vfs, DBD_DBFS_MAX_RECOVERY_BYTES,
-    DBD_DBFS_JOURNAL_PATH_V1
+    DBD_DBFS_JOURNAL_PATH_V1,
+    dbd_dbfs_verification_close_failure_probe_v1
 }
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.block_device.{BlockDevice}
@@ -163,16 +164,13 @@ describe "dbd device-backed verified commit":
         expect(adapter.commit_outcome_uncertain()).to_be(false)
 
     it "retains verification-handle authority after an unproved close":
-        var adapter = DbdDbfsAdapter(
-            state: DbdDbfsAdapterState.Quarantined,
-            driver: nil,
-            driver_instance_id: 41,
-            generation: 3,
-            open_handles: 1,
-            last_error: "dbfs-commit-postflush-verify-close-failed",
-            filesystem_vfs: false,
-            filesystem_vfs_transactional_replace: false,
-            filesystem_vfs_generation: 0u64)
+        val probe = dbd_dbfs_verification_close_failure_probe_v1(
+            DbdDbfsAdapter.detached("probe-start"))
+        var adapter = probe.adapter
+        expect(probe.receipt.is_none()).to_be(true)
+        expect(probe.reason).to_equal(
+            "dbfs-commit-postflush-verify-close-failed")
+        expect(adapter.state).to_equal(DbdDbfsAdapterState.Quarantined)
         expect(adapter.commit_outcome_uncertain()).to_be(true)
         expect(adapter.close()).to_be(false)
         expect(adapter.reset_for_restart()).to_be(false)

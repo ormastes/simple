@@ -183,6 +183,14 @@ contract covers removal of caller claims, generation pinning, receipt issuance,
 exact readback, and fail-closed quarantine. Runtime/native/QEMU execution is
 deferred until the admitted phase environment is ready.
 
+TODO(environment/baseline): compilation is not claimed by this source-only
+slice. The inherited
+`src/lib/nogc_sync_mut/db/dbfs_driver/namespace_io.spl` currently initializes
+`content_generation` twice in existing inode constructors; that unrelated
+baseline compiler blocker was intentionally not edited in this isolated DBD
+authority change. Once the baseline is repaired and an admitted Phase-2
+runtime exists, execute the focused DBD adapter and DBFS crash/recovery specs.
+
 ## Boot credential owner closed at source scope (2026-09-23)
 
 The canonical `/SERVERS.ELF` launch path now feeds the bounded credential file
