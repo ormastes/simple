@@ -137,7 +137,7 @@ pub use collections::{
     rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
     rt_transient_heap_promote, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
-    rt_bytes_u8_at, rt_bytes_u8_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
+    rt_bytes_u8_at, rt_bytes_u8_set, rt_collection_set, rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get,
     rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes,
     rt_string_chars, rt_string_lines, rt_string_byte_at, rt_string_char_code_at, rt_string_concat, rt_string_contains,
     rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_free, rt_string_capitalize,

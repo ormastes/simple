@@ -910,6 +910,7 @@ pub use value::{
     rt_array_set_len_known_text,
     rt_array_set,
     rt_array_set_text,
+    rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
     rt_typed_words_u32_at,
