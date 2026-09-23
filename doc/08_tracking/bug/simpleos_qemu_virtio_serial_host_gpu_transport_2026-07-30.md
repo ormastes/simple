@@ -50,6 +50,29 @@ that runtime, then implement and verify the bounded socket endpoint, guest-owned
 VirtIO descriptor queues, one-in-flight session reset, and correlated x86_64 and
 RISC-V QEMU round trips. Codec-only evidence must not close this bug.
 
+### 2026-09-23 integration prerequisite audit
+
+The transport-neutral source slice now also contains an immutable single-owner
+session state machine. It admits only one request, requires HELLO before submit,
+enforces monotonic generation/frame identity and a stable run identity, and
+resets on unsolicited or mismatched responses without allocating body buffers.
+
+Production integration remains blocked on two concrete missing owner surfaces:
+
+- `src/lib/nogc_sync_mut/service/extern.spl` declares Unix listen/accept/send/
+  receive functions as requiring runtime implementation. The declared send and
+  receive types are `text`, so they cannot safely carry arbitrary framed bytes.
+  Only client connect plus QMP-oriented text I/O exist in the runtime.
+- `src/os/drivers/virtio/` has no console driver. The shared MMIO helper owns
+  only queue zero, while a named multiport console requires control RX/TX and
+  dynamically selected data RX/TX queues. The x86 PCI manager only recognizes
+  the console device name; it does not configure or own its queues or IRQs.
+
+Implementing either endpoint atop the current declarations would create a fake
+transport or ambiguous descriptor ownership. Required next work is a bounded,
+binary-safe Unix socket facade and a console-specific multi-queue owner for both
+x86 PCI and RISC-V MMIO, followed by WM composition with this session state.
+
 The current wrapper correctly reports `virtio-serial-unimplemented` when
 `ivshmem-plain` and the AArch64-only file-backed RAM tail are unavailable but
 QEMU exposes `virtio-serial-pci` or `virtio-serial-device`. Do not weaken that
