@@ -11,6 +11,10 @@ use os.kernel.loader.executable_crypto_authority.{
 }
 use os.services.evidence.verifier_owner.{SimpleOsTrustedEvidenceSignerV1}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.services.evidence.authority_clock_transition.{
+    simpleos_evidence_clock_transition_v1,
+    simpleos_evidence_authority_lock_outcome_v1
+}
 
 @unsafe(reason: "canonical wall-clock owner with typed negative failure", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
@@ -51,10 +55,11 @@ fn _copy_root(root: ExecutableTrustedSignerV1) -> SimpleOsTrustedEvidenceSignerV
     SimpleOsTrustedEvidenceSignerV1(key_id: root.key_id, public_key: key)
 
 fn _unlock(ok: bool) -> bool:
-    if not mutex_raw_unlock(_AUTHORITY_MUTEX):
-        _authority_quarantined = true
-        return false
-    ok
+    val unlocked = mutex_raw_unlock(_AUTHORITY_MUTEX)
+    val outcome = simpleos_evidence_authority_lock_outcome_v1(
+        true, unlocked, _authority_quarantined)
+    _authority_quarantined = outcome.quarantined
+    ok and outcome.authoritative
 
 pub fn simpleos_evidence_authority_start_v1(
 ) -> SimpleOsEvidenceAuthorityStatusV1:
@@ -69,17 +74,20 @@ pub fn simpleos_evidence_authority_start_v1(
         val _ = _unlock(false)
         return _status(false, "evidence-authority-quarantined")
     val sampled = _sample_wall_time_v1()
-    if sampled <= 0:
+    val clock = simpleos_evidence_clock_transition_v1(
+        _authority_started, _authority_quarantined,
+        _authority_last_unix_us, sampled)
+    if not clock.ok:
+        _authority_quarantined = clock.quarantined
         val _ = _unlock(false)
-        return _status(false, "time-owner-unavailable")
+        return _status(false, clock.reason)
     if _authority_started:
         val same_generation = loader.generation == _authority_loader_generation
-        if not same_generation or sampled < _authority_last_unix_us:
+        if not same_generation:
             _authority_quarantined = true
             val _ = _unlock(false)
-            return _status(false, if same_generation:
-                "time-owner-rollback" else: "trust-root-generation-changed")
-        _authority_last_unix_us = sampled
+            return _status(false, "trust-root-generation-changed")
+        _authority_last_unix_us = clock.next_last_unix_us
         val unlocked = _unlock(true)
         return _status(unlocked, if unlocked: "" else:
             "evidence-authority-unlock-unavailable")
@@ -87,7 +95,7 @@ pub fn simpleos_evidence_authority_start_v1(
     for root in loader.roots: projected.push(_copy_root(root))
     _authority_roots = projected
     _authority_loader_generation = loader.generation
-    _authority_last_unix_us = sampled
+    _authority_last_unix_us = clock.next_last_unix_us
     _authority_generation = 1u64
     _authority_started = true
     val unlocked = _unlock(true)
@@ -106,19 +114,21 @@ pub fn simpleos_evidence_authority_time_v1(
             ok: false, reason: "evidence-authority-quarantined",
             unix_us: 0, generation: 0u64)
     val sampled = _sample_wall_time_v1()
-    if sampled <= 0:
+    val clock = simpleos_evidence_clock_transition_v1(
+        _authority_started, _authority_quarantined,
+        _authority_last_unix_us, sampled)
+    if not clock.ok:
+        _authority_quarantined = clock.quarantined
+        val _ = _unlock(false)
+        return SimpleOsEvidenceAuthorityTimeV1(
+            ok: false, reason: clock.reason,
+            unix_us: 0, generation: 0u64)
+    if not _authority_started:
         val _ = _unlock(false)
         return SimpleOsEvidenceAuthorityTimeV1(
             ok: false, reason: "time-owner-unavailable",
             unix_us: 0, generation: 0u64)
-    if not _authority_started or sampled < _authority_last_unix_us:
-        _authority_quarantined = sampled < _authority_last_unix_us
-        val _ = _unlock(false)
-        return SimpleOsEvidenceAuthorityTimeV1(
-            ok: false, reason: if _authority_quarantined:
-                "time-owner-rollback" else: "time-owner-unavailable",
-            unix_us: 0, generation: 0u64)
-    _authority_last_unix_us = sampled
+    _authority_last_unix_us = clock.next_last_unix_us
     val generation = _authority_generation
     if not _unlock(true):
         return SimpleOsEvidenceAuthorityTimeV1(

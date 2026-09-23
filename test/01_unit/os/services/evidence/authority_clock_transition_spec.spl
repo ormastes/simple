@@ -1,0 +1,54 @@
+# @cover src/os/services/evidence/authority_clock_transition.spl 100%
+
+use std.spec
+use os.services.evidence.authority_clock_transition.{
+    simpleos_evidence_clock_transition_v1,
+    simpleos_evidence_authority_lock_outcome_v1
+}
+
+describe "SimpleOS evidence authority clock transition":
+    it "accepts equal or increasing samples without false concurrent rollback":
+        val equal = simpleos_evidence_clock_transition_v1(
+            true, false, 200, 200)
+        val increasing = simpleos_evidence_clock_transition_v1(
+            true, false, 200, 201)
+        expect(equal.ok).to_be(true)
+        expect(equal.quarantined).to_be(false)
+        expect(increasing.ok).to_be(true)
+        expect(increasing.next_last_unix_us).to_equal(201)
+
+    it "fails a provider outage without inventing time and permits recovery":
+        val failed = simpleos_evidence_clock_transition_v1(
+            true, false, 200, -1)
+        expect(failed.ok).to_be(false)
+        expect(failed.reason).to_equal("time-owner-unavailable")
+        expect(failed.next_last_unix_us).to_equal(200)
+        expect(failed.quarantined).to_be(false)
+        val recovered = simpleos_evidence_clock_transition_v1(
+            true, failed.quarantined, failed.next_last_unix_us, 201)
+        expect(recovered.ok).to_be(true)
+
+    it "quarantines rollback and never recovers that generation":
+        val rollback = simpleos_evidence_clock_transition_v1(
+            true, false, 200, 199)
+        expect(rollback.ok).to_be(false)
+        expect(rollback.reason).to_equal("time-owner-rollback")
+        expect(rollback.quarantined).to_be(true)
+        val retry = simpleos_evidence_clock_transition_v1(
+            true, rollback.quarantined, rollback.next_last_unix_us, 300)
+        expect(retry.ok).to_be(false)
+        expect(retry.reason).to_equal("evidence-authority-quarantined")
+
+    it "models lock failure as rejection and unlock failure as quarantine":
+        val lock_failed = simpleos_evidence_authority_lock_outcome_v1(
+            false, false, false)
+        expect(lock_failed.authoritative).to_be(false)
+        expect(lock_failed.quarantined).to_be(false)
+        expect(lock_failed.reason).to_equal(
+            "evidence-authority-lock-unavailable")
+        val unlock_failed = simpleos_evidence_authority_lock_outcome_v1(
+            true, false, false)
+        expect(unlock_failed.authoritative).to_be(false)
+        expect(unlock_failed.quarantined).to_be(true)
+        expect(unlock_failed.reason).to_equal(
+            "evidence-authority-unlock-unavailable")
