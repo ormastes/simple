@@ -527,6 +527,12 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool, includ
             "runtime_gpu_vulkan_readback_private.h",
             "runtime_gpu_vulkan_pipeline_private.h",
         ]);
+        if target.os != simple_common::target::TargetOS::Linux {
+            // The canonical non-Linux owner only exposes the unsupported-HIP
+            // contract. Linux's real HIP implementation must remain outside
+            // the provider-loader archive.
+            runtime_inputs.push("runtime_rocm.c");
+        }
     }
     if target.os == simple_common::target::TargetOS::Linux {
         // The portable compositor remains in the full CLI closure on Linux.
