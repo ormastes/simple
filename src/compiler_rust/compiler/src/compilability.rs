@@ -194,8 +194,9 @@ pub fn boxed_return_functions(items: &[Node]) -> HashSet<String> {
 /// would regress them); scalars and floats keep their historical raw-i64 unbox
 /// (f64 remains a separate, pre-existing gap). An optional inherits the ABI of
 /// its inner value: `text?` must retain a boxed `Some(text)`, while `i64?`
-/// keeps the historical scalar representation. Generics remain a future
-/// extension until each has a verified round-trip.
+/// keeps the historical scalar representation. `Option<T>` and `Result<T, E>`
+/// are boxed enum handles at the ABI boundary regardless of payload type; all
+/// other generic/named handles retain their historical raw-i64 behavior.
 ///
 /// `Type::Array` was the missing arm behind
 /// `doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`:
@@ -215,6 +216,7 @@ fn return_type_keeps_boxed(ty: &Type) -> bool {
         // `Type::Array`, and all of them marshal to a heap runtime array.
         Type::Array { .. } => true,
         Type::Simple(name) => matches!(name.as_str(), "text" | "str" | "string" | "String" | "Str"),
+        Type::Generic { name, .. } => matches!(name.as_str(), "Option" | "Result"),
         Type::Optional(inner) => return_type_keeps_boxed(inner),
         Type::Capability { inner, .. } => return_type_keeps_boxed(inner),
         _ => false,
@@ -1160,6 +1162,26 @@ mod tests {
             !boxed.contains("maybe_number"),
             "`i64?` retains the scalar/nil runtime representation"
         );
+    }
+
+    #[test]
+    fn generic_option_and_result_extern_returns_keep_their_enum_handles_boxed() {
+        let source = "extern fn maybe_text() -> Option<text>\n\
+                      extern fn maybe_i64() -> Option<i64>\n\
+                      extern fn maybe_nested() -> Option<Result<text, i64>>\n\
+                      extern fn result_value() -> Result<Option<text>, text>\n\
+                      extern fn generic_handle() -> Box<text>\n\
+                      extern fn class_handle() -> Socket\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse generic extern declarations");
+        let boxed = boxed_return_functions(&module.items);
+
+        assert!(boxed.contains("maybe_text"));
+        assert!(boxed.contains("maybe_i64"), "Option<i64> is an enum handle, not a raw scalar");
+        assert!(boxed.contains("maybe_nested"));
+        assert!(boxed.contains("result_value"));
+        assert!(!boxed.contains("generic_handle"));
+        assert!(!boxed.contains("class_handle"));
     }
 
     // Regression test for the seed cranelift Dict-return ABI miscompile
