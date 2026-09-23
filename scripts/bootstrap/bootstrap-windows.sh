@@ -7,6 +7,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
+. "${script_dir}/bootstrap-windows-cl-mode.shs"
+bootstrap_windows_preserve_cl_mode
 abi="${SIMPLE_WINDOWS_ABI:-msvc}"
 forward=()
 
