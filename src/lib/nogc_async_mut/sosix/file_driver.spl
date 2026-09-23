@@ -10,9 +10,10 @@ specs drive with a scripted device runs against the filesystem of this host.
 # negative errno and drops the two extra syscalls.
 """
 
-# TODO: (sosix C4) replace this reference provider with a Linux io_uring provider
-# once the runtime exposes io_uring externs; the seed's async driver is a thread pool
-# over pread whose backend reports "rust-syscall", so there is nothing to bind yet.
+# C4 Linux has an exact io_uring provider below. The hosted provider remains
+# the portable fallback selected by callers that do not require this backend.
+# TODO: (sosix C4 acceptance) run the exact-provider spec through the admitted
+# self-hosted interpreter and native binary before closing the tracking row.
 # TODO: (sosix C5) add the macOS provider on a host that has one; this path is
 # the portable fallback, not its replacement. 2026-09-12: verified on macOS
 # arm64 that the fallback has no portability gap (file_driver_spec.spl passes
@@ -33,6 +34,12 @@ use std.common.contracts.sosix.wait_v1.{SOSIX_NATIVE_WAIT_SIGNALED}
 use std.nogc_async_mut.io.{file_read_text_at, file_write_text_at}
 use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsTaken}
 use std.nogc_async_mut.sosix.sync.{SosixSyncWaitDriver}
+use std.nogc_async_mut.io.native_driver.{
+    native_driver_create, native_driver_destroy, native_driver_submit_open,
+    native_driver_submit_read, native_driver_submit_write, native_driver_submit_close,
+    native_driver_flush, native_driver_poll, native_driver_poll_id, native_driver_poll_result,
+    native_driver_poll_data, native_driver_backend_name
+}
 
 # The alias reports failure without an errno; EIO is the documented stand-in for
 # every failure the driver can see (bad table slot, alias error, buffer window).
@@ -100,4 +107,112 @@ impl SosixSyncWaitDriver for SosixHostedFileDriver:
         self.service(fs)
         SOSIX_NATIVE_WAIT_SIGNALED
 
-export SosixHostedFileDriver, SOSIX_FILE_DRIVER_STATUS_IO
+class SosixLinuxUringFileDriver:
+    handle: i64
+    paths: [text]
+    buffers: [text]
+    services: u64
+
+    static fn create() -> SosixLinuxUringFileDriver:
+        val handle = native_driver_create(64)
+        if handle < 0:
+            return SosixLinuxUringFileDriver(handle: -1, paths: [""], buffers: [""], services: 0u64)
+        if native_driver_backend_name(handle) != "io_uring":
+            native_driver_destroy(handle)
+            return SosixLinuxUringFileDriver(handle: -1, paths: [""], buffers: [""], services: 0u64)
+        SosixLinuxUringFileDriver(handle: handle, paths: [""], buffers: [""], services: 0u64)
+
+    fn available() -> bool:
+        self.handle >= 0 and native_driver_backend_name(self.handle) == "io_uring"
+
+    fn backend_name() -> text:
+        if self.handle < 0: "unavailable" else: native_driver_backend_name(self.handle)
+
+    me close():
+        if self.handle >= 0:
+            native_driver_destroy(self.handle)
+            self.handle = -1
+
+    me open_path(path: text) -> SosixCapabilityRef:
+        self.paths.push(path)
+        SosixCapabilityRef(slot: (self.paths.len() - 1).to_u32(), generation: 1u32)
+
+    me buffer_from(bytes: text) -> SosixBufferRef:
+        self.buffers.push(bytes)
+        SosixBufferRef(slot: (self.buffers.len() - 1).to_u32(), generation: 1u32)
+
+    fn buffer_bytes(buffer: SosixBufferRef) -> text:
+        val slot = buffer.slot.to_i64()
+        if slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
+
+    fn _path_of(file: SosixCapabilityRef) -> text:
+        val slot = file.slot.to_i64()
+        if slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
+
+    fn _wait_result(operation: i64) -> i64:
+        if operation < 0: return operation
+        val submitted = native_driver_flush(self.handle)
+        if submitted < 0: return submitted
+        if submitted == 0: return -5
+        val completed = native_driver_poll(self.handle, 1000)
+        if completed <= 0: return -5
+        if native_driver_poll_id(self.handle) != operation: return -5
+        native_driver_poll_result(self.handle)
+
+    me service(fs: SosixHostedFs) -> bool:
+        val taken = fs.take_next()
+        if not taken.taken:
+            return taken.canceled
+        self.services = self.services + 1u64
+        if not self.available():
+            return fs.complete_taken(taken, -38, 0u64)
+        val request = taken.request
+        val path = self._path_of(request.file)
+        val buffer_slot = request.buffer.slot.to_i64()
+        if path == "" or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
+            return fs.complete_taken(taken, -22, 0u64)
+
+        # Open and close are submitted native operations too; the positioned
+        # read/write is the operation whose result is published to SOSIX.
+        # O_CREAT (64) is needed for positioned writes; reads retain ENOENT.
+        val flags = if request.api_id == SOSIX_FS_READ_AT: 0 else: 66
+        val open_op = native_driver_submit_open(self.handle, path, flags, 420)
+        val fd = self._wait_result(open_op)
+        if fd < 0:
+            return fs.complete_taken(taken, fd.to_i32(), 0u64)
+
+        var status: i64 = 0
+        var transferred: u64 = 0u64
+        if request.api_id == SOSIX_FS_READ_AT:
+            val read_op = native_driver_submit_read(self.handle, fd, request.length.to_i64(), request.file_offset.to_i64())
+            status = self._wait_result(read_op)
+            if status >= 0:
+                val bytes = native_driver_poll_data(self.handle)
+                self.buffers[buffer_slot] = bytes
+                transferred = status.to_u64()
+        else:
+            val start = request.buffer_offset.to_i64()
+            val stop = start + request.length.to_i64()
+            val data = self.buffers[buffer_slot]
+            if start < 0 or start > data.len():
+                status = -22
+            else:
+                val window = if stop > data.len(): data[start:data.len()] else: data[start:stop]
+                val write_op = native_driver_submit_write(self.handle, fd, window, request.file_offset.to_i64())
+                status = self._wait_result(write_op)
+                if status >= 0: transferred = status.to_u64()
+
+        val close_op = native_driver_submit_close(self.handle, fd)
+        val close_status = self._wait_result(close_op)
+        if status >= 0 and close_status < 0: status = close_status
+        if status < 0:
+            fs.complete_taken(taken, status.to_i32(), transferred)
+        else:
+            fs.complete_taken(taken, 0, transferred)
+
+impl SosixSyncWaitDriver for SosixLinuxUringFileDriver:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8:
+        self.service(fs)
+        SOSIX_NATIVE_WAIT_SIGNALED
+
+export SosixHostedFileDriver, SosixLinuxUringFileDriver, SOSIX_FILE_DRIVER_STATUS_IO
