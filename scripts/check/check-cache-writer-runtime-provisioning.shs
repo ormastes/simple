@@ -1,0 +1,85 @@
+#!/bin/sh
+# Static regression for clean-checkout cache-writer runtime provisioning.
+set -eu
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
+cd "$root"
+
+main=.github/workflows/cache-main-writer.yml
+branch=.github/workflows/cache-branch-ci.yml
+promotion=.github/workflows/cache-promotion.yml
+provisioner=scripts/ci/provision-cache-writer-runtime.shs
+
+fail() {
+  echo "check-cache-writer-runtime-provisioning: FAIL - $*" >&2
+  exit 1
+}
+
+for workflow in "$main" "$branch" "$promotion" "$provisioner"; do
+  test -f "$workflow" || fail "missing workflow: $workflow"
+done
+
+step_contains() {
+  awk -v step="$2" -v token="$3" '
+    $0 == "      - name: " step { inside = 1; next }
+    inside && $0 ~ /^      - name:/ { exit }
+    inside && index($0, token) { found = 1 }
+    END { exit !found }
+  ' "$1"
+}
+
+for token in \
+  'uses: actions/cache@v4' \
+  "hashFiles('src/compiler_rust/Cargo.lock'," \
+  "'src/compiler_rust/**/*.rs'"; do
+  rg -Fq -- "$token" "$main" || fail "$main is missing cache identity: $token"
+  rg -Fq -- "$token" "$branch" || fail "$branch is missing cache identity: $token"
+done
+
+for workflow in "$main" "$branch"; do
+  step_contains "$workflow" 'Provision self-hosted bin/simple' \
+    'sh scripts/ci/provision-cache-writer-runtime.shs' ||
+    fail "$workflow does not provision the canonical self-hosted runtime"
+  if rg -q -F -- 'ln -sfn "$PWD/src/compiler_rust/target/bootstrap/simple" bin/simple' "$workflow"; then
+    fail "$workflow must not install the help-only Rust seed as bin/simple"
+  fi
+done
+
+for token in \
+  '--full-bootstrap' \
+  '--stop-after-stage2' \
+  '--target=//bootstrap:stage4' \
+  '--reason=self-host-convergence-check' \
+  '--bootstrap-receipt="$receipt"' \
+  '--deploy' \
+  '--no-mcp' \
+  '--jobs=2' \
+  'SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=2'; do
+  rg -Fq -- "$token" "$provisioner" ||
+    fail "provisioner is missing admitted bootstrap contract: $token"
+done
+
+if rg -q -- '--resume-stage[34]-from-admitted|ln -s.*target/bootstrap/simple' "$provisioner"; then
+  fail "provisioner must use normal admitted scheduling and never deploy the Rust seed"
+fi
+
+for step in \
+  'Cache bootstrap toolchain objects' \
+  'Provision self-hosted bin/simple' \
+  'Build' \
+  'Publish branch action mappings (TTL, branch quota)'; do
+  step_contains "$branch" "$step" "if: steps.preflight.outputs.writer == 'true'" ||
+    fail "branch step is not guarded by the writer verdict: $step"
+done
+
+main_provision_line=$(rg -n -F -- '- name: Provision self-hosted bin/simple' "$main" | cut -d: -f1)
+main_build_line=$(rg -n -F -- '- name: Build the exact main commit' "$main" | cut -d: -f1)
+test "$main_provision_line" -lt "$main_build_line" ||
+  fail "main runtime must be provisioned before the exact-commit build"
+
+# Promotion validates shell requests only. Keep it free of compiler setup.
+if rg -q -- 'cargo build|rust-toolchain|Provision bin/simple|bootstrap runtime' "$promotion"; then
+  fail "cache promotion must not provision a compiler runtime"
+fi
+
+echo "check-cache-writer-runtime-provisioning: PASS"
