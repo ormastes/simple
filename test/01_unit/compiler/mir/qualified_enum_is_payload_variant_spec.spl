@@ -1,0 +1,87 @@
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# Regression: doc/08_tracking/bug/interp_qualified_enum_is_payload_variant_2026-06-14.md
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+enum QualifiedEnumIsProbe:
+    A(x: i64)
+    B
+
+enum QualifiedEnumIsOtherProbe:
+    A(x: i64)
+
+fn lower_function(src: text, target_name: text) -> (text, [text]):
+    val filename = "qualified_enum_is_" + target_name + ".spl"
+    val parsed = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in mir_lowering.errors:
+        errors = errors.push("MIR: " + error.message)
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            return (serialize_mir_function(function), errors)
+    ("", errors.push("missing function " + target_name))
+
+val ENUM_SOURCE = "enum E:\n" +
+    "    A(x: i64)\n" +
+    "    B\n\n" +
+    "fn is_a(value: E) -> bool:\n" +
+    "    value is E.A\n\n" +
+    "fn is_b(value: E) -> bool:\n" +
+    "    value is E.B\n\n" +
+    "fn scalar_is(value: i64) -> bool:\n" +
+    "    value is 5\n\n" +
+    "fn match_a(value: E) -> bool:\n" +
+    "    match value:\n" +
+    "        case E.A(x): x == 5\n" +
+    "        case _: false\n"
+
+describe "qualified enum variant is executable semantics":
+    it "recognizes a fresh payload value while match binds the same payload":
+        val payload = QualifiedEnumIsProbe.A(x: 5)
+        val unit = QualifiedEnumIsProbe.B
+        expect(payload is QualifiedEnumIsProbe.A).to_equal(true)
+        expect(payload is QualifiedEnumIsProbe.B).to_equal(false)
+        expect(payload is QualifiedEnumIsOtherProbe.A).to_equal(false)
+        expect(unit is QualifiedEnumIsProbe.B).to_equal(true)
+        var matched = -1
+        match payload:
+            case QualifiedEnumIsProbe.A(x): matched = x
+            case _: matched = -2
+        expect(matched).to_equal(5)
+
+describe "qualified enum variant is lowering":
+    it "tests a payload variant by enum identity and discriminant without constructing the RHS":
+        val (mir, errors) = lower_function(ENUM_SOURCE, "is_a")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_enum_check_variant")
+        expect(mir.contains("rt_enum_new")).to_equal(false)
+        expect(mir.contains("\"op\":\"Add\"")).to_equal(false)
+
+    it "uses the same typed test for a unit variant":
+        val (mir, errors) = lower_function(ENUM_SOURCE, "is_b")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_enum_check_variant")
+        expect(mir.contains("rt_enum_new")).to_equal(false)
+
+    it "keeps a non-enum is expression boolean instead of using the arithmetic fallback":
+        val (mir, errors) = lower_function(ENUM_SOURCE, "scalar_is")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("\"op\":\"Eq\"")
+        expect(mir.contains("\"op\":\"Add\"")).to_equal(false)
+
+    it "keeps qualified match lowering as the control path":
+        val (mir, errors) = lower_function(ENUM_SOURCE, "match_a")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_enum_discriminant")

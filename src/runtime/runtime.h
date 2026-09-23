@@ -1599,8 +1599,12 @@ int64_t     rt_driver_poll(int64_t handle, int64_t max, int64_t timeout_ms);
 int64_t     rt_driver_poll_id(int64_t handle, int64_t index);
 int64_t     rt_driver_poll_result(int64_t handle, int64_t index);
 int64_t     rt_driver_poll_flags(int64_t handle, int64_t index);
+int64_t     rt_driver_poll_data(int64_t handle, int64_t index);
+int64_t     rt_driver_poll_data_len(int64_t handle, int64_t index);
+const uint8_t* rt_driver_poll_data_ptr(int64_t handle, int64_t index);
 bool        rt_driver_cancel(int64_t handle, int64_t op_id);
 int64_t     rt_driver_backend_name(int64_t handle);
+const char* rt_driver_backend_name_ptr(int64_t handle);
 bool        rt_driver_supports_sendfile(int64_t handle);
 bool        rt_driver_supports_zero_copy(int64_t handle);
 

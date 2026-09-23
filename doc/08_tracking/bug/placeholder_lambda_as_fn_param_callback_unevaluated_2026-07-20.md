@@ -1,14 +1,54 @@
 # Placeholder-lambda callback passed to a free-function parameter is never invoked (returns `<lambda>`)
-## Open 2026-09-16 — needs owner triage
+## Open 2026-09-21 — AST argument shape passes; callback-value proof unavailable
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+Revalidated from exact `origin/main` revision
+`e0dd873da1b7828389db4eb60e82972cc8245313` on 2026-09-21:
+
+- The deployed `bin/simple.exe` is a Rust bootstrap seed (SHA-256
+  `E2A42543D62F794A8DF8389DE70C4200FF95675B5C48B60F0103B1F47A77E78C`).
+  It still reproduces the report: named and explicit lambda controls pass,
+  while the free-function, multi-hop, `pmap`-shaped loop, and numbered
+  placeholder cases nested inside SSpec expectations return `<lambda>`. This
+  is diagnostic seed evidence only.
+- A separate seed `run` probe that first bound each callback result to a `val`
+  produced the expected values for direct invocation, built-in `map`,
+  free-function, multi-hop, `pmap`, and numbered forms. The broad historical
+  framing "never invoked" is therefore not established for current source;
+  the retained red requires an outer consumer expression around the callback
+  call, consistent with a placeholder scope/ownership defect.
+- The working-copy pure-Simple frontend AST probe passes
+  `test/01_unit/compiler/frontend/placeholder_lambda_callback_param_spec.spl`:
+  four examples find matching ordinary-call and method-call nodes whose
+  callback argument is `EXPR_LAMBDA` with the expected arity. The named
+  function control is `EXPR_IDENT`; the explicit lambda control is also
+  `EXPR_LAMBDA`. The probe scans the expression arena and does not prove that
+  the matching node is the reachable executable root or that evaluation
+  returns the required value.
+- `src/compiler/10.frontend/core/parser_expr.spl::parse_call_arg` is the
+  candidate parser boundary. It applies `transform_placeholder_lambda` to the
+  raw argument before the enclosing call is built. Source inspection shows
+  explicit and placeholder lambdas share `eval_lambda` and `eval_call`, but
+  execution through those paths remains unverified.
+- Runtime revalidation through `core_interpret` is blocked: the seed-hosted
+  source probe terminates with Windows status `0xC000001D` (illegal
+  instruction) before producing a result, and no admitted Stage 2/3/4 or
+  deployed pure-Simple Windows binary with matching provenance exists in this
+  worktree. Native proof with `SIMPLE_NO_STUB_FALLBACK=1` is therefore absent.
+  `test/01_unit/compiler/frontend/fixtures/placeholder_lambda_callback_value_probe.spl`
+  retains the value-based interpreter/native regression for that future run.
+
+Keep this row **open** until an admitted pure-Simple interpreter and native
+candidate both pass the callback-value regression. The AST evidence alone is
+insufficient to close it or justify a parser/evaluator source change.
+
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/{gc_async_immut,gc_sync_immut}`
-**Status:** open — genuine interpreter/compiler defect, reproduces under both
-`bin/simple run` and `bin/simple test`
+**Status:** open — historical interpreter/compiler defect; current admitted
+interpreter/native behavior is unverified
 
 ## Summary
 
@@ -25,7 +65,7 @@ higher-order methods (`[1,2,3].map(_1 + 1)`) and direct invocation
 threading a placeholder lambda through a *user-defined* function parameter
 and invoking it there.
 
-## Minimal repro (reproduces under `bin/simple run`, no test harness needed)
+## Historical minimal repro
 
 ```simple
 fn call_once(f):
@@ -94,4 +134,3 @@ site rather than the runtime value's actual callable-ness. Not root-caused
 further (would require reading the placeholder-lambda desugaring/lowering
 code, out of scope for this triage pass — no Rust seed source fix per the
 fix-guide's scope).
-

@@ -3,8 +3,16 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase1-authority.XXXXXX")
-trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
+cleanup_tmp=$tmp
+trap 'chmod -R u+w "$cleanup_tmp" 2>/dev/null || :; rm -rf "$cleanup_tmp"' EXIT HUP INT TERM
 fail() { echo "bootstrap_phase_stage1_native_build_authority_test: $*" >&2; exit 1; }
+
+# An inherited export attribute can hide assignment-before-function differences
+# between host shells. Require the verifier to export its task environment and
+# to scrub bootstrap-only dispatch controls from non-producer tasks.
+unset TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NATIVE_BUILD_CACHE_DIR
+SIMPLE_BOOTSTRAP=ambient SIMPLE_NATIVE_BUILD_RUST=ambient SIMPLE_BINARY=ambient
+export SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
 
 mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/good" "$tmp/silent/outputs"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
@@ -12,11 +20,25 @@ cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
 
 cat >"$tmp/fake-seed" <<'EOF'
 #!/bin/sh
+work=$(dirname "$0")
+[ "${HOME:-}" = "$work/home" ] || exit 71
+[ "${TMPDIR:-}" = "$work/tmp" ] || exit 72
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 73
+case "${SIMPLE_NATIVE_BUILD_CACHE_DIR:-}" in
+  "$work/cache/"?*) ;;
+  *) exit 74 ;;
+esac
 if [ "${1:-}" = --version ]; then
+  [ "$SIMPLE_NATIVE_BUILD_CACHE_DIR" = "$work/cache/compiler_version" ] || exit 75
+  [ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}${SIMPLE_BINARY:-}" ] || exit 76
   echo fake-phase1-seed
   exit 0
 fi
 if [ "${1:-}" = native-build ]; then
+  verification_root=${SIMPLE_NATIVE_BUILD_CACHE_DIR%/cache/*}
+  [ "${SIMPLE_BOOTSTRAP:-}" = 1 ] || exit 77
+  [ "${SIMPLE_NATIVE_BUILD_RUST:-}" = 1 ] || exit 78
+  [ "${SIMPLE_BINARY:-}" = "$verification_root/compiler.snapshot" ] || exit 79
   printf 'rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
     "${SIMPLE_NATIVE_BUILD_RUST:-}" "${SIMPLE_BINARY:-}" \
     "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_INVOCATIONS"
@@ -30,7 +52,10 @@ if [ "${1:-}" = native-build ]; then
   mkdir -p "$(dirname "$output")"
   cat >"$output" <<'TOOL'
 #!/bin/sh
-printf '%s\n' "$(basename "$0") $*" >>"$PHASE1_EXECUTIONS"
+[ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}${SIMPLE_BINARY:-}" ] || exit 77
+printf 'generic=%s|rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
+  "$(basename "$0")" "${SIMPLE_NATIVE_BUILD_RUST:-}" \
+  "${SIMPLE_BINARY:-}" "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_EXECUTIONS"
 exit 0
 TOOL
   chmod +x "$output"
@@ -53,6 +78,8 @@ PHASE1_EXECUTIONS="$tmp/good.executions" \
     --source-root="$tmp/source" --work-root="$tmp/good" \
     --timeout-seconds=30 || status=$?
 [ "$status" -ne 0 ] || fail "Stage 1 unsupported rows unexpectedly admitted the whole matrix"
+grep -Fq 'task=compiler_version|result=PASS|status=0' "$tmp/good/summary.env" ||
+  fail "compiler version child did not receive isolated task environment"
 [ "$(wc -l <"$tmp/good.invocations" | tr -d ' ')" = 2 ] ||
   fail "expected both Stage 1 server builds"
 snapshot="$tmp/good/compiler.snapshot"
@@ -67,8 +94,10 @@ grep -Eq 'task=mcp_build\|result=PASS\|status=0.*artifact_status=present' \
   "$tmp/good/summary.env" || fail "materialized MCP build was not recorded"
 grep -Eq 'task=lsp_build\|result=PASS\|status=0.*artifact_status=present' \
   "$tmp/good/summary.env" || fail "materialized LSP build was not recorded"
-grep -Fq 'simple_mcp_server --help' "$tmp/good.executions" || fail "MCP help did not launch"
-grep -Fq 'simple_lsp_mcp_server --help' "$tmp/good.executions" || fail "LSP help did not launch"
+grep -Fq 'generic=simple_mcp_server|rust=|binary=|bootstrap=|argv=--help' \
+  "$tmp/good.executions" || fail "MCP generic child inherited bootstrap dispatch controls"
+grep -Fq 'generic=simple_lsp_mcp_server|rust=|binary=|bootstrap=|argv=--help' \
+  "$tmp/good.executions" || fail "LSP generic child inherited bootstrap dispatch controls"
 
 # A stale executable plus an exit-zero producer used to become a false PASS.
 # The recorder must delete the residue, require a fresh exact artifact, and
@@ -98,5 +127,59 @@ grep -Fq 'task=simple_lsp_mcp_server_help|result=BLOCKED|status=not-built' \
 [ ! -s "$tmp/silent.executions" ] || fail "stale server residue executed"
 [ ! -e "$tmp/silent/outputs/simple_mcp_server" ] || fail "stale MCP artifact survived"
 [ ! -e "$tmp/silent/outputs/simple_lsp_mcp_server" ] || fail "stale LSP artifact survived"
+
+# The compiler-unit and repository-full runners deliberately bypass run_task.
+# Execute those function bodies with hostile exported dispatch controls and a
+# fake runner that rejects leakage while requiring the exact receipt-bound CLI.
+direct="$tmp/direct"
+mkdir -p "$direct/source/test/01_unit/compiler" "$direct/source/scripts/bootstrap" \
+  "$direct/logs" "$direct/tmp" "$direct/cache"
+: >"$direct/source/test/01_unit/compiler/env_isolation_spec.spl"
+cat >"$direct/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+chmod +x "$direct/source/scripts/bootstrap/run-process-group-timeout.shs"
+cat >"$direct/runner" <<'EOF'
+#!/bin/sh
+[ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}" ] || exit 80
+[ "${SIMPLE_BINARY:-}" = "$EXPECTED_SIMPLE_BINARY" ] || exit 81
+case " $* " in
+  *' --json '*)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0}}'
+    ;;
+esac
+EOF
+chmod +x "$direct/runner"
+{
+  sed -n '/^run_compiler_unit_tests()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_repository_full_tests()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+} >"$direct/functions.sh"
+# shellcheck disable=SC1090 -- generated from the verifier under test.
+. "$direct/functions.sh"
+validate_command_owner_receipt() { return 0; }
+source_root="$direct/source"
+logs="$direct/logs"
+tmp="$direct/tmp"
+cache="$direct/cache"
+home="$direct/home"
+mkdir -p "$home"
+spec_timeout_seconds=30
+compiler_cli="$direct/receipt-bound-simple"
+summary="$direct/summary.env"
+: >"$summary"
+EXPECTED_SIMPLE_BINARY="$compiler_cli"
+export EXPECTED_SIMPLE_BINARY
+run_compiler_unit_tests "$direct/runner" "$direct/owner.env" ||
+  fail "compiler-unit child inherited hostile bootstrap dispatch controls"
+run_repository_full_tests "$direct/runner" "$direct/owner.env" "$direct/mcp" ||
+  fail "repository-full child inherited hostile bootstrap dispatch controls"
+grep -Fq 'task=compiler_unit_tests|result=PASS' "$summary" ||
+  fail "compiler-unit isolation receipt missing"
+grep -Fq 'task=repository_full_tests|result=PASS' "$summary" ||
+  fail "repository-full isolation receipt missing"
 
 echo 'bootstrap_phase_stage1_native_build_authority_test: PASS'
