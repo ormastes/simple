@@ -61,8 +61,11 @@ Current focused implementation/evidence surfaces:
 
 `authority_owner.spl` now projects evidence signing roots only from the
 loader's one-time immutable trust-root registry and pins its generation. It
-owns the bounded receipt-age/challenge-TTL policy and samples the raw wall-clock
-provider behind a typed negative-failure boundary with rollback quarantine.
+owns the bounded receipt-age/challenge-TTL policy and samples the wall-clock
+provider through `std.nogc_sync_mut.io.time_ops`'s single-call, non-panicking
+sentinel facade, with rollback quarantine. This removes the evidence service's
+direct runtime call; SOSIX has no separate Unix-epoch provider on this route,
+so guest-native clock delivery remains an explicit QEMU verification item.
 The umbrella admission path uses those authoritative roots and time; its
 legacy roots parameter is only an exact assertion and cannot select authority.
 Partial initialization, root-generation change, clock failure, rollback, lock
@@ -83,7 +86,8 @@ sampling is O(1), allocation-free apart from returned value construction, and
 does not alter receipt signature verification or ledger hot loops.
 
 TODO(environment): once an admitted Phase-2 test-capable runtime exists, run
-`test/01_unit/os/services/evidence/authority_owner_spec.spl`,
+`test/01_unit/os/services/evidence/authority_clock_transition_spec.spl`,
+`authority_owner_spec.spl`,
 `artifact_snapshot_spec.spl`, `verifier_owner_spec.spl`, and
 `verifier_authority_spec.spl`, `performance_policy_owner_spec.spl`, and
 `umbrella_admission_spec.spl`; then run SimpleOS QEMU root-absence,
