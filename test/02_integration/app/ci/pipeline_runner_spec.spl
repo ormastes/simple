@@ -35,6 +35,7 @@ use std.io_runtime.{file_read, file_exists}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1, PodSpecV1}
 use std.common.contracts.orchestration.ci_v1.*
+use std.common.contracts.container.runtime_v1.*
 use app.ci.pipeline_runner.*
 
 fn empty_job() -> JobV1:
@@ -128,6 +129,19 @@ fn run_or_empty(p: PipelineV1, t: Dict<text, JobV1>, id: text) -> RunReceiptV1:
         case Err(r): RunReceiptV1(run_id: id, pipeline: "", verdict: "REJECTED:" + r.kind, jobs: [])
 
 describe "Simple CI runs a pipeline on this host":
+
+    it "deletes state after proven pre-execution failure but retains uncertain create state":
+        val pre_exec = RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+            operation: "create", command: runtime_command_empty(),
+            state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "",
+            reason: "intent-journal-write-failed")
+        expect(container_runtime_state_requires_recovery(pre_exec)).to_equal(false)
+
+        val uncertain = RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED,
+            operation: "create", command: runtime_command_empty(),
+            state: runtime_state_empty(), exit_code: 125, stdout: "", stderr: "",
+            reason: "native-create-failed")
+        expect(container_runtime_state_requires_recovery(uncertain)).to_equal(true)
 
     it "cleans temporary container runtime state and reports no stale path":
         val state_dir = match secure_temp_dir("/tmp", "simpleorch-cleanup-spec-"):
