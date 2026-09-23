@@ -1,0 +1,89 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+fail() { echo "FAIL: $*" >&2; exit 1; }
+export TMPDIR="$tmp"
+
+# Failed installation must leave the workload unexecuted and publish evidence.
+status=0
+CC=false perl "$guard" --receipt="$tmp/install-failed.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/unprotected" >"$tmp/install.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$tmp/unprotected" ] || fail 'installation failure launched work'
+grep -Fxq 'status=session-helper-install-failed' "$tmp/install-failed.env" || fail 'missing installation receipt'
+
+cat >"$tmp/workload.sh" <<'EOF'
+#!/bin/sh
+set -eu
+root=$1
+tmp=$2
+"$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check
+printf '%s\n' "$SIMPLE_BOOTSTRAP_SESSION_ID" >"$tmp/exported.sid"
+printf '%s\n' "$SIMPLE_BOOTSTRAP_SESSION_EXEC" >"$tmp/exported.helper"
+"$SIMPLE_BOOTSTRAP_SESSION_EXEC" -- /bin/sh -c \
+    '"$SIMPLE_BOOTSTRAP_SESSION_EXEC" --sid $$ >"$1"; test "$$" != "$SIMPLE_BOOTSTRAP_SESSION_ID"' sh "$tmp/nested.sid"
+SIMPLE_PROCESS_TREE_RSS_RECEIPT="$tmp/nested-guard.env" \
+    sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 5 0 /bin/sh -c \
+    '"$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check; test "$SIMPLE_BOOTSTRAP_SESSION_ID" = "$1"' sh "$SIMPLE_BOOTSTRAP_SESSION_ID"
+EOF
+perl "$guard" --receipt="$tmp/installed.env" -- /bin/sh "$tmp/workload.sh" "$root" "$tmp"
+sid=$(sed -n 's/^session_id=//p' "$tmp/installed.env")
+[ "$sid" = "$(cat "$tmp/exported.sid")" ] || fail 'exported SID differs from receipt'
+awk -v sid="$sid" '$2 != sid { exit 1 }' "$tmp/nested.sid" || fail 'nested group escaped session'
+grep -Fxq "session_id=$sid" "$tmp/nested-guard.env" || fail 'nested guard established another session'
+helper=$(cat "$tmp/exported.helper")
+[ -x "$helper" ] || fail 'installed helper was not retained'
+actual_sha=$(shasum -a 256 "$helper" | awk '{print $1}')
+grep -Fxq "session_helper_sha256=$actual_sha" "$tmp/installed.env" || fail 'helper hash was not pinned in evidence'
+grep -Fxq 'session_helper_integrity=verified' "$tmp/installed.env" || fail 'helper integrity not verified'
+checks=$(sed -n 's/^session_checks=//p' "$tmp/installed.env")
+[ "$checks" -gt 1 ] || fail 'no authoritative SID observations'
+
+# A correct ambient SID and a permissive helper still are not outer authority.
+ambient_sid=$("$helper" --sid $$ | awk '{print $2}')
+cat >"$tmp/fake-helper" <<EOF
+#!/bin/sh
+touch "$tmp/fake-helper-executed"
+exit 0
+EOF
+chmod +x "$tmp/fake-helper"
+for spoof_helper in /usr/bin/true "$tmp/fake-helper"; do
+    status=0
+    SIMPLE_BOOTSTRAP_SESSION_ID="$ambient_sid" SIMPLE_BOOTSTRAP_SESSION_EXEC="$spoof_helper" \
+        perl "$guard" --session-mode=new --receipt="$tmp/spoof.env" -- \
+        /bin/sh -c 'touch "$1"' sh "$tmp/spoof.payload" >"$tmp/spoof.log" 2>&1 || status=$?
+    [ "$status" -eq 89 ] && [ ! -e "$tmp/spoof.payload" ] && [ ! -e "$tmp/fake-helper-executed" ] || fail 'ambient session spoof executed'
+done
+# Explicit inheritance also requires a real helper admission receipt.
+status=0
+SIMPLE_BOOTSTRAP_SESSION_ID="$ambient_sid" SIMPLE_BOOTSTRAP_SESSION_EXEC=/usr/bin/true \
+    perl "$guard" --session-mode=inherit --receipt="$tmp/unadmitted.env" -- \
+    /bin/sh -c 'touch "$1"' sh "$tmp/unadmitted.payload" >"$tmp/unadmitted.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] && [ ! -e "$tmp/unadmitted.payload" ] || fail 'unadmitted helper inherited'
+
+# Replacing the path cannot replace the supervisor's pinned identity silently.
+status=0
+perl "$guard" --receipt="$tmp/tamper.env" -- /bin/sh -c \
+    'echo $$ >"$1"; cp /usr/bin/true "$SIMPLE_BOOTSTRAP_SESSION_EXEC.new"; mv "$SIMPLE_BOOTSTRAP_SESSION_EXEC.new" "$SIMPLE_BOOTSTRAP_SESSION_EXEC"; sleep 10' \
+    sh "$tmp/tamper.pid" >"$tmp/tamper.log" 2>&1 || status=$?
+[ "$status" -eq 89 ] || fail "tampered helper returned $status"
+grep -Fxq 'status=session-helper-invalid' "$tmp/tamper.env" || fail 'tamper not attributed to helper'
+grep -Fxq 'session_helper_integrity=failed' "$tmp/tamper.env" || fail 'tamper receipt claims verified helper'
+kill -0 "$(cat "$tmp/tamper.pid")" 2>/dev/null && fail 'tampered workload survived'
+
+# An observed child changing SID is rejected, even while its RSS is low.
+"${CC:-cc}" -O0 "$root/test/01_unit/scripts/fixture_process_tree_rss.c" -o "$tmp/fixture"
+status=0
+perl "$guard" --receipt="$tmp/escape.env" -- "$tmp/fixture" 2 escape "$tmp/escape.pids" \
+    >"$tmp/escape.log" 2>&1 || status=$?
+[ "$status" -eq 90 ] || fail "observed SID escape returned $status"
+grep -Fxq 'status=bootstrap-session-escaped' "$tmp/escape.env" || fail 'missing SID escape evidence'
+grep -Eq '^unexpected_session_pids=[0-9]+' "$tmp/escape.env" || fail 'escaped PID was not recorded'
+while read -r pid; do
+    state=$(ps -o stat= -p "$pid" 2>/dev/null || :)
+    case "$state" in ''|Z*) ;; *) fail "escaped process survived: $pid" ;; esac
+done <"$tmp/escape.pids"
+echo 'PASS: helper installation, SHA pin, actual SID export/observation, nested groups, tamper and escape rejection'

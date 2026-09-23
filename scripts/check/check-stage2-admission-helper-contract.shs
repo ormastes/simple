@@ -1,0 +1,109 @@
+#!/bin/sh
+# Exercise the shipped shell gates with synthetic compilers; no native build.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+if [ "${1:-}" = --candidate ]; then
+    shift
+    printf 'strict=%s abi=%s linker=%s\n' "${SIMPLE_NO_STUB_FALLBACK:-unset}" \
+        "${SIMPLE_WINDOWS_ABI:-auto}" "${SIMPLE_LINKER_FLAVOR:-auto}" >>"$CONTRACT_CALLS"
+    if [ "$CONTRACT_MODE" = unresolved ] && [ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ]; then
+        echo 'error: 7 unresolved symbols; stub fallback disabled' >&2
+        exit 47
+    fi
+    output=
+    route=1
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -o) output=$2; shift 2 ;;
+            --entry) route=0; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [ -n "$output" ] || exit 48
+    [ "$CONTRACT_MODE" != unresolved ] || echo 'Generating 7 stub functions for unresolved symbols...'
+    if [ "$route" = 0 ]; then
+        printf '#!/bin/sh\nprintf "bootstrap struct receiver guard\\n"\n' >"$output"
+    else
+        printf '#!/bin/sh\nprintf "app.cli.bootstrap_main\\ncompiler.driver.driver\\napp.cli.main\\n"\n' >"$output"
+    fi
+    chmod +x "$output"
+    exit 0
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-admission-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir "$work/runtime" "$work/bin"
+printf '#!/bin/sh\nexec sh "$CONTRACT_TEST" --candidate "$@"\n' >"$work/compiler"
+# The stub completes immediately; timeout mechanics are outside this contract.
+printf '#!/bin/sh\nshift 3\nexec "$@"\n' >"$work/bin/timeout"
+chmod +x "$work/compiler" "$work/bin/timeout"
+export CONTRACT_TEST="$root/scripts/check/check-stage2-admission-helper-contract.shs"
+export PATH="$work/bin:$PATH"
+failures=0
+checks=0
+check() {
+    checks=$((checks + 1))
+    if ! "$@"; then echo "FAIL: $*"; failures=$((failures + 1)); fi
+}
+
+for target in aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-pc-windows-gnu; do
+    case "$target" in
+        *windows-msvc) expected='strict=1 abi=msvc linker=msvc' ;;
+        *windows-gnu) expected='strict=1 abi=gnu linker=gnu' ;;
+        *) expected='strict=1 abi=auto linker=auto' ;;
+    esac
+    for mode in clean unresolved; do
+        calls="$work/$target.$mode.calls"
+        log="$work/$target.$mode.log"
+        rc=0
+        CONTRACT_MODE=$mode CONTRACT_CALLS=$calls SIMPLE_NO_STUB_FALLBACK=0 \
+            SIMPLE_WINDOWS_ABI=ambient-wrong SIMPLE_LINKER_FLAVOR=ambient-wrong \
+            sh "$root/scripts/check/check-bootstrap-stage2-struct-receiver.shs" \
+            "$work/compiler" "$work/runtime" "$target" llvm >"$log" 2>&1 || rc=$?
+        check grep -qx "$expected" "$calls"
+        check test "$(grep -v -x "$expected" "$calls" | wc -l | tr -d ' ')" = 0
+        if [ "$mode" = clean ]; then
+            check test "$rc" = 0
+            check test "$(wc -l <"$calls" | tr -d ' ')" = 2
+            check grep -qx bootstrap_stage2_struct_receiver=PASS "$log"
+            check grep -qx bootstrap_stage2_positional_stage3_route=PASS "$log"
+        else
+            check test "$rc" = 1
+            check test "$(wc -l <"$calls" | tr -d ' ')" = 1
+            check grep -q '7 unresolved symbols; stub fallback disabled' "$log"
+            if grep -q '=PASS' "$log"; then check false; else check true; fi
+        fi
+    done
+done
+
+# Use the real archival function and diagnostic selector, with an old frontend
+# failure followed by a successful current frontend and a current receiver fail.
+awk '/^bootstrap_stage2_sanity_output_preflight\(\) \(/{f=1} f{print} f&&/^\)$/{exit}' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/preflight.sh"
+check grep -q '^bootstrap_stage2_sanity_output_preflight() (' "$work/preflight.sh"
+. "$work/preflight.sh"
+base="$work/stage2-sanity.env"
+printf 'error: stale frontend failure\n' >"$base.frontend-failure.log"
+printf 'status=fail\n' >"$base"
+bootstrap_stage2_sanity_output_preflight "$base" >"$work/archive.log" 2>&1
+check test ! -e "$base.frontend-failure.log"
+archives=0
+for prior in "$base".superseded-*/stage2-sanity.env.frontend-failure.log; do
+    [ -f "$prior" ] || continue
+    archives=$((archives + 1))
+    check grep -qx 'error: stale frontend failure' "$prior"
+done
+check test "$archives" = 1
+printf 'Build complete: 899 compiled, 0 failed\n' >"$work/build.log"
+printf 'status=pass\n' >"$base"
+printf 'error: current receiver failure\n' >"$work/receiver.log"
+sh "$root/scripts/check/check-stage-log-diagnosable.shs" --stage stage2 --status 1 \
+    --log "$work/build.log" --log "$base.frontend-failure.log" \
+    --log "$work/receiver.log" >"$work/diagnosis.log"
+check grep -q 'current receiver failure' "$work/diagnosis.log"
+if grep -q 'stale frontend failure' "$work/diagnosis.log"; then check false; else check true; fi
+check test "$checks" -gt 0
+printf 'checks=%s failures=%s\n' "$checks" "$failures"
+[ "$failures" = 0 ]
+echo 'PASS: strict receiver builds, platform ABI propagation, and current-only diagnostics'

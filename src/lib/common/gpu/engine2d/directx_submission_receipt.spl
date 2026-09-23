@@ -1,0 +1,88 @@
+"""Scheduler-visible, fail-closed DirectX submission lifecycle receipts.
+
+The native D3D11 owner supplies the event-query fact to `poll`.  This module
+never promotes a submitted receipt because a query was created: only a positive
+event-query observation can publish `gpu_finished`.
+"""
+
+pub val DIRECTX_SUBMISSION_PHASE_REJECTED: text = "rejected"
+pub val DIRECTX_SUBMISSION_PHASE_SUBMITTED: text = "submitted"
+pub val DIRECTX_SUBMISSION_PHASE_GPU_FINISHED: text = "gpu_finished"
+pub val DIRECTX_SUBMISSION_PHASE_COMPLETED: text = "completed"
+pub val DIRECTX_SUBMISSION_PHASE_RETIRED: text = "retired"
+
+struct DirectXSubmissionReceipt:
+    submission_id: i64
+    phase: text
+    terminal: bool
+    gpu_finished_observed: bool
+    diagnostic: text
+
+fn _directx_submission_receipt(id: i64, phase: text, terminal: bool, observed: bool, diagnostic: text) -> DirectXSubmissionReceipt:
+    DirectXSubmissionReceipt(submission_id: id, phase: phase, terminal: terminal, gpu_finished_observed: observed, diagnostic: diagnostic)
+
+pub fn directx_submission_receipt_submitted(submission_id: i64) -> DirectXSubmissionReceipt:
+    if submission_id <= 0:
+        return _directx_submission_receipt(0, DIRECTX_SUBMISSION_PHASE_REJECTED, true, false, "native D3D11 submission was refused")
+    _directx_submission_receipt(submission_id, DIRECTX_SUBMISSION_PHASE_SUBMITTED, false, false, "submitted; D3D11 event query has not signalled")
+
+pub fn directx_submission_receipt_poll(receipt: DirectXSubmissionReceipt, event_query_signalled: bool) -> DirectXSubmissionReceipt:
+    if receipt.terminal or receipt.phase != DIRECTX_SUBMISSION_PHASE_SUBMITTED:
+        return receipt
+    if not event_query_signalled:
+        return receipt
+    _directx_submission_receipt(receipt.submission_id, DIRECTX_SUBMISSION_PHASE_GPU_FINISHED, false, true, "gpu_finished observed through D3D11 event query")
+
+pub fn directx_submission_receipt_native_failure(receipt: DirectXSubmissionReceipt) -> DirectXSubmissionReceipt:
+    if receipt.terminal:
+        return receipt
+    _directx_submission_receipt(receipt.submission_id, DIRECTX_SUBMISSION_PHASE_REJECTED, true, receipt.gpu_finished_observed, "native D3D11 event-query operation failed")
+
+pub fn directx_submission_receipt_reconcile_native_phase(receipt: DirectXSubmissionReceipt, native_phase: i64) -> DirectXSubmissionReceipt:
+    """Reconcile a copied scheduler receipt with an observed native phase.
+
+    A scheduler may hold a stale copy while another owner completes or retires
+    the submission. Native phase values are authoritative; contiguous missing
+    transitions are rebuilt only to converge that stale copy. The native owner
+    retains only a bounded retired-ID cache; an evicted old ID returns a native
+    error and is terminally rejected here, never left submitted. IDs are
+    monotonic and never reused, so an eviction cannot alias a new submission.
+    """
+    if receipt.terminal:
+        return receipt
+    if native_phase < 0:
+        return directx_submission_receipt_native_failure(receipt)
+    if native_phase == 1:
+        return receipt
+    val finished = directx_submission_receipt_poll(receipt, native_phase >= 2)
+    if native_phase == 2:
+        return finished
+    val completed = directx_submission_receipt_complete(finished, native_phase >= 3)
+    if native_phase == 3:
+        return completed
+    if native_phase == 4:
+        return directx_submission_receipt_retire(completed, true)
+    directx_submission_receipt_native_failure(receipt)
+
+pub fn directx_submission_receipt_complete(receipt: DirectXSubmissionReceipt, native_complete: bool) -> DirectXSubmissionReceipt:
+    if receipt.terminal or receipt.phase != DIRECTX_SUBMISSION_PHASE_GPU_FINISHED or not native_complete:
+        return receipt
+    _directx_submission_receipt(receipt.submission_id, DIRECTX_SUBMISSION_PHASE_COMPLETED, false, true, "scheduler completed observed D3D11 submission")
+
+pub fn directx_submission_receipt_retire(receipt: DirectXSubmissionReceipt, native_retired: bool) -> DirectXSubmissionReceipt:
+    if receipt.terminal or receipt.phase != DIRECTX_SUBMISSION_PHASE_COMPLETED or not native_retired:
+        return receipt
+    _directx_submission_receipt(receipt.submission_id, DIRECTX_SUBMISSION_PHASE_RETIRED, true, true, "native D3D11 submission resources retired")
+
+export DIRECTX_SUBMISSION_PHASE_REJECTED
+export DIRECTX_SUBMISSION_PHASE_SUBMITTED
+export DIRECTX_SUBMISSION_PHASE_GPU_FINISHED
+export DIRECTX_SUBMISSION_PHASE_COMPLETED
+export DIRECTX_SUBMISSION_PHASE_RETIRED
+export DirectXSubmissionReceipt
+export directx_submission_receipt_submitted
+export directx_submission_receipt_poll
+export directx_submission_receipt_native_failure
+export directx_submission_receipt_reconcile_native_phase
+export directx_submission_receipt_complete
+export directx_submission_receipt_retire

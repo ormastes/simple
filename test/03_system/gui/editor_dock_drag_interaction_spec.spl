@@ -1,0 +1,67 @@
+# Dock placement is a session property and GUI dragging changes the rendered zone.
+
+use std.spec
+use std.editor.core.session.{EditSession}
+use std.editor.view.dock_zone.*
+use app.editor.gui_shell_core.*
+use app.editor.gui_shell_render.*
+
+describe "editor dock drag interaction":
+    it "moves the visible problems panel from right to bottom and renders it there":
+        val session = EditSession.new()
+        val state = gui_shell_new(session)
+        state.ctrl.session.dock_layout.show_right("problems")
+        val before = gui_shell_render_frame(state)
+        expect(before.editor_html.contains("data-zone=\"right\"")).to_equal(true)
+        expect(before.editor_html.contains("problems-pane")).to_equal(true)
+
+        val pressed = gui_handle_mouse_down(state, _drag_state_new(), 1000, 25)
+        expect(pressed.active).to_equal(true)
+        expect(pressed.source_panel_id).to_equal("problems")
+        val moved = gui_handle_mouse_move(state, pressed, 600, 700)
+        expect(moved.drop_target_zone).to_equal(DOCK_BOTTOM)
+        val released = gui_handle_mouse_up(state, moved)
+        expect(released.active).to_equal(false)
+        expect(state.ctrl.session.dock_layout.panel_zone("problems")).to_equal(DOCK_BOTTOM)
+        expect(state.ctrl.session.dock_layout.is_right_visible()).to_equal(false)
+        expect(gui_render_drop_overlay(state, moved, 1200, 800).contains("bottom:20px;height:250px")).to_equal(true)
+
+        val after = gui_shell_render_frame(state)
+        expect(after.editor_html.contains("data-zone=\"bottom\"")).to_equal(true)
+        expect(after.editor_html.contains("problems-pane")).to_equal(true)
+        expect(after.editor_html.contains("data-zone=\"right\"")).to_equal(false)
+        expect(gui_compute_drop_zone(state, 600, 529)).to_equal(-1)
+        expect(gui_compute_drop_zone(state, 600, 530)).to_equal(DOCK_BOTTOM)
+        expect(gui_handle_mouse_down(state, _drag_state_new(), 10, 529).active).to_equal(false)
+        val bottom_tab = gui_handle_mouse_down(state, _drag_state_new(), 10, 530)
+        expect(bottom_tab.active).to_equal(true)
+        expect(bottom_tab.source_panel_id).to_equal("problems")
+        state.ctrl.session.dock_layout.hide_right()
+        expect(state.ctrl.session.dock_layout.visible_panels_in(DOCK_BOTTOM).len()).to_equal(1)
+        expect(state.ctrl.session.dock_layout.is_right_visible()).to_equal(false)
+        val hidden_right = gui_shell_render_frame(state)
+        expect(hidden_right.editor_html.contains("data-zone=\"bottom\"")).to_equal(true)
+        expect(hidden_right.editor_html.contains("problems-pane")).to_equal(true)
+        expect(gui_handle_mouse_down(state, _drag_state_new(), 10, 530).source_panel_id).to_equal("problems")
+
+    it "uses pixel sized tab bounds and keeps placement across panel switches":
+        val session = EditSession.new()
+        val state = gui_shell_new(session)
+        state.ctrl.session.dock_layout.show_right("problems")
+        expect(gui_handle_mouse_down(state, _drag_state_new(), 949, 25).active).to_equal(false)
+        expect(gui_handle_mouse_down(state, _drag_state_new(), 1000, 25).active).to_equal(true)
+        expect(state.ctrl.session.dock_layout.move_panel("problems", DOCK_LEFT)).to_equal(true)
+        state.ctrl.session.dock_layout.show_right("wiki-panel")
+        val left_tabs = state.ctrl.session.dock_layout.visible_panels_in(DOCK_LEFT)
+        expect(left_tabs.len()).to_equal(2)
+        expect(left_tabs[1].id).to_equal("problems")
+        expect(gui_handle_mouse_down(state, _drag_state_new(), 130, 25).source_panel_id).to_equal("problems")
+        val switched = gui_shell_render_frame(state)
+        expect(switched.file_tree_html.contains("problems-pane")).to_equal(true)
+        expect(switched.editor_html.contains("wiki-pane")).to_equal(true)
+        state.ctrl.session.dock_layout.show_right("problems")
+        expect(state.ctrl.session.dock_layout.panel_zone("problems")).to_equal(DOCK_LEFT)
+        val frame = gui_shell_render_frame(state)
+        expect(frame.file_tree_html.contains("data-zone=\"left\"")).to_equal(true)
+        expect(frame.file_tree_html.contains("problems-pane")).to_equal(true)
+        expect(frame.editor_html.contains("wiki-pane")).to_equal(true)
