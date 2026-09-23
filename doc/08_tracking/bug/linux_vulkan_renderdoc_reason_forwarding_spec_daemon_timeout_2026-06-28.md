@@ -1,22 +1,19 @@
 # Linux Vulkan RenderDoc Reason Forwarding SSpec Daemon Timeout
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
-
-## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
-- **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
-- **inferred**: every runner-behaviour claim in this entry (example counts, PASS/FAIL bookkeeping, daemon timeouts) is therefore unverifiable here; a green or red from this host would be meaningless either way.
-- **inferred**: left OPEN, not stale — the referenced spec files all still exist.
 
 Date: 2026-06-28
 
-## Summary
+## Status
 
-`test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl` times
-out under the current SPipe test daemon on this host, even though the direct
-aggregate evidence check completes quickly. Do not rerun this SSpec repeatedly
-in one session.
+STALE ASSERTION FIXED / DAEMON VERIFICATION PENDING.
+
+The stale forwarding assertion now checks the current lookup components: raw
+external-host reason, capture reason, and the generic gate fallback. This
+repairs the stale source assertion only. It does not prove the lookup's runtime
+precedence and it does not resolve or explain the historical daemon timeout.
+
+The timeout report predates the `SIMPLE_TIMEOUT_SECONDS` handling fix, but that
+chronology is not evidence that the ignored environment budget caused this
+specific timeout.
 
 ## Observed Command
 
@@ -24,7 +21,18 @@ in one session.
 SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl --mode=interpreter --clean --fail-fast
 ```
 
-Observed result:
+Non-authoritative seed result (2026-09-21):
+
+```text
+PASS test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl
+Duration: 257ms
+```
+
+The available `bin/simple` identifies itself as a Rust bootstrap seed. This
+result preserves the red-to-green evidence but cannot close the bug under the
+pure-Simple runtime policy.
+
+Original daemon observation (2026-06-28):
 
 ```text
 ERROR: test daemon timed out: test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl
@@ -43,10 +51,25 @@ gui_showcase_4k_200fps_status=pass
 gui_showcase_8k_perf_status=pass
 ```
 
-## Required Fix
+## Scope
 
-Fix the SPipe daemon profile or split this focused static-forwarding scenario so
-it can complete reliably. Until then, use the direct aggregate evidence for this
-specific forwarding contract and keep the broader Linux RenderDoc gate
-incomplete until Chrome and Electron `.rdc` artifacts have `RDOC` magic.
+Run the focused command with an admitted pure-Simple self-hosted binary and
+record a passing daemon result before closing this bug. The broader Linux
+RenderDoc gate remains incomplete until Chrome and Electron `.rdc` artifacts
+have `RDOC` magic.
 
+## TODO: Deferred Verification
+
+- On Linux/aarch64, after an admitted pure-Simple Stage 2 or Stage 3 CLI is
+  available, run the focused command above through the session daemon with an
+  explicit `--timeout` and with `SIMPLE_TIMEOUT_SECONDS` set to a distinct
+  larger value. Record binary path, SHA-256, stage/provenance, elapsed time, and
+  daemon verdict. This is the required test for this timeout bug.
+- The GPU-free behavioral fixture is now
+  `test/01_unit/scripts/linux_vulkan_renderdoc_reason_precedence_contract_test.shs`.
+  It supplies distinct raw-capture, capture, and generic-gate reasons and proves
+  raw wins, capture is the second fallback, and generic is last.
+- On a prepared Linux Vulkan GUI host, run Chrome and Electron under the
+  canonical RenderDoc wrapper and require both resulting capture files to have
+  `RDOC` magic. This is broader platform completion evidence, not a prerequisite
+  for closing the focused daemon-timeout verdict.
