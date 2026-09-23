@@ -2,7 +2,58 @@
 use strict;
 use warnings;
 use Errno qw(EPERM ESRCH);
-use Fcntl qw(:mode);
+use Fcntl qw(:mode O_RDONLY O_NOFOLLOW);
+
+# The enforced Darwin workload must never spawn its setuid /bin/ps. Reuse the
+# watchdog's admitted observer, including during EXIT-trap owner verification.
+# Keep the legacy lstart manifest encoding so unguarded callers interoperate.
+sub darwin_identity {
+    my ($pid) = @_;
+    my $path = $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER} // '';
+    my $sha = $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256} // '';
+    return unless length($path) && $sha =~ /\A[0-9a-f]{64}\z/;
+    my ($child, $pipe, $row);
+    my $ok = eval {
+        local $SIG{ALRM} = sub { die "lock observer timeout\n" };
+        alarm 5;
+        require Digest::SHA;
+        sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "observer open\n";
+        my @st = stat($fh); my @entry = lstat($path);
+        S_ISREG($st[2]) && @entry && !S_ISLNK($entry[2]) &&
+            $st[0] == $entry[0] && $st[1] == $entry[1] && !($st[2] & 06000) &&
+            Digest::SHA->new(256)->addfile($fh)->hexdigest eq $sha
+            or die "observer admission\n";
+        close($fh) or die "observer close\n";
+        $child = open($pipe, '-|');
+        defined($child) or die "observer fork\n";
+        if (!$child) {
+            alarm 5;
+            exec {$path} $path, '--identity', $pid;
+            exit 127;
+        }
+        $row = '';
+        while (1) {
+            my $n = sysread($pipe, my $chunk, 256);
+            defined($n) or die "observer read\n";
+            last unless $n;
+            $row .= $chunk;
+            length($row) <= 256 or die "observer oversized identity\n";
+        }
+        my $closed = close($pipe);
+        $child = undef;
+        $closed or die "observer exit\n";
+        alarm 0;
+        1;
+    };
+    alarm 0;
+    if (defined($child) && $child > 0) {
+        kill 'KILL', $child;
+        close($pipe);
+        waitpid($child, 0);
+    }
+    return unless $ok && $row =~ /\A([0-9]+:[0-9]+) [0-9]+ ([^\r\n]+)\n\z/;
+    return ($1, $2);
+}
 
 sub fail_usage {
     die "usage: portable-hardlink-lock.pl COMMAND ARGS...\n";
@@ -65,6 +116,16 @@ sub proc_stat_snapshot {
 sub process_snapshot {
     my ($pid) = @_;
     return unless defined($pid) && $pid =~ /\A[1-9][0-9]*\z/;
+    if ($^O eq 'darwin' && (exists($ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER}) ||
+                            exists($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE}))) {
+        my ($birth_one, $start) = darwin_identity($pid);
+        return unless defined($birth_one);
+        my $pgid = getpgrp($pid);
+        return unless defined($pgid) && $pgid > 0;
+        my ($birth_two) = darwin_identity($pid);
+        return unless defined($birth_two) && $birth_one eq $birth_two;
+        return (unpack('H*', $start), $pgid);
+    }
     my $start_one = ps_value('lstart', $pid);
     if (defined($start_one)) {
         my $pgid = ps_value('pgid', $pid);

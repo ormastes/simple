@@ -2,7 +2,7 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-tool=${PHASE2_CAPSULE_TOOL:-"$root/scripts/bootstrap/phase2-runtime-capsule.shs"}
+tool=${PHASE2_CAPSULE_FIXTURE_TOOL:-${PHASE2_CAPSULE_TOOL:-"$root/scripts/bootstrap/phase2-runtime-capsule.shs"}}
 tmp=$(mktemp -d)
 windows_host=0
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) windows_host=1 ;; esac
@@ -125,6 +125,16 @@ if $tool verify "$renamed_path" >/dev/null 2>&1; then fail 'renamed capsule acce
 writable=$(fresh_capsule writable)
 if [ "$windows_host" = 1 ]; then thaw "$writable"; else chmod u+w "$writable/libsimple_native_all.a"; fi
 if $tool verify "$writable" >/dev/null 2>&1; then fail 'writable leaf accepted'; fi
+
+# The portable BSD/GNU predicate must reject each write bit independently.
+# Checking owner-write alone silently admits group/world-writable capsules.
+for permission in g o; do
+  writable_other=$(fresh_capsule "writable-$permission")
+  chmod "$permission+w" "$writable_other/libsimple_native_all.a"
+  if $tool verify "$writable_other" >/dev/null 2>&1; then
+    fail "$permission-writable leaf accepted"
+  fi
+done
 
 writable_dir=$(fresh_capsule writable-dir)
 thaw "$writable_dir"
@@ -277,4 +287,106 @@ if $tool publish "$tmp/compiler" "$tmp/windows" "$tmp/backfill-output" >/dev/nul
   fail 'stale Windows backfill stamp accepted'
 fi
 
-echo 'PASS: POSIX and Windows Phase2 capsules preserve names, enforce immutable bytes, and reject invalid authorities'
+if [ "$windows_host" = 0 ]; then
+make_authority "$tmp/macos"
+printf 'cocoa-provider\n' > "$tmp/macos/libsimple_runtime.dylib"
+macos_capsule=$($tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-output")
+[ -f "$macos_capsule/libsimple_runtime.dylib" ] || fail 'macOS dynamic runtime missing'
+cmp "$tmp/macos/libsimple_runtime.dylib" "$macos_capsule/libsimple_runtime.dylib" ||
+  fail 'macOS dynamic runtime copy differs'
+dynamic_sha=$(sha256sum "$tmp/macos/libsimple_runtime.dylib" | awk '{print $1}')
+[ "$(sed -n 's/^dynamic_runtime_sha256=//p' "$macos_capsule/phase2-runtime-capsule.env")" = "$dynamic_sha" ] ||
+  fail 'macOS dynamic runtime is not receipt-bound'
+$tool verify "$macos_capsule"
+chmod u+w "$macos_capsule/libsimple_runtime.dylib"
+printf tamper >> "$macos_capsule/libsimple_runtime.dylib"
+chmod 400 "$macos_capsule/libsimple_runtime.dylib"
+if $tool verify "$macos_capsule" >/dev/null 2>&1; then fail 'tampered dynamic runtime accepted'; fi
+
+missing_dynamic=$($tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-missing-output")
+chmod u+w "$missing_dynamic"
+rm "$missing_dynamic/libsimple_runtime.dylib"
+chmod 500 "$missing_dynamic"
+if $tool verify "$missing_dynamic" >/dev/null 2>&1; then fail 'missing bound dynamic runtime accepted'; fi
+mv "$tmp/macos/libsimple_runtime.dylib" "$tmp/macos/dylib.real"
+ln -s dylib.real "$tmp/macos/libsimple_runtime.dylib"
+if $tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-linked-output" >/dev/null 2>&1; then
+  fail 'symlink dynamic runtime accepted'
+fi
+
+# A producer receipt is preserved as diagnostic evidence, never upgraded to
+# exact Darwin mapping/dependency admission by capsule publication.
+make_authority "$tmp/cocoa"
+printf 'diagnostic-cocoa-candidate\n' >"$tmp/cocoa/libspl_cocoa.dylib"
+cocoa_sha=$(sha256sum "$tmp/cocoa/libspl_cocoa.dylib" | awk '{print $1}')
+{
+  echo kind=diagnostic-producer-receipt
+  echo admission=not-established
+  echo artifact=libspl_cocoa.dylib
+  echo abi=legacy-cocoa-raw-title-v1
+  echo artifact_sha256="$cocoa_sha"
+  echo dependency_admission=not-established
+  echo dependency_observed=/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa
+} >"$tmp/cocoa/libspl_cocoa.producer.txt"
+cocoa_capsule=$($tool publish "$tmp/compiler" "$tmp/cocoa" "$tmp/cocoa-output")
+$tool verify "$cocoa_capsule"
+cmp "$tmp/cocoa/libspl_cocoa.dylib" "$cocoa_capsule/libspl_cocoa.dylib" || fail 'Cocoa candidate changed'
+cmp "$tmp/cocoa/libspl_cocoa.producer.txt" "$cocoa_capsule/libspl_cocoa.producer.txt" || fail 'Cocoa producer receipt changed'
+[ "$(sed -n 's/^cocoa_admission=//p' "$cocoa_capsule/phase2-runtime-capsule.env")" = unavailable ] || fail 'diagnostic candidate granted admission'
+
+for mutation in bytes receipt missing path admission; do
+  candidate=$($tool publish "$tmp/compiler" "$tmp/cocoa" "$tmp/cocoa-$mutation-output")
+  chmod -R u+w "$candidate"
+  case "$mutation" in
+    bytes) printf tamper >>"$candidate/libspl_cocoa.dylib" ;;
+    receipt) printf 'dependency_observed=/tmp/substituted.dylib\n' >>"$candidate/libspl_cocoa.producer.txt" ;;
+    missing) rm "$candidate/libspl_cocoa.dylib" ;;
+    path)
+      mv "$candidate/libspl_cocoa.dylib" "$candidate/other.dylib"
+      ln -s other.dylib "$candidate/libspl_cocoa.dylib" ;;
+    admission)
+      sed 's/^cocoa_admission=.*/cocoa_admission=admitted/' "$candidate/phase2-runtime-capsule.env" >"$tmp/cocoa-receipt.new"
+      mv "$tmp/cocoa-receipt.new" "$candidate/phase2-runtime-capsule.env" ;;
+  esac
+  chmod 500 "$candidate" "$candidate/deps" "$candidate/simple"
+  find "$candidate" -type f ! -name simple -exec chmod 400 {} +
+  if $tool verify "$candidate" >/dev/null 2>&1; then fail "Cocoa $mutation mutation accepted"; fi
+done
+
+for invalid in absent-receipt wrong-abi wrong-path duplicate-digest admitted; do
+  make_authority "$tmp/cocoa-invalid-$invalid"
+  cp "$tmp/cocoa/libspl_cocoa.dylib" "$tmp/cocoa/libspl_cocoa.producer.txt" "$tmp/cocoa-invalid-$invalid/"
+  producer="$tmp/cocoa-invalid-$invalid/libspl_cocoa.producer.txt"
+  case "$invalid" in
+    absent-receipt) rm "$producer" ;;
+    wrong-abi) sed 's/^abi=.*/abi=incompatible/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+    wrong-path) sed 's/^artifact=.*/artifact=..\/other.dylib/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+    duplicate-digest) echo "artifact_sha256=$cocoa_sha" >>"$producer" ;;
+    admitted) sed 's/^admission=.*/admission=admitted/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+  esac
+  if $tool publish "$tmp/compiler" "$tmp/cocoa-invalid-$invalid" "$tmp/cocoa-invalid-$invalid-output" >/dev/null 2>&1; then
+    fail "invalid Cocoa producer $invalid accepted"
+  fi
+done
+
+# Candidates use the existing tuple copy owner; no second mapping/path owner.
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+cp "$tmp/compiler" "$tmp/cocoa/simple"
+printf backfill >"$tmp/cocoa/libsimple_compiler_backfill.a"
+printf runtime >"$tmp/cocoa/deps/libsimple_runtime.a"
+printf dylib >"$tmp/cocoa/libsimple_runtime.dylib"
+bootstrap_stage3_copy_seed_tuple "$tmp/cocoa" "$tmp/cocoa-tuple" simple \
+  libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin
+cmp "$tmp/cocoa/libspl_cocoa.dylib" "$tmp/cocoa-tuple/libspl_cocoa.dylib" || fail 'tuple lost Cocoa candidate'
+cmp "$tmp/cocoa/libspl_cocoa.producer.txt" "$tmp/cocoa-tuple/libspl_cocoa.producer.txt" || fail 'tuple lost Cocoa provenance'
+mv "$tmp/cocoa/libspl_cocoa.producer.txt" "$tmp/producer.saved"
+if bootstrap_stage3_copy_seed_tuple "$tmp/cocoa" "$tmp/cocoa-tuple-incomplete" simple \
+  libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin >/dev/null 2>&1; then
+  fail 'tuple accepted incomplete Cocoa candidate pair'
+fi
+
+fi
+
+echo 'PASS: POSIX, Windows, macOS dynamic-runtime, and diagnostic Cocoa capsules reject invalid authorities'

@@ -178,8 +178,41 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn add_macos_base_link_args(cmd: &mut std::process::Command) {
-    cmd.arg("-Wl,-ld_classic").arg("-Wl,-dead_strip");
+fn verify_macos_llvm_tool(tool: &std::ffi::OsStr, required: &str) -> Result<(), String> {
+    let path = Path::new(tool);
+    if !path.is_absolute() {
+        return Err(format!("pinned macOS LLVM tool must be absolute: {}", path.display()));
+    }
+    let output = std::process::Command::new(tool).arg("--version").output()
+        .map_err(|error| format!("cannot inspect LLVM tool {}: {error}", path.display()))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text.split_whitespace().find(|word|
+        word.as_bytes().first().is_some_and(u8::is_ascii_digit));
+    if !output.status.success() || version != Some(required) {
+        return Err(format!("LLVM tool {} must report {required}; got {}", path.display(), text.trim()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_base_link_args(cmd: &mut std::process::Command) -> Result<(), String> {
+    if let Ok(required) = std::env::var("SIMPLE_LLVM_REQUIRED_VERSION") {
+        verify_macos_llvm_tool(cmd.get_program(), &required)?;
+        let linker = std::env::var_os("LD")
+            .ok_or_else(|| "pinned macOS LLVM link requires explicit LD".to_string())?;
+        if Path::new(&linker).file_name() != Some(std::ffi::OsStr::new("ld64.lld")) {
+            return Err("pinned macOS LLVM link requires the Mach-O ld64.lld driver".to_string());
+        }
+        verify_macos_llvm_tool(&linker, &required)?;
+        let mut argument = std::ffi::OsString::from("--ld-path=");
+        argument.push(linker);
+        cmd.arg(argument);
+    } else {
+        // Preserve the existing Apple linker behavior for unpinned lanes.
+        cmd.arg("-Wl,-ld_classic");
+    }
+    cmd.arg("-Wl,-dead_strip");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1481,7 +1514,7 @@ int main(int argc, char** argv) {
         }
 
         #[cfg(target_os = "macos")]
-        add_macos_base_link_args(&mut cmd);
+        add_macos_base_link_args(&mut cmd)?;
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-no-pie");
@@ -3082,8 +3115,8 @@ mod linker_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_native_all_link_args_dead_strip_and_retain_metal_support() {
-        let mut command = std::process::Command::new("clang++");
-        add_macos_base_link_args(&mut command);
+        let mut command = std::process::Command::new(find_cxx_compiler());
+        add_macos_base_link_args(&mut command).unwrap();
         add_macos_runtime_host_support(&mut command);
         let args = command
             .get_args()

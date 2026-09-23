@@ -1,0 +1,77 @@
+#!/bin/sh
+# Exercise the real Stage 2 argv builder and both admission hash vectors without
+# invoking a compiler. Catch missing pins, whitespace splitting and replay drift.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+bootstrap=${BOOTSTRAP_ENV_FIXTURE_SOURCE:-$root/scripts/bootstrap/bootstrap-from-scratch.sh}
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage2-macos-env.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+eval "$(sed -n '/^  bootstrap_run_stage2_native() {/,/^  }/p' "$bootstrap")"
+absolute_path() { printf '%s\n' "$1"; }
+bootstrap_stage3_run_transcribed() {
+    shift 6
+    : > "$fixture/env"
+    while [ "$1" != -- ]; do
+        printf '%s\n' "$1" >> "$fixture/env"
+        shift
+    done
+    shift 2
+    printf '%s\n' "$@" > "$fixture/argv"
+}
+repo_root=$root stage2_command_transcript=$fixture/transcript
+stage2_native_log=$fixture/log stage2_home_absolute=$fixture/home
+stage2_tmp_absolute=$fixture/tmp stage_build_path='/pin tools:/usr/bin:/bin'
+stage_build_rust_log=error bootstrap_link_library_path=
+bootstrap_link_compat_sha256=absent simple_abi_policy=fixture-policy
+SIMPLE_PLUGIN_MANIFEST_POLICY=fixture-plugin SIMPLE_KERNEL_K1_POLICY=fixture-k1
+SIMPLE_COVERAGE_CUTOVER_STATE=fixture-coverage k1_composition_sha256_before=fixture-sha
+build_progress_events=$fixture/events stage2_cache_absolute=$fixture/cache
+bootstrap_windows_abi_env= bootstrap_windows_cc_env= bootstrap_windows_include_env=
+bootstrap_windows_lib_env= bootstrap_windows_libpath_env=
+stage2_compatibility_manifest_absolute=$fixture/manifest stage3_cache_absolute=$fixture/stage3
+stage2_seed_absolute=$fixture/seed k1_composition_source_args= jobs=1
+native_verbose_arg= stage2_timeout_args= bootstrap_mode=dynload
+stage_runtime_absolute=$fixture/runtime stage2_bin=$fixture/simple
+CC='/pin tools/clang' CXX='/pin tools/clang++' AR='/pin tools/llvm-ar'
+LD='/pin tools/ld64.lld' LLVM_CONFIG='/pin tools/llvm-config'
+SIMPLE_LLVM_REQUIRED_VERSION=23.1.1
+
+for PLATFORM in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
+  bootstrap_stage2_darwin_env=
+  case "$PLATFORM" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
+  for backend in cranelift llvm; do
+    bootstrap_run_stage2_native
+    for tool in CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION; do
+      if [ -n "$bootstrap_stage2_darwin_env" ]; then
+        eval 'expected_value=${'"$tool"'}'
+        [ "$(sed -n "s/^$tool=//p" "$fixture/env")" = "$expected_value" ] || {
+          echo "FAIL: $PLATFORM/$backend did not preserve $tool" >&2; exit 1;
+        }
+      elif grep -q "^$tool=" "$fixture/env"; then
+        echo "FAIL: macOS pin leaked to $PLATFORM/$backend" >&2; exit 1
+      fi
+    done
+    # The admission digest deliberately excludes the independently bound
+    # LLVM lookup/PATH prefix. Compare every remaining real env/argv argument.
+    set --
+    while IFS= read -r argument; do set -- "$@" "$argument"; done < "$fixture/env"
+    shift 3
+    while IFS= read -r argument; do set -- "$@" "$argument"; done < "$fixture/argv"
+    actual_hash=$(bootstrap_stage3_args_sha256 "$@")
+    eval "$(sed -n '/^  stage2_build_args_sha256=\$(/,/^  )/p' "$bootstrap")"
+    [ "$actual_hash" = "$stage2_build_args_sha256" ] || {
+      echo "FAIL: $PLATFORM/$backend execution and admission digest differ" >&2; exit 1;
+    }
+    stage2_env_value() { sed -n "s/^$1=//p" "$fixture/env"; }
+    stage2_library_path= stage2_link_compat=absent stage2_progress=$build_progress_events
+    set --
+    while IFS= read -r argument; do set -- "$@" "$argument"; done < "$fixture/argv"
+    eval "$(sed -n '/^stage2_args=\$(bootstrap_stage3_args_sha256/,/^  "\$@") || exit 1/p' "$resume")"
+    [ "$actual_hash" = "$stage2_args" ] || {
+      echo "FAIL: $PLATFORM/$backend admission replay drift" >&2; exit 1;
+    }
+    echo "PASS: $PLATFORM/$backend pins, execution digest and replay"
+  done
+done

@@ -1,0 +1,75 @@
+#!/bin/sh
+# Link every frozen export and census retained runner GPU references.
+# This does not execute GPU hardware or claim full-runner success.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-phase2-gpu-loader-integration.shs NEW_EVIDENCE_DIR RETAINED_RUNNER_ARCHIVE}
+runner_archive=${2:?retained runner archive required}
+[ -f "$runner_archive" ] || exit 2
+[ ! -e "$out" ] || { echo 'evidence directory already exists' >&2; exit 2; }
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
+cc=${CC:-cc}
+case $(uname -s) in
+  Darwin) strip_flag=-Wl,-dead_strip; dl_flag= ;;
+  *) strip_flag=-Wl,--gc-sections; dl_flag=-ldl ;;
+esac
+manifest="$root/doc/03_plan/agent_tasks/phase2_gpu_loader_abi_2026-09-23.md"
+shasum -a 256 "$manifest" "$runner_archive" "$0" \
+  "$root/src/runtime/runtime.h" "$root/src/runtime/runtime_native.c" \
+  "$root/src/runtime/runtime_dynload.c" "$root/src/runtime/runtime_legacy_core.c" \
+  "$root/src/runtime/runtime_gpu_vulkan_scalar_private.h" \
+  "$root/src/runtime/runtime_gpu_vulkan_readback_private.h" \
+  "$root/src/runtime/runtime_gpu_vulkan_pipeline_private.h" \
+  "$root/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs" \
+  "$root/src/compiler_rust/compiler/src/pipeline/native_project/config.rs" \
+  "$root/src/compiler_rust/compiler/src/pipeline/native_project/linker.rs" \
+  "$root/src/compiler_rust/compiler/src/pipeline/native_project/tests.rs" \
+  >"$out/source.sha256"
+awk '/^\| rt_/ {print $2}' "$manifest" | LC_ALL=C sort >"$out/manifest-symbols.txt"
+[ "$(wc -l <"$out/manifest-symbols.txt" | tr -d ' ')" = 79 ]
+[ "$(uniq "$out/manifest-symbols.txt" | wc -l | tr -d ' ')" = 79 ]
+# Generated build-only TU takes function addresses without invoking them; it
+# intentionally does not declare or test their argument ABI.
+awk '
+  { names[NR]=$0; printf "extern void %s(void);\n", $0 }
+  END {
+    print "typedef void (*Fn)(void);"
+    print "static Fn volatile exports[] = {"
+    for (i=1;i<=NR;i++) printf "  %s,\n", names[i]
+    print "};"
+    print "int main(void) { for (unsigned i=0; i<sizeof(exports)/sizeof(exports[0]); i++) if (!exports[i]) return 1; return 0; }"
+  }' "$out/manifest-symbols.txt" >"$out/all-exports.c"
+for source in runtime_native runtime_dynload runtime_legacy_core; do
+  "$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    -c "$root/src/runtime/$source.c" -o "$out/$source.o"
+done
+"$cc" -std=gnu11 "$strip_flag" "$out/all-exports.c" \
+  "$out/runtime_native.o" "$out/runtime_dynload.o" "$out/runtime_legacy_core.o" \
+  -lm -lpthread $dl_flag -o "$out/all-exports"
+"$out/all-exports"
+nm -g "$out/runtime_native.o" "$out/runtime_dynload.o" "$out/runtime_legacy_core.o" \
+  >"$out/runtime-nm.txt"
+awk 'NF >= 2 && $(NF-1) != "U" && $NF ~ /^_?rt_(cuda|vulkan|vk)_/ { sub(/^_/, "", $NF); print $NF }' \
+  "$out/runtime-nm.txt" >"$out/runtime-gpu-definitions.unsorted.txt"
+LC_ALL=C sort -u "$out/runtime-gpu-definitions.unsorted.txt" >"$out/runtime-gpu-definitions.txt"
+nm -u "$runner_archive" >"$out/runner-nm.txt"
+awk 'NF >= 1 && $NF ~ /^_?rt_(cuda|vulkan|vk)_/ { sub(/^_/, "", $NF); print $NF }' \
+  "$out/runner-nm.txt" >"$out/runner-gpu-references.unsorted.txt"
+LC_ALL=C sort -u "$out/runner-gpu-references.unsorted.txt" >"$out/runner-gpu-references.txt"
+[ -s "$out/runner-gpu-references.txt" ]
+LC_ALL=C comm -23 "$out/runner-gpu-references.txt" "$out/runtime-gpu-definitions.txt" \
+  >"$out/missing-runner-gpu-symbols.txt"
+LC_ALL=C comm -23 "$out/manifest-symbols.txt" "$out/runtime-gpu-definitions.txt" \
+  >"$out/missing-manifest-symbols.txt"
+[ ! -s "$out/missing-runner-gpu-symbols.txt" ]
+[ ! -s "$out/missing-manifest-symbols.txt" ]
+if [ "$(uname -s)" = Darwin ]; then
+  otool -L "$out/all-exports" >"$out/dependencies.txt"
+  if grep -Ei 'libcuda|libvulkan|cuda\.so|vulkan\.so' "$out/dependencies.txt"; then exit 1; fi
+fi
+shasum -a 256 -c "$out/source.sha256" >"$out/source-verification.txt"
+shasum -a 256 "$out/all-exports" "$out/all-exports.c" >"$out/artifacts.sha256"
+echo 'phase2-gpu-loader-integration: 79-export link and retained runner GPU census PASS'
