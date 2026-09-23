@@ -21,11 +21,37 @@ pub enum EnvironmentVariantPolicyHandoffOwnerErrorV1:
     EnvironmentSnapshotFailed
     ConfigurationReadFailed
     PolicyCollectionFailed
-    PolicyEncodingFailed
+    PolicyConstructionFailed(reason: EnvironmentVariantPolicyHandoffErrorV1)
+    PolicyEncodingFailed(reason: EnvironmentVariantPolicyHandoffErrorV1)
     MissingInternalArgument
     DuplicateInternalArgument
     CallerSuppliedInternalArgument
-    InvalidInternalArgument
+    InvalidInternalArgument(reason: EnvironmentVariantPolicyHandoffErrorV1)
+
+fn _handoff_error_label(reason: EnvironmentVariantPolicyHandoffErrorV1) -> text:
+    match reason:
+        case EnvironmentVariantPolicyHandoffErrorV1.InvalidPolicy: "invalid-policy"
+        case EnvironmentVariantPolicyHandoffErrorV1.InvalidValue: "invalid-value"
+        case EnvironmentVariantPolicyHandoffErrorV1.Oversized: "oversized"
+        case EnvironmentVariantPolicyHandoffErrorV1.Corrupt: "corrupt"
+        case EnvironmentVariantPolicyHandoffErrorV1.NonCanonical: "non-canonical"
+
+pub fn environment_variant_policy_handoff_owner_error_label_v1(
+    failure: EnvironmentVariantPolicyHandoffOwnerErrorV1
+) -> text:
+    match failure:
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.EnvironmentSnapshotFailed: "environment-snapshot-failed"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.ConfigurationReadFailed: "configuration-read-failed"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyCollectionFailed: "policy-collection-failed"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyConstructionFailed(reason):
+            "policy-construction-failed:{_handoff_error_label(reason)}"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyEncodingFailed(reason):
+            "policy-encoding-failed:{_handoff_error_label(reason)}"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.MissingInternalArgument: "missing-internal-argument"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.DuplicateInternalArgument: "duplicate-internal-argument"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.CallerSuppliedInternalArgument: "caller-supplied-internal-argument"
+        case EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument(reason):
+            "invalid-internal-argument:{_handoff_error_label(reason)}"
 
 pub struct EnvironmentVariantPolicyPreparedHandoffV1:
     handoff: EnvironmentVariantPolicyHandoffV1
@@ -72,10 +98,10 @@ pub fn environment_variant_policy_handoff_prepare_from_snapshot_v1(
         case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyCollectionFailed)
     val handoff = match environment_variant_policy_handoff_v1(collected):
         case Ok(value): value
-        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyEncodingFailed)
+        case Err(reason): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyConstructionFailed(reason))
     val encoded = match environment_variant_policy_handoff_encode_v1(handoff):
         case Ok(value): value
-        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyEncodingFailed)
+        case Err(reason): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.PolicyEncodingFailed(reason))
     Ok(EnvironmentVariantPolicyPreparedHandoffV1(
         handoff: handoff, encoded_payload: encoded))
 
@@ -106,7 +132,7 @@ pub fn environment_variant_policy_handoff_attach_v1(
                 arg.starts_with(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1):
             return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.CallerSuppliedInternalArgument)
     val _validated = match environment_variant_policy_handoff_decode_v1(encoded_payload):
-        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument)
+        case Err(reason): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument(reason))
         case Ok(value): value
     var out = user_args
     out.push(ENVIRONMENT_VARIANT_POLICY_HANDOFF_ARG_PREFIX_V1 + encoded_payload)
@@ -132,6 +158,6 @@ pub fn environment_variant_policy_handoff_extract_v1(
         return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.DuplicateInternalArgument)
     val handoff = match environment_variant_policy_handoff_decode_v1(encoded):
         case Ok(value): value
-        case Err(_): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument)
+        case Err(reason): return Err(EnvironmentVariantPolicyHandoffOwnerErrorV1.InvalidInternalArgument(reason))
     Ok(EnvironmentVariantPolicyOpenedHandoffV1(
         handoff: handoff, user_args: user_args))
