@@ -2024,10 +2024,11 @@ bootstrap_stage3_tool_authority_snapshot() (
 )
 
 # Hash a NUL-delimited path manifest retaining the scanner's regular-file identity.
-# Each child verifies lstat(dev, ino, mode, size, mtime, ctime), opens the leaf,
-# verifies the same fstat tuple, hashes the opened descriptor, and verifies both
-# descriptor and pathname again. This detects in-place content mutation without
-# a second hashing pass on the performance-sensitive path.
+# Each child verifies lstat(dev, ino, mode, size, high-resolution mtime/ctime),
+# opens the leaf, verifies the same fstat tuple, hashes the opened descriptor,
+# and verifies both descriptor and pathname again. Subsecond timestamps reject
+# same-length, same-second mutation without a second hashing pass on the
+# performance-sensitive path.
 # A replacement symlink or outside target therefore fails closed before its
 # bytes can become an authority record. Children emit indexed hashes; the
 # owner reconstructs the original input order and rejects missing/duplicate
@@ -2057,7 +2058,7 @@ bootstrap_stage3_hash_bound_path_list() (
     trap 'rm -rf "$bootstrap_stage3_hash_bound_work"; \
         rm -f "$bootstrap_stage3_hash_bound_result"' EXIT
     trap 'exit 1' HUP INT TERM
-    perl -MDigest::SHA -e '
+    perl -MDigest::SHA -MTime::HiRes=stat,lstat -e '
         use strict;
         use warnings;
         my ($paths_path, $meta_path, $work, $workers, $root) = @ARGV;
@@ -2078,6 +2079,7 @@ bootstrap_stage3_hash_bound_path_list() (
         my $root_base = $root;
         $root_base =~ s{/\./}{/}g;
         $root_base =~ s{/\.$}{};
+        sub stable_time { sprintf "%.9f", $_[0] }
         sub ancestors_are_bound {
             my ($path) = @_;
             my $normalized = $path;
@@ -2134,8 +2136,8 @@ bootstrap_stage3_hash_bound_path_list() (
                         split /\t/, $meta[$index], 8;
                     if (!defined $expected_ctime || $path =~ /\0/ ||
                         $expected_size !~ /^[0-9]+$/ ||
-                        $expected_mtime !~ /^[0-9]+$/ ||
-                        $expected_ctime !~ /^[0-9]+$/) {
+                        $expected_mtime !~ /^[0-9]+\.[0-9]{9}$/ ||
+                        $expected_ctime !~ /^[0-9]+\.[0-9]{9}$/) {
                         $status = 72;
                         last;
                     }
@@ -2151,8 +2153,8 @@ bootstrap_stage3_hash_bound_path_list() (
                         "$before[0]" ne $expected_dev ||
                         "$before[1]" ne $expected_ino ||
                         "$before[7]" ne $expected_size ||
-                        "$before[9]" ne $expected_mtime ||
-                        "$before[10]" ne $expected_ctime) {
+                        stable_time($before[9]) ne $expected_mtime ||
+                        stable_time($before[10]) ne $expected_ctime) {
                         $status = 73;
                         last;
                     }
@@ -2166,8 +2168,8 @@ bootstrap_stage3_hash_bound_path_list() (
                         "$opened[0]" ne $expected_dev ||
                         "$opened[1]" ne $expected_ino ||
                         "$opened[7]" ne $expected_size ||
-                        "$opened[9]" ne $expected_mtime ||
-                        "$opened[10]" ne $expected_ctime) {
+                        stable_time($opened[9]) ne $expected_mtime ||
+                        stable_time($opened[10]) ne $expected_ctime) {
                         close $leaf;
                         $status = 75;
                         last;
@@ -2206,13 +2208,13 @@ bootstrap_stage3_hash_bound_path_list() (
                         "$after[0]" ne $expected_dev ||
                         "$after[1]" ne $expected_ino ||
                         "$after[7]" ne $expected_size ||
-                        "$after[9]" ne $expected_mtime ||
-                        "$after[10]" ne $expected_ctime ||
+                        stable_time($after[9]) ne $expected_mtime ||
+                        stable_time($after[10]) ne $expected_ctime ||
                         "$path_after[0]" ne $expected_dev ||
                         "$path_after[1]" ne $expected_ino ||
                         "$path_after[7]" ne $expected_size ||
-                        "$path_after[9]" ne $expected_mtime ||
-                        "$path_after[10]" ne $expected_ctime) {
+                        stable_time($path_after[9]) ne $expected_mtime ||
+                        stable_time($path_after[10]) ne $expected_ctime) {
                         $status = 78;
                         last;
                     }
@@ -2342,7 +2344,7 @@ bootstrap_stage3_directory_snapshot() (
         rm -f "$bootstrap_stage3_directory_snapshot_tmp"' EXIT HUP INT TERM
     # NUL-delimited paths support every POSIX filename through the same bound
     # worker path; hex-encoded metadata remains newline-delimited and countable.
-    perl -MFile::Find -e '
+    perl -MFile::Find -MTime::HiRes=stat,lstat -e '
         use strict;
         use warnings;
         my ($root, $paths_path, $meta_path) = @ARGV;
@@ -2376,8 +2378,9 @@ bootstrap_stage3_directory_snapshot() (
                     print {$meta} unpack("H*", $relative), "\t",
                         (-x $absolute ? 1 : 0), "\t",
                         ($stat[2] & 07777), "\t", $stat[0], "\t",
-                        $stat[1], "\t", $stat[7], "\t", $stat[9], "\t",
-                        $stat[10], "\n" or
+                        $stat[1], "\t", $stat[7], "\t",
+                        sprintf("%.9f", $stat[9]), "\t",
+                        sprintf("%.9f", $stat[10]), "\n" or
                         die "write metadata\n";
                 },
             },

@@ -9,10 +9,10 @@ trap 'rm -rf "$test_tmp"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 bound_metadata() {
-    perl -e 'my @s=lstat($ARGV[0]); @s or exit 1;
+    perl -MTime::HiRes=lstat -e 'my @s=lstat($ARGV[0]); @s or exit 1;
         print((-x $ARGV[0] ? 1 : 0), "\t", ($s[2] & 07777), "\t",
-            $s[0], "\t", $s[1], "\t", $s[7], "\t", $s[9], "\t",
-            $s[10])' "$1"
+            $s[0], "\t", $s[1], "\t", $s[7], "\t",
+            sprintf("%.9f", $s[9]), "\t", sprintf("%.9f", $s[10]))' "$1"
 }
 
 fixture="$test_tmp/authority"
@@ -58,7 +58,8 @@ fi
 [ ! -e "$test_tmp/race-snapshot" ] || fail "race published a snapshot"
 
 printf '%s\0' "$test_tmp/moved/$newline_name" >"$test_tmp/paths"
-printf '00\t0\t0\t0\t0\t0\t0\t0\n' >"$test_tmp/meta"
+printf '00\t0\t0\t0\t0\t0\t0.000000000\t0.000000000\n' \
+    >"$test_tmp/meta"
 if bootstrap_stage3_hash_bound_path_list "$test_tmp/paths" "$test_tmp/meta" \
     "$test_tmp/hashes" 1 "$test_tmp" >/dev/null 2>&1; then
     fail "mismatched identity was accepted"
@@ -116,6 +117,42 @@ if PATH="$test_tmp/mutation-intercept:$PATH" \
 fi
 grep -Fqx 'previous mutation snapshot' "$test_tmp/mutation.snapshot" ||
     fail "content mutation replaced the prior snapshot"
+
+# Reproduce the review gap exactly: replace AAAA with same-length BBBB while
+# integer-second size/mtime/ctime remain unchanged. The high-resolution tuple
+# must reject what the former integer stat binding accepted.
+perl -MTime::HiRes=time,sleep -e '
+    my $deadline = time + 2;
+    while (1) {
+        my $now = time;
+        exit 0 if $now - int($now) < 0.10;
+        die "timestamp alignment timeout\n" if $now >= $deadline;
+        sleep 0.005;
+    }
+'
+same_length_file="$test_tmp/same-length-file"
+printf 'AAAA' >"$same_length_file"
+same_length_metadata=$(bound_metadata "$same_length_file")
+same_length_integer_before=$(perl -e '@s=lstat($ARGV[0]);
+    print join(":", @s[7,9,10])' "$same_length_file")
+perl -MTime::HiRes=sleep -e 'sleep 0.01'
+printf 'BBBB' >"$same_length_file"
+same_length_integer_after=$(perl -e '@s=lstat($ARGV[0]);
+    print join(":", @s[7,9,10])' "$same_length_file")
+[ "$same_length_integer_before" = "$same_length_integer_after" ] ||
+    fail "same-second mutation fixture crossed an integer timestamp boundary"
+[ "$same_length_metadata" != "$(bound_metadata "$same_length_file")" ] ||
+    fail "filesystem did not expose subsecond mutation identity"
+printf '%s\0' "$same_length_file" >"$test_tmp/same-length.paths"
+printf '00\t%s\n' "$same_length_metadata" >"$test_tmp/same-length.meta"
+printf 'previous same-length result\n' >"$test_tmp/same-length.hashes"
+if bootstrap_stage3_hash_bound_path_list "$test_tmp/same-length.paths" \
+    "$test_tmp/same-length.meta" "$test_tmp/same-length.hashes" 1 \
+    "$test_tmp" >/dev/null 2>&1; then
+    fail "same-length same-second content mutation was accepted"
+fi
+grep -Fqx 'previous same-length result' "$test_tmp/same-length.hashes" ||
+    fail "same-length mutation replaced the prior result"
 
 # The descriptor/path tuple is checked again after hashing. Exercise that
 # precise boundary deterministically rather than relying on scheduler timing.

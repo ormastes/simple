@@ -56,6 +56,9 @@ failed-worker cleanup. The adjusted directory snapshot streaming suite also
 passed, including byte equality, mutation detection, worker caps and its
 Linux 32 MiB RSS gates. Both runs set `SIMPLE_NATIVE_BUILD_THREADS=12`;
 the suite intentionally requests two workers for its explicit worker fixture.
+The follow-up identity binding uses high-resolution mtime/ctime and includes a
+deterministic same-length `AAAA` to `BBBB` mutation within one integer second;
+this closes the integer-second stat gap without a second content-hash pass.
 The timing table above remains historical evidence, not a measurement of the
 2026-09-22 correction. Memory use remains proportional to manifest size and
 worker count; per-process RSS does not establish aggregate guest peak RSS.
