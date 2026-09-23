@@ -10,16 +10,53 @@ runtime=$1
 wall_seconds=${SCV_COLD_MAX_SECONDS:-90}
 rss_kib=${SCV_COLD_MAX_RSS_KIB:-524288}
 report=${SCV_COLD_REPORT_DIR:-build/scv-cold-profile}
+host_os=${SCV_HOST_OS:-$(uname -s 2>/dev/null || printf unknown)}
+time_bin=${SCV_TIME_BIN:-/usr/bin/time}
+timeout_bin=${SCV_TIMEOUT_BIN:-timeout}
 mkdir -p "$report"
-/usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kib=%M' -o "$report/resources.txt" \
-    timeout "$wall_seconds" "$runtime" run test/05_perf/scv/cold_inventory_workload.spl \
-    >"$report/workload.txt" 2>"$report/stderr.txt"
-grep -Fx 'cold_inventory entries=16384 generation=16384 byte_sum=134225920' "$report/workload.txt" >/dev/null
-actual_rss=$(sed -n 's/^max_rss_kib=//p' "$report/resources.txt")
+status=0
+case "$host_os" in
+    FreeBSD)
+        # FreeBSD time(1) has no GNU -f formatter. Its -l ru_maxrss value is
+        # already KiB; -p supplies a stable `real SECONDS` wall-time row.
+        if "$time_bin" -p -l \
+            "$timeout_bin" "$wall_seconds" "$runtime" run \
+            test/05_perf/scv/cold_inventory_workload.spl \
+            >"$report/workload.txt" 2>"$report/resources.raw.txt"; then
+            :
+        else
+            status=$?
+        fi
+        elapsed_seconds=$(awk '$1 == "real" { print $2; exit }' "$report/resources.raw.txt")
+        actual_rss=$(awk '/maximum resident set size/ { print $1; exit }' "$report/resources.raw.txt")
+        ;;
+    *)
+        if "$time_bin" -f 'elapsed_seconds=%e\nmax_rss_kib=%M' \
+            -o "$report/resources.raw.txt" \
+            "$timeout_bin" "$wall_seconds" "$runtime" run \
+            test/05_perf/scv/cold_inventory_workload.spl \
+            >"$report/workload.txt" 2>"$report/stderr.txt"; then
+            :
+        else
+            status=$?
+        fi
+        elapsed_seconds=$(sed -n 's/^elapsed_seconds=//p' "$report/resources.raw.txt")
+        actual_rss=$(sed -n 's/^max_rss_kib=//p' "$report/resources.raw.txt")
+        ;;
+esac
+[ "$status" -eq 0 ] || {
+    echo "FAIL cold inventory workload status=$status" >&2
+    exit "$status"
+}
+case "$elapsed_seconds" in ''|*[!0-9.]*) echo "missing wall-time measurement" >&2; exit 1;; esac
 case "$actual_rss" in ''|*[!0-9]*) echo "missing RSS measurement" >&2; exit 1;; esac
+printf 'elapsed_seconds=%s\nmax_rss_kib=%s\n' \
+    "$elapsed_seconds" "$actual_rss" >"$report/resources.txt"
+grep -Fx 'cold_inventory entries=16384 generation=16384 byte_sum=134225920' "$report/workload.txt" >/dev/null
 if [ "$actual_rss" -gt "$rss_kib" ]; then
     echo "FAIL cold inventory RSS: $actual_rss KiB > $rss_kib KiB" >&2
     exit 1
 fi
 cat "$report/workload.txt" "$report/resources.txt"
-printf 'PASS wall_budget_seconds=%s rss_budget_kib=%s\n' "$wall_seconds" "$rss_kib"
+printf 'PASS host_os=%s wall_budget_seconds=%s rss_budget_kib=%s\n' \
+    "$host_os" "$wall_seconds" "$rss_kib"
