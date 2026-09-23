@@ -53,7 +53,6 @@ failures in the inventory and summary. A nonzero runner status is preserved.
 `scripts/bootstrap/validate-test-runner-json.pl` owns the strict JSON boundary;
 the shell runner records only its admitted passed/failed/skipped counters.
 
-<<<<<<< HEAD
 The phase-owned full CLI and standalone test runner also run the compiler
 bootstrap suite and `compiler/loader/module_loader_segment_transaction_spec.spl` in explicit
 interpreter and compile modes. Every focused row uses `--assert-ran`, isolated
@@ -101,8 +100,6 @@ and `compiler_unit_tests` elapsed/RSS values before changing concurrency or
 cache policy. Git checkout and LFS materialization occur before this verifier
 and are outside these measurements.
 
-=======
->>>>>>> origin/main
 ## Why an umbrella exists
 
 Before this, the gates were scattered across three regimes: some invoked from
