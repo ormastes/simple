@@ -818,12 +818,11 @@ impl<'a> Parser<'a> {
                         | TokenKind::String(_)
                         | TokenKind::RawString(_)
                         | TokenKind::FString(_)
-                        // `context` is also a legal identifier. At the end of
-                        // an indented block its next token is a line boundary,
-                        // so route it through expression parsing rather than
-                        // requiring the statement form's `context expr:`.
+                        // A bare `context` at a line, block, or file boundary
+                        // is an identifier, not a context DSL header.
                         | TokenKind::Newline
                         | TokenKind::Dedent
+                        | TokenKind::Eof
                 ) {
                     self.parse_expression_or_assignment()
                 } else {
