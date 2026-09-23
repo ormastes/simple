@@ -8,6 +8,12 @@ trap 'rm -rf "$test_tmp"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+bound_metadata() {
+    perl -e 'my @s=lstat($ARGV[0]); @s or exit 1;
+        print((-x $ARGV[0] ? 1 : 0), "\t", ($s[2] & 07777), "\t",
+            $s[0], "\t", $s[1], "\t", $s[7], "\t", $s[9], "\t",
+            $s[10])' "$1"
+}
 
 fixture="$test_tmp/authority"
 mkdir -p "$fixture/sub"
@@ -52,7 +58,7 @@ fi
 [ ! -e "$test_tmp/race-snapshot" ] || fail "race published a snapshot"
 
 printf '%s\0' "$test_tmp/moved/$newline_name" >"$test_tmp/paths"
-printf '00\t0\t0\t0\t0\n' >"$test_tmp/meta"
+printf '00\t0\t0\t0\t0\t0\t0\t0\n' >"$test_tmp/meta"
 if bootstrap_stage3_hash_bound_path_list "$test_tmp/paths" "$test_tmp/meta" \
     "$test_tmp/hashes" 1 "$test_tmp" >/dev/null 2>&1; then
     fail "mismatched identity was accepted"
@@ -60,4 +66,72 @@ fi
 for worker_dir in "$test_tmp"/hashes.workers.*; do
     [ ! -e "$worker_dir" ] || fail "failed worker leaked its directory"
 done
-echo "PASS: newline authority path modes, identity binding, and failure cleanup"
+
+# A failure after the first fork must terminate/reap that child and preserve
+# the previously published result. The injected failure is handled by the same
+# owner path as an operating-system fork failure.
+fork_file="$test_tmp/fork-file"
+printf 'fork cleanup\n' >"$fork_file"
+printf '%s\0%s\0' "$fork_file" "$fork_file" >"$test_tmp/fork.paths"
+fork_metadata=$(bound_metadata "$fork_file")
+printf '00\t%s\n01\t%s\n' "$fork_metadata" "$fork_metadata" \
+    >"$test_tmp/fork.meta"
+printf 'previous fork result\n' >"$test_tmp/fork.hashes"
+if BOOTSTRAP_STAGE3_TEST_FORK_FAIL_AT=1 \
+    bootstrap_stage3_hash_bound_path_list "$test_tmp/fork.paths" \
+        "$test_tmp/fork.meta" "$test_tmp/fork.hashes" 2 "$test_tmp" \
+        >/dev/null 2>&1; then
+    fail "partial fork failure was accepted"
+fi
+grep -Fqx 'previous fork result' "$test_tmp/fork.hashes" ||
+    fail "partial fork failure replaced the prior result"
+for worker_dir in "$test_tmp"/fork.hashes.workers.* \
+        "$test_tmp"/fork.hashes.tmp.*; do
+    [ ! -e "$worker_dir" ] || fail "partial fork failure leaked temp state"
+done
+
+# Deterministically mutate file content after scanning but before workers open
+# it. Size/time binding must reject the stale scan and preserve publication.
+mutation_fixture="$test_tmp/mutation-authority"
+mkdir "$mutation_fixture"
+printf 'before\n' >"$mutation_fixture/file"
+mkdir "$test_tmp/mutation-intercept"
+printf '%s\n' '#!/bin/sh' \
+    '"$SNAPSHOT_TEST_REAL_PERL" "$@"' \
+    'status=$?' \
+    'if [ "$status" -eq 0 ] && [ ! -e "$SNAPSHOT_TEST_MUTATION_MARKER" ]; then' \
+    '  printf "content mutated after scan\\n" >>"$SNAPSHOT_TEST_MUTATION_FILE" || exit 1' \
+    '  : >"$SNAPSHOT_TEST_MUTATION_MARKER"' \
+    'fi' \
+    'exit "$status"' >"$test_tmp/mutation-intercept/perl"
+chmod 755 "$test_tmp/mutation-intercept/perl"
+printf 'previous mutation snapshot\n' >"$test_tmp/mutation.snapshot"
+if PATH="$test_tmp/mutation-intercept:$PATH" \
+    SNAPSHOT_TEST_REAL_PERL="$real_perl" \
+    SNAPSHOT_TEST_MUTATION_MARKER="$test_tmp/mutation.marker" \
+    SNAPSHOT_TEST_MUTATION_FILE="$mutation_fixture/file" \
+    bootstrap_stage3_directory_snapshot "$test_tmp/mutation.snapshot" \
+        "$mutation_fixture" >/dev/null 2>&1; then
+    fail "content mutation after scan was accepted"
+fi
+grep -Fqx 'previous mutation snapshot' "$test_tmp/mutation.snapshot" ||
+    fail "content mutation replaced the prior snapshot"
+
+# The descriptor/path tuple is checked again after hashing. Exercise that
+# precise boundary deterministically rather than relying on scheduler timing.
+post_hash_file="$test_tmp/post-hash-file"
+printf 'post hash original\n' >"$post_hash_file"
+printf '%s\0' "$post_hash_file" >"$test_tmp/post-hash.paths"
+post_hash_metadata=$(bound_metadata "$post_hash_file")
+printf '00\t%s\n' "$post_hash_metadata" >"$test_tmp/post-hash.meta"
+printf 'previous post-hash result\n' >"$test_tmp/post-hash.hashes"
+if BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_HASH="$post_hash_file" \
+    bootstrap_stage3_hash_bound_path_list "$test_tmp/post-hash.paths" \
+        "$test_tmp/post-hash.meta" "$test_tmp/post-hash.hashes" 1 \
+        "$test_tmp" >/dev/null 2>&1; then
+    fail "post-hash content mutation was accepted"
+fi
+grep -Fqx 'previous post-hash result' "$test_tmp/post-hash.hashes" ||
+    fail "post-hash mutation replaced the prior result"
+
+echo "PASS: newline paths, stability binding, and transactional worker cleanup"

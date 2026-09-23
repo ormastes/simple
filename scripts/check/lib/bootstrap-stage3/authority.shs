@@ -2024,8 +2024,10 @@ bootstrap_stage3_tool_authority_snapshot() (
 )
 
 # Hash a NUL-delimited path manifest retaining the scanner's regular-file identity.
-# Each child verifies lstat(dev, ino), opens the leaf, verifies fstat(dev, ino),
-# hashes the opened descriptor, and verifies both descriptor and pathname again.
+# Each child verifies lstat(dev, ino, mode, size, mtime, ctime), opens the leaf,
+# verifies the same fstat tuple, hashes the opened descriptor, and verifies both
+# descriptor and pathname again. This detects in-place content mutation without
+# a second hashing pass on the performance-sensitive path.
 # A replacement symlink or outside target therefore fails closed before its
 # bytes can become an authority record. Children emit indexed hashes; the
 # owner reconstructs the original input order and rejects missing/duplicate
@@ -2047,7 +2049,13 @@ bootstrap_stage3_hash_bound_path_list() (
         bootstrap_stage3_hash_bound_workers=64
     bootstrap_stage3_hash_bound_work=$(mktemp -d \
         "${bootstrap_stage3_hash_bound_output}.workers.XXXXXX") || return 1
-    trap 'rm -rf "$bootstrap_stage3_hash_bound_work"' EXIT
+    bootstrap_stage3_hash_bound_result=$(mktemp \
+        "${bootstrap_stage3_hash_bound_output}.tmp.XXXXXX") || {
+        rm -rf "$bootstrap_stage3_hash_bound_work"
+        return 1
+    }
+    trap 'rm -rf "$bootstrap_stage3_hash_bound_work"; \
+        rm -f "$bootstrap_stage3_hash_bound_result"' EXIT
     trap 'exit 1' HUP INT TERM
     perl -MDigest::SHA -e '
         use strict;
@@ -2095,12 +2103,22 @@ bootstrap_stage3_hash_bound_path_list() (
             }
             return 1;
         }
+        my $test_fork_fail_at =
+            $ENV{BOOTSTRAP_STAGE3_TEST_FORK_FAIL_AT};
+        defined $test_fork_fail_at &&
+            $test_fork_fail_at !~ /^[0-9]+$/ and
+            die "invalid fork failure fixture\n";
         my @pids;
         my $failed = 0;
         for my $worker (0 .. $workers - 1) {
-            my $pid = fork;
+            my $pid = defined $test_fork_fail_at &&
+                $worker == $test_fork_fail_at ? undef : fork;
             if (!defined $pid) {
                 $failed = 1;
+                # A partial fork is a failed transaction. Stop every child
+                # already admitted before reaping them; do not let abandoned
+                # workers continue reading authority files in the background.
+                kill "TERM", @pids if @pids;
                 last;
             }
             if ($pid == 0) {
@@ -2111,9 +2129,13 @@ bootstrap_stage3_hash_bound_path_list() (
                      $index += $workers) {
                     my $path = $paths[$index];
                     my ($relative_hex, $executable, $expected_mode,
-                        $expected_dev, $expected_ino) =
-                        split /\t/, $meta[$index], 5;
-                    if (!defined $expected_ino || $path =~ /\0/) {
+                        $expected_dev, $expected_ino, $expected_size,
+                        $expected_mtime, $expected_ctime) =
+                        split /\t/, $meta[$index], 8;
+                    if (!defined $expected_ctime || $path =~ /\0/ ||
+                        $expected_size !~ /^[0-9]+$/ ||
+                        $expected_mtime !~ /^[0-9]+$/ ||
+                        $expected_ctime !~ /^[0-9]+$/) {
                         $status = 72;
                         last;
                     }
@@ -2127,7 +2149,10 @@ bootstrap_stage3_hash_bound_path_list() (
                         (($before[2] & 07777) != $expected_mode) ||
                         $before_executable != $executable ||
                         "$before[0]" ne $expected_dev ||
-                        "$before[1]" ne $expected_ino) {
+                        "$before[1]" ne $expected_ino ||
+                        "$before[7]" ne $expected_size ||
+                        "$before[9]" ne $expected_mtime ||
+                        "$before[10]" ne $expected_ctime) {
                         $status = 73;
                         last;
                     }
@@ -2139,7 +2164,10 @@ bootstrap_stage3_hash_bound_path_list() (
                         (($opened[2] & 07777) != $expected_mode) ||
                         $opened_executable != $executable ||
                         "$opened[0]" ne $expected_dev ||
-                        "$opened[1]" ne $expected_ino) {
+                        "$opened[1]" ne $expected_ino ||
+                        "$opened[7]" ne $expected_size ||
+                        "$opened[9]" ne $expected_mtime ||
+                        "$opened[10]" ne $expected_ctime) {
                         close $leaf;
                         $status = 75;
                         last;
@@ -2149,6 +2177,20 @@ bootstrap_stage3_hash_bound_path_list() (
                         close $leaf;
                         $status = 76;
                         last;
+                    }
+                    # Deterministic regression hook: mutate only the explicitly
+                    # named fixture after hashing so the post-hash stat gate is
+                    # exercised without timing-dependent background races.
+                    if (defined $ENV{BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_HASH} &&
+                        $path eq
+                            $ENV{BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_HASH}) {
+                        open my $mutation, ">>:raw", $path or
+                            do { close $leaf; $status = 76; last; };
+                        print {$mutation} "post-hash mutation\n" or
+                            do { close $mutation; close $leaf;
+                                $status = 76; last; };
+                        close $mutation or
+                            do { close $leaf; $status = 76; last; };
                     }
                     my @after = stat($leaf);
                     my @path_after = lstat($path);
@@ -2163,8 +2205,14 @@ bootstrap_stage3_hash_bound_path_list() (
                         $path_after_executable != $executable ||
                         "$after[0]" ne $expected_dev ||
                         "$after[1]" ne $expected_ino ||
+                        "$after[7]" ne $expected_size ||
+                        "$after[9]" ne $expected_mtime ||
+                        "$after[10]" ne $expected_ctime ||
                         "$path_after[0]" ne $expected_dev ||
-                        "$path_after[1]" ne $expected_ino) {
+                        "$path_after[1]" ne $expected_ino ||
+                        "$path_after[7]" ne $expected_size ||
+                        "$path_after[9]" ne $expected_mtime ||
+                        "$path_after[10]" ne $expected_ctime) {
                         $status = 78;
                         last;
                     }
@@ -2207,7 +2255,12 @@ bootstrap_stage3_hash_bound_path_list() (
         "$bootstrap_stage3_hash_bound_meta" \
         "$bootstrap_stage3_hash_bound_work" \
         "$bootstrap_stage3_hash_bound_workers" \
-        "$bootstrap_stage3_hash_bound_root"
+        "$bootstrap_stage3_hash_bound_root" \
+        >"$bootstrap_stage3_hash_bound_result" || return 1
+    mv -f "$bootstrap_stage3_hash_bound_result" \
+        "$bootstrap_stage3_hash_bound_output" || return 1
+    trap - EXIT HUP INT TERM
+    rm -rf "$bootstrap_stage3_hash_bound_work"
 )
 
 bootstrap_stage3_directory_snapshot() (
@@ -2323,7 +2376,8 @@ bootstrap_stage3_directory_snapshot() (
                     print {$meta} unpack("H*", $relative), "\t",
                         (-x $absolute ? 1 : 0), "\t",
                         ($stat[2] & 07777), "\t", $stat[0], "\t",
-                        $stat[1], "\n" or
+                        $stat[1], "\t", $stat[7], "\t", $stat[9], "\t",
+                        $stat[10], "\n" or
                         die "write metadata\n";
                 },
             },
@@ -2353,8 +2407,7 @@ bootstrap_stage3_directory_snapshot() (
         "$bootstrap_stage3_directory_snapshot_meta" \
         "$bootstrap_stage3_directory_snapshot_hashes" \
         "$bootstrap_stage3_directory_snapshot_workers" \
-        "$bootstrap_stage3_directory_snapshot_scan" \
-        >"$bootstrap_stage3_directory_snapshot_hashes" || exit 1
+        "$bootstrap_stage3_directory_snapshot_scan" || exit 1
     awk 'NR == FNR { hashes++; next } { metadata++ }
         END { exit hashes != metadata }' \
         "$bootstrap_stage3_directory_snapshot_hashes" \

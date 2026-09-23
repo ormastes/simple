@@ -64,12 +64,15 @@ worker count; per-process RSS does not establish aggregate guest peak RSS.
   `QEMU_CPUS=12 SIMPLE_NATIVE_BUILD_THREADS=12 sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke`
   in an isolated VM/output, preserving any already-running guest bootstrap.
 - [ ] In that FreeBSD guest, run the path contract and streaming tests once,
-  retaining exit codes and snapshot digests, then run the canonical wrapper
-  with `--full` for bootstrap admission. Record the exact candidate commit,
-  compiler hashes, phase results, guest CPU count, and logs.
-- [ ] Measure serial versus 12-requested-worker wall time and aggregate peak
-  RSS on the same frozen guest authority tree. Existing Linux owner/process
-  RSS evidence cannot satisfy this gate.
+  with `SIMPLE_NATIVE_BUILD_THREADS=12`, retaining exit codes and proving the
+  parallel snapshot is byte-equal to the serial oracle. Then run the canonical
+  wrapper with `--full` for bootstrap admission. Record the exact candidate
+  commit, compiler hashes, phase results, guest CPU count, and logs.
+- [ ] On that same frozen FreeBSD guest authority tree, measure serial versus
+  `SIMPLE_NATIVE_BUILD_THREADS=12` wall time and aggregate peak RSS for the
+  complete owner-plus-worker process tree (not only the owner process). Reject
+  a wall-time or memory regression. Existing Linux owner/process RSS evidence
+  cannot satisfy this gate.
 - [ ] Investigate the currently failing PR hygiene/container CI checks; no
   platform-wide PASS is claimed from focused shell regressions.
 
