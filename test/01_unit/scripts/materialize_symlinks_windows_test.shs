@@ -9,7 +9,10 @@ for tool in powershell cygpath git od awk cmp sha256sum; do
 done
 case_name=setup
 trap 'rc=$?; echo "FIRST FAILURE: case=$case_name line=$LINENO command=$BASH_COMMAND exit=$rc" >&2; [ ! -f "${tmp:-}/last.log" ] || cat "$tmp/last.log" >&2; exit "$rc"' ERR
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-materialize-links.XXXXXX")
+# Receipt paths intentionally stay in lexical /<drive>/ form. MSYS /tmp is
+# outside that contract even when it maps to a Windows drive underneath.
+test -n "${LOCALAPPDATA:-}" || { echo 'BLOCKED: LOCALAPPDATA required' >&2; exit 77; }
+tmp=$(mktemp -d "$(cygpath -u "$LOCALAPPDATA")/Temp/simple-materialize-links.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
 export TMPDIR="$tmp"
 
@@ -65,6 +68,20 @@ remove_junction() {
         [System.IO.Directory]::Delete($env:FIXTURE_JUNCTION, $false)
         '
 }
+
+# Publishing into freshly created directories retains their safety handles
+# through rename. Those handles must not conflict with the rename itself.
+new_repo receipt-created-parents
+printf 'payload\n' >"$repo/target.txt"
+add_link file-link.txt target.txt
+commit_repo
+run_materializer "$tmp/new-receipts/nested/receipt.env"
+test "$materializer_status" -eq 0
+grep -Fqx 'result=complete' "$receipt"
+cp "$receipt" "$tmp/receipt-before-collision.env"
+run_materializer "$receipt"
+test "$materializer_status" -ne 0
+cmp "$receipt" "$tmp/receipt-before-collision.env"
 
 new_repo positive
 printf 'payload\n' >"$repo/target.txt"
@@ -148,7 +165,14 @@ foreach ($spec in [IO.File]::ReadAllLines($env:ORACLE_SPECS, $utf8)) {
  Equal $r.target_volume $info.Volume "$name volume"
  Equal $r.target_file_id ("{0}:{1}" -f $info.High,$info.Low) "$name file id"
  Equal $r.target_size (([uint64]$info.SizeHigh * 4294967296) + $info.SizeLow) "$name size"
- $sha=if ($kind -eq "file") { (Get-FileHash -LiteralPath $native -Algorithm SHA256).Hash.ToLowerInvariant() } else { "-" }
+ $sha=if ($kind -eq "file") {
+  $stream=[IO.File]::OpenRead($native)
+  try {
+   $hasher=[Security.Cryptography.SHA256]::Create()
+   try { [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace("-", "").ToLowerInvariant() }
+   finally { $hasher.Dispose() }
+  } finally { $stream.Dispose() }
+ } else { "-" }
  Equal $r.target_sha256 $sha "$name sha"
  Equal $r.kind $kind "$name kind"
  Equal $r.state "created" "$name state"
@@ -378,6 +402,49 @@ if grep -Fq 'mkdir -p "${materialized_receipt_dir}"' "$root/scripts/bootstrap/bo
     false
 fi
 grep -Fq 'native_action prepare' "$root/scripts/setup/materialize-symlinks-windows.shs"
+
+# The strict materializer encounters tracked links into .spipe/spipe.  The
+# wrapper must first populate precisely the gitlink recorded by HEAD; a remote
+# update would make bootstrap input depend on mutable network state.
+windows_bootstrap="$root/scripts/bootstrap/bootstrap-windows.sh"
+grep -Fqx 'git -C "${repo_root}" submodule update --init -- .spipe/spipe || {' "$windows_bootstrap"
+if grep -Eq 'submodule[[:space:]]+update.*--remote' "$windows_bootstrap"; then
+    echo 'wrapper must not resolve the SPipe gitlink from a remote branch' >&2
+    false
+fi
+awk '
+  /git -C "\$\{repo_root\}" submodule update --init -- \.spipe\/spipe/ && !submodule { submodule=NR }
+  /materialize-symlinks-windows\.shs/ && !materializer { materializer=NR }
+  END { exit !(submodule && materializer && submodule < materializer) }
+' "$windows_bootstrap" || {
+    echo 'wrapper must initialize the recorded SPipe gitlink before materialization' >&2
+    false
+}
+
+# Git itself owns the only permitted update operation. A dirty checkout that
+# already matches the recorded gitlink remains intact, even from outside the
+# parent repository.
+submodule_source="$tmp/recorded-spipe-source"
+submodule_parent="$tmp/recorded-spipe-parent"
+mkdir "$submodule_source" "$submodule_parent"
+git -C "$submodule_source" init -q
+git -C "$submodule_source" config user.email test@example.invalid
+git -C "$submodule_source" config user.name materializer-test
+printf 'recorded\n' >"$submodule_source/held.txt"
+git -C "$submodule_source" add held.txt
+git -C "$submodule_source" commit -qm recorded
+git -C "$submodule_parent" init -q
+git -C "$submodule_parent" config user.email test@example.invalid
+git -C "$submodule_parent" config user.name materializer-test
+git -C "$submodule_parent" -c protocol.file.allow=always submodule add -q "$submodule_source" .spipe/spipe
+git -C "$submodule_parent" commit -qm parent
+printf 'dirty but preserved\n' >"$submodule_parent/.spipe/spipe/held.txt"
+mkdir "$tmp/unrelated-cwd"
+(
+    cd "$tmp/unrelated-cwd"
+    git -C "$submodule_parent" submodule update --init -- .spipe/spipe
+)
+test "$(cat "$submodule_parent/.spipe/spipe/held.txt")" = 'dirty but preserved'
 
 # Replace the target after link validation, immediately before metadata capture.
 # A pathname-only metadata reader would certify the replacement as the target.

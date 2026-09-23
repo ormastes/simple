@@ -11,13 +11,24 @@ fail() {
   exit 1
 }
 
+for invalid_workers in 00 01 0 13 999999999999999999999999999999 abc; do
+  if invalid_output=$(BOOTSTRAP_VERIFY_TEST_WORKERS=$invalid_workers \
+      sh "$phase_runner" --phase=stage2 2>&1); then
+    fail "invalid worker count was accepted: $invalid_workers"
+  fi
+  case "$invalid_output" in
+    *'test workers must be an integer from 1 to 12'*) ;;
+    *) fail "invalid worker count reached later validation: $invalid_workers" ;;
+  esac
+done
+
 # Exercise the production function without invoking a compiler. Keep the
 # extraction narrow so edits to the function are tested here rather than a
 # copied implementation drifting independently.
-sed -n '/^validate_test_runner_json_log() {$/,/^}$/p' "$phase_runner" \
-  >"$tmp/production-function.sh"
-sed -n '/^run_compiler_unit_tests() {$/,/^}$/p' "$phase_runner" \
-  >>"$tmp/production-function.sh"
+for function_name in validate_test_runner_json_log run_inventory_row run_inventory_rows run_compiler_unit_tests; do
+  sed -n "/^${function_name}() {\$/,/^}\$/p" "$phase_runner" \
+    >>"$tmp/production-function.sh"
+done
 grep -Fq 'run_compiler_unit_tests() {' "$tmp/production-function.sh" ||
   fail production-function-not-found
 . "$tmp/production-function.sh"
@@ -41,6 +52,21 @@ chmod +x "$source_root/scripts/bootstrap/run-process-group-timeout.shs"
 test_runner="$tmp/fake-test-runner"
 cat >"$test_runner" <<'EOF'
 #!/bin/sh
+if [ "${FIXTURE_RESULT:-}" = parallel ]; then
+  case " $* " in *' --parallel --max-workers=12 --json '*) ;; *) exit 64 ;; esac
+  printf 'start %s\n' "$1" >>"${PARALLEL_EVENTS:?}"
+  sleep 2
+  printf 'end %s\n' "$1" >>"$PARALLEL_EVENTS"
+  case "$1" in
+    *fixture_07_spec.spl)
+      echo '{"success":false,"spec":{"success":false,"total_passed":0,"total_failed":1,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+      ;;
+    *)
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+      ;;
+  esac
+  exit 0
+fi
 case "${FIXTURE_RESULT:?}" in
   pass)
     echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
@@ -91,6 +117,19 @@ command_owner_receipt="$tmp/command-owner.env"
 home="$tmp/home"
 cache="$tmp/cache"
 spec_timeout_seconds=10
+test_mode_flag=--sequential
+test_worker_flag=
+test_workers=1
+
+# The inventory function delegates process measurement to the phase runner's
+# outer helper. Keep this focused JSON/count test independent of host rusage.
+run_measured_timeout() {
+  metric_file=$1
+  shift 3
+  printf '1\n' >"$metric_file"
+  "$@"
+}
+read_max_rss_kib() { printf '1\n'; }
 
 # The inventory function delegates process measurement to the phase runner's
 # outer helper. Keep this focused JSON/count test independent of host rusage.
@@ -132,6 +171,25 @@ run_case pass 0
 grep -Fq 'task=compiler_unit_tests|result=PASS|status=0' "$summary" ||
   fail passing-row-not-admitted
 pass_summary=$summary
+
+# Retry the same work root after a PASS, then make the row process die before
+# writing a new result. Neither its old receipt nor its old JSON may be reused.
+(
+  run_inventory_row() { return 77; }
+  logs="$tmp/case-pass/logs"
+  summary="$tmp/case-pass/retry-summary.env"
+  : >"$summary"
+  retry_status=0
+  run_compiler_unit_tests "$test_runner" "$command_owner_receipt" ||
+    retry_status=$?
+  [ "$retry_status" -eq 1 ] || fail "dead retry inherited a prior PASS"
+  awk -F '\t' '$2 == "FAIL" && $3 == 96 && $4 == 0 { found=1 } \
+    END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
+    fail "dead retry did not retain an explicit failed row"
+  grep -Fq 'inventory row worker exited 77' \
+    "$logs/compiler_unit_tests.log" ||
+    fail "dead retry lost its worker exit evidence"
+)
 
 run_case lookalike 0
 grep -Fq 'task=compiler_unit_tests|result=PASS|status=0' "$summary" ||
@@ -191,5 +249,31 @@ run_case sorting 1
 grep -Fq 'task=compiler_unit_tests|result=FAIL|status=sort-error' "$summary" ||
   fail failed-sort-was-admitted
 unset -f sort
+
+for row_number in 01 02 03 04 05 06 07 08 09 10 11 12 13; do
+  : >"$source_root/test/01_unit/compiler/loader/fixture_${row_number}_spec.spl"
+done
+test_workers=12
+test_mode_flag=--parallel
+test_worker_flag=--max-workers=12
+PARALLEL_EVENTS="$tmp/parallel-events"
+export PARALLEL_EVENTS
+: >"$PARALLEL_EVENTS"
+run_case parallel 1
+awk '
+  $1 == "start" { active++; started++; if (active > peak) peak=active }
+  $1 == "end" { active--; ended++; if (active < 0) bad=1 }
+  END { exit !(started == 14 && ended == 14 && active == 0 && peak == 12 && !bad) }
+' "$PARALLEL_EVENTS" || fail "12-worker pool did not run exactly 12 concurrent rows"
+grep -Fq 'spec_count=14|passed_count=13|timeout_count=0|crash_count=0' \
+  "$summary" || fail "parallel row counts were not retained"
+awk -F '\t' '$1 ~ /fixture_07_spec[.]spl$/ && $2 == "FAIL" && \
+  $3 == 93 && $4 == 1 && $5 == 0 && $6 == 1 { found=1 } \
+  END { exit !found }' "$logs/compiler_unit_tests.inventory.tsv" ||
+  fail "parallel failed row lost its JSON count"
+awk -F '\t' 'NR > 1 { count++; if ($2 == "PASS") passed++ } \
+  END { exit !(count == 14 && passed == 13) }' \
+  "$logs/compiler_unit_tests.inventory.tsv" ||
+  fail "parallel inventory omitted a row"
 
 echo 'bootstrap_compiler_unit_execution_count_test: PASS'

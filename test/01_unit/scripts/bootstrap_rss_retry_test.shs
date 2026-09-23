@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+mkdir "$tmp/home" "$tmp/tmp"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+# Run the actual transcription/execution boundary twice, as the cache retry does.
+# The second attempt deliberately hits the lowered cap before executing work.
+for attempt in first retry; do
+    if [ "$attempt" = first ]; then
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=65536
+        expected=7
+    else
+        cp "$tmp/build.log.rss.env" "$tmp/before-cache-retry.log.rss.env"
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1
+        expected=88
+    fi
+    status=0
+    bootstrap_stage3_run_transcribed "$tmp/$attempt.transcript" "$root" \
+        "$tmp/build.log" "$tmp/home" "$tmp/tmp" /usr/bin:/bin \
+        -- /bin/sh -c 'exit 7' || status=$?
+    [ "$status" -eq "$expected" ] || { cat "$tmp/build.log"; fail "$attempt got $status expected $expected"; }
+    grep -Fxq "max_rss_kib=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
+        "$tmp/build.log.rss.env" || fail "$attempt missing independent RSS receipt"
+done
+grep -Fxq 'max_rss_kib=65536' "$tmp/before-cache-retry.log.rss.env" || fail 'retry overwrote first receipt'
+grep -Fq 'stage2-native-build.before-cache-retry.log.rss.env' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'bootstrap does not archive retry receipt'
+[ "$(grep -c '^  *bootstrap_run_stage2_native$' "$root/scripts/bootstrap/bootstrap-from-scratch.sh")" -eq 2 ] || fail 'Stage2 initial/retry execution boundary changed'
+grep -Fq 'bootstrap_stage3_run_transcribed "$stage3_transcript"' \
+    "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" || fail 'resume bypasses shared guard'
+grep -Fq 'stage4-native-build.log.rss.env' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'Stage4 guard missing'
+echo 'PASS: transcribed initial/retry executions each produce RSS evidence; resume/Stage4 wiring retained'

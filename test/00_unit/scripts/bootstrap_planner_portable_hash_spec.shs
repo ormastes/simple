@@ -1,0 +1,44 @@
+#!/bin/sh
+# Exercise macOS's shasum provider even on hosts with GNU coreutils installed.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+lib="$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/planner-portable-hash.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+mkdir "$scratch/bin" "$scratch/broken" "$scratch/empty"
+provider=$(command -v shasum) || { echo 'FAIL: shasum unavailable'; exit 1; }
+ln -s "$provider" "$scratch/bin/shasum"
+printf abc >"$scratch/input with spaces"
+printf abc >"$scratch/-input"
+expected=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+PATH="$scratch/bin" /bin/sh -eu -c '
+    . "$1"
+    ! command -v sha256sum >/dev/null 2>&1
+    [ "$(bootstrap_planner_v2_hash_text abc)" = "$3" ]
+    [ "$(bootstrap_planner_v2_hash_file "$2/input with spaces")" = "$3" ]
+    [ "$(bootstrap_planner_v2_hash_file "$2/-input")" = "$3" ]
+    [ "$(printf abc | bootstrap_planner_v2_hash_stdin)" = "$3" ]
+    [ "$(bootstrap_planner_v2_hash_text "")" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]
+    ! bootstrap_planner_v2_hash_file "$2/missing" >/dev/null 2>&1
+    # Snapshot records retain the exact GNU-compatible digest/path layout.
+    bootstrap_planner_v2_sha256 -- "$2/input with spaces" "$2/-input"
+' sh "$lib" "$scratch" "$expected" >"$scratch/actual"
+printf '%s  %s\n' "$expected" "$scratch/input with spaces" \
+    "$expected" "$scratch/-input" >"$scratch/expected"
+cmp "$scratch/expected" "$scratch/actual"
+
+cat >"$scratch/broken/sha256sum" <<'BROKEN'
+#!/bin/sh
+printf 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  -\n'
+exit 1
+BROKEN
+chmod +x "$scratch/broken/sha256sum"
+for hash_path in "$scratch/broken" "$scratch/empty"; do
+    PATH="$hash_path" /bin/sh -eu -c '
+        . "$1"
+        if bootstrap_planner_v2_hash_text abc >"$2"; then exit 1; fi
+        [ ! -s "$2" ]
+    ' sh "$lib" "$scratch/refused"
+done
+printf 'PASS: planner portable file/text/stream/snapshot hashing and provider failure\n'

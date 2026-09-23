@@ -978,6 +978,35 @@ fn llvm_ar_archive_commands_keep_gnu_argument_forms() {
     assert_eq!(command_args(&list), ["t", "libout.a"]);
 }
 
+#[test]
+fn archive_batches_keep_long_windows_object_paths_within_command_line_limit() {
+    let archive = PathBuf::from("D:/cache/native-objects/output/libspl_objects.a");
+    let objects: Vec<PathBuf> = (0..430)
+        .map(|index| PathBuf::from(format!(
+            "D:/cache/compiler-tools/stage2/very-long-producer-sha/very-long-closure-sha/native-objects/object_{index:04}_{}.obj",
+            "segment".repeat(14)
+        )))
+        .collect();
+    let batches = super::linker::archive_object_batches("lib.exe", &archive, &objects).unwrap();
+    assert!(batches.len() > 3, "long absolute paths must be split by length");
+    assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), objects.len());
+    for (index, batch) in batches.iter().enumerate() {
+        assert!(!batch.is_empty());
+        let command = archive_create_command("lib.exe", &archive, batch, index > 0, false);
+        let budget = super::linker::archive_arg_budget(command.get_program())
+            + command.get_args().map(super::linker::archive_arg_budget).sum::<usize>();
+        assert!(budget <= super::linker::ARCHIVE_BATCH_ARG_LIMIT);
+    }
+}
+
+#[test]
+fn archive_batch_rejects_an_object_path_too_long_for_one_command() {
+    let object = PathBuf::from("x".repeat(super::linker::ARCHIVE_BATCH_ARG_LIMIT));
+    let error = super::linker::archive_object_batches("lib.exe", Path::new("out.lib"), &[object])
+        .unwrap_err();
+    assert!(error.contains("archive object path exceeds Windows command-line budget"));
+}
+
 fn test_host_object_extension() -> &'static str {
     #[cfg(target_os = "windows")]
     {

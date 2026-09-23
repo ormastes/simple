@@ -2,8 +2,11 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-tool=${PHASE2_CAPSULE_TOOL:-"$root/scripts/bootstrap/phase2-runtime-capsule.shs"}
+tool=${PHASE2_CAPSULE_FIXTURE_TOOL:-${PHASE2_CAPSULE_TOOL:-"$root/scripts/bootstrap/phase2-runtime-capsule.shs"}}
 tmp=$(mktemp -d)
+# The binder records a physical compiler path. macOS exposes /tmp and
+# /var/folders through /private, so use that same spelling in fixture receipts.
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
 windows_host=0
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) windows_host=1 ;; esac
 permissions() {
@@ -17,14 +20,21 @@ thaw() {
 }
 trap 'thaw "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $1" >&2; exit 1; }
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi | awk '{print $1}'
+}
 
 make_authority() {
   dir=$1
   mkdir -p "$dir/deps"
   printf native >"$dir/libsimple_native_all.a"
   printf hosted >"$dir/deps/libspl_hosted_runtime-fixture.rlib"
-  hosted_sha=$(sha256sum "$dir/deps/libspl_hosted_runtime-fixture.rlib" | awk '{print $1}')
-  native_sha=$(sha256sum "$dir/libsimple_native_all.a" | awk '{print $1}')
+  hosted_sha=$(hash_file "$dir/deps/libspl_hosted_runtime-fixture.rlib")
+  native_sha=$(hash_file "$dir/libsimple_native_all.a")
   {
     echo schema=simple-bootstrap-hosted-runtime-authority-v1
     echo status=frozen
@@ -53,7 +63,7 @@ if [ "$windows_host" = 1 ]; then
     fail 'frozen directory allowed replacing its runtime'
   fi
 else
-  [ "$(stat -c '%a' "$capsule" 2>/dev/null || stat -f '%Lp' "$capsule")" = 500 ] || fail 'capsule is writable'
+  [ "$(find "$capsule" -prune -perm 0500 -print)" = "$capsule" ] || fail 'capsule mode is not 0500'
 fi
 [ -f "$capsule/libsimple_native_all.a" ] || fail 'native_all missing'
 
@@ -126,11 +136,42 @@ writable=$(fresh_capsule writable)
 if [ "$windows_host" = 1 ]; then thaw "$writable"; else chmod u+w "$writable/libsimple_native_all.a"; fi
 if $tool verify "$writable" >/dev/null 2>&1; then fail 'writable leaf accepted'; fi
 
+# The portable BSD/GNU predicate must reject each write bit independently.
+# Checking owner-write alone silently admits group/world-writable capsules.
+for permission in g o; do
+  writable_other=$(fresh_capsule "writable-$permission")
+  chmod "$permission+w" "$writable_other/libsimple_native_all.a"
+  if $tool verify "$writable_other" >/dev/null 2>&1; then
+    fail "$permission-writable leaf accepted"
+  fi
+done
+
 writable_dir=$(fresh_capsule writable-dir)
 thaw "$writable_dir"
 if $tool verify "$writable_dir" >/dev/null 2>&1; then fail 'writable directory accepted'; fi
 
 if [ "$windows_host" = 0 ]; then
+  # An unsuccessful permission scan must never be treated as an empty result.
+  # BSD find rejecting GNU -perm /0222 caused exactly this false admission.
+  scan_error=$(fresh_capsule scan-error)
+  real_find=$(command -v find)
+  mkdir "$tmp/failing-find"
+  cat >"$tmp/failing-find/find" <<'EOF'
+#!/bin/sh
+for arg do
+  if [ "$arg" = -perm ]; then
+    echo 'find: fixture permission scan failure' >&2
+    exit 42
+  fi
+done
+exec "$CAPSULE_TEST_REAL_FIND" "$@"
+EOF
+  chmod +x "$tmp/failing-find/find"
+  if PATH="$tmp/failing-find:$PATH" CAPSULE_TEST_REAL_FIND="$real_find" \
+     $tool verify "$scan_error" >/dev/null 2>&1; then
+    fail 'failed permission scan accepted'
+  fi
+
   symlinked=$(fresh_capsule symlinked)
   thaw "$symlinked"; mv "$symlinked/deps" "$symlinked/deps.real"; ln -s deps.real "$symlinked/deps"
   if $tool verify "$symlinked" >/dev/null 2>&1; then fail 'symlink deps accepted'; fi
@@ -157,7 +198,7 @@ make_authority "$tmp/windows"
 mv "$tmp/windows/libsimple_native_all.a" "$tmp/windows/simple_native_all.lib"
 mv "$tmp/windows/simple.inputs.sha256" "$tmp/windows/simple.exe.inputs.sha256"
 printf backfill >"$tmp/windows/simple_compiler_backfill.lib"
-backfill_sha=$(sha256sum "$tmp/windows/simple_compiler_backfill.lib" | awk '{print $1}')
+backfill_sha=$(hash_file "$tmp/windows/simple_compiler_backfill.lib")
 sed -e 's/^backfill_status=.*/backfill_status=present/' -e "s/^backfill_sha256=.*/backfill_sha256=$backfill_sha/" \
   "$tmp/windows/simple.exe.inputs.sha256" >"$tmp/windows/stamp.new"
 mv "$tmp/windows/stamp.new" "$tmp/windows/simple.exe.inputs.sha256"
@@ -173,7 +214,7 @@ done
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 mkdir -p "$tmp/source/src/compiler" "$tmp/source/src/app" "$tmp/source/src/lib" \
-  "$tmp/source/src/compositions" "$tmp/source/examples/10_tooling" "$tmp/admitted"
+  "$tmp/source/src/plugins" "$tmp/source/src/compositions" "$tmp/source/examples/10_tooling" "$tmp/admitted"
 printf 'fn main():\n    0\n' >"$tmp/source/src/compiler/main.spl"
 bootstrap_stage3_source_snapshot "$tmp/source-before.txt" "$tmp/source"
 bootstrap_stage3_directory_snapshot "$tmp/runtime-before.txt" "$tmp/windows"
@@ -183,20 +224,20 @@ chmod +x "$tmp/admitted/simple.exe"
   echo schema=simple-bootstrap-stage2-admission-v2
   echo status=admitted
   echo candidate_path="$tmp/admitted/simple.exe"
-  echo candidate_sha256="$(sha256sum "$tmp/admitted/simple.exe" | awk '{print $1}')"
+  echo candidate_sha256="$(hash_file "$tmp/admitted/simple.exe")"
   echo runtime_authority_path="$tmp/windows"
   echo hosted_runtime_sha256="$hosted_sha"
-  echo source_snapshot_sha256="$(sha256sum "$tmp/source-before.txt" | awk '{print $1}')"
+  echo source_snapshot_sha256="$(hash_file "$tmp/source-before.txt")"
   echo runtime_snapshot_path="$tmp/runtime-before.txt"
-  echo runtime_snapshot_sha256="$(sha256sum "$tmp/runtime-before.txt" | awk '{print $1}')"
+  echo runtime_snapshot_sha256="$(hash_file "$tmp/runtime-before.txt")"
 } >"$tmp/admitted/admission.env"
 binding_tool="$root/scripts/bootstrap/phase2-runtime-binding.shs"
 bound=$(sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output")
 resolved=$(sh "$binding_tool" resolve "$tmp/admitted/simple.exe" "$tmp/source" "$tmp/resolve")
 [ "$resolved" = "$bound" ] || fail 'binding resolved a different capsule'
-binding_sha=$(sha256sum "$tmp/admitted/runtime-capsule.env" | awk '{print $1}')
+binding_sha=$(hash_file "$tmp/admitted/runtime-capsule.env")
 reused=$(sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output")
-[ "$reused" = "$bound" ] && [ "$(sha256sum "$tmp/admitted/runtime-capsule.env" | awk '{print $1}')" = "$binding_sha" ] ||
+[ "$reused" = "$bound" ] && [ "$(hash_file "$tmp/admitted/runtime-capsule.env")" = "$binding_sha" ] ||
   fail 'verified retry changed the capsule binding'
 mkdir "$tmp/admitted/runtime-capsule.env.publish-lock"
 if sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/bound-output" >/dev/null 2>&1; then
@@ -207,7 +248,7 @@ rmdir "$tmp/admitted/runtime-capsule.env.publish-lock"
 cp "$tmp/windows/simple_native_all.lib" "$tmp/native.saved"
 cp "$tmp/windows/simple.exe.inputs.sha256" "$tmp/stamp.saved"
 printf 'changed-native' >>"$tmp/windows/simple_native_all.lib"
-changed_native_sha=$(sha256sum "$tmp/windows/simple_native_all.lib" | awk '{print $1}')
+changed_native_sha=$(hash_file "$tmp/windows/simple_native_all.lib")
 sed "s/^native_all_sha256=.*/native_all_sha256=$changed_native_sha/" "$tmp/stamp.saved" >"$tmp/windows/simple.exe.inputs.sha256"
 if sh "$binding_tool" publish "$tmp/admitted/simple.exe" "$tmp/windows" "$tmp/wrong-runtime-output" >/dev/null 2>&1; then
   fail 'changed native archive and matching stamp reused old admission'
@@ -256,4 +297,110 @@ if $tool publish "$tmp/compiler" "$tmp/windows" "$tmp/backfill-output" >/dev/nul
   fail 'stale Windows backfill stamp accepted'
 fi
 
-echo 'PASS: POSIX and Windows Phase2 capsules preserve names, enforce immutable bytes, and reject invalid authorities'
+if [ "$windows_host" = 0 ]; then
+make_authority "$tmp/macos"
+printf 'cocoa-provider\n' > "$tmp/macos/libsimple_runtime.dylib"
+macos_capsule=$($tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-output")
+[ -f "$macos_capsule/libsimple_runtime.dylib" ] || fail 'macOS dynamic runtime missing'
+cmp "$tmp/macos/libsimple_runtime.dylib" "$macos_capsule/libsimple_runtime.dylib" ||
+  fail 'macOS dynamic runtime copy differs'
+dynamic_sha=$(hash_file "$tmp/macos/libsimple_runtime.dylib")
+[ "$(sed -n 's/^dynamic_runtime_sha256=//p' "$macos_capsule/phase2-runtime-capsule.env")" = "$dynamic_sha" ] ||
+  fail 'macOS dynamic runtime is not receipt-bound'
+$tool verify "$macos_capsule"
+chmod u+w "$macos_capsule/libsimple_runtime.dylib"
+printf tamper >> "$macos_capsule/libsimple_runtime.dylib"
+chmod 400 "$macos_capsule/libsimple_runtime.dylib"
+if $tool verify "$macos_capsule" >/dev/null 2>&1; then fail 'tampered dynamic runtime accepted'; fi
+
+missing_dynamic=$($tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-missing-output")
+chmod u+w "$missing_dynamic"
+rm "$missing_dynamic/libsimple_runtime.dylib"
+chmod 500 "$missing_dynamic"
+if $tool verify "$missing_dynamic" >/dev/null 2>&1; then fail 'missing bound dynamic runtime accepted'; fi
+mv "$tmp/macos/libsimple_runtime.dylib" "$tmp/macos/dylib.real"
+ln -s dylib.real "$tmp/macos/libsimple_runtime.dylib"
+if $tool publish "$tmp/compiler" "$tmp/macos" "$tmp/macos-linked-output" >/dev/null 2>&1; then
+  fail 'symlink dynamic runtime accepted'
+fi
+
+# A producer receipt is preserved as diagnostic evidence, never upgraded to
+# exact Darwin mapping/dependency admission by capsule publication.
+make_authority "$tmp/cocoa"
+printf 'diagnostic-cocoa-candidate\n' >"$tmp/cocoa/libspl_cocoa.dylib"
+cocoa_sha=$(hash_file "$tmp/cocoa/libspl_cocoa.dylib")
+{
+  echo kind=diagnostic-producer-receipt
+  echo admission=not-established
+  echo artifact=libspl_cocoa.dylib
+  echo abi=legacy-cocoa-raw-title-v1
+  echo artifact_sha256="$cocoa_sha"
+  echo dependency_admission=not-established
+  echo dependency_observed=/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa
+} >"$tmp/cocoa/libspl_cocoa.producer.txt"
+cocoa_capsule=$($tool publish "$tmp/compiler" "$tmp/cocoa" "$tmp/cocoa-output")
+$tool verify "$cocoa_capsule"
+cmp "$tmp/cocoa/libspl_cocoa.dylib" "$cocoa_capsule/libspl_cocoa.dylib" || fail 'Cocoa candidate changed'
+cmp "$tmp/cocoa/libspl_cocoa.producer.txt" "$cocoa_capsule/libspl_cocoa.producer.txt" || fail 'Cocoa producer receipt changed'
+[ "$(sed -n 's/^cocoa_admission=//p' "$cocoa_capsule/phase2-runtime-capsule.env")" = unavailable ] || fail 'diagnostic candidate granted admission'
+
+for mutation in bytes receipt missing path admission; do
+  candidate=$($tool publish "$tmp/compiler" "$tmp/cocoa" "$tmp/cocoa-$mutation-output")
+  chmod -R u+w "$candidate"
+  case "$mutation" in
+    bytes) printf tamper >>"$candidate/libspl_cocoa.dylib" ;;
+    receipt) printf 'dependency_observed=/tmp/substituted.dylib\n' >>"$candidate/libspl_cocoa.producer.txt" ;;
+    missing) rm "$candidate/libspl_cocoa.dylib" ;;
+    path)
+      mv "$candidate/libspl_cocoa.dylib" "$candidate/other.dylib"
+      ln -s other.dylib "$candidate/libspl_cocoa.dylib" ;;
+    admission)
+      sed 's/^cocoa_admission=.*/cocoa_admission=admitted/' "$candidate/phase2-runtime-capsule.env" >"$tmp/cocoa-receipt.new"
+      mv "$tmp/cocoa-receipt.new" "$candidate/phase2-runtime-capsule.env" ;;
+  esac
+  chmod 500 "$candidate" "$candidate/deps" "$candidate/simple"
+  find "$candidate" -type f ! -name simple -exec chmod 400 {} +
+  if $tool verify "$candidate" >/dev/null 2>&1; then fail "Cocoa $mutation mutation accepted"; fi
+done
+
+for invalid in absent-receipt wrong-abi wrong-path duplicate-digest admitted \
+  missing-dependency duplicate-dependency admitted-dependency; do
+  make_authority "$tmp/cocoa-invalid-$invalid"
+  cp "$tmp/cocoa/libspl_cocoa.dylib" "$tmp/cocoa/libspl_cocoa.producer.txt" "$tmp/cocoa-invalid-$invalid/"
+  producer="$tmp/cocoa-invalid-$invalid/libspl_cocoa.producer.txt"
+  case "$invalid" in
+    absent-receipt) rm "$producer" ;;
+    wrong-abi) sed 's/^abi=.*/abi=incompatible/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+    wrong-path) sed 's/^artifact=.*/artifact=..\/other.dylib/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+    duplicate-digest) echo "artifact_sha256=$cocoa_sha" >>"$producer" ;;
+    admitted) sed 's/^admission=.*/admission=admitted/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+    missing-dependency) sed '/^dependency_admission=/d' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+    duplicate-dependency) echo 'dependency_admission=not-established' >>"$producer" ;;
+    admitted-dependency) sed 's/^dependency_admission=.*/dependency_admission=admitted/' "$producer" >"$tmp/producer.new"; mv "$tmp/producer.new" "$producer" ;;
+  esac
+  if $tool publish "$tmp/compiler" "$tmp/cocoa-invalid-$invalid" "$tmp/cocoa-invalid-$invalid-output" >/dev/null 2>&1; then
+    fail "invalid Cocoa producer $invalid accepted"
+  fi
+done
+
+# Candidates use the existing tuple copy owner; no second mapping/path owner.
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+cp "$tmp/compiler" "$tmp/cocoa/simple"
+printf backfill >"$tmp/cocoa/libsimple_compiler_backfill.a"
+printf runtime >"$tmp/cocoa/deps/libsimple_runtime.a"
+printf dylib >"$tmp/cocoa/libsimple_runtime.dylib"
+bootstrap_stage3_copy_seed_tuple "$tmp/cocoa" "$tmp/cocoa-tuple" simple \
+  libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin
+cmp "$tmp/cocoa/libspl_cocoa.dylib" "$tmp/cocoa-tuple/libspl_cocoa.dylib" || fail 'tuple lost Cocoa candidate'
+cmp "$tmp/cocoa/libspl_cocoa.producer.txt" "$tmp/cocoa-tuple/libspl_cocoa.producer.txt" || fail 'tuple lost Cocoa provenance'
+mv "$tmp/cocoa/libspl_cocoa.producer.txt" "$tmp/producer.saved"
+if bootstrap_stage3_copy_seed_tuple "$tmp/cocoa" "$tmp/cocoa-tuple-incomplete" simple \
+  libsimple_native_all.a libsimple_compiler_backfill.a aarch64-apple-darwin >/dev/null 2>&1; then
+  fail 'tuple accepted incomplete Cocoa candidate pair'
+fi
+
+fi
+
+echo 'PASS: POSIX, Windows, macOS dynamic-runtime, and diagnostic Cocoa capsules reject invalid authorities'

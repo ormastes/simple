@@ -176,6 +176,10 @@ def main():
             assert dead(int(pid_file.read_text())), f"native {name} descendant survived"
             if expected != 125:
                 assert receipt["job_remnants_terminated"] == "yes"
+                assert int(receipt["root_exit_active_count"]) >= 1
+                assert 0 <= int(receipt["root_exit_elapsed_ms"]) < 4000
+                assert f"{int(pid_file.read_text())}:" in receipt["root_exit_members"]
+                assert Path(sys.executable).name in receipt["root_exit_members"]
                 assert (work / f"{name}.log").read_bytes() == b"root finished\n"
                 assert receipt["native_exit_status"] == ("3221225477" if expected == 139 else str(expected))
                 assert receipt["reason"] == ("child-native-exception" if expected == 139 else "child-exit")

@@ -562,6 +562,9 @@ int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
+SplArray* rt_f64_array_alloc(int64_t len);
+SplArray* rt_f32_array_alloc(int64_t len);
+SplArray* rt_i64_array_alloc(int64_t len);
 SplArray* rt_array_new_uninit(int64_t cap);
 /* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
 int rt_array_is_byte_packed(SplArray* value);
@@ -587,6 +590,8 @@ int64_t   rt_dict_free_deep(int64_t value);
 int64_t   rt_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
+int64_t   rt_random_bytes_c(uint64_t count);
+double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_array_len(SplArray* array);
@@ -880,12 +885,15 @@ double   rt_math_sin(double x);
 double   rt_math_cos(double x);
 double   rt_math_tan(double x);
 double   rt_math_hypot(double x, double y);
+double   rt_math_fma(double x, double y, double z);
+int64_t  rt_f64_to_bits(double value);
 /* IEEE-754 minNum/maxNum (fmin/fmax), matching Rust f64::min / f64::max. */
 double   rt_math_min(double a, double b);
 double   rt_math_max(double a, double b);
 int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
 int8_t   rt_utf8_validate(int64_t bytes_value);
 int64_t  rt_utf8_find_invalid(int64_t bytes_value);
+int64_t  rt_numeric_sum_f64(int64_t value);
 int64_t  rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value);
 int64_t  rt_numeric_sum_f64(int64_t array_value);
 int64_t  rt_array_sorted(int64_t receiver);
@@ -1160,6 +1168,8 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
 
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
+/* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
+int64_t  rt_process_spawn_inherit(void);
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 int64_t  rt_process_start_identity(int64_t pid);
@@ -1422,6 +1432,10 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1852. NOT a C string. */
 int64_t     rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_file_read_regular_no_follow_bounded(
+                const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
+/* Byte-array sibling for binary payloads (images/archives); identical
+ * admission arms, no UTF-8 decode. Returns a [u8] RuntimeValue. */
+int64_t     rt_file_read_regular_no_follow_bounded_bytes(
                 const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
 /* Arm code of the last bounded no-follow read: 77 never called, 100 succeeded,
  * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
