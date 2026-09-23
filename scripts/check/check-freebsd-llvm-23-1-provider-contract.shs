@@ -57,12 +57,23 @@ if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$t
     fail "LLVM 18 llc was accepted by the explicit provider gate"
 fi
 
-printf '#!/bin/sh\nexit 0\n' > "$tmp/provider/bin/cc"
-chmod +x "$tmp/provider/bin/cc"
-selected_cc=$(PATH="$tmp/provider/bin:$PATH" sh -c \
-    '. "$1"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' sh "$authority")
-[ "$selected_cc" = "$tmp/provider/bin/cc" ] \
-    || fail "bootstrap authority ignored provider-bound PATH compiler"
+printf '#!/bin/sh\n[ "$1" = --version ] || exit 64\n' > "$tmp/provider/bin/explicit-cc"
+chmod +x "$tmp/provider/bin/explicit-cc"
+selected_cc=$(sh -c \
+    '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority" "$tmp/provider/bin/explicit-cc")
+[ "$selected_cc" = "$tmp/provider/bin/explicit-cc" ] \
+    || fail "bootstrap authority ignored explicit CC provider"
+if sh -c '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority" "$tmp/provider/bin/missing-cc" >/dev/null 2>&1; then
+    fail "bootstrap authority accepted missing explicit CC provider"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$tmp/provider/bin/non-executable-cc"
+chmod 0644 "$tmp/provider/bin/non-executable-cc"
+if sh -c '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority" "$tmp/provider/bin/non-executable-cc" >/dev/null 2>&1; then
+    fail "bootstrap authority accepted non-executable explicit CC provider"
+fi
 
 # Exercise the same receipt naming authority used by the remote FreeBSD
 # producer, then consume the emitted llc hash exactly as the bootstrap gate does.
@@ -120,6 +131,11 @@ grep -Fq 'llvm-23.1-provider-post-verify.log' "$freebsd_qemu" \
     || fail "FreeBSD runner does not retain post-native provider verification evidence"
 grep -F 'check-freebsd-selfhost-ci.shs' "$freebsd_qemu" | grep -Fq 'FREEBSD_RUST_SEED_ENV' \
     || fail "FreeBSD Rust seed is not bound to its LLVM 18 compatibility provider"
+grep -F 'cargo test -p simple-compiler' "$freebsd_qemu" | grep -Fq 'FREEBSD_RUST_SEED_ENV' \
+    || fail "FreeBSD Rust cargo test is not pinned to the LLVM 18 seed environment"
+if grep -F 'cargo test -p simple-compiler' "$freebsd_qemu" | grep -Fq 'FREEBSD_LLVM_23_1_ENV'; then
+    fail "FreeBSD Rust cargo test incorrectly uses the LLVM 23 post-bootstrap environment"
+fi
 grep -Fq 'LLVM_VERSIONS=18 LLVM_SYS_180_PREFIX=/usr/local/llvm18' "$freebsd_qemu" \
     || fail "FreeBSD Rust seed does not select LLVM 18 for inkwell"
 grep -Fq 'LLVM_VERSIONS=23 SIMPLE_LLVM_BIN=' "$freebsd_qemu" \
@@ -135,7 +151,6 @@ grep -Fq "clang_23_1_require '\${FREEBSD_LLVM_23_1_PREFIX}/bin/clang++' clang++"
 grep -Fq 'clang_23_1_provider_receipt_name' "$freebsd_qemu" \
     || fail "FreeBSD provider receipt bypasses canonical tool naming"
 for compiler_gate in \
-    'cargo test -p simple-compiler' \
     'check-stage4-hosted-dynload-provider-archive.shs' \
     'NATIVE_SMOKE_BACKEND=llvm' \
     'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}'; do

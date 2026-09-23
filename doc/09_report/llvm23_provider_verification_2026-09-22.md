@@ -22,12 +22,15 @@ not establish end-to-end bootstrap, target correctness, or guest performance.
 ## Outstanding verification TODOs
 
 - TODO (FreeBSD owner): after Linux bootstrap succeeds, run
-  `QEMU_CPUS=12 QEMU_BUILD_JOBS=12 sh scripts/check/check-freebsd-bootstrap-qemu.shs --full`
+  `/usr/bin/time -v -o build/freebsd-qemu-full.time env QEMU_CPUS=12 QEMU_BUILD_JOBS=12 sh scripts/check/check-freebsd-bootstrap-qemu.shs --full`
   from the integrated PR revision. Use the pinned FreeBSD 14.4 cloud image,
   admitted LLVM 23.1 provider, SSH key, adequate overlay space and memory.
-  Capture the provider receipt and native verification results. The existing
-  guest began from an older source snapshot and cannot validate this change.
-  Rust seed/Stage 2/3 remain LLVM 18 because of the pinned Inkwell binding.
+  Capture the provider receipt, elapsed time, and maximum resident set size
+  from `build/freebsd-qemu-full.time`. The existing guest began from an older
+  source snapshot and cannot validate this change. Rust seed/Stage 2/3 and its
+  `cargo test -p simple-compiler` gate remain under `FREEBSD_RUST_SEED_ENV`
+  (LLVM 18) because of the pinned Inkwell binding; LLVM 23 is restricted to
+  pure-Simple post-bootstrap gates.
 - TODO (SimpleOS sysroot owner): integrate and verify the separately owned
   freestanding runtime/sysroot fixes. The existing full sysroot attempt
   (`sysroot-build-fixed.log`) fails compiling `runtime_native.c`, including
@@ -37,8 +40,11 @@ not establish end-to-end bootstrap, target correctness, or guest performance.
   then `scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` with the
   admitted Phase 3 compiler and LLVM 23.1 prefix. Retain guest receipts,
   provider hashes, QMP input/frame evidence, and time/RSS measurements.
-- TODO (platform bootstrap owners): run Phase 2 compiler/interpreter/loader
-  binary tests as soon as each platform's Phase 2 compiler is admitted.
+- TODO (FreeBSD Phase 2 owner): as soon as the FreeBSD Phase 2 compiler is
+  admitted, run the compiler, interpreter, and loader binary tests in the
+  same QEMU guest. Wrap each binary invocation with `/usr/bin/time -l`, retain
+  its exit status, elapsed time, and `maximum resident set size`, and bind the
+  receipts to the Phase 2 binary SHA-256 and integrated source revision.
 
 Overall platform verification remains pending; only the provider contract
 and dispatcher/header regression checks above are recorded as passing.
