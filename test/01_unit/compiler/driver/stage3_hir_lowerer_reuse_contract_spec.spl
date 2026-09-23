@@ -341,6 +341,7 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         ]:
             expect(body).to_contain("self." + field + " = {}")
             expect(body.contains("self." + field + ".clear()")).to_equal(false)
+        expect(body).to_contain("self.imported_enum_owner_rows = []")
         # Arrays retain their owner and are safely cleared in place; scalars
         # and optionals are reset without disturbing cross-module registries.
         for reset in [
@@ -379,6 +380,7 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
             "self.imported_traits = {}",
             "self.imported_enums = {}",
             "self.imported_enum_owners = {}",
+            "self.imported_enum_owner_rows = []",
             "self.materialized_payload_origins = {}",
             "self.materialized_payload_bindings = {}",
             "self.struct_field_types_by_name = {}",
@@ -436,3 +438,121 @@ describe "Stage3 HIR lowerer retained-owner lifecycle":
         expect(body).to_contain("validation_content_hash")
         expect(body).to_contain(".canonical_path")
         expect(body.contains("module_surface_index_for_source(")).to_equal(false)
+
+    it "bounds retained-parser HIR scratch with one scoped promotion lifecycle":
+        # @req REQ-STAGE3-HIR-RSS
+        # The fixture is the normal retained-parser Stage-3 loop below. Its
+        # correctness output is the promoted HirModule; its resource contract
+        # is one begin/pause/promote/end sequence for each cache miss. Keeping
+        # both assertions in this contract prevents an RSS repair from quietly
+        # returning an unpromoted or partial module.
+        step("promotes a correct retained-parser HIR module and then releases its scratch scope")
+        val source = file_read(DRIVER)
+        val helper_start = source.index_of(
+            "me lower_retained_surface_module(lowering: HirLowering")
+        val helper_end = source.index_of(
+            "me lower_streaming_surface_source(", helper_start)
+        val helper = source.substring(helper_start, helper_end)
+        expect(helper_start).to_be_greater_than(0)
+        expect(helper).to_contain("rt_transient_array_scope_begin()")
+        expect(helper).to_contain(
+            "lowering.lower_parser_module_unstub(module, is_entry)")
+        expect(helper).to_contain("rt_transient_array_scope_pause()")
+        expect(helper).to_contain("rt_transient_heap_promote(hir_module)")
+        expect(helper).to_contain(
+            "lowering.promote_diagnostics_transient_owner()")
+        expect(helper).to_contain(
+            "lowering.promote_phase_memo_transient_owners()")
+        expect(helper).to_contain("bootstrap_hir_modules_promote_last()")
+        expect(helper).to_contain("driver_promote_frontend_registry_owners()")
+        expect(helper).to_contain("driver_end_transient_parse_scope()")
+        expect(helper).to_contain("Ok(hir_module)")
+        val begin = helper.index_of("rt_transient_array_scope_begin()")
+        val lower = helper.index_of(
+            "lowering.lower_parser_module_unstub(module, is_entry)")
+        val pause = helper.index_of("rt_transient_array_scope_pause()", lower)
+        val promote = helper.index_of("rt_transient_heap_promote(hir_module)", pause)
+        val phase_memos = helper.index_of(
+            "lowering.promote_phase_memo_transient_owners()", promote)
+        val end = helper.last_index_of("driver_end_transient_parse_scope()")
+        expect(begin).to_be_less_than(lower)
+        expect(lower).to_be_less_than(pause)
+        expect(pause).to_be_less_than(promote)
+        expect(promote).to_be_less_than(phase_memos)
+        expect(promote).to_be_less_than(end)
+
+        val lowering = file_read(LOWERING)
+        val memo_start = lowering.index_of(
+            "me promote_phase_memo_transient_owners() -> bool:")
+        val memo_end = lowering.index_of("me lower_type(", memo_start)
+        val memos = lowering.substring(memo_start, memo_end)
+        for memo_owner in [
+            "field_package_dep_memo",
+            "surface_package_name_memo",
+            "surface_package_name_memo_keys",
+            "surface_package_name_memo_values",
+            "surface_package_name_memo_hash_buckets",
+            "surface_package_name_memo_hash_next",
+            "surface_decl_owners",
+            "surface_decl_pair_names",
+            "surface_decl_pair_surfaces",
+            "surface_decl_pair_hash_buckets",
+            "surface_decl_pair_hash_next",
+            "package_sibling_names",
+            "package_sibling_canons",
+            "surface_index_by_name",
+            "explicit_dep_target_memo",
+            "explicit_dep_item_memo",
+            "explicit_dep_target_memo_keys",
+            "explicit_dep_target_memo_target_values",
+            "explicit_dep_target_memo_item_values",
+            "explicit_dep_target_memo_hash_buckets",
+            "explicit_dep_target_memo_hash_next",
+            "payload_origin_miss_memo",
+            "payload_origin_miss_memo_keys",
+            "payload_origin_miss_memo_hash_buckets",
+            "payload_origin_miss_memo_hash_next",
+            "impl_index_built",
+            "impl_index_positions",
+            "impl_method_name_index",
+            "impl_trait_name_index",
+            "name_index_built",
+            "name_index_positions",
+            "name_index_keys",
+            "name_index_positions_values",
+            "name_index_hash_buckets",
+            "name_index_hash_next",
+            "name_index_built_keys",
+            "name_index_built_buckets",
+            "name_index_built_next",
+            "glob_reachable_miss_memo",
+            "glob_reachable_miss_memo_keys",
+            "glob_reachable_miss_memo_hash_buckets",
+            "glob_reachable_miss_memo_hash_next",
+            "glob_reachable_importer_owner",
+            "reexport_root_memo_index",
+            "reexport_root_memo_item",
+            "reexport_root_memo_keys",
+            "reexport_root_memo_index_values",
+            "reexport_root_memo_item_values",
+            "reexport_root_memo_hash_buckets",
+            "reexport_root_memo_hash_next"
+        ]:
+            expect(memos).to_contain("rt_transient_heap_promote(self." + memo_owner + ")")
+
+        val owner_start = source.index_of("var phase_hir_modules: Dict<text, HirModule>")
+        val owner_end = source.index_of("# Step 3b: ParserTrait coherence checking", owner_start)
+        val owner = source.substring(owner_start, owner_end)
+        val cache_start = owner.index_of("if hir_cache_hit:")
+        val lower_start = owner.index_of(
+            "var hir_module: HirModule = if hir_cache_hit:")
+        val cache_branch = owner.substring(cache_start, lower_start)
+        val lowering_branch = owner.substring(lower_start, owner.len())
+        # Negative control: an admitted cache entry does no lowering and opens
+        # no transient scope. A cache hit therefore cannot hide a per-source
+        # time or RSS increase from the measured cache-miss fixture.
+        expect(cache_branch.contains("lower_retained_surface_module(")).to_equal(false)
+        expect(lowering_branch).to_contain(
+            "self.lower_retained_surface_module(")
+        expect(lowering_branch.contains(
+            "lowering.lower_parser_module_unstub(self.ctx.modules[name]")).to_equal(false)
