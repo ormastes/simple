@@ -250,6 +250,26 @@ unbounded software queue.
 
 ## Bounded source-only checks
 
+### Queue-owner increment (2026-09-23)
+
+`src/os/drivers/virtio/virtio_console_queue_owner.spl` now provides one shared,
+fixed-storage owner for the control RX/TX and negotiated-port RX/TX queues used
+by x86 PCI and RISC-V MMIO adapters. Descriptor leases are queue-local and
+generation-bound and device-owner-bound; IRQ ingress only records ready queues
+inside an architecture-owned IRQ critical section, while fair draining runs in
+driver/session task context. Reset refuses to invalidate leases unless the
+adapter reports the device DMA/IRQ path quiesced. This increment does not claim discovery,
+DMA mapping, live interrupt delivery, control-event parsing, or framed GPU I/O.
+
+TODO(simpleos-qemu-virtio-console-owner): when the admitted phase environment
+and Q-LIVE executor are ready, run the focused unit spec plus bounded x86_64
+`virtio-serial-pci` and RISC-V `virtio-serial-device` QEMU rows. Prove PCI/PLIC
+registration, DMA descriptor lifecycle, DEVICE_READY/PORT_READY/PORT_OPEN,
+split-frame RX, queue-full backpressure, IRQ wakeup, reset invalidation, and
+stable throughput/RSS against the existing ivshmem baseline. Integration must
+mint non-reused device-owner identities, negotiate `VIRTIO_CONSOLE_F_MULTIPORT`,
+and prove there is exactly one owner of the device-global control queues.
+
 Executed exactly once in the isolated clean worktree:
 
 ```text
@@ -263,4 +283,3 @@ BLOCKED  SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_hos
 The interpreter spec was not retried because this checkout has no admitted
 `bin/simple`, and this delegated lane forbids bootstrap. This environmental
 blocker does not change the transport finding.
-
