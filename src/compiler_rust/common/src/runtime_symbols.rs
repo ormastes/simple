@@ -451,6 +451,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Dict operations
     "rt_dict_new",
     "rt_dict_set",
+    // Used by dynamic Dict.set lowering. Keep this registered so a JIT module
+    // using the generic collection helper is not silently demoted.
+    "rt_collection_set",
     "rt_dict_get",
     "rt_dict_len",
     "rt_dict_clear",
