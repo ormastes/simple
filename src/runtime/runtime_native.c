@@ -13520,36 +13520,6 @@ bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     return rt_dir_create_cpath(path, recursive);
 }
 
-const char* lib__nogc_sync_mut__debug__remote__session_model__DebugExecutionMode_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "rtl_sim";
-        case 2: return "qemu_stub";
-        default: return "hw";
-    }
-}
-
-const char* lib__nogc_sync_mut__debug__remote__session_model__DebugTransportKind_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "openocd_remote_bitbang";
-        case 2: return "intel_jtagd";
-        case 3: return "trace32_native";
-        case 4: return "trace32_gdb";
-        case 5: return "gdb_remote";
-        default: return "openocd_jtag";
-    }
-}
-
-const char* lib__nogc_sync_mut__debug__remote__types__Architecture_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "arm64";
-        case 2: return "riscv32";
-        case 3: return "riscv64";
-        case 4: return "x86";
-        case 5: return "x86_64";
-        default: return "arm32";
-    }
-}
-
 static char* rt_core_shell_quote(const char* s) {
     if (!s) return spl_strdup("''");
     size_t extra = 2;
