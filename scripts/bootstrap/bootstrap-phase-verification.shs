@@ -261,23 +261,38 @@ fi
 } >>"$summary" || die "cannot initialize verification summary headers"
 
 rss_time=""
-rss_measurement=unavailable
+rss_time_style=none
 rss_probe="$tmp/phase-verification-rss-probe"
 if [ -x /usr/bin/time ] &&
    /usr/bin/time -f '%M' -o "$rss_probe" true >/dev/null 2>&1 &&
    grep -Eq '^[1-9][0-9]*$' "$rss_probe"; then
   rss_time=/usr/bin/time
-  rss_measurement=gnu-time-rusage-kib
-else
+  rss_time_style=gnu
+elif [ -x /usr/bin/time ] &&
+     LC_ALL=C /usr/bin/time -l -o "$rss_probe" true >/dev/null 2>&1 &&
+     grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]+maximum resident set size[[:space:]]*$' "$rss_probe"; then
+  rss_time=/usr/bin/time
   case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-      if [ -r /proc/self/stat ]; then
-        rss_measurement=proc-group-rss-kib
-      fi
-      ;;
+    Darwin) rss_time_style=darwin ;;
+    FreeBSD) rss_time_style=bsd-kib ;;
   esac
 fi
 rm -f "$rss_probe"
+case "$rss_time_style" in
+  gnu) rss_measurement=gnu-time-rusage-kib ;;
+  darwin) rss_measurement=darwin-time-rusage-bytes-normalized-kib ;;
+  bsd-kib) rss_measurement=bsd-time-rusage-kib ;;
+  *)
+    rss_measurement=unavailable
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if [ -r /proc/self/stat ]; then
+          rss_measurement=proc-group-rss-kib
+        fi
+        ;;
+    esac
+    ;;
+esac
 echo "max_rss_measurement=$rss_measurement" >>"$summary"
 
 proc_tree_rss_kib() {
@@ -290,44 +305,66 @@ run_measured_timeout() {
   measured_timeout=$2
   measured_grace=$3
   shift 3
-  if [ -n "$rss_time" ]; then
-    "$rss_time" -f '%M' -o "$metric_file" \
-      "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@"
-  elif [ "$rss_measurement" = proc-group-rss-kib ]; then
-    "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@" &
-    measured_pid=$!
-    peak_rss_kib=0
-    while kill -0 "$measured_pid" 2>/dev/null; do
-      measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
-        "/proc/$measured_pid/stat" 2>/dev/null || printf 'gone\n')
-      [ "$measured_state" != Z ] && [ "$measured_state" != gone ] || break
-      sample_rss_kib=$(proc_tree_rss_kib "$measured_pid" || printf '0\n')
-      case "$sample_rss_kib" in
-        [1-9][0-9]*)
-          [ "$sample_rss_kib" -le "$peak_rss_kib" ] || peak_rss_kib=$sample_rss_kib
-          ;;
-      esac
-      sleep 0.05
-    done
-    if wait "$measured_pid"; then measured_status=0; else measured_status=$?; fi
-    if [ "$peak_rss_kib" -gt 0 ]; then
-      printf '%s\n' "$peak_rss_kib" >"$metric_file"
-    else
-      printf 'unavailable\n' >"$metric_file"
-    fi
-    return "$measured_status"
-  else
-    printf 'unavailable\n' >"$metric_file"
-    "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-      "$measured_timeout" "$measured_grace" "$@"
-  fi
+  case "$rss_time_style" in
+    gnu)
+      "$rss_time" -f '%M' -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    darwin|bsd-kib)
+      LC_ALL=C "$rss_time" -l -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    *)
+      if [ "$rss_measurement" = proc-group-rss-kib ]; then
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+          "$measured_timeout" "$measured_grace" "$@" &
+        measured_pid=$!
+        peak_rss_kib=0
+        while kill -0 "$measured_pid" 2>/dev/null; do
+          measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
+            "/proc/$measured_pid/stat" 2>/dev/null || printf 'gone\n')
+          [ "$measured_state" != Z ] && [ "$measured_state" != gone ] || break
+          sample_rss_kib=$(proc_tree_rss_kib "$measured_pid" || printf '0\n')
+          case "$sample_rss_kib" in
+            [1-9][0-9]*)
+              [ "$sample_rss_kib" -le "$peak_rss_kib" ] || peak_rss_kib=$sample_rss_kib
+              ;;
+          esac
+          sleep 0.05
+        done
+        if wait "$measured_pid"; then measured_status=0; else measured_status=$?; fi
+        if [ "$peak_rss_kib" -gt 0 ]; then
+          printf '%s\n' "$peak_rss_kib" >"$metric_file"
+        else
+          printf 'unavailable\n' >"$metric_file"
+        fi
+        return "$measured_status"
+      else
+        printf 'unavailable\n' >"$metric_file"
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+          "$measured_timeout" "$measured_grace" "$@"
+      fi
+      ;;
+  esac
 }
 
 read_max_rss_kib() {
   metric_file=$1
-  metric=$(tail -n 1 "$metric_file" 2>/dev/null || :)
+  [ -f "$metric_file" ] || {
+    printf 'unavailable\n'
+    return 0
+  }
+  case "$rss_time_style" in
+    darwin)
+      metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        printf "%.0f\n", int(($1 + 1023) / 1024)
+      }' "$metric_file" | tail -n 1) ;;
+    bsd-kib)
+      metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        print $1
+      }' "$metric_file" | tail -n 1) ;;
+    *) metric=$(tail -n 1 "$metric_file" 2>/dev/null || :) ;;
+  esac
   case "$metric" in
     [1-9][0-9]*) printf '%s\n' "$metric" ;;
     *) printf 'unavailable\n' ;;
@@ -1410,6 +1447,10 @@ else
   if [ "$compiler_cli_ready" -eq 1 ] && [ "$test_runner_ready" -eq 1 ] && \
      [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
      [ -n "$command_owner_receipt" ]; then
+    loader_oracle=test/01_unit/compiler/loader/module_loader_relocation_spec.spl
+    case "$(uname -s)" in
+      Darwin) loader_oracle=test/01_unit/compiler/loader/module_load_intent_spec.spl ;;
+    esac
     run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
@@ -1429,13 +1470,13 @@ else
     run_matrix_task loader_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl --mode=interpreter --unstable \
+      "$loader_oracle" --mode=interpreter --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     run_matrix_task loader_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl --mode=compile --unstable \
+      "$loader_oracle" --mode=compile --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then

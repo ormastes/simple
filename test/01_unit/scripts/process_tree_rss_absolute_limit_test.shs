@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+for cap in 5859376 6291456; do
+    rc=0
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib="$cap" -- \
+        /bin/sh -c 'touch "$1"' sh "$tmp/launched" >"$tmp/limit.log" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && [ ! -e "$tmp/launched" ] || fail "direct cap $cap admitted"
+    for name in SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB; do
+        rc=0
+        env "$name=$cap" TMPDIR="$tmp" sh "$root/scripts/bootstrap/run-process-group-timeout.shs" \
+            5 0 /bin/sh -c 'touch "$1"' sh "$tmp/launched" >"$tmp/env-limit.log" 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] && [ ! -e "$tmp/launched" ] || fail "$name=$cap admitted"
+    done
+done
+echo 'PASS: direct and both environment override routes reject limits above decimal 6 GB'
