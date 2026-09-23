@@ -2,21 +2,40 @@
 # Focused ABI proof: production adapter extracted verbatim, typed fixture provider.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-out=${1:?usage: check-cuda-signed-span-abi.shs NEW_DIR BASELINE_RUNTIME_SOURCE}
-baseline=${2:?baseline runtime_dynload.c containing faulty macro required}
+out=${1:?usage: check-cuda-signed-span-abi.shs NEW_DIR [BASELINE_RUNTIME_SOURCE|--selftest]}
+baseline=${2:---selftest}
 [ ! -e "$out" ] || exit 2
 mkdir -p "$out/red" "$out/green"
 out=$(CDPATH= cd -- "$out" && pwd)
 cc=${CC:-clang}
 source="$root/src/runtime/runtime_dynload.c"
 fixture="$root/test/02_integration/runtime/cuda_signed_span_abi.c"
-sed -n '/^#define GPU_CALL2(/,/^#define GPU_CALL3(/{ /^#define GPU_CALL3(/!p; }' \
-  "$baseline" > "$out/red/cuda_span_adapter.inc"
-grep '^GPU_CALL2(int64_t, rt_cuda_module_load_data,' "$baseline" >> "$out/red/cuda_span_adapter.inc"
+if [ "$baseline" = --selftest ]; then
+  red_pattern='provider_calls == calls_before && acquired == pins_before'
+  cat > "$out/red/cuda_span_adapter.inc" <<'EOF'
+int64_t rt_cuda_module_load_data(const uint8_t *data, uint64_t length) {
+    typedef int64_t (*Fn)(int64_t, int64_t);
+    SimpleGpuCallPinV1 pin = {0};
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA,
+            "rt_cuda_module_load_data_bytes", &pin)) return -3;
+    int64_t result = ((Fn)pin.symbol)((int64_t)(intptr_t)data, (int64_t)length);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+EOF
+  baseline_hash_input="$out/red/cuda_span_adapter.inc"
+else
+  red_pattern='call to function.*through pointer to incorrect function type'
+  [ -f "$baseline" ] || { echo 'baseline runtime source not found' >&2; exit 2; }
+  sed -n '/^#define GPU_CALL2(/,/^#define GPU_CALL3(/{ /^#define GPU_CALL3(/!p; }' \
+    "$baseline" > "$out/red/cuda_span_adapter.inc"
+  grep '^GPU_CALL2(int64_t, rt_cuda_module_load_data,' "$baseline" >> "$out/red/cuda_span_adapter.inc"
+  baseline_hash_input=$baseline
+fi
 awk '/^int64_t rt_cuda_module_load_data\(/ { copy=1 } copy { print } copy && /^}/ { exit }' \
   "$source" > "$out/green/cuda_span_adapter.inc"
 [ -s "$out/green/cuda_span_adapter.inc" ]
-shasum -a 256 "$source" "$baseline" "$fixture" "$out/red/cuda_span_adapter.inc" \
+shasum -a 256 "$source" "$baseline_hash_input" "$fixture" "$out/red/cuda_span_adapter.inc" \
   "$out/green/cuda_span_adapter.inc" > "$out/source-hashes.txt"
 for variant in red green; do
   "$cc" -std=gnu11 -O1 -fsanitize=function -fno-sanitize-recover=function \
@@ -26,7 +45,7 @@ status=0
 UBSAN_OPTIONS=print_stacktrace=0 /usr/bin/time -l "$out/red/check" > "$out/red/log" 2>&1 || status=$?
 printf 'exit_status=%s\n' "$status" > "$out/red/status.env"
 [ "$status" != 0 ]
-grep -q 'call to function.*through pointer to incorrect function type' "$out/red/log"
+grep -q "$red_pattern" "$out/red/log"
 status=0
 /usr/bin/time -l "$out/green/check" > "$out/green/log" 2>&1 || status=$?
 printf 'exit_status=%s\n' "$status" > "$out/green/status.env"

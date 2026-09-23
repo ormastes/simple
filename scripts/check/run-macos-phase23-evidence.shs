@@ -61,6 +61,28 @@ printf 'source_git_sha=%s\n' "$source_sha" >>"$verify_root/macos-stage2/summary.
 sh "$evidence_tool" stage2 "$verify_root/macos-stage2/summary.env" completed \
   "$root" "$source_sha"
 
+# Artifact-dependent Phase 2 guards belong beside the admitted producer. They
+# are intentionally absent from local push hooks and make no physical-GPU claim.
+llvm_nm_dir=$("$LLVM_CONFIG" --bindir)
+NM="$llvm_nm_dir/llvm-nm" sh "$root/scripts/check/check-macos-cocoa-runtime-owner.shs" \
+  "$authority/libsimple_runtime.dylib" "$authority/libsimple_native_all.a"
+sh "$root/scripts/check/check-phase2-gpu-vulkan-pipeline.shs" \
+  "$stage2" "$stage2_capsule" "$root" "$verify_root/macos-stage2/gpu-pipeline"
+runner_archive="$verify_root/macos-stage2/retained-runner/simple_test_runner.a"
+mkdir -p "$(dirname "$runner_archive")" "$verify_root/macos-stage2/retained-runner-cache"
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --rss-cap-mode=enforce \
+  --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=1800 --session-mode=new \
+  --receipt="$verify_root/macos-stage2/retained-runner.rss.env" -- \
+  env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+  "$stage2" native-build --emit-archive --no-mangle \
+    --runtime-bundle host-gpu --runtime-path "$stage2_capsule" \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry src/app/test_runner_new/main.spl --threads 1 \
+    --cache-dir "$verify_root/macos-stage2/retained-runner-cache" --output "$runner_archive"
+[ -f "$runner_archive" ] || { echo 'retained Stage 2 runner archive was not produced' >&2; exit 1; }
+sh "$root/scripts/check/check-phase2-gpu-loader-integration.shs" \
+  "$verify_root/macos-stage2/gpu-loader-integration" "$runner_archive"
+
 receipt="$bootstrap_root/stage3-planner-admission.receipt"
 [ -f "$receipt" ] || exit 1
 SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$bootstrap_root" \
