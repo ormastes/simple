@@ -129,6 +129,109 @@ fn string_literal_has_runtime_interpolations(interps: [HirInterpolation]?) -> bo
         return parts.len() > 0
     false
 
+fn mir_static_type_is_float(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.F32 | MirTypeKind.F64: true
+        case _: false
+
+fn mir_static_type_is_integer(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 |
+             MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+        case _: false
+
+impl MirLowering:
+    me static_scalar_type_from_hir(type_: HirType?) -> MirType?:
+        if type_ == nil:
+            return nil
+        match type_.kind:
+            # Raw bootstrap text uses the Opaque representation. `lower_type`
+            # describes the general fat-pointer text ABI instead, so it is not
+            # the static slot representation used by literal lowering.
+            case HirTypeKind.Str: Some(self.bootstrap_text_type())
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool:
+                Some(self.lower_type(type_))
+            case _: nil
+
+    me infer_unfolded_static_expr_type(expr: HirExpr) -> MirType?:
+        # Shared across both binary branches so a repeated dependency cannot
+        # turn type recovery into an exponential traversal.
+        var visit_budget: [i64] = [256]
+        self.infer_unfolded_static_expr_type_bounded(expr, 0, visit_budget)
+
+    me infer_unfolded_static_expr_type_bounded(expr: HirExpr, depth: i64, visit_budget: [i64]) -> MirType?:
+        """Recover a scalar static type without guessing that an expression is text.
+
+        Bootstrap function bodies may read a static before the runtime module
+        initializer replaces its provisional static. Only scalar facts that
+        the HIR operands establish are admissible here; unknown expressions
+        keep the existing explicit-annotation diagnostic.
+        """
+        if depth > 64 or visit_budget[0] <= 0:
+            return nil
+        visit_budget[0] = visit_budget[0] - 1
+        if val typed = self.static_scalar_type_from_hir(expr.type_):
+            return Some(typed)
+        match expr.kind:
+            case IntLit(_, _): Some(MirType.i64())
+            case FloatLit(_, _): Some(MirType.f64())
+            case BoolLit(_): Some(MirType.bool())
+            case StringLit(_, _): Some(self.bootstrap_text_type())
+            case Var(symbol) | NamedVar(symbol, _):
+                # Normal HIR identifier nodes deliberately have no scalar
+                # type payload here. Resolve their registered initializer,
+                # with a depth guard for cyclic module definitions.
+                if self.global_const_exprs.contains(symbol.id):
+                    return self.infer_unfolded_static_expr_type_bounded(
+                        self.global_const_exprs[symbol.id], depth + 1, visit_budget)
+                nil
+            case Binary(op, left, right):
+                val left_type = self.infer_unfolded_static_expr_type_bounded(left, depth + 1, visit_budget)
+                val right_type = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget)
+                match op:
+                    case Eq | NotEq | Lt | LtEq | Gt | GtEq:
+                        if left_type.? and right_type.?: return Some(MirType.bool())
+                    case And | Or:
+                        if val left_known = left_type:
+                            if val right_known = right_type:
+                                if left_known.kind == MirTypeKind.Bool and right_known.kind == MirTypeKind.Bool:
+                                    return Some(MirType.bool())
+                        return nil
+                    case Add:
+                        if val left_known = left_type:
+                            match left_known.kind:
+                                case MirTypeKind.Opaque(name):
+                                    if name == "str": return Some(self.bootstrap_text_type())
+                                case _: ()
+                        if val right_known = right_type:
+                            match right_known.kind:
+                                case MirTypeKind.Opaque(name):
+                                    if name == "str": return Some(self.bootstrap_text_type())
+                                case _: ()
+                    case Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | Shl | Shr: ()
+                    case _: return nil
+                if val left_known = left_type:
+                    if val right_known = right_type:
+                        var arithmetic = false
+                        match op:
+                            case Add | Sub | Mul | Div | Mod | Pow: arithmetic = true
+                            case _: ()
+                        val both_numeric = (mir_static_type_is_float(left_known) or mir_static_type_is_integer(left_known)) and
+                            (mir_static_type_is_float(right_known) or mir_static_type_is_integer(right_known))
+                        if arithmetic and both_numeric and (mir_static_type_is_float(left_known) or mir_static_type_is_float(right_known)):
+                            if left_known.kind == MirTypeKind.F32 and right_known.kind == MirTypeKind.F32:
+                                return Some(MirType(kind: MirTypeKind.F32))
+                            return Some(MirType.f64())
+                        if mir_static_type_is_integer(left_known) and mir_static_type_is_integer(right_known):
+                            # `lower_binary_expr` uses i64 for non-float
+                            # arithmetic, including matching narrow widths.
+                            # Keep this provisional slot identical to its
+                            # later runtime initializer rather than relabeling
+                            # the result with an operand's width.
+                            return Some(MirType.i64())
+                nil
+            case _: nil
+
 fn runtime_module_initializer_supported(const_: HirConst) -> bool:
     match const_.value.kind:
         case IntLit(_, _) | FloatLit(_, _) | BoolLit(_): false
@@ -1857,7 +1960,19 @@ impl MirLowering:
                             MirType(kind: MirTypeKind.Opaque("str"))
                         else:
                             self.lower_type(const_.type_)
-                    case Binary(_, _, _): MirType(kind: MirTypeKind.Opaque("str"))
+                    case Binary(_, _, _):
+                        # A runtime module initializer overwrites this static
+                        # later on the ordinary path, but bootstrap functions
+                        # can read the provisional slot first. Do not route
+                        # every unresolved binary through string concatenation:
+                        # recover only scalar type evidence from its operands.
+                        if val declared = self.static_scalar_type_from_hir(const_.type_):
+                            declared
+                        elif val inferred = self.infer_unfolded_static_expr_type(const_.value):
+                            inferred
+                        else:
+                            self.error_fatal("cannot derive module static type from unresolved binary initializer; add an explicit annotation", Some(const_.value.span))
+                            MirType.i64()
                     case MethodCall(_, _, _, _): MirType(kind: MirTypeKind.Opaque("str"))
                     case _:
                         match const_.type_.kind:
