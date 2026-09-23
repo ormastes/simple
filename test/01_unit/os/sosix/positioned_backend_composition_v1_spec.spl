@@ -33,6 +33,9 @@ use os.kernel.abi.syscall_shim_positioned.{
     shim_positioned_install_backend_route_v1,
     shim_positioned_dispatch_v1
 }
+use os.sosix.fs.positioned_syscall_v1.{
+    SOSIX_FS_PREAD_REGISTERED_V1, sosix_fs_positioned_syscall_args_v1
+}
 use std.fs_driver.instance.DriverInstance
 use std.fs_driver.nvfs_driver.NvfsDriver
 use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs}
@@ -106,6 +109,21 @@ describe "SOSIX typed positioned backend composition v1":
         expect(result.accepted).to_be(true)
         expect(result.reason).to_equal("positioned-acceptance-round-trip")
         expect(result.bytes).to_equal([0u8, 0u8, 11u8, 22u8])
+
+    it "does not mistake the local route oracle for an installed live shim":
+        step("Prove that the boot route check does not arm the C-ABI shim")
+        shim_positioned_reset_v1()
+        _clear_vfs_rootfs_for_test()
+        vfs_mount_rootfs(DriverInstance.Nvfs(NvfsDriver.new("sosix-live-shim"))).unwrap()
+        val local = sosix_positioned_acceptance_round_trip_v1(
+            SosixPositionedBackendKindV1.Nvfs, "/local-only.bin")
+        expect(local.accepted).to_be(true)
+        val live = shim_positioned_dispatch_v1(
+            sosix_fs_positioned_syscall_args_v1(
+                SOSIX_FS_PREAD_REGISTERED_V1, 1u64, 1u64,
+                0x0000000100000001u64, 0u64, 0u64, 1u64),
+            true, 1u64)
+        expect(live.value).to_equal(-95)
 
         # @req: REQ-SSPEC-OS
     it "does not infer a DBFS route from an NVFS virtual object identity":
