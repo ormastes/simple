@@ -777,6 +777,19 @@ impl<'a> MirLowerer<'a> {
             .collect()
     }
 
+    fn implicit_tail_mentions_array(body: &[HirStmt], local_index: usize) -> bool {
+        match body.last() {
+            Some(HirStmt::Expr(expr)) => Self::expr_mentions_array(expr, local_index),
+            Some(HirStmt::If { then_block, else_block, .. }) => {
+                Self::implicit_tail_mentions_array(then_block, local_index)
+                    || else_block.as_ref().is_some_and(|body| {
+                        Self::implicit_tail_mentions_array(body, local_index)
+                    })
+            }
+            _ => false,
+        }
+    }
+
     fn collect_dead_append_candidates(body: &[HirStmt], candidates: &mut Vec<usize>) {
         for stmt in body {
             match stmt {
@@ -2086,6 +2099,14 @@ impl<'a> MirLowerer<'a> {
         // Reset last expression value for this function
         self.last_expr_value = None;
         self.dead_append_array_locals = Self::dead_append_array_locals_for_body(&func.body);
+        if func.return_type != TypeId::VOID {
+            // The final expression is a return use, not an ignored append.
+            // Preserve only candidates reachable from that tail; unrelated
+            // dead arrays and procedures retain the existing elimination.
+            self.dead_append_array_locals.retain(|local_index| {
+                !Self::implicit_tail_mentions_array(&func.body, *local_index)
+            });
+        }
 
         // Emit function entry path probe for coverage (#674)
         self.emit_function_entry_probe()?;
