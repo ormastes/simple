@@ -3495,7 +3495,13 @@ public static class Stage3MaterializedConsumer {
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
     // Callers may tighten budgets, never increase the admitted ceilings.
-    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 100000);
+    // Shared by HEAD and the physical walk: 137461 + 176143 entries at the
+    // admitted source state. 400000 leaves bounded growth without bypassing
+    // the command-output, byte, or 28-second watchdog ceilings.
+    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 400000);
+    // Inventory is separate from the cumulative HEAD/physical count; retain
+    // its previous per-list ceiling and handle-retention bound.
+    const int MaxUntracked = 100000;
     const int MaxOutput = 16 * 1024 * 1024;
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
     static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 28000);
@@ -3695,7 +3701,7 @@ public static class Stage3MaterializedConsumer {
             collapse.Append("alias-collapse-directory:").Append(Utf8.GetByteCount(path)).Append(':').Append(Hex(Utf8.GetBytes(path))).Append('\n');
         }
         string[] paths = Nul(Git(root, args.ToArray()));
-        if (paths.Length > MaxEntries) throw new IOException("bound.untracked");
+        if (paths.Length > MaxUntracked || paths.Length > MaxEntries) throw new IOException("bound.untracked");
         Array.Sort(paths, (a,b) => CompareBytes(Utf8.GetBytes(a), Utf8.GetBytes(b)));
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string path in paths) {
