@@ -10957,7 +10957,12 @@ static wchar_t* rt_widen_long_path_rc(const char* path) {
         free(wide);
         return NULL;
     }
-    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
     {
         wchar_t* scan;
         DWORD need;
@@ -10968,7 +10973,11 @@ static wchar_t* rt_widen_long_path_rc(const char* path) {
         if (need == 0) return wide;
         full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
         out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
         out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
@@ -13870,7 +13879,12 @@ static wchar_t* spl_widen_long_path(const char* path) {
         free(wide);
         return NULL;
     }
-    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
     {
         wchar_t* scan;
         DWORD need;
@@ -13881,7 +13895,11 @@ static wchar_t* spl_widen_long_path(const char* path) {
         if (need == 0) return wide;
         full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
         if (!full) return wide;
-        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
         out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
         if (!out) { free(full); return wide; }
         out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
