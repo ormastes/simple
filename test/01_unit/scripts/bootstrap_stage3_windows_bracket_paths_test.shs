@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+case "$(uname -s)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *) echo 'SKIP: Windows Stage3 bracket path test'; exit 0 ;;
+esac
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage3-bracket-paths.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+
+repo="$tmp/repo"
+mkdir -p "$repo/assets/fonts/google-fonts/apache/robotoslab"
+git -C "$repo" init -q
+git -C "$repo" config user.name 'Stage3 path test'
+git -C "$repo" config user.email 'stage3-path@example.invalid'
+printf 'tracked bracket\n' >"$repo/assets/fonts/google-fonts/apache/robotoslab/RobotoSlab[wght].ttf"
+printf 'glob sibling\n' >"$repo/assets/fonts/google-fonts/apache/robotoslab/RobotoSlabw.ttf"
+git -C "$repo" add -A
+git -C "$repo" commit -qm 'tracked bracket path'
+
+printf 'untracked bracket\n' >"$repo/Untracked[wght].txt"
+printf 'untracked sibling\n' >"$repo/Untrackedw.txt"
+printf 'shell data\n' >"$repo/\$(touch injected-marker).txt"
+
+bootstrap_stage3_materialized_native_source >"$tmp/native.ps1"
+STAGE3_ROOT=$(cygpath -aw "$repo")
+STAGE3_GIT=$(cygpath -aw "$(command -v git)")
+STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe)
+export STAGE3_ROOT STAGE3_GIT STAGE3_SH
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
+    "$(cygpath -aw "$root/test/01_unit/scripts/bootstrap_stage3_windows_bracket_paths_test.ps1")" \
+    "$(cygpath -aw "$tmp/native.ps1")" "$(cygpath -aw "$repo")"
+[ ! -e "$repo/injected-marker" ]
+echo 'PASS: Windows Stage3 tracked and untracked bracket paths stay literal'
