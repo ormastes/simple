@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/linux-vulkan-rdoc-reason.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+run_case() {
+    name="$1"
+    expected="$2"
+    raw="$3"
+    capture="$4"
+    gate="$5"
+    case_dir="$TMP_DIR/$name"
+    mkdir -p "$case_dir"
+    {
+        printf 'rdoc_external_host_capture_reason_raw=%s\n' "$raw"
+        printf 'rdoc_capture_reason=%s\n' "$capture"
+        printf 'rdoc_external_host_gate_reason=%s\n' "$gate"
+    } >"$case_dir/chrome.env"
+
+    if BUILD_DIR="$case_dir/out" \
+        REPORT_PATH="$case_dir/report.md" \
+        GUI_WEB_2D_VULKAN_ENV="$case_dir/missing-gui.env" \
+        GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV="$case_dir/missing-backing.env" \
+        RDOC_SIMPLE_EVIDENCE_ENV="$case_dir/missing-simple.env" \
+        RDOC_HTML_EVIDENCE_ENV="$case_dir/chrome.env" \
+        RDOC_ELECTRON_HTML_EVIDENCE_ENV="$case_dir/missing-electron.env" \
+        LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 \
+        sh "$ROOT_DIR/scripts/check/check-linux-vulkan-render-log-compare.shs" \
+        >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"; then
+        echo "expected incomplete fixture to fail: $name" >&2
+        exit 1
+    fi
+
+    actual="$(sed -n 's/^linux_vulkan_render_log_compare_renderdoc_chrome_reason=//p' "$case_dir/out/evidence.env")"
+    if [ "$actual" != "$expected" ]; then
+        echo "$name: expected reason '$expected', got '$actual'" >&2
+        exit 1
+    fi
+}
+
+run_case raw-wins raw-reason raw-reason capture-reason gate-reason
+run_case capture-fallback capture-reason "" capture-reason gate-reason
+run_case gate-last gate-reason "" "" gate-reason
+
+echo "PASS: Linux Vulkan RenderDoc reason precedence"

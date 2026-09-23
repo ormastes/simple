@@ -92,3 +92,39 @@ fn main() -> i64:
 "#;
     assert_eq!(run(source), 0);
 }
+
+#[test]
+fn filesystem_methods_on_erased_receiver_ignore_impl_less_name_collisions() {
+    // SimpleOS hosted VFS shape: common method names also occur on unrelated,
+    // impl-less traits. Those declarations cannot own the receiver's vtable
+    // and therefore must not force DUCK_DISPATCH_UNSUPPORTED_SLOT.
+    let source = r#"
+trait AUnimplementedIo:
+    fn open(path: text) -> i64:
+        pass
+    fn read(handle: i64, size: i64) -> i64:
+        pass
+    fn stat(path: text) -> i64:
+        pass
+
+trait FileSystem:
+    fn open(path: text) -> i64:
+        pass
+    fn read(handle: i64, size: i64) -> i64:
+        pass
+    fn stat(path: text) -> i64:
+        pass
+
+struct Fat32(FileSystem):
+    fn open(path: text) -> i64: 11
+    fn read(handle: i64, size: i64) -> i64: handle * 10 + size
+    fn stat(path: text) -> i64: 33
+
+fn exercise(fs: Any) -> i64:
+    fs.open("/font.ttf") + fs.read(2, 2) + fs.stat("/font.ttf")
+
+fn main() -> i64:
+    exercise(Fat32()) - 66
+"#;
+    assert_eq!(run(source), 0);
+}

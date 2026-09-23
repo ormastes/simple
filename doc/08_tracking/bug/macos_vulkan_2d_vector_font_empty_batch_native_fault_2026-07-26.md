@@ -2,6 +2,97 @@
 
 Status: open, live evidence blocked
 
+## 2026-09-22 delegated continuation: truncated producer receipt
+
+Reconstructed the isolated Vulkan worktree from preserved commit
+`7386266f49f`; the Bungee asset is present at its expected 118996-byte size.
+The selected-outline producer already uses caller-owned coverage, so the
+historical aggregate-return workaround must not be reapplied.
+
+Source inspection found a separate real refusal-contract defect in
+`sfnt_render_glyph_into`: its combined `meta.len() >= 10` cookie reset left
+an existing completion cookie in slot 8 untouched for a nine-element metadata
+array. The function then rejected the undersized metadata. A caller observing
+the completion slot could therefore mistake a refused render for a successful
+one. Clear each present render receipt independently before validating the
+array, matching the existing measurement boundary.
+
+The native SFNT probe now tests metadata lengths 8, 9, 10 and 19 with stale
+receipts and sentinel destination bytes. Every refusal must clear available
+render/alpha receipts and preserve all destination bytes. Its specific failure
+is exit 28, `fail-undersized-stale-render`. Reverting only the two independent
+reset guards to the previous combined guard is the negative control: the
+nine-element case must fail. This is additional producer regression coverage,
+not evidence of Vulkan execution or resolution of the original empty batch.
+
+The production change adds one constant-time length comparison, allocates no
+new memory, and leaves parsing, rasterization and cache paths unchanged.
+`git diff --check` passed. Native positive/negative execution and latency/RSS
+measurements remain pending the P0 owner's admitted compiler and serialized
+host build slot. Do not run the installed bootstrap seed as test evidence.
+Use the enforced process-tree threshold of 5,859,375 KiB for both build and
+probe execution. No producer native cycle has been consumed by this source
+inspection and fixture update.
+
+## 2026-09-22 main and PR audit: native validation still blocked
+
+Audited `origin/main` at `e0dd873da1b` in an isolated worktree. Merged
+[PR #655](https://github.com/ormastes/simple/pull/655) (`c3f701adc18`) already
+rejects empty and zero-area batches before backend dispatch. Its regression
+is `test/01_unit/lib/gpu/engine2d/font_empty_batch_fail_closed_spec.spl`.
+This fixes one acceptance seam; the PR explicitly leaves native verification
+pending. Do not implement that guard again or interpret it as producer proof.
+
+The selected-outline branch of `FontRenderer.get_glyph` now calls
+`sfnt_measure_glyph_into` and `sfnt_render_glyph_into` with caller-owned
+metadata and coverage arrays, then constructs `CachedGlyph` locally. Thus the
+historical pixel-bearing aggregate-return chain below is not the current
+selected-outline implementation. Its old failure receipts remain historical
+evidence, not a reproduction against current main.
+
+A single invocation of the installed canonical-path executable
+`bin/release/aarch64-apple-darwin/simple` against the existing
+`test/02_integration/rendering/sfnt_glyf_bungee_native_probe.spl` stopped before
+probe execution: `sfnt.spl` reported `expected LParen, found LBracket`.
+The executable also identified itself as a Rust-built bootstrap seed despite
+its release path. No further seed execution, bootstrap, or native build was
+performed. The failed invocation consumed 0.10 seconds wall time and
+20,709,376 bytes maximum RSS; these measure parser failure, not renderer
+performance. macOS rejected the attempted `ulimit -v` memory cap, so this
+invocation was not protected by that limit.
+
+No new producer defect has been isolated. Resume with an admitted self-hosted
+executable that supports current source syntax, then run the focused existing
+SFNT/Bungee native probe before the Engine2D and Vulkan acceptance gates. The
+SoSIX/host provider interface was not changed or exercised: parsing failed
+before font production or backend dispatch. Keep this bug open until the
+native producer, cache, and device-readback requirements pass.
+
+### Prepared caller-coverage regression (not executed)
+
+The existing SFNT native probe compared codepoint and glyph-index buffers but
+trusted the producer's positive-alpha receipt. Identically empty caller
+buffers could therefore pass that comparison. The probe now independently
+counts actual nonzero caller bytes and requires equality with `meta[9]`.
+A three-byte destination additionally checks refusal clears completion/alpha
+receipts and leaves every sentinel byte intact. Both checks exercise the
+existing host-independent SFNT boundary; they introduce no SoSIX calls.
+
+Native verification remains pending an admitted compiler. For a meaningful
+negative control, suppress only the coverage-buffer assignment in an isolated
+source copy while keeping producer alpha accounting: the new oracle must
+exit 25 (`fail-caller-coverage`); restoring the assignment must pass. Neither
+outcome is claimed here. Profile the same native fixture under an externally
+monitored 6 GiB RSS limit, recording wall time and peak RSS.
+
+The matching historical TODO audit
+`doc/08_tracking/todo/blocked_p1_audit_2026-07-28.md` item 11 identifies the
+producer transport failure as reproducible on Linux too. Mac-only ownership
+of the DB row describes the final Vulkan attestation gate, not evidence that
+the generic SFNT producer defect is exclusive to macOS. No exact fixture entry
+was found in the test database during this audit; no passing DB receipt was
+added.
+
 ## Scope
 
 The manifest-attested macOS Vulkan 2D binary built successfully at pushed

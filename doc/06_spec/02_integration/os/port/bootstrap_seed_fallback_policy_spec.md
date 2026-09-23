@@ -27,7 +27,7 @@ bootstrap_seed_fallback_policy_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,6 +37,18 @@ bootstrap_seed_fallback_policy_spec -> std
 ## Scenarios
 
 ### bootstrap seed fallback policy
+
+#### distinguishes source provenance from forbidden wrapper primitives
+
+Allow the parser source-path citation and empty input. Reject each executable
+wrapper marker independently: `execv`, `SIMPLE_BOOTSTRAP_SEED`, and `ret i64 0`.
+The original source checks then inspect the real bootstrap entry and driver.
+
+This scenario was authored on 2026-09-22. Executable SSpec status is
+**TEST_BLOCKED** pending an admitted general pure-Simple test runner; the
+host-side source audit is documented in
+[the scope report](../../../../09_report/bootstrap_stage3_seed_wrapper_scope_2026-09-22.md).
+The scenario counts describe the source, not passed test results.
 
 #### keeps bootstrap_main free of seed-wrapper fallback generation
 
@@ -156,8 +168,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -249,6 +249,45 @@ fn nested_result_option_receivers_both_route_through_static_construct() {
     );
 }
 
+/// A declared generic `Result<T, E>` local must retain its enum identity until
+/// `.ok` / `.err` projection lowering.  The Windows seed previously erased the
+/// local to `i64`, then treated `.ok` as a struct property and dropped the JIT
+/// module before the interpreter attempted an enum-to-int conversion.
+#[test]
+fn annotated_result_local_projects_ok_payload() {
+    let source = "fn declared_ok(value: i64) -> Result<i64, text>:\n    Ok(value)\n\nfn main() -> i64:\n    val declared: Result<i64, text> = declared_ok(41)\n    val inferred = declared.ok\n    inferred + 1\n";
+    let module = parse_and_lower(source).expect("annotated Result.ok must lower");
+    let function = module.functions.iter().find(|f| f.name == "main").unwrap();
+    let HirStmt::Let {
+        value: Some(expr), ty, ..
+    } = &function.body[1]
+    else {
+        panic!("expected projected Result.ok binding, got {:?}", function.body[1]);
+    };
+    assert_eq!(*ty, TypeId::I64, "Result.ok must retain its declared payload type");
+    assert!(
+        matches!(expr.kind, HirExprKind::If { .. }),
+        "Result.ok must lower to discriminant-guarded payload projection, got {:?}",
+        expr.kind
+    );
+}
+
+#[test]
+fn annotated_result_local_projects_err_payload() {
+    let source = "fn declared_err() -> Result<i64, text>:\n    Err(\"provider-error\")\n\nfn main() -> text:\n    val declared: Result<i64, text> = declared_err()\n    return declared.err\n";
+    let module = parse_and_lower(source).expect("annotated Result.err must lower");
+    let function = module.functions.iter().find(|f| f.name == "main").unwrap();
+    let HirStmt::Return(Some(expr)) = &function.body[1] else {
+        panic!("expected projected Result.err return, got {:?}", function.body[1]);
+    };
+    assert_eq!(
+        expr.ty,
+        TypeId::STRING,
+        "Result.err must retain its declared payload type"
+    );
+    assert!(matches!(expr.kind, HirExprKind::If { .. }));
+}
+
 // =============================================================================
 // #3: struct-init fields lowered by DECLARED order + nil-fill (6b59a8c4bf7)
 // =============================================================================

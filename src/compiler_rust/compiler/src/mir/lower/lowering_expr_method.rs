@@ -486,14 +486,18 @@ impl<'a> MirLowerer<'a> {
 
             let target = crate::mir::effects::CallTarget::from_name("rt_dict_set");
             return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
+                    // rt_dict_set returns an i8 success flag. `.set()` is a
+                    // mutating fluent method, so its expression value is the
+                    // receiver handle, as it is in the interpreter. Returning
+                    // the flag made successful calls look like nil after the
+                    // RuntimeValue conversion in the JIT.
+                    dest: None,
                     target,
                     args: vec![receiver_reg, key_reg, value_reg],
                 });
-                dest
+                receiver_reg
             });
         }
 

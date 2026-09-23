@@ -3,7 +3,7 @@
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query}
-use app.io.file_ops.{path_absolute}
+use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
 
 use std.io_runtime.{get_args}
@@ -274,6 +274,40 @@ fn output_path_arg(args: [text]) -> text:
             return a.substring(2)
         i = i + 1
     ""
+
+# An output path that merely exists is not proof that native-build produced an
+# artifact. A failed worker can leave a pre-created empty file behind while
+# still returning status 0. Keep the decision pure so the parent check and its
+# regression spec exercise the same rule.
+pub fn native_build_artifact_valid(
+    present: bool, size: i64, worker_success: bool
+) -> bool:
+    # The worker receipt is emitted only after the staged artifact has passed
+    # the driver's existence check and has been published. This accepts a
+    # deterministic rebuild with unchanged bytes while rejecting a silent
+    # zero-exit/no-work worker that leaves an old file in place.
+    present and size > 0 and worker_success
+
+pub fn native_build_worker_success_receipt(
+    requested_output: text, stdout: text, stderr: text
+) -> bool:
+    if requested_output == "":
+        return false
+    val receipt = "[native-build] Artifact published: {requested_output}"
+    stdout.replace("\r\n", "\n").split("\n").contains(receipt) or
+        stderr.replace("\r\n", "\n").split("\n").contains(receipt)
+
+# Do not enter the timeout runner with a guessed fallback path. On a stale
+# self-hosted deployment that path can be missing or non-runnable; some seed
+# runtimes collapse that spawn failure into a successful-looking parent return,
+# which is the original silent-no-artifact failure mode.
+pub fn native_build_worker_binary_valid(path: text, present: bool) -> bool:
+    path != "" and present
+
+fn native_build_output_exists(path: text, worker_success: bool) -> bool:
+    if path == "" or not file_exists(path):
+        return false
+    native_build_artifact_valid(true, file_size_raw(path), worker_success)
 
 pub fn native_build_strict_stub_evidence(output: text) -> bool:
     output.contains("stub functions for unresolved symbols") or
@@ -765,7 +799,11 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         # Preserve every public argument byte and its order. Only the worker
         # removes the one internal handoff argument before cli_native_build.
         worker_args = worker_args.push(arg)
+    val requested_output = output_path_arg(args)
     val simple_bin = resolve_simple_binary()
+    if not native_build_worker_binary_valid(simple_bin, file_exists(simple_bin)):
+        eprint "error: native-build worker binary is unavailable: {simple_bin}"
+        return 1
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
     # an empty one.
@@ -819,8 +857,9 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
-    val output_path = output_path_arg(args)
-    val output_ok = output_path != "" and file_exists(output_path)
+    val output_path = requested_output
+    val output_ok = native_build_output_exists(
+        output_path, native_build_worker_success_receipt(output_path, stdout, stderr))
     val strict_no_stub = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
     if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
         if output_ok:
@@ -832,7 +871,7 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
     env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
-    if code == 0 and output_path != "" and not file_exists(output_path):
+    if code == 0 and output_path != "" and not output_ok:
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
         # worker chain died in a way that still reports success (an early-exit
         # helper, a killed sibling, etc.) but left no output file, fail loudly

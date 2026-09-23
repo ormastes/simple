@@ -1254,10 +1254,7 @@ fn resolve_import_name_strict(
     }
 
     let candidates = all_mangled.get(func_name)?;
-    let matching: Vec<&String> = candidates
-        .iter()
-        .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
-        .collect();
+    let matching = matching_import_owners(func_name, use_segments, candidates);
     if matching.len() == 1 {
         return Some(matching[0].clone());
     }
@@ -1315,10 +1312,43 @@ fn mangled_import_owner_candidates(
 ) -> std::collections::BTreeSet<String> {
     all_mangled
         .get(func_name)
+        .map(|candidates| matching_import_owners(func_name, use_segments, candidates))
         .into_iter()
         .flatten()
-        .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
         .cloned()
+        .collect()
+}
+
+/// A declaration in the exact imported module wins over a nested module whose
+/// path merely contains the imported segments as a subsequence. Keep the
+/// historical subsequence route for tier/facade spellings only when no exact
+/// owner exists. This scans just the candidates for one imported name.
+fn matching_import_owners<'a>(
+    func_name: &str,
+    use_segments: &[&str],
+    candidates: &'a [String],
+) -> Vec<&'a String> {
+    if !use_segments.is_empty() {
+        let exact_name = format!("{}__{}", use_segments.join("__"), func_name);
+        if let Some(exact) = candidates.iter().find(|candidate| *candidate == &exact_name) {
+            return vec![exact];
+        }
+        // Some build roots prepend a project namespace. Use that suffix only
+        // after an exact full owner miss: a nested `loader__loader__owner`
+        // otherwise also ends in `__loader__owner` and would reintroduce the
+        // very collision this precedence fixes.
+        let exact_suffix = format!("__{exact_name}");
+        let suffix_matches: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.ends_with(&exact_suffix))
+            .collect();
+        if !suffix_matches.is_empty() {
+            return suffix_matches;
+        }
+    }
+    candidates
+        .iter()
+        .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
         .collect()
 }
 

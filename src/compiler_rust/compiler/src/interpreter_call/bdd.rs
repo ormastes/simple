@@ -1079,6 +1079,15 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "pending" | "pending_it" => {
+            // The BDD table is consulted before regular function dispatch.  Keep
+            // the historical standalone marker only when no Simple definition
+            // owns this name; otherwise a user or stdlib DSL implementation
+            // would be silently bypassed and the enclosing example could pass
+            // without running its body.
+            if functions.contains_key(name) {
+                return Ok(None);
+            }
+
             let name_str = extract_desc_str(args, "unnamed");
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());

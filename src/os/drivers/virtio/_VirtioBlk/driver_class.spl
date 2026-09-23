@@ -100,6 +100,10 @@ var g_virtio_blk_desc_addr: u64 = 0
 var g_virtio_blk_avail_addr: u64 = 0
 var g_virtio_blk_used_addr: u64 = 0
 var g_virtio_blk_last_read_bytes: [u8] = []
+var g_virtio_blk_request_busy: bool = false
+var g_virtio_blk_queue_quarantined: bool = false
+var g_virtio_blk_completed_write_epoch: u64 = 0
+var g_virtio_blk_durable_write_epoch: u64 = 0
 
 pub fn virtio_blk_set_active_mmio_base(base: u64):
     g_virtio_blk_mmio_base = base
@@ -131,6 +135,9 @@ extern fn rt_arm_virtio_blk_sector_bytes() -> [u8]
 extern fn rt_arm_virtio_blk_set_mmio_base(base: u64)
 extern fn rt_arm_virtio_blk_configure_queue(version: u32)
 extern fn rt_arm_virtio_blk_wait_completion(timeout_polls: u32) -> u32
+extern fn rt_arm_virtio_blk_request_owner_load() -> i64
+extern fn rt_arm_virtio_blk_request_owner_compare_exchange(expected: i64, desired: i64) -> bool
+extern fn rt_arm_virtio_blk_request_owner_store(value: i64)
 
 struct VirtioBlkDmaAlloc:
     virt_addr: u64
@@ -156,7 +163,11 @@ fn _virtio_blk_sync_for_cpu(addr: u64, size: u64):
     mmio_shared_invalidate_range(addr, size)
 
 fn _virtio_blk_alloc_dma(size: u64) -> Result<VirtioBlkDmaAlloc, text>:
+    if not g_virtio_blk_request_busy:
+        return Err("virtio-blk DMA allocation requires request ownership")
     val alloc_size: u64 = 1024
+    if size == 0 or size > alloc_size:
+        return Err("virtio-blk DMA request exceeds bounded scratch slot")
     val addr: u64 = VIRTIO_BLK_DMA_BASE
     g_virtio_blk_dma_next = addr + alloc_size
     _virtio_blk_zero(addr: addr, size: alloc_size)
@@ -205,6 +216,11 @@ fn _virtq_setup(base: u64):
     g_virtio_blk_desc_addr = base
     g_virtio_blk_avail_addr = base + 2048
     g_virtio_blk_used_addr = base + 4096
+    g_virtio_blk_request_busy = false
+    g_virtio_blk_queue_quarantined = false
+    rt_arm_virtio_blk_request_owner_store(0)
+    g_virtio_blk_completed_write_epoch = 0
+    g_virtio_blk_durable_write_epoch = 0
     _virtio_blk_zero(addr: base, size: 8192)
 
     var i: u32 = 0
@@ -219,6 +235,8 @@ fn _virtq_setup(base: u64):
     _virtio_blk_sync_for_device(base, 8192)
 
 fn _virtq_alloc_desc() -> i32:
+    if g_virtio_blk_queue_quarantined:
+        return -1
     if g_virtio_blk_free_head >= 128:
         return -1
     val idx = g_virtio_blk_free_head
@@ -228,6 +246,101 @@ fn _virtq_alloc_desc() -> i32:
 fn _virtq_free_desc(idx: u32):
     mmio_write16(_virtq_desc_addr(idx) + 14, g_virtio_blk_free_head.to_u16())
     g_virtio_blk_free_head = idx
+
+fn _virtq_release_partial(desc0: i32, desc1: i32, desc2: i32):
+    # Reverse allocation order so the original freelist order is restored.
+    if desc2 >= 0:
+        _virtq_free_desc(desc2.to_u32())
+    if desc1 >= 0:
+        _virtq_free_desc(desc1.to_u32())
+    if desc0 >= 0:
+        _virtq_free_desc(desc0.to_u32())
+
+fn _virtio_blk_request_begin() -> Result<bool, text>:
+    val owner_state = rt_arm_virtio_blk_request_owner_load()
+    val acquired = if owner_state == 0:
+        rt_arm_virtio_blk_request_owner_compare_exchange(0, 1)
+    else:
+        false
+    val transition = virtio_blk_request_owner_transition(owner_state, acquired)
+    if transition.is_err():
+        return Err(transition.unwrap_err())
+    g_virtio_blk_request_busy = true
+    Ok(true)
+
+fn _virtio_blk_request_completed():
+    g_virtio_blk_request_busy = false
+    rt_arm_virtio_blk_request_owner_store(0)
+
+fn _virtio_blk_request_indeterminate():
+    # A timed-out descriptor chain remains device-owned. Quarantine the queue,
+    # then reset the device and wait for the reset acknowledgement before this
+    # scoped call can return caller-owned DMA. VirtIO guarantees that reset
+    # acknowledgement ends device access. If it never acknowledges, panic
+    # instead of returning an aliased buffer to the caller.
+    g_virtio_blk_queue_quarantined = true
+    g_virtio_blk_request_busy = true
+    rt_arm_virtio_blk_request_owner_store(2)
+    _virtio_blk_reg_write32(VIRTIO_MMIO_STATUS, VIRTIO_STATUS_FAILED)
+    rt_memory_barrier()
+    _virtio_blk_reg_write32(VIRTIO_MMIO_STATUS, 0)
+    rt_memory_barrier()
+    var reset_poll: u32 = 0
+    while reset_poll < BLK_COMPLETION_TIMEOUT_POLLS:
+        if virtio_blk_reset_acknowledged(_virtio_blk_reg_read32(VIRTIO_MMIO_STATUS)):
+            return
+        reset_poll = reset_poll + 1
+    panic("virtio-blk reset was not acknowledged; DMA ownership cannot return")
+
+pub fn virtio_blk_validate_completion(last_used_idx: u32, observed_used_idx: u32, expected_head: u32, observed_head: u32) -> Result<u32, text>:
+    val expected_used_idx = (last_used_idx + 1) & 0xFFFF
+    if observed_used_idx != expected_used_idx:
+        return Err("virtio-blk stale, duplicate, or skipped used-ring completion")
+    if observed_head != expected_head:
+        return Err("virtio-blk completion returned an unexpected descriptor head")
+    Ok(observed_used_idx)
+
+pub fn virtio_blk_request_owner_transition(observed_state: i64, acquired: bool) -> Result<i64, text>:
+    if observed_state == 2:
+        return Err("virtio-blk queue quarantined after indeterminate completion")
+    if observed_state != 0 or not acquired:
+        return Err("virtio-blk queue already owns an in-flight request")
+    Ok(1)
+
+pub fn virtio_blk_reset_acknowledged(device_status: u32) -> bool:
+    device_status == 0
+
+pub fn virtio_blk_descriptor_tail(flags: u32, next_desc: u32) -> u32:
+    # VirtqDesc stores flags in the low 16 bits and next in the high 16 bits.
+    (next_desc << 16) | (flags & 0xFFFF)
+
+pub fn virtio_blk_dma_transfer_len(capacity_sectors: u64, lba: u64, count: u32, sector_size: u32, buffer_len: u64) -> Result<u64, text>:
+    val count_u64 = count.to_u64()
+    val sector_u64 = sector_size.to_u64()
+    if count == 0 or sector_size == 0:
+        return Err("virtio-blk DMA transfer must contain sectors")
+    if capacity_sectors != 0 and (lba >= capacity_sectors or count_u64 > capacity_sectors - lba):
+        return Err("virtio-blk DMA transfer exceeds device capacity")
+    val data_len = count_u64 * sector_u64
+    if data_len > 0xFFFFFFFFu64:
+        return Err("virtio-blk DMA transfer exceeds descriptor length")
+    if buffer_len < data_len:
+        return Err("virtio-blk DMA buffer is too small")
+    Ok(data_len)
+
+pub fn virtio_blk_next_write_epoch(completed_write_epoch: u64) -> Result<u64, text>:
+    if completed_write_epoch == 0xFFFFFFFFFFFFFFFFu64:
+        return Err("virtio-blk write epoch exhausted")
+    Ok(completed_write_epoch + 1u64)
+
+pub fn virtio_blk_flush_transition(completed_write_epoch: u64, durable_write_epoch: u64, target_write_epoch: u64, device_ok: bool) -> Result<u64, text>:
+    if not device_ok:
+        return Err("virtio-blk FLUSH did not complete successfully")
+    if target_write_epoch > completed_write_epoch:
+        return Err("virtio-blk FLUSH cannot publish an incomplete write")
+    if target_write_epoch < durable_write_epoch:
+        return Err("virtio-blk FLUSH cannot move durability backward")
+    Ok(target_write_epoch)
 
 fn _virtq_push_avail(desc_idx: u32):
     # Descriptor rows are driver-owned until this publication boundary.
@@ -240,13 +353,27 @@ fn _virtq_push_avail(desc_idx: u32):
     _virtio_blk_sync_for_device(g_virtio_blk_avail_addr, 512)
     rt_memory_barrier()
 
-fn _virtq_wait_completion(timeout_polls: u32) -> bool:
+fn _virtq_wait_completion(expected_head: u32, timeout_polls: u32) -> bool:
     var i: u32 = 0
     while i < timeout_polls:
-        _virtio_blk_sync_for_cpu(g_virtio_blk_used_addr, 64)
+        # Poll only the used-ring header. Invalidate the one returned element
+        # after its index advances; scanning the whole ring on every poll turns
+        # a timeout into gigabytes of needless cache maintenance.
+        _virtio_blk_sync_for_cpu(g_virtio_blk_used_addr, 4)
         val used_idx = mmio_read16(g_virtio_blk_used_addr + 2)
         if used_idx.to_u32() != g_virtio_blk_last_used_idx:
-            g_virtio_blk_last_used_idx = used_idx.to_u32()
+            val used_slot = g_virtio_blk_last_used_idx.to_u64() % g_virtio_blk_queue_size.to_u64()
+            val used_elem_addr = g_virtio_blk_used_addr + 4 + used_slot * 8
+            _virtio_blk_sync_for_cpu(used_elem_addr, 8)
+            val used_head = mmio_read32(used_elem_addr)
+            val transition = virtio_blk_validate_completion(
+                g_virtio_blk_last_used_idx,
+                used_idx.to_u32(),
+                expected_head,
+                used_head)
+            if transition.is_err():
+                return false
+            g_virtio_blk_last_used_idx = transition.unwrap()
             return true
         i = i + 1
     false
@@ -347,74 +474,13 @@ pub fn virtio_blk_arm_init(driver_in: VirtioBlkDriver) -> VirtioBlkArmInitResult
     VirtioBlkArmInitResult(driver: driver, ok: true)
 
 pub fn virtio_blk_arm_read_sector(driver: VirtioBlkDriver, lba: u64, buffer: [u8]) -> Result<bool, text>:
-    if driver.capacity_sectors != 0 and lba >= driver.capacity_sectors:
-        return Result.Err("read beyond disk capacity")
-    if 512 > buffer.len().to_u32():
-        return Result.Err("buffer too small for single sector")
-
-    val dma_total: u64 = 529
-    val dma_result = _virtio_blk_alloc_dma(dma_total)
-    if dma_result.is_err():
-        return Result.Err("virtio-blk read DMA allocation failed")
-    val dma = dma_result.unwrap()
-    val header_addr = dma.virt_addr
-    val data_addr = header_addr + 16
-    val status_addr = data_addr + 512
-    mmio_write32(status_addr, 0x01010101)
-
-    mmio_write32(header_addr, VIRTIO_BLK_T_IN)
-    mmio_write32(header_addr + 4, 0)
-    val lba_low = (lba & 0xFFFFFFFF).to_u32()
-    val lba_high = (lba >> 32).to_u32()
-    mmio_write32(header_addr + 8, lba_low)
-    mmio_write32(header_addr + 12, lba_high)
-
-    val ha_low = header_addr & 0xFFFFFFFF
-    val ha_high = header_addr >> 32
-    rt_virtq_desc_write(g_virtio_blk_desc_addr, 0, ha_low, ha_high, 16, 1, 1)
-
-    val da_low = data_addr & 0xFFFFFFFF
-    val da_high = data_addr >> 32
-    rt_virtq_desc_write(g_virtio_blk_desc_addr, 1, da_low, da_high, 512, 3, 2)
-
-    val sa_low = status_addr & 0xFFFFFFFF
-    val sa_high = status_addr >> 32
-    rt_virtq_desc_write(g_virtio_blk_desc_addr, 2, sa_low, sa_high, 1, 2, 0)
-
-    _virtio_blk_sync_for_device(dma.virt_addr, dma_total)
-    _virtq_push_avail(0)
-    _virtio_blk_reg_write32(80, 0)
-
-    if not _virtio_blk_wait_status(status_addr, BLK_COMPLETION_TIMEOUT_POLLS):
-        val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
-        return Result.Err("virtio-blk read timeout")
-
-    _virtio_blk_sync_for_cpu(dma.virt_addr, dma_total)
-    val status = mmio_read8(status_addr)
-    if status != VIRTIO_BLK_S_OK:
-        val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
-        return Result.Err("virtio-blk read error (status={status})")
-
-    val direct_out = dma_raw_bytes_to_array(data_addr, 512)
-    g_virtio_blk_last_read_bytes = direct_out
-
-    var copy_i: i32 = 0
-    while copy_i < 512 and copy_i < buffer.len():
-        val copy_byte_u32 = mmio_read8(data_addr + copy_i.to_u64()) as u32
-        buffer[copy_i] = copy_byte_u32.to_u8()
-        copy_i = copy_i + 1
-
-    val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
-    Result.Ok(true)
+    driver.read_sectors(lba, 1, buffer)
 
 pub fn virtio_blk_arm_read_sector_bytes(driver: VirtioBlkDriver, lba: u64) -> [u8]:
-    val _driver = driver
-    val status = rt_arm_virtio_blk_read_sector_direct(lba)
-    if status == 0xFFFFFFFF:
+    val result = driver.read_sector(lba)
+    if result.is_err():
         return []
-    if status != 0:
-        return []
-    rt_arm_virtio_blk_sector_bytes()
+    result.unwrap()
 
 class VirtioBlkDriver:
     """VirtIO block device driver.

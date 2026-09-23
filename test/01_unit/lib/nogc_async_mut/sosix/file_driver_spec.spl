@@ -61,6 +61,28 @@ describe "SOSIX reference file driver on the host filesystem":
         expect(read.completion.partial_progress).to_equal(true)
         expect(driver.buffer_bytes(sink)).to_equal("de")
 
+    it "places a positioned read at the requested buffer offset without changing surrounding bytes":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        step("Write a short file and register a destination with a prefix and suffix")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("read_buffer_offset"))
+        val source = driver.buffer_from("abc")
+        expect(sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 3u64, 0u64).outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        val sink = driver.buffer_from("XX.....YY")
+        step("Read two bytes from file offset one into destination buffer offset three")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 1u64, 3u64, 2u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.completion.transferred).to_equal(2u64)
+        expect(driver.buffer_bytes(sink)).to_equal("XX.bc..YY")
+
+        step("Reject a destination offset past the registered bytes without changing them")
+        val rejected = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 10u64, 1u64, 0u64)
+        expect(rejected.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(rejected.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(rejected.completion.transferred).to_equal(0u64)
+        expect(driver.buffer_bytes(sink)).to_equal("XX.bc..YY")
+
     it "surfaces a missing file as a typed native error after exactly one wait":
         step("Read from a path that does not exist")
         val fs = setup_sosix_hosted_fs()

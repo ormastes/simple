@@ -54,9 +54,11 @@ extern int errno;
 #define ELOOP       40   /* Too many symbolic links */
 #define ENOMSG      42   /* No message of desired type */
 #define EILSEQ      84   /* Illegal byte sequence */
+#define EOVERFLOW   75   /* Value too large for defined data type */
 
 /* Network error codes (extended) */
 #define ENOTSOCK     88  /* Socket operation on non-socket */
+#define EAFNOSUPPORT 97  /* Address family not supported */
 #define EADDRINUSE   98  /* Address already in use */
 #define ECONNRESET  104  /* Connection reset by peer */
 #define ENOTCONN    107  /* Transport endpoint not connected */

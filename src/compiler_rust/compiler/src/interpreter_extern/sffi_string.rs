@@ -393,11 +393,13 @@ pub fn rt_string_builder_push_fn(args: &[Value]) -> Result<Value, CompileError> 
         }
     };
 
-    // Materialize the text as a RuntimeValue string (matching the extern ABI),
-    // then forward to the runtime push.
+    // Materialize the text for the runtime ABI, then release that temporary
+    // immediately. `rt_string_builder_push` copies its input into its own
+    // geometric buffer and does not retain the RuntimeValue.
     let bytes = text.as_bytes();
     let rv = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
     let status = unsafe { rt_string_builder_push(handle, rv) };
+    let _ = rt_string_free(rv);
     Ok(Value::Int(status))
 }
 
@@ -487,6 +489,19 @@ pub fn rt_string_builder_free_fn(args: &[Value]) -> Result<Value, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_runtime::value::heap::rt_heap_registry_count;
+
+    #[test]
+    fn builder_push_reclaims_its_temporary_runtime_string() {
+        let handle = rt_string_builder_new_fn(&[]).unwrap();
+        let before = rt_heap_registry_count();
+        assert_eq!(
+            rt_string_builder_push_fn(&[handle.clone(), Value::text("temporary".to_string())]).unwrap(),
+            Value::Int(1),
+        );
+        assert_eq!(rt_heap_registry_count(), before, "push must not retain its ABI temporary");
+        rt_string_builder_free_fn(&[handle]).unwrap();
+    }
 
     #[test]
     fn invalid_builder_finish_is_a_contract_error() {

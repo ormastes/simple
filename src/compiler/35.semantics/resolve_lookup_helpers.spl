@@ -177,6 +177,32 @@ impl MethodResolver:
             case _("indirect/computed callees have no static signature to fill"):
                 return args
 
+    me fill_resolved_method_defaults(resolution: MethodResolution, args: [HirCallArg], call_span: Span) -> [HirCallArg]:
+        val target: SymbolId? = match resolution:
+            case InstanceMethod(_, method): Some(method)
+            case TraitMethod(_, method): Some(method)
+            case StaticMethod(_, method): Some(method)
+            case FreeFunction(function): Some(function)
+            case Unresolved: nil
+        if not target.?: return args
+        val symbol = target ?? SymbolId(id: -1)
+        if not self.module_functions.contains_key(symbol): return args
+        for arg in args:
+            if arg.has_name: return args
+        val params = self.module_functions[symbol].params
+        val offset = match resolution:
+            case InstanceMethod(_, _) | TraitMethod(_, _) | FreeFunction(_): 1
+            case _: 0
+        if args.len() + offset >= params.len(): return args
+        var filled = args
+        var i = args.len() + offset
+        while i < params.len():
+            val param = params[i]
+            if not param.has_default: return filled
+            filled = filled.push(HirCallArg(has_name: false, name: "", value: self.resolve_expr(param.default), span: call_span))
+            i = i + 1
+        filled
+
     me resolve_comp_clause(clause: HirCompClause) -> HirCompClause:
         """Resolve method calls in comprehension clause."""
         val kind = match clause.kind:
