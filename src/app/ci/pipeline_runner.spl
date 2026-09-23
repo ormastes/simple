@@ -228,12 +228,22 @@ fn finalized_container_operation_receipt(name: text, spec: PodSpecV1,
         state_dir: text) -> JobReceiptV1:
     val receipt = container_operation_receipt(name, spec, result, boot,
         attempt, state_dir)
-    if result.operation != "probe" and result.operation != "prepare_pod" and
-            result.state.phase != RUNTIME_PHASE_DESTROYED:
+    if container_runtime_state_requires_recovery(result):
         var retained = receipt
         retained.reason = receipt.reason + "; runtime-state-retained-for-recovery"
         return retained
     cleanup_container_runtime_state(receipt, state_dir)
+
+# Keep the journal only when native side effects may exist and recovery could
+# still need its identity. A failed pre-execution journal write proves create
+# never reached the engine, so retaining its temporary directory only leaks
+# pipeline-owned storage.
+pub fn container_runtime_state_requires_recovery(result: RuntimeOperationV1) -> bool:
+    if result.operation == "probe" or result.operation == "prepare_pod": return false
+    if result.state.phase == RUNTIME_PHASE_DESTROYED: return false
+    if result.operation == "create" and
+            result.reason == "intent-journal-write-failed": return false
+    true
 
 fn merge_container_cleanup(primary: RuntimeOperationV1,
         cleanup: RuntimeOperationV1) -> RuntimeOperationV1:

@@ -141,6 +141,13 @@ compaction, and rejects active-state overflow. Pipeline exits now remove their
 temporary state when no recovery authority is needed, retain and name it when
 native cleanup is unresolved, and never report a deleted path as evidence.
 
+TODO (bounded churn evidence): add a no-container 10,000-attempt scripted
+create/destroy/recover churn collector with a 256-record warm cache. Retain raw
+per-operation samples plus `/usr/bin/time -v` maximum RSS; require p95 provider
+operation latency <= 5 ms and post-warmup RSS growth <= 16 MiB. Until that
+receipt exists, the cardinality contracts are structural/behavioral evidence,
+not a measured latency or memory claim.
+
 ## Engine choice and what "native" costs per host (added 2026-09-07)
 
 The default engine is **podman**, then docker, then bare runc
