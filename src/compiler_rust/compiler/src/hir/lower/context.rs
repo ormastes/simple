@@ -35,6 +35,12 @@ pub(super) struct FunctionContext {
     /// decisions. This map is consulted in exactly one place — the ANY-receiver
     /// fallback in `expr/access.rs` — and is scoped to one function.
     pub static_call_type_hints: HashMap<String, String>,
+    /// Declared payload types for Result locals, keyed by local slot.
+    ///
+    /// The ordinary local type stores the runtime carrier (i64), so property
+    /// lowering needs this metadata to preserve Result<T, E>.ok / .err.
+    /// Slots keep shadowed bindings distinct.
+    pub result_projection_types: HashMap<usize, (TypeId, TypeId)>,
 }
 
 impl FunctionContext {
@@ -48,6 +54,7 @@ impl FunctionContext {
             has_self: false,
             is_me_method: false,
             static_call_type_hints: HashMap::new(),
+            result_projection_types: HashMap::new(),
         }
     }
 
@@ -62,6 +69,7 @@ impl FunctionContext {
             has_self: true,
             is_me_method,
             static_call_type_hints: HashMap::new(),
+            result_projection_types: HashMap::new(),
         }
     }
 

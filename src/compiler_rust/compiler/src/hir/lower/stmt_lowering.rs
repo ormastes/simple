@@ -404,6 +404,27 @@ impl Lowerer {
                     });
                 }
 
+                // Keep an authored `Result<T, E>` annotation available to
+                // property projection.  On the Windows bootstrap path a
+                // generic local can arrive at expression lowering as i64;
+                // using the annotation here prevents `value.ok` / `value.err`
+                // from being mis-routed through struct-field lowering.
+                let result_projection_type = if let Some(ast::Type::Generic { name: family, args }) =
+                    let_stmt.ty.as_ref().or(pattern_type)
+                {
+                    if family == "Result" && args.len() == 2 {
+                        if let (Ok(ok_ty), Ok(err_ty)) = (self.resolve_type(&args[0]), self.resolve_type(&args[1])) {
+                            Some((ok_ty, err_ty))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let is_untyped_empty_array_binding = !has_explicit_type
                     && value
                         .as_ref()
@@ -518,6 +539,9 @@ impl Lowerer {
                     }
                 }
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let Some(result_payload_types) = result_projection_type {
+                    ctx.result_projection_types.insert(local_index, result_payload_types);
+                }
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);
                 }
