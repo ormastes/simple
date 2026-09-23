@@ -34,6 +34,10 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = native-build ]; then
+  verification_root=${SIMPLE_NATIVE_BUILD_CACHE_DIR%/cache/*}
+  [ "${SIMPLE_BOOTSTRAP:-}" = 1 ] || exit 77
+  [ "${SIMPLE_NATIVE_BUILD_RUST:-}" = 1 ] || exit 78
+  [ "${SIMPLE_BINARY:-}" = "$verification_root/compiler.snapshot" ] || exit 79
   printf 'rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
     "${SIMPLE_NATIVE_BUILD_RUST:-}" "${SIMPLE_BINARY:-}" \
     "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_INVOCATIONS"
@@ -47,7 +51,10 @@ if [ "${1:-}" = native-build ]; then
   mkdir -p "$(dirname "$output")"
   cat >"$output" <<'TOOL'
 #!/bin/sh
-printf '%s\n' "$(basename "$0") $*" >>"$PHASE1_EXECUTIONS"
+[ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}${SIMPLE_BINARY:-}" ] || exit 77
+printf 'generic=%s|rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
+  "$(basename "$0")" "${SIMPLE_NATIVE_BUILD_RUST:-}" \
+  "${SIMPLE_BINARY:-}" "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_EXECUTIONS"
 exit 0
 TOOL
   chmod +x "$output"
@@ -86,8 +93,10 @@ grep -Eq 'task=mcp_build\|result=PASS\|status=0.*artifact_status=present' \
   "$tmp/good/summary.env" || fail "materialized MCP build was not recorded"
 grep -Eq 'task=lsp_build\|result=PASS\|status=0.*artifact_status=present' \
   "$tmp/good/summary.env" || fail "materialized LSP build was not recorded"
-grep -Fq 'simple_mcp_server --help' "$tmp/good.executions" || fail "MCP help did not launch"
-grep -Fq 'simple_lsp_mcp_server --help' "$tmp/good.executions" || fail "LSP help did not launch"
+grep -Fq 'generic=simple_mcp_server|rust=|binary=|bootstrap=|argv=--help' \
+  "$tmp/good.executions" || fail "MCP generic child inherited bootstrap dispatch controls"
+grep -Fq 'generic=simple_lsp_mcp_server|rust=|binary=|bootstrap=|argv=--help' \
+  "$tmp/good.executions" || fail "LSP generic child inherited bootstrap dispatch controls"
 
 # A stale executable plus an exit-zero producer used to become a false PASS.
 # The recorder must delete the residue, require a fresh exact artifact, and
