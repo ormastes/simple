@@ -11,7 +11,8 @@ use super::config::runtime_bundle_requests_core_c_bootstrap;
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
-    build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
+    build_core_c_runtime_library, build_host_gpu_core_c_runtime_library,
+    build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
     find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
@@ -1291,7 +1292,7 @@ int main(int argc, char** argv) {
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
         let host_gpu_core_runtime = if host_gpu_lane {
             Some(
-                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
+                build_host_gpu_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
                     .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
             )
         } else {

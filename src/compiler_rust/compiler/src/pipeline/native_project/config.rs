@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use simple_common::target::LinkerFlavor;
 
 use super::tools::{
-    archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library,
+    archive_defined_symbols, build_core_c_runtime_library, build_host_gpu_core_c_runtime_library,
+    find_abi_complete_simple_core_runtime_library,
     find_core_c_runtime_source_root, find_runtime_library, find_simple_core_runtime_library,
     runtime_archive_has_core_required_symbols, runtime_authority_search_dirs,
 };
@@ -523,7 +524,7 @@ impl NativeProjectBuilder {
             // selecting a feature-built Rust archive here would install strong
             // symbols that bypass the loader's weak trampolines.
             let core_dir = temp_dir.join("host_gpu_core_c_runtime");
-            let core = build_core_c_runtime_library(&core_dir)
+            let core = build_host_gpu_core_c_runtime_library(&core_dir)
                 .ok_or_else(|| "failed to build the host-gpu core-C provider loader".to_string())?;
             return Ok(Some((core, false)));
         }

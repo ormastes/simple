@@ -609,7 +609,10 @@ bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t h
  * rt_webgpu_destroy_surface, rt_webgpu_shutdown" (macOS, 2026-09-06).
  * Same fail-closed contract as the three above: this lane has no wgpu
  * provider, so acquisition already returns unavailable and teardown has
- * nothing to release. */
+ * nothing to release. The host-gpu lane links the hosted Rust runtime and
+ * defines SIMPLE_HOSTED_WEBGPU_OWNER, leaving that runtime as the sole
+ * WebGPU export owner. Core-C-only lanes keep these fail-closed exports. */
+#if !defined(SIMPLE_HOSTED_WEBGPU_OWNER)
 bool rt_webgpu_is_available(void) { return false; }
 bool rt_webgpu_init(void) { return false; }
 int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
@@ -618,6 +621,7 @@ int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
 }
 bool rt_webgpu_shutdown(void) { return false; }
 bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
+#endif
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {

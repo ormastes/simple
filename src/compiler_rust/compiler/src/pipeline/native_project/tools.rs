@@ -374,7 +374,11 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
-fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
+fn build_c_runtime_library(
+    build_dir: &Path,
+    include_stage4_hosted: bool,
+    hosted_webgpu_owner: bool,
+) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let target = effective_target();
@@ -547,7 +551,11 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
 
-    let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
+    let fingerprint = format!(
+        "{}:{}",
+        runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?,
+        if hosted_webgpu_owner { "hosted-webgpu" } else { "core-c-webgpu" }
+    );
     let fingerprint_path = build_dir.join(format!("{}.inputs.fingerprint", host_archive_name()));
 
     if has_nonempty_archive_payload(&archive)
@@ -617,6 +625,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             // runtime_native.c's mutually-exclusive fallback copies of the same
             // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
             .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
+            .args(hosted_webgpu_owner.then_some("-DSIMPLE_HOSTED_WEBGPU_OWNER=1"))
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
@@ -685,11 +694,15 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false)
+    build_c_runtime_library(build_dir, false, false)
+}
+
+pub(crate) fn build_host_gpu_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false, true)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true)
+    build_c_runtime_library(build_dir, true, false)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
