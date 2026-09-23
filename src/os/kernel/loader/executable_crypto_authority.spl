@@ -1,6 +1,6 @@
 # Loader-owned executable signature authority.
-# Trust roots are installed once by platform configuration. Callers may submit
-# signatures, but cannot submit or select the key that authorizes them.
+# Trust roots are installed once by pin-verified loader boot code. Public
+# callers may submit signatures, but cannot install or select authority.
 
 use std.common.crypto.ed25519.{pure_ed25519_verify}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -68,6 +68,29 @@ fn _unlock(ok: bool) -> bool:
 pub fn executable_loader_trust_roots_initialize(
     roots: [ExecutableTrustedSignerV1]
 ) -> bool:
+    """Legacy public entry: inspect a proposed root set without installing it.
+
+    Only package-owned boot adapters may establish executable authority. In
+    particular, a valid public first writer cannot reserve the one-time slot.
+    """
+    if not _roots_valid(roots) or _loader_crypto_quarantined:
+        return false
+    if not mutex_raw_lock(_loader_crypto_mutex):
+        return false
+    if not _loader_crypto_initialized:
+        return _unlock(false)
+    var same = roots.len() == _loader_crypto_roots.len()
+    var i = 0
+    while same and i < roots.len():
+        same = roots[i].key_id == _loader_crypto_roots[i].key_id and
+            _bytes_equal(roots[i].public_key, _loader_crypto_roots[i].public_key)
+        i = i + 1
+    _unlock(same)
+
+pub(package) fn executable_loader_trust_roots_boot_initialize_v1(
+    roots: [ExecutableTrustedSignerV1]
+) -> bool:
+    """Install only a root already checked against the platform's boot pin."""
     if not _roots_valid(roots) or _loader_crypto_quarantined:
         return false
     if not mutex_raw_lock(_loader_crypto_mutex):
