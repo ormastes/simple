@@ -1,0 +1,53 @@
+# Cross-backend Optional tagged-slot matrix for the index-of digit-3 P1.
+# Each line is a self-checking control: output `PASS <case>` only when its
+# observed behaviour matches the language contract.
+
+fn check(name: text, actual: text, expected: text):
+    if actual == expected:
+        print "PASS {name}"
+    else:
+        print "FAIL {name}: got={actual} expected={expected}"
+        assert(actual == expected)
+
+fn digit_index(text: text) -> i64?:
+    return text.index_of("3")
+
+fn main():
+    # Exact repro: digit `3` at zero-based position 3 enters an i64? slot.
+    val hit3: i64? = digit_index("abc3def")
+    check("digit-index-3-is-present", "{hit3 == nil}", "false")
+    val raw3 = hit3 ?? -1
+    check("digit-index-3-arithmetic-after-unwrap", "{raw3 + 1}", "4")
+
+    # Nearby integer controls distinguish the old flat raw payload lane.
+    val hit2: i64? = digit_index("ab3def")
+    val hit4: i64? = digit_index("abcd3ef")
+    check("digit-index-2-is-present", "{hit2 == nil}", "false")
+    check("digit-index-2-round-trips", "{hit2 ?? -1}", "2")
+    check("digit-index-4-is-present", "{hit4 == nil}", "false")
+    check("digit-index-4-round-trips", "{hit4 ?? -1}", "4")
+
+    # Generic Optional boundary and direct scalar controls.
+    val direct3: i64? = 3
+    val direct_nil: i64? = nil
+    check("direct-3-is-present", "{direct3 == nil}", "false")
+    check("direct-3-round-trips", "{direct3 ?? -1}", "3")
+    check("direct-nil-is-nil", "{direct_nil == nil}", "true")
+
+    # Text Optional stays an already-tagged heap value; absence stays nil.
+    val text_hit: text? = "three"
+    val text_nil: text? = nil
+    # `index_of` uses -1 for a miss; keep that legacy text API sentinel
+    # distinct from the Optional nil control immediately above.
+    val absent: i64? = digit_index("abcdef")
+    check("text-present", "{text_hit == nil}", "false")
+    check("text-round-trips", "{text_hit ?? \"fallback\"}", "three")
+    check("text-nil", "{text_nil == nil}", "true")
+    check("index-miss-is-not-nil-sentinel", "{absent == nil}", "false")
+    check("index-miss-round-trips", "{absent ?? -1}", "-1")
+
+    # Error-result controls must keep their own tagged discriminant.
+    val ok: Result<i64, text> = Ok(3)
+    val err: Result<i64, text> = Err("missing")
+    check("result-ok-discriminant", "{ok.is_ok()}", "true")
+    check("result-err-discriminant", "{err.is_err()}", "true")
