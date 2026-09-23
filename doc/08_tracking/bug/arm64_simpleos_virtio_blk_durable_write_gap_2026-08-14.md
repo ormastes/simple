@@ -127,3 +127,30 @@ FAT32 replace/recovery fixture pass. The available `bin/simple` identified
 itself as a Rust bootstrap seed, and no live ARM64 QEMU writable-disk reboot was
 run in this lane, so the bug remains OPEN pending admitted self-hosted compile
 and fresh-process hardware/QEMU persistence proof.
+
+## Ownership repair follow-up 2026-09-23
+
+The zero-copy interfaces remain enabled. Driver-owned, caller-region, and
+`SharedDmaBuffer` requests acquire the same target-native atomic single-request
+authority backed by boot-initialized static storage
+before descriptors or scratch DMA are allocated. A successful or device-error
+completion releases that scoped authority only after the exact used-ring head
+is validated and descriptors are reclaimed. Timeout or malformed completion
+permanently quarantines the queue, resets the VirtIO device, and waits for
+status-zero acknowledgement before a caller-owned region can return. Failure
+to acknowledge reset panics rather than exposing memory the device may still
+access. This timeout-only reset adds no work to the successful zero-copy path.
+
+Descriptor flags/next encoding, partial-allocation rollback, overflow-safe
+capacity checks, and monotonic write/flush epochs now use production helpers
+covered by the focused durability boundary spec.
+
+TODO(simpleos-qemu): once the admitted ARM64 SimpleOS phase environment is
+available, run the focused spec with the self-hosted runner, then run a
+writable virtio-blk QEMU power-cut/reboot scenario proving acknowledged writes
+become persistent only after FLUSH and a forced timeout/reset never permits DMA
+into a returned or reused buffer. Capture latency and maximum RSS against the
+prior zero-copy baseline; reject steady-state throughput or memory regression.
+Also fault-inject the production CAS and reset-ack provider (not only the pure
+transition helpers) to prove competing acquisition, partial descriptor rollback,
+late completion quarantine, and non-acknowledged reset fail closed.
