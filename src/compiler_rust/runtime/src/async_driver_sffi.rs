@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::value::{rt_string_new, RuntimeValue};
@@ -431,8 +431,8 @@ fn operation_id(operation: &Operation) -> i64 {
     }
 }
 
-fn drivers() -> &'static Mutex<Vec<Option<Driver>>> {
-    static DRIVERS: OnceLock<Mutex<Vec<Option<Driver>>>> = OnceLock::new();
+fn drivers() -> &'static Mutex<Vec<Option<Arc<Mutex<Driver>>>>> {
+    static DRIVERS: OnceLock<Mutex<Vec<Option<Arc<Mutex<Driver>>>>>> = OnceLock::new();
     DRIVERS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -445,9 +445,12 @@ fn linux_uring_ptr(driver: &Driver) -> Option<*mut CSplDriver> {
 }
 
 fn with_driver_mut<R>(handle: i64, f: impl FnOnce(&mut Driver) -> R) -> Option<R> {
-    let mut guard = drivers().lock().ok()?;
-    let driver = guard.get_mut(handle as usize)?.as_mut()?;
-    Some(f(driver))
+    let driver = {
+        let guard = drivers().lock().ok()?;
+        guard.get(handle as usize)?.as_ref()?.clone()
+    };
+    let mut guard = driver.lock().ok()?;
+    Some(f(&mut guard))
 }
 
 fn create_driver(queue_depth: i64) -> Result<Driver, i64> {
@@ -654,13 +657,13 @@ fn execute_operation(operation: Operation) -> Completion {
 
 #[no_mangle]
 pub extern "C" fn rt_driver_create(queue_depth: i64) -> i64 {
+    let driver = match create_driver(queue_depth) {
+        Ok(driver) => Arc::new(Mutex::new(driver)),
+        Err(status) => return status,
+    };
     let mut guard = match drivers().lock() {
         Ok(guard) => guard,
         Err(_) => return NEG_EINVAL,
-    };
-    let driver = match create_driver(queue_depth) {
-        Ok(driver) => driver,
-        Err(status) => return status,
     };
     if let Some((index, slot)) = guard.iter_mut().enumerate().find(|(_, slot)| slot.is_none()) {
         *slot = Some(driver);
@@ -672,11 +675,18 @@ pub extern "C" fn rt_driver_create(queue_depth: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_driver_destroy(handle: i64) {
-    if let Ok(mut guard) = drivers().lock() {
+    let removed = if let Ok(mut guard) = drivers().lock() {
         if let Some(slot) = guard.get_mut(handle as usize) {
-            *slot = None;
+            slot.take()
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
+    // Run potentially blocking cancellation/drain after releasing the table
+    // mutex, so unrelated drivers remain available.
+    drop(removed);
 }
 
 #[no_mangle]
@@ -918,6 +928,12 @@ mod tests {
         assert_eq!(rt_driver_flush(handle), 1);
         assert_eq!(rt_driver_poll(handle, 1, 1000), 1);
         assert_eq!(rt_driver_poll_result(handle, 0), 0);
+
+        // Destruction must cancel and drain an in-flight payload-owning SQE
+        // before releasing its timeout storage.
+        let pending_timeout = rt_driver_submit_timeout(handle, 10_000);
+        assert!(pending_timeout > 0);
+        assert_eq!(rt_driver_flush(handle), 1);
         rt_driver_destroy(handle);
         let _ = fs::remove_file(path);
     }

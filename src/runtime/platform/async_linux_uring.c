@@ -243,21 +243,75 @@ static struct io_uring_sqe* get_sqe(uring_driver* ud)
 
 /* ---- destroy ---- */
 
+static void release_tracked_entry(uring_driver* ud, int64_t op_id)
+{
+    buf_entry entry = bufs_take(ud, op_id);
+    if (entry.op_id == 0) return;
+    free(entry.buf);
+    free(entry.path);
+}
+
+static bool uring_cancel_and_drain_tracked(uring_driver* ud)
+{
+    /* Publish every original SQE before queuing cancellation requests. */
+    if (io_uring_submit(&ud->ring) < 0)
+        return false;
+
+    for (int64_t i = 0; i < ud->bufs_cap; i++) {
+        int64_t op_id = ud->bufs[i].op_id;
+        if (op_id == 0) continue;
+
+        struct io_uring_sqe* sqe = io_uring_get_sqe(&ud->ring);
+        if (!sqe) {
+            if (io_uring_submit(&ud->ring) <= 0)
+                return false;
+            sqe = io_uring_get_sqe(&ud->ring);
+            if (!sqe)
+                return false;
+        }
+        io_uring_prep_cancel64(sqe, (uint64_t)op_id, 0);
+        io_uring_sqe_set_data64(sqe, 0);
+    }
+    if (io_uring_submit(&ud->ring) < 0)
+        return false;
+
+    /* A cancel CQE (user_data=0) only acknowledges the cancellation request;
+     * the original CQE retires the buffer lease. Drain until every tracked
+     * original operation has produced that terminal CQE. */
+    while (ud->bufs_count > 0) {
+        struct io_uring_cqe* cqe = NULL;
+        int ret;
+        do {
+            ret = io_uring_wait_cqe(&ud->ring, &cqe);
+        } while (ret == -EINTR);
+        if (ret < 0 || !cqe)
+            return false;
+        int64_t op_id = (int64_t)io_uring_cqe_get_data64(cqe);
+        if (op_id != 0)
+            release_tracked_entry(ud, op_id);
+        io_uring_cqe_seen(&ud->ring, cqe);
+    }
+    return true;
+}
+
 static void uring_destroy(spl_driver* d)
 {
     uring_driver* ud = UD(d);
 
-    /* Closing the ring first cancels and joins kernel ownership of submitted
-     * buffers.  Freeing those buffers before queue_exit is a use-after-free
-     * when an operation is still in flight. */
+    bool drained = uring_cancel_and_drain_tracked(ud);
     io_uring_queue_exit(&ud->ring);
 
-    /* Free all buffers that did not transfer to a completion consumer. */
+    /* If draining failed, intentionally leak the remaining payloads. Older
+     * kernels may finish cancellation asynchronously after close, so freeing
+     * them here would be a use-after-free. The table itself is never shared
+     * with the kernel and remains safe to release. */
     if (ud->bufs) {
-        for (int64_t i = 0; i < ud->bufs_cap; i++) {
-            if (ud->bufs[i].op_id != 0) {
-                free(ud->bufs[i].buf);
-                free(ud->bufs[i].path);
+        if (drained) {
+            for (int64_t i = 0; i < ud->bufs_cap; i++) {
+                if (ud->bufs[i].op_id != 0) {
+                    free(ud->bufs[i].buf);
+                    free(ud->bufs[i].path);
+                }
             }
         }
         free(ud->bufs);
