@@ -1,7 +1,8 @@
 # Phase 2 loader binary verification
 
-Date: 2026-09-21. Source reviewed:
-`6a68f7052d1dd55824557097e8bde94d4b1065b9`.
+Date: 2026-09-21; safety follow-up: 2026-09-23. Original source reviewed:
+`6a68f7052d1dd55824557097e8bde94d4b1065b9`; follow-up reviewed PR
+head `b6f8c4a229f8a2ce201657bf0877c81dee51926d`.
 
 **STATUS: BLOCKED — admitted Phase 2 runtime execution is unavailable.**
 
@@ -13,7 +14,10 @@ It could not exercise executable memory. The updated spec imports the real
 loader APIs, reads back bytes from a real mapping, checks deterministic invalid
 inputs, and observes the Result-returning function-call contract. Its x86_64
 scenario executes `mov eax, 42; ret` after the RW-to-RX transition. No runtime or
-C toolchain implementation changed.
+C toolchain implementation changed. The x86_64 execution scenario now also
+checks exact byte readback and gates the native call on complete bytes and a
+successful RX transition. Spec expectations only record failures, so without
+these guards a failed setup could continue into an invalid native call.
 
 The former 1 TB allocation assertion was invalid on hosts that allow large
 virtual mappings. Zero and negative allocation sizes replace it. No unsupported

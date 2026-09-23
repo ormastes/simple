@@ -52,15 +52,23 @@ describe "Loader executable memory":
             val code: [u8] = [184, 42, 0, 0, 0, 195]
             val addr = native_alloc_exec_memory(4096)
             expect(addr).to_be_greater_than(0)
-            unsafe(capabilities: [raw_ptr]):
-                val written = native_write_exec_memory(addr, code, 0)
-                expect(written).to_equal(code.len() as i64)
-                step("Seal the mapping as executable before invoking its entry point")
-                val made_exec = native_make_executable(addr, 4096)
-                expect(made_exec).to_be(true)
-                val result = native_call_function_0(addr)
-                val freed = native_free_exec_memory(addr, 4096)
-                step("Observe the exact machine-code return and release the mapping")
-                expect(result.is_ok()).to_be(true)
-                expect(result.unwrap()).to_equal(42)
-                expect(freed).to_be(true)
+            if addr > 0:
+                unsafe(capabilities: [raw_ptr]):
+                    val written = native_write_exec_memory(addr, code, 0)
+                    val copied = native_mmap_read_bytes(addr, 0, code.len() as i64)
+                    expect(written).to_equal(code.len() as i64)
+                    expect(copied).to_equal(code)
+                    # Expectations record failures but do not stop execution.
+                    # Never call incomplete bytes or a mapping that is not RX.
+                    if written == code.len() as i64 and copied == code:
+                        step("Seal the mapping as executable before invoking its entry point")
+                        val made_exec = native_make_executable(addr, 4096)
+                        expect(made_exec).to_be(true)
+                        if made_exec:
+                            val result = native_call_function_0(addr)
+                            expect(result.is_ok()).to_be(true)
+                            if result.is_ok():
+                                expect(result.unwrap()).to_equal(42)
+                    step("Release the mapping after the guarded execution attempt")
+                    val freed = native_free_exec_memory(addr, 4096)
+                    expect(freed).to_be(true)
