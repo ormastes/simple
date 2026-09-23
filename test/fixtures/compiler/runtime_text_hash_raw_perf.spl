@@ -1,0 +1,44 @@
+# Test-only ABI bridge: rt_string_data returns a borrowed NUL-terminated pointer.
+# Declare its machine-word result as text to exercise the legacy raw-text ABI.
+# Keep the owning string live; never use this declaration in production code.
+use std.common.hash.runtime_text.{runtime_text_hash_v1}
+extern fn rt_string_data(value: text) -> text
+extern fn rt_time_monotonic_ns() -> i64
+
+fn measure(doublings: i64) -> i64:
+    var owned = "x"
+    var count = 0
+    while count < doublings:
+        owned = owned + owned
+        count = count + 1
+    val borrowed = rt_string_data(owned)
+    val expected = runtime_text_hash_v1(owned)
+    if borrowed.len() != owned.len():
+        print "raw-text-abi-length-mismatch"
+        return 1
+    val started = rt_time_monotonic_ns()
+    var repeated = 0
+    while repeated < 8:
+        if runtime_text_hash_v1(borrowed) != expected:
+            print "raw-text-hash-mismatch"
+            return 2
+        repeated = repeated + 1
+    val raw_ns = rt_time_monotonic_ns() - started
+    val tagged_started = rt_time_monotonic_ns()
+    repeated = 0
+    while repeated < 8:
+        if runtime_text_hash_v1(owned) != expected:
+            return 3
+        repeated = repeated + 1
+    val tagged_ns = rt_time_monotonic_ns() - tagged_started
+    print "bytes={owned.len()} repeats=8 raw_ns={raw_ns} tagged_ns={tagged_ns}"
+    return 0
+
+fn main() -> i64:
+    if measure(14) != 0:
+        return 1
+    if measure(15) != 0:
+        return 2
+    if measure(16) != 0:
+        return 3
+    return 0

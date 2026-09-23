@@ -20,7 +20,7 @@ use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
-use compiler.mir.text_extern_abi.{text_arg_indices, boxed_text_arg_indices}
+use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
@@ -672,15 +672,19 @@ impl MirLowering:
         val maybe_indices = text_arg_indices(callee_name)
         if not maybe_indices.?:
             return args
+        # Some runtime symbols have both a semantic text facade and a raw
+        # machine-word bridge. Split only the facade arity: otherwise the raw
+        # four-word rt_env_set bridge is expanded again into six operands and
+        # integer words are passed to rt_string_data/rt_string_len. This is a
+        # constant-time, allocation-free guard on the existing hot path.
+        if val expected = text_extern_semantic_arity(callee_name):
+            if args.len() != expected:
+                return args
         val indices = maybe_indices ?? []
         if indices.len() == 0:
             return args
-        # Defensive: an already-hand-split call site to the same C symbol
-        # (e.g. interpreter_calls.spl's 4-raw-i64-arg `rt_env_set`) has more
-        # args than the registry's text-only arity expects and no text-typed
-        # operand at the listed indices any more -- leave any call whose arg
-        # count doesn't reach every listed index untouched rather than
-        # corrupt it.
+        # Defensive for entries without an exact semantic arity: leave any
+        # call whose arg count does not reach every listed index untouched.
         var max_index = -1
         for idx in indices:
             if idx > max_index:

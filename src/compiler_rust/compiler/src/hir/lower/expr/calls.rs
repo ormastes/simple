@@ -289,7 +289,7 @@ impl Lowerer {
     /// locals or sibling parameters. Conservative: anything not provably
     /// constant (identifiers, calls, field access, …) returns false and is left
     /// unfilled rather than risk a silent miscompile.
-    fn is_constant_default(expr: &Expr) -> bool {
+    pub(super) fn is_constant_default(expr: &Expr) -> bool {
         match expr {
             Expr::Integer(_)
             | Expr::Float(_)

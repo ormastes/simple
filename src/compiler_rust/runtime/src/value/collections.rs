@@ -1928,7 +1928,6 @@ mod collection_set_tests {
         let dict = rt_dict_new(0);
         let key = RuntimeValue::from_int(7);
         let value = RuntimeValue::from_int(99);
-
         assert_eq!(rt_collection_set(dict, key, value), dict);
         assert_eq!(rt_dict_get(dict, key), value);
     }
@@ -1937,6 +1936,45 @@ mod collection_set_tests {
     fn array_and_tuple_set_keep_their_method_not_found_identity() {
         assert_eq!(collection_set_missing_type(rt_array_new(3)), b"Array");
         assert_eq!(collection_set_missing_type(rt_tuple_new(3)), b"Tuple");
+    }
+
+    fn assert_rejected_child(kind: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("value::collections::collection_set_tests::{kind}_set_rejection_child"))
+            .arg("--nocapture")
+            .env("SIMPLE_COLLECTION_SET_REJECTION_CHILD", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(70), "{kind}.set must fail loudly");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let type_name = if kind == "array" { "Array" } else { "Tuple" };
+        assert!(stderr.contains(type_name), "missing receiver type in diagnostic: {stderr}");
+        assert!(stderr.contains("set"), "missing method in diagnostic: {stderr}");
+    }
+
+    #[test]
+    fn array_set_rejection_is_loud() {
+        assert_rejected_child("array");
+    }
+
+    #[test]
+    fn array_set_rejection_child() {
+        if std::env::var_os("SIMPLE_COLLECTION_SET_REJECTION_CHILD").is_some() {
+            rt_collection_set(rt_array_new(0), RuntimeValue::from_int(1), RuntimeValue::from_int(2));
+        }
+    }
+
+    #[test]
+    fn tuple_set_rejection_is_loud() {
+        assert_rejected_child("tuple");
+    }
+
+    #[test]
+    fn tuple_set_rejection_child() {
+        if std::env::var_os("SIMPLE_COLLECTION_SET_REJECTION_CHILD").is_some() {
+            rt_collection_set(rt_tuple_new(0), RuntimeValue::from_int(1), RuntimeValue::from_int(2));
+        }
     }
 }
 

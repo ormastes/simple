@@ -1239,7 +1239,16 @@ impl<'a> MirLowerer<'a> {
                                     },
                                 });
                             })?;
-                            self.last_expr_value = None;
+                            // A statement can also be the function's implicit
+                            // tail. Typed push helpers return success, while
+                            // push/append expressions yield the mutated array.
+                            // Keep that receiver just like lower_method_call;
+                            // dropping it leaves value-returning helpers with
+                            // an Unreachable terminator instead of a return.
+                            let ret_ty = self.with_func(|func, _| func.return_type)?;
+                            let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, receiver_reg)?;
+                            let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
+                            self.last_expr_value = Some(result);
                             return Ok(());
                         }
                     }
