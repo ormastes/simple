@@ -334,6 +334,34 @@ run_with_timeout() {
   run_measured_timeout "$active_rss_file" "$timeout_seconds" 15 "$@"
 }
 
+validate_test_runner_json_log() {
+  validated_log=$1
+  validated_status=0
+  validated_counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" \
+    "$validated_log") || validated_status=$?
+  validated_passed=0
+  validated_failed=0
+  validated_skipped=0
+  if [ -n "$validated_counts" ]; then
+    validated_tab=$(printf '\t')
+    validated_old_ifs=$IFS
+    IFS=$validated_tab
+    set -- $validated_counts
+    IFS=$validated_old_ifs
+    if [ "$#" -eq 3 ]; then
+      validated_passed=$1
+      validated_failed=$2
+      validated_skipped=$3
+    else
+      validated_status=91
+    fi
+  elif [ "$validated_status" -eq 0 ]; then
+    validated_status=91
+  fi
+  validated_executed=$((validated_passed + validated_failed))
+  [ "$validated_status" -eq 0 ]
+}
+
 run_task() {
   task=$1
   shift
@@ -373,6 +401,7 @@ run_task() {
   stage4_tooling_after=not-applicable
   stage4_snapshot_before=not-applicable
   stage4_snapshot_after=not-applicable
+  test_executed=not-applicable
   executed=not-applicable
   test_passed=not-applicable
   test_failed=not-applicable
@@ -497,6 +526,35 @@ run_task() {
       stage4_snapshot_after=mismatch
     fi
   fi
+  case "$task" in
+    compiler_bootstrap_tests|compiler_bootstrap_compile_tests)
+      test_executed=0
+      test_passed=0
+      test_failed=0
+      test_skipped=0
+      if [ "$status" -eq 0 ]; then
+        validate_test_runner_json_log "$log" 2>>"$log" || status=$validated_status
+        test_executed=$validated_executed
+        test_passed=$validated_passed
+        test_failed=$validated_failed
+        test_skipped=$validated_skipped
+        if [ "$test_skipped" -gt 0 ] && [ "$status" -eq 0 ]; then
+          printf 'bootstrap-phase-verification: aggregate bootstrap row reported skipped examples; per-file category proof is unavailable\n' >>"$log"
+          status=94
+        fi
+      fi
+      ;;
+  esac
+  # The two bootstrap tasks above compute a stricter test_executed (via
+  # validate_test_runner_json_log, enforcing the zero-skip aggregate-row
+  # policy) above; every other --verification-require-test-json task (e.g.
+  # loader_interpreter_tests/loader_compile_tests) only ever populates the
+  # generic $executed from the require_test_json block earlier in this
+  # function. Fall back to that so the terminal summary line below always
+  # carries a real executed count, not the not-applicable default.
+  if [ "$test_executed" = not-applicable ] && [ "$require_test_json" -eq 1 ]; then
+    test_executed=$executed
+  fi
   # Tool help is an executable ABI sanity probe, not merely an exit-code
   # check. Native runtimes deliberately fail closed on invalid handles but may
   # return control to the program so diagnostics remain inspectable. Do not
@@ -555,8 +613,8 @@ run_task() {
     printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|command_owner_before=%s|command_owner_after=%s|stage4_tooling_before=%s|stage4_tooling_after=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
       "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
       "$command_owner_before" "$command_owner_after" "$stage4_tooling_before" "$stage4_tooling_after" \
-      "$stage4_snapshot_before" "$stage4_snapshot_after" "$executed" "$test_passed" \
-      "$test_failed" "$test_skipped" >>"$summary"
+      "$stage4_snapshot_before" "$stage4_snapshot_after" \
+      "$test_executed" "$test_passed" "$test_failed" "$test_skipped" >>"$summary"
   fi
   [ "$status" -eq 0 ]
 }
@@ -1001,6 +1059,7 @@ run_repository_full_tests() {
   task=repository_full_tests
   log="$logs/$task.log"
   inventory="$logs/${task}.inventory.tsv"
+  results="$logs/${task}.results.tsv"
   manifest="$tmp/${task}.manifest"
   unsorted_manifest="$tmp/${task}.unsorted"
   if ! find "$source_root/test" -type f \
@@ -1021,14 +1080,19 @@ run_repository_full_tests() {
   # validate-test-runner-json.pl expects, and that distinction predates this
   # merge (base already had it) — keeping it here avoids silently changing
   # how repository-wide pass/fail counts are parsed.
+  category_count=$(awk '{ path=$0; sub(/^.*\/test\//, "", path); split(path, part, "/"); \
+      if (part[1] != "") seen[part[1]]=1 } \
+      END { for (key in seen) count++; print count+0 }' "$manifest")
   : >"$log"
   row_dir="$logs/${task}.rows"
   mkdir -p "$row_dir"
   printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\tmax_rss_kib\n' >"$inventory"
+  printf 'runner\tpath\tresult\texecuted\tskipped\n' >"$results"
   started=$(date +%s)
   failed=0
   spec_count=0
   passed_count=0
+  skipped_spec_count=0
   timeout_count=0
   crash_count=0
   max_rss_kib=0
@@ -1044,6 +1108,7 @@ run_repository_full_tests() {
     row_passed=0
     row_failed=0
     row_skipped=0
+    row_disposition=execute
     if ! validate_command_owner_receipt "$full_owner_receipt"; then
       printf 'command-owner receipt mismatch before %s\n' "$relative" >>"$log"
       status=90
@@ -1070,22 +1135,22 @@ run_repository_full_tests() {
       fi
     fi
     if [ "$status" -eq 0 ]; then
-      row_json=$(grep -E '^\{"success":' "$row_output" | tail -n 1 || :)
-      row_success=$(printf '%s\n' "$row_json" | sed -n 's/^{"success":true,.*/true/p')
-      row_spec_success=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"success":true.*/true/p')
-      row_passed=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_passed":\([0-9][0-9]*\).*/\1/p')
-      row_failed=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_failed":\([0-9][0-9]*\).*/\1/p')
-      row_skipped=$(printf '%s\n' "$row_json" | sed -n 's/.*"spec":{[^}]*"total_skipped":\([0-9][0-9]*\).*/\1/p')
-      case "$row_success" in true) ;; *) status=93 ;; esac
-      case "$row_spec_success" in true) ;; *) status=93 ;; esac
-      numeric_rows=1
-      case "$row_passed" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
-      case "$row_failed" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
-      case "$row_skipped" in ''|*[!0-9]*) status=91; numeric_rows=0 ;; esac
-      if [ "$numeric_rows" -eq 1 ]; then
-        [ "$row_failed" -eq 0 ] || status=93
-        executed=$((row_passed + row_failed))
-        [ "$executed" -gt 0 ] || [ "$status" -ne 0 ] || status=92
+      validate_test_runner_json_log "$row_output" 2>>"$log" || :
+      row_passed=$validated_passed
+      row_failed=$validated_failed
+      row_skipped=$validated_skipped
+      executed=$validated_executed
+      status=$validated_status
+      if [ "$row_skipped" -gt 0 ] && { [ "$status" -eq 0 ] || [ "$status" -eq 92 ]; }; then
+        skip_policy_status=0
+        skip_policy=$(sh "$source_root/scripts/bootstrap/phase3-test-skip-policy.shs" \
+          classify "$spec" "$row_skipped" "$executed" 2>>"$log") || skip_policy_status=$?
+        if [ "$skip_policy_status" -eq 0 ] && [ "$skip_policy" = 'skip|in-development' ]; then
+          status=0
+          row_disposition=skip
+        else
+          status=94
+        fi
       fi
     fi
     row_max_rss_kib=$(read_max_rss_kib "$row_rss_file")
@@ -1095,13 +1160,26 @@ run_repository_full_tests() {
     esac
     result=FAIL
     case "$status" in
-      0) result=PASS; passed_count=$((passed_count + 1)) ;;
+      0)
+        if [ "$row_disposition" = skip ]; then
+          result=SKIP
+          skipped_spec_count=$((skipped_spec_count + 1))
+        else
+          result=PASS
+          passed_count=$((passed_count + 1))
+        fi
+        ;;
       124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
       134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
     esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
       "$row_skipped" "$row_output" "$row_max_rss_kib" >>"$inventory"
+    result_receipt=FAIL
+    [ "$result" = PASS ] && result_receipt=PASS
+    [ "$result" = SKIP ] && result_receipt=SKIP
+    printf 'simple-spec\t%s\t%s\t%s\t%s\n' "$relative" "$result_receipt" \
+      "$executed" "$row_skipped" >>"$results"
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
@@ -1113,11 +1191,45 @@ run_repository_full_tests() {
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
   [ "$max_rss_kib" -gt 0 ] || max_rss_kib=unavailable
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|results=%s|spec_count=%s|passed_count=%s|skipped_spec_count=%s|category_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
     "$task" "$result" "$failed" "$((ended - started))" "$max_rss_kib" "$log" "$inventory" \
-    "$spec_count" "$passed_count" "$timeout_count" "$crash_count" \
+    "$results" "$spec_count" "$passed_count" "$skipped_spec_count" "$category_count" "$timeout_count" "$crash_count" \
     "$full_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
+}
+
+run_phase3_expanded_tests() {
+  expanded_runner=$1
+  expanded_owner_receipt=$2
+  expanded_mcp_server=$3
+  expanded_repository_results=$4
+  task=phase3_expanded_tests
+  log="$logs/$task.log"
+  inventory="$logs/$task.inventory.tsv"
+  results="$logs/$task.results.tsv"
+  counts="$logs/$task.surface-counts.tsv"
+  nested_receipt="$logs/$task.nested-receipt.tsv"
+  started=$(date +%s)
+  status=0
+  sh "$source_root/scripts/bootstrap/phase3-test-inventory.shs" discover \
+    "$source_root" "$nested_receipt" >"$inventory" 2>"$log" || status=$?
+  if [ "$status" -eq 0 ]; then
+    PHASE3_COMMAND_OWNER_RECEIPT="$expanded_owner_receipt" \
+    PHASE3_COMMAND_OWNER_RECEIPT_SHA256="$command_owner_receipt_sha" \
+    PHASE3_TEST_RUNNER="$expanded_runner" PHASE3_COMPILER_CLI="$compiler_cli" \
+    PHASE3_MCP_SERVER="$expanded_mcp_server" PHASE3_TIMEOUT_SECONDS="$spec_timeout_seconds" \
+    PHASE3_HOME="$home" PHASE3_TMPDIR="$tmp" PHASE3_CACHE_DIR="$cache/$task" \
+      sh "$source_root/scripts/bootstrap/phase3-expanded-test-runner.shs" \
+        "$source_root" "$inventory" "$expanded_repository_results" "$results" \
+        "$counts" "$logs/$task.rows" "$nested_receipt" >>"$log" 2>&1 || status=$?
+  fi
+  ended=$(date +%s)
+  result=PASS
+  [ "$status" -eq 0 ] || result=FAIL
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|results=%s|surface_counts=%s|nested_receipt=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$status" "$((ended - started))" "$log" "$inventory" \
+    "$results" "$counts" "$nested_receipt" "$expanded_owner_receipt" >>"$summary"
+  [ "$status" -eq 0 ]
 }
 
 # Normal is fail-fast within a phase-local matrix; the already-running next
@@ -1325,6 +1437,16 @@ else
        ! run_repository_full_tests "$test_runner" "$command_owner_receipt" "$mcp_server"; then
       matrix_failed=1
     fi
+    if { [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; } && [ "$strategy" = full ]; then
+      if [ -f "$logs/repository_full_tests.results.tsv" ]; then
+        if ! run_phase3_expanded_tests "$test_runner" "$command_owner_receipt" "$mcp_server" \
+            "$logs/repository_full_tests.results.tsv"; then
+          matrix_failed=1
+        fi
+      else
+        record_unsupported_task phase3_expanded_tests repository-full-result-receipt-unavailable
+      fi
+    fi
   else
     if [ "$compiler_cli_ready" -ne 1 ]; then
       test_owner_reason=full-cli-artifact-not-built
@@ -1341,6 +1463,7 @@ else
       record_unsupported_task compiler_unit_tests "$test_owner_reason"
       if [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; then
         record_unsupported_task repository_full_tests "$test_owner_reason"
+        record_unsupported_task phase3_expanded_tests "$test_owner_reason"
       fi
     fi
   fi

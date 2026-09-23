@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+policy="$root/scripts/bootstrap/phase3-test-skip-policy.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase3-test-skip-policy.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+  printf 'bootstrap_phase3_test_skip_policy_test: FAIL (%s)\n' "$*" >&2
+  exit 1
+}
+
+classify() {
+  sh "$policy" classify "$@"
+}
+
+expect_reject() {
+  reject_label=$1
+  shift
+  reject_status=0
+  classify "$@" >"$tmp/$reject_label.out" 2>"$tmp/$reject_label.err" ||
+    reject_status=$?
+  [ "$reject_status" -ne 0 ] || fail "$reject_label was admitted"
+  [ ! -s "$tmp/$reject_label.out" ] || fail "$reject_label emitted an admission"
+}
+
+cat >"$tmp/ordinary_spec.spl" <<'EOF'
+describe "ordinary":
+    it "runs":
+        expect(1).to_equal(1)
+EOF
+
+cat >"$tmp/development_spec.spl" <<'EOF'
+# @tag:in-development
+describe "future work":
+    it "is intentionally unavailable":
+        pending("tracked development work")
+EOF
+
+cat >"$tmp/unknown_category_spec.spl" <<'EOF'
+# @tag:manual-only
+describe "unknown category":
+    it "must not be silently excluded":
+        pending("unclassified")
+EOF
+
+cat >"$tmp/mixed_category_spec.spl" <<'EOF'
+# @tag:in-development
+# @tag:system
+describe "mixed category":
+    it "must not inherit broad admission":
+        pending("mixed")
+EOF
+
+cat >"$tmp/noncanonical_spec.spl" <<'EOF'
+@tag:in-development
+describe "bare tag":
+    it "must use the canonical comment marker":
+        pending("noncanonical")
+EOF
+
+cat >"$tmp/substring_spec.spl" <<'EOF'
+# @tag:not-in-development
+describe "substring":
+    it "is not the allowlisted category":
+        pending("substring")
+EOF
+
+cat >"$tmp/prose_spec.spl" <<'EOF'
+# This mentions # @tag:in-development but is not a directive.
+describe "prose":
+    it "must not classify as development-only":
+        pending("prose")
+EOF
+
+[ "$(classify "$tmp/ordinary_spec.spl" 0)" = 'execute|-' ] ||
+  fail 'zero-skip spec did not classify for execution'
+[ "$(classify "$tmp/development_spec.spl" 1)" = 'skip|in-development' ] ||
+  fail 'canonical development skip was not admitted'
+[ "$(classify "$tmp/development_spec.spl" 7 0)" = 'skip|in-development' ] ||
+  fail 'observed skipped count changed the admitted category'
+
+expect_reject untagged "$tmp/ordinary_spec.spl" 1
+expect_reject unknown "$tmp/unknown_category_spec.spl" 1
+expect_reject mixed "$tmp/mixed_category_spec.spl" 1
+expect_reject noncanonical "$tmp/noncanonical_spec.spl" 1
+expect_reject substring "$tmp/substring_spec.spl" 1
+expect_reject prose "$tmp/prose_spec.spl" 1
+expect_reject malformed-count "$tmp/development_spec.spl" nope
+expect_reject missing "$tmp/missing_spec.spl" 1
+
+# A category can admit only a wholly skipped file. Otherwise one passing case
+# can make a row look healthy while another eligible case remains hidden.
+expect_reject partial-execution "$tmp/development_spec.spl" 1 1
+
+# Mutation control for the exact false pass: the prior tempting rule "any tag
+# plus any skip is admitted" accepts this unknown category. The production
+# classifier above must kill that mutation.
+legacy_any_tag_policy() {
+  grep -Eq '^[[:space:]]*#[[:space:]]*@tag[[:space:]]*:' "$1" && [ "$2" -gt 0 ]
+}
+legacy_any_tag_policy "$tmp/unknown_category_spec.spl" 1 ||
+  fail 'false-pass mutation control did not survive'
+expect_reject exact-false-pass "$tmp/unknown_category_spec.spl" 1
+
+printf 'bootstrap_phase3_test_skip_policy_test: PASS (13 policy cases; exact false pass killed)\n'

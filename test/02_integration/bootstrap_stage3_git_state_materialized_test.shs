@@ -4,6 +4,8 @@ set -Eeuo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 77 ;; esac
+test_case=${STAGE3_MATERIALIZED_TEST_CASE:-full}
+case "$test_case" in full|bounded) ;; *) echo "unknown STAGE3_MATERIALIZED_TEST_CASE: $test_case" >&2; exit 2 ;; esac
 case_name=setup
 # The v2 publisher deliberately accepts only lexically drive-qualified Windows
 # receipt paths.  MSYS /tmp is not drive-qualified, and CI-provided user temp
@@ -15,7 +17,15 @@ mkdir -p "$fixture_tmp_parent"
 TMPDIR=$fixture_tmp_parent
 export TMPDIR
 tmp=$(mktemp -d "$fixture_tmp_parent/stage3-consumer-test.XXXXXX")
+consumer_tmp="$tmp/consumer-tmp"
+mkdir -p "$consumer_tmp"
 repo="$tmp/repo"
+if [ "$test_case" = bounded ]; then
+    # Exercise the Windows path handling without exceeding MAX_PATH. The
+    # spaces are intentional; the repeated component keeps the fixture long
+    # enough to catch accidental shell word splitting.
+    repo="$tmp/space root/repo"
+fi
 cleanup() {
     case "$tmp" in "$fixture_tmp_parent"/stage3-consumer-test.*) ;; *) return 1 ;; esac
     # Unlink junction leaves before any recursive removal of the owned fixture.
@@ -27,13 +37,15 @@ cleanup() {
     rm -rf -- "$tmp"
     rmdir -- "$fixture_tmp_parent" 2>/dev/null || :
 }
+git_repo() { git -c core.longpaths=true -C "$repo" "$@"; }
 trap cleanup EXIT
 trap 'rc=$?; printf "FAIL case=%s line=%s exit=%s\n" "$case_name" "$LINENO" "$rc" >&2; tail -c 2500 "$tmp/error" >&2 2>/dev/null || :; exit "$rc"' ERR
 mkdir -p "$repo/scripts/setup" "$repo/target-dir" "$repo/bin"
 cp "$root/scripts/setup/materialize-symlinks-windows.shs" "$root/scripts/setup/windows-materialized-pending-policy.tsv" "$repo/scripts/setup/"
-git -C "$repo" init -q
-git -C "$repo" config core.symlinks false
-git -C "$repo" config core.autocrlf false
+git -c core.longpaths=true -C "$repo" init -q
+git_repo config core.symlinks false
+git_repo config core.autocrlf false
+git_repo config core.longpaths true
 # A gitlink's pinned commit need not exist in the superproject object store.
 git -C "$tmp" init -q child-source
 git -C "$tmp/child-source" config core.autocrlf false
@@ -55,40 +67,40 @@ printf target.txt >"$repo/shared-file-link"
 printf target-dir >"$repo/dir-link"
 printf target-dir/tracked.txt >"$repo/nested-target-link"
 printf ../tools/bb-cli/bin/bb >"$repo/bin/bb"
-git -C "$repo" add .
-git -C "$repo" update-index --add --cacheinfo "160000,$child_head,child-module"
+git_repo add .
+git_repo update-index --add --cacheinfo "160000,$child_head,child-module"
 for link in file-link shared-file-link dir-link nested-target-link bin/bb; do
-    blob=$(git -C "$repo" hash-object -w -- "$repo/$link")
-    git -C "$repo" update-index --cacheinfo "120000,$blob,$link"
+    blob=$(git_repo hash-object -w -- "$repo/$link")
+    git_repo update-index --cacheinfo "120000,$blob,$link"
 done
 # Seed HEAD only in the disposable repository; no real checkout commit/ref edit.
-tree=$(git -C "$repo" write-tree)
-head=$(printf 'synthetic consumer fixture\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$repo" commit-tree "$tree")
-git -C "$repo" update-ref HEAD "$head"
+tree=$(git_repo write-tree)
+head=$(printf 'synthetic consumer fixture\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git_repo commit-tree "$tree")
+git_repo update-ref HEAD "$head"
 case_name=synthetic-producer
 /usr/bin/sh "$repo/scripts/setup/materialize-symlinks-windows.shs" --strict-missing --receipt "$tmp/good" "$repo" >"$tmp/error" 2>&1
 receipt="$tmp/good"
 
 accept() {
     case_name=$1
-    if ! bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then
-        printf 'unexpected rejection: %s\n' "$1" >&2
-        tail -c 2500 "$tmp/error" >&2
-        return 1
-    fi
+    TMPDIR="$consumer_tmp" bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"
     test ! -s "$tmp/stdout"
     grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/$1.state"
     grep -qx 'alias_collapse_count=1' "$tmp/$1.state"
-    test "$(find "$fixture_tmp_parent" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+    test "$(find "$consumer_tmp" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
 }
 reject() {
     case_name=$1
-    if bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then
+    if TMPDIR="$consumer_tmp" bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then
         echo "unexpected acceptance: $1" >&2; return 1
     fi
     test ! -s "$tmp/stdout"
     test ! -e "$tmp/$1.state"
-    test "$(find "$fixture_tmp_parent" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+    test "$(find "$consumer_tmp" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+}
+reject_reason() {
+    reject "$1"
+    grep -Fqx "$2" "$tmp/error"
 }
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
@@ -220,6 +232,21 @@ accept restored-initialized-gitlink
 mkdir -p "$repo/child-module/nested/.git"
 reject nested-repository-under-gitlink
 rmdir "$repo/child-module/nested/.git" "$repo/child-module/nested"
+if [ "$test_case" = bounded ]; then
+    # Keep the long ordinary-file case independent from the canonical
+    # target-dir oracle below, which intentionally has one untracked path.
+    long_dir="$repo/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789"
+    long_file="$long_dir/untracked.txt"
+    mkdir -p "$long_dir"
+    printf 'long ordinary untracked payload A\n' >"$long_file"
+    test "$(cygpath -aw "$long_file" | wc -c)" -gt 260
+    accept long-path-untracked-a
+    printf 'long ordinary untracked payload B\n' >"$long_file"
+    accept long-path-untracked-b
+    test "$(fingerprint "$tmp/long-path-untracked-a.state")" != "$(fingerprint "$tmp/long-path-untracked-b.state")"
+    rm -rf -- "$repo/long-path-component-0123456789"
+    test ! -e "$long_file"
+fi
 # Independent canonical oracle: explicitly exclude only the known fixture dir.
 printf '\000\377raw\r\nbytes\000' >"$repo/target-dir/untracked.bin"
 accept untracked-bytes
@@ -239,8 +266,57 @@ test "$(grep '^alias_collapse_sha256=' "$tmp/positive-file-dir-pending.state")" 
 printf 'dirty tracked bytes\n' >"$repo/source.spl"
 accept dirty-tracked-preserved
 test "$(fingerprint "$tmp/untracked-bytes.state")" != "$(fingerprint "$tmp/dirty-tracked-preserved.state")"
-SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="$receipt" bootstrap_stage3_git_state "$repo" "$tmp/inherited.state" >"$tmp/stdout" 2>"$tmp/error"
+SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="$receipt" TMPDIR="$consumer_tmp" bootstrap_stage3_git_state "$repo" "$tmp/inherited.state" >"$tmp/stdout" 2>"$tmp/error"
 cmp "$tmp/inherited.state" "$tmp/dirty-tracked-preserved.state"
+test "$(find "$consumer_tmp" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+if [ "$test_case" = bounded ]; then
+    # A receipt-header mutation must refuse without publishing a state file.
+    # This is deliberately a cheap negative control: the full suite covers
+    # exhaustive row mutations in its own unbounded lane.
+    sed 's/^schema=.*/schema=invalid/' "$tmp/good" >"$tmp/bad"
+    receipt="$tmp/bad"
+    reject_reason bounded-schema-mutation 'stage3-materialized-consumer: Exception calling "Run" with "0" argument(s): "receipt.header-mismatch"'
+    receipt="$tmp/good"
+
+    # Native symlink creation is privilege-dependent on Windows. It is a
+    # control for the checkout mode, never an alias-consumer prerequisite.
+    native_link="$tmp/native-symlink-control"
+    if NATIVE_LINK="$(cygpath -aw "$native_link")" NATIVE_TARGET="$(cygpath -aw "$repo/target.txt")" powershell -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference="Stop"
+        try {
+          New-Item -ItemType SymbolicLink -Path $env:NATIVE_LINK -Target $env:NATIVE_TARGET | Out-Null
+          exit 0
+        } catch {
+          $code=$_.Exception.HResult -band 0xffff
+          if ($_.Exception -is [NotSupportedException] -or $code -eq 50) {
+            [Console]::Error.WriteLine("native-symlink-control: skip reason=unsupported code="+$code)
+            exit 77
+          }
+          if ($_.Exception -is [UnauthorizedAccessException] -or $code -in 5,1314) {
+            [Console]::Error.WriteLine("native-symlink-control: skip reason=privilege code="+$code)
+            exit 77
+          }
+          [Console]::Error.WriteLine("native-symlink-control: fail "+$_.Exception.GetType().FullName+" code="+$code)
+          exit 1
+        }' >"$tmp/error" 2>&1; then
+        test -L "$native_link"
+        rm -f -- "$native_link"
+        printf 'native_symlink_control=pass\n'
+    else
+        native_rc=$?
+        if [ "$native_rc" -eq 77 ]; then
+            # Developer Mode / SeCreateSymbolicLinkPrivilege is optional.
+            # Keep a typed skip rather than weakening alias assertions.
+            grep -Eq '^native-symlink-control: skip reason=(unsupported|privilege) code=[0-9]+$' "$tmp/error"
+            printf 'native_symlink_control=skip-privilege-or-filesystem\n'
+        else
+            cat "$tmp/error" >&2
+            exit "$native_rc"
+        fi
+    fi
+    printf 'bootstrap_stage3_git_state_materialized_bounded=true\n'
+    exit 0
+fi
 git -C "$repo" update-index --force-remove file-link bin/bb
 accept file-and-pending-still-untracked
 (

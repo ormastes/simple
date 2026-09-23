@@ -177,7 +177,9 @@ fn is_msvc_archive_tool(tool: &str) -> bool {
     Path::new(tool)
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("lib"))
+        .is_some_and(|stem| {
+            stem.eq_ignore_ascii_case("lib") || stem.eq_ignore_ascii_case("llvm-lib")
+        })
 }
 
 pub(super) fn archive_create_command(
