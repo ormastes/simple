@@ -1641,18 +1641,16 @@ impl MirLowering:
             return self.fn_return_types[symbol.id]
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
-            # Name-keyed cross-module source: symbol IDs are per-module-table,
-            # so a callee defined in another closure module never hits the
-            # id-keyed map. The flat pre-pass registered every free fn's
-            # declared return type globally (ambiguous names never answered).
-            if val reg_ret = bootstrap_fn_ret_hir_type_lookup(found_sym.name):
-                return reg_ret
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
                     case HirTypeKind.Function(_, ret, _):
                         return ret
                     case _:
                         ()
+            # Shared fallback carries symbol-free shapes only; Named return
+            # types must come from the consumer's relocated signature above.
+            if val reg_ret = bootstrap_fn_ret_hir_type_lookup(found_sym.name):
+                return reg_ret
         nil
 
     me resolved_call_result_ok_shape(symbol: SymbolId) -> text?:
@@ -3907,13 +3905,14 @@ impl MirLowering:
             # call argument; without this the identifier fell through to
             # "undefined variable" and the whole binding was silently dropped
             # (bug module_global_fn_pointer_lowered_as_direct_call_2026-08-21).
-            if self.is_known_top_level_function(named_var_name):
+            if self.is_known_top_level_function(named_var_name, named_var_symbol):
+                val fn_value_name = self.provider_callable_symbol_name(named_var_symbol, named_var_name)
                 val fn_value_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                     params: [], return_type: MirType.i64(), is_variadic: false
                 )))
                 var b_fn_value = self.builder
                 val fn_value_local = b_fn_value.new_temp(fn_value_type)
-                b_fn_value.emit_const(fn_value_local, MirConstValue.Str(named_var_name), fn_value_type)
+                b_fn_value.emit_const(fn_value_local, MirConstValue.Str(fn_value_name), fn_value_type)
                 self.builder = b_fn_value
                 return fn_value_local
             self.error("undefined variable " + named_var_name, Some(expr_value.span))

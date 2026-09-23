@@ -23,6 +23,8 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.text_extern_abi.{text_arg_indices, boxed_text_arg_indices}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 # Explicit import, not an ambient builtin: the Rust seed resolves `eprint`
 # ambiently but the self-hosted HIR resolver does not, so a Stage-3 build fails
 # with "unresolved name: eprint" without this (same fix as mir_data.spl:27).
@@ -1450,6 +1452,13 @@ impl MirLowering:
             return MirType.i64()
         if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
             return MirType.i64()
+        # A signature in this SymbolTable is already in the consumer's ID
+        # namespace. It takes precedence over shared primitive-shape caches.
+        val consumer_symbol = self.symbols.get_symbol_raw(symbol.id)
+        if consumer_symbol != nil and consumer_symbol.type_ != nil:
+            match consumer_symbol.type_.kind:
+                case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
+                case _: ()
         if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             # Name-keyed prescan registry: covers callees whose symbol id is
             # invalid at this call site (wildcard imports), where
@@ -3879,6 +3888,11 @@ impl MirLowering:
                     if fi < hd_flags.len() and hd_flags[fi]:
                         val def_exprs = self.struct_field_default_expr[struct_name]
                         if fi < def_exprs.len():
+                            match def_exprs[fi].kind:
+                                case Error:
+                                    self.error_fatal("unsupported provider default for {struct_name}.{field_names[fi]}; supply the field explicitly", Some(def_exprs[fi].span))
+                                    return nil
+                                case _: ()
                             var def_v = self.lower_expr(def_exprs[fi])
                             if def_v != nil:
                                 if fi < field_hir_types.len():
@@ -3890,6 +3904,9 @@ impl MirLowering:
                                 ops = ops.push(mir_operand_copy(def_v))
                                 field_type_names.push(self.struct_value_syms.get(def_v.id) ?? "")
                                 filled_default = true
+                            else:
+                                self.error_fatal("cannot lower declared default for {struct_name}", Some(def_exprs[fi].span))
+                                return nil
                 if not filled_default:
                     # No declared default (or it could not be lowered). For an
                     # Option-typed field, fill with a proper nil handle (sentinel
@@ -4017,7 +4034,7 @@ impl MirLowering:
                     acc
             case NamedVar(symbol, name):
                 val sid = mir_expr_symbol_id_value(symbol)
-                if sid >= 0 and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name) and not int_list_contains(acc, sid):
+                if sid >= 0 and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
@@ -4320,7 +4337,7 @@ impl MirLowering:
                 val sid = mir_expr_symbol_id_value(symbol)
                 if int_list_contains(param_syms, sid):
                     false
-                elif self.is_known_top_level_function(name):
+                elif self.is_known_top_level_function(name, symbol):
                     false
                 else:
                     true
@@ -4510,9 +4527,23 @@ impl MirLowering:
             i = i + 1
         true
 
-    me is_known_top_level_function(name: text) -> bool:
+    me is_known_top_level_function(name: text, symbol: SymbolId = SymbolId(id: -1)) -> bool:
+        var resolved = symbol
+        if resolved.id < 0:
+            resolved = self.symbols.lookup_or_invalid(name)
+            if resolved.id < 0 and self.symbols.exact_symbols.has(name):
+                resolved = SymbolId(id: self.symbols.exact_symbols[name])
+        var callable_name = name
+        if resolved.id >= 0:
+            val info = self.symbols.get_symbol_raw(resolved.id)
+            if info != nil:
+                match info.kind:
+                    case SymbolKind.Function | SymbolKind.Method: ()
+                    case _: return false
+            if self.provider_callable_has_link(resolved): return true
+            callable_name = self.provider_callable_symbol_name(resolved, name)
         for fn_name in self.current_function_names:
-            if fn_name == name:
+            if fn_name == callable_name:
                 return true
         false
 
@@ -4865,7 +4896,7 @@ impl MirLowering:
         # plain `foo()` call is a known function name and keeps its direct
         # call unchanged. Bug
         # module_global_fn_pointer_lowered_as_direct_call_2026-08-21.
-        if is_direct and not self.is_known_top_level_function(direct_name):
+        if is_direct and not self.is_known_top_level_function(direct_name, direct_symbol):
             val slot_symbol_id = mir_expr_symbol_id_value(direct_symbol)
             if slot_symbol_id >= 0 and self.global_symbol_ids.contains(slot_symbol_id):
                 if self.find_global_static(slot_symbol_id).?:
@@ -4966,8 +4997,22 @@ impl MirLowering:
                 return int_arg_local
             if is_gpu_intrinsic(direct_name):
                 return self.lower_gpu_intrinsic_call(direct_name, args)
-            if self.struct_field_order.has(direct_name):
-                return self.lower_struct_construct(direct_symbol, direct_name, args)
+            # A class constructor's source spelling can collide across
+            # imports.  Its resolved symbol retains the defining owner, so
+            # select the owner-qualified metadata key before falling back to
+            # the legacy bare struct name.
+            var constructor_name = direct_name
+            if mir_expr_symbol_id_value(direct_symbol) >= 0:
+                val constructor_info = self.symbols.get_symbol_raw(direct_symbol.id)
+                if constructor_info != nil:
+                    val candidate = mir_class_identity(constructor_info)
+                    if constructor_info.kind == SymbolKind.Class:
+                        constructor_name = candidate
+                        if not self.class_type_names.has(candidate) or not self.struct_field_order.has(candidate):
+                            self.error_fatal("missing class provider metadata for {candidate}", nil)
+                            return nil
+            if self.struct_field_order.has(constructor_name):
+                return self.lower_struct_construct(direct_symbol, constructor_name, args)
 
         # TODO(LANE ISO1, switch_operators_calls.spl:3105-3182): call arguments
         # are lowered straight to a `mir_operand_copy(arg_local)` MirOperand
@@ -5167,7 +5212,8 @@ impl MirLowering:
                 arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:
-            val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
+            val source_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
+            val resolved_name = self.provider_callable_symbol_name(direct_symbol, source_name)
             val return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
             val func_operand = if resolved_name != "":
                 MirOperand(kind: MirOperandKind.Const(
