@@ -1,0 +1,72 @@
+# Adversarial decimal-to-binary rounding coverage for the SimpleOS parser.
+
+use std.spec
+use os.libc.simpleos_stdlib_float.{libc_strtod, libc_strtof}
+use std.common.binary_io.{f64_to_bits}
+
+fn repeated_zero(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(48)
+        i = i + 1
+    out
+
+describe("SimpleOS decimal floating-point rounding"):
+    it("rounds binary64 integer ties to even"):
+        expect(libc_strtod("9007199254740993".bytes()).value).to_equal(9007199254740992.0)
+        expect(libc_strtod("9007199254740995".bytes()).value).to_equal(9007199254740996.0)
+
+    it("rounds exact binary64 midpoint and its upper neighbor"):
+        val tie = libc_strtod("1.00000000000000011102230246251565404236316680908203125".bytes())
+        val above = libc_strtod("1.00000000000000011102230246251565404236316680908203126".bytes())
+        expect(tie.value).to_equal(1.0)
+        expect(above.value).to_equal(1.0000000000000002)
+
+    it("distinguishes the binary64 underflow midpoint"):
+        expect(libc_strtod("2.4703282292062327e-324".bytes()).value).to_equal(0.0)
+        expect(libc_strtod("2.4703282292062328e-324".bytes()).value)
+            .to_equal(4.9406564584124654e-324)
+
+    it("separates largest finite binary64 from overflow"):
+        val largest = libc_strtod("1.7976931348623157e308".bytes()).value
+        val overflow = libc_strtod("1.7976931348623159e308".bytes()).value
+        expect(largest).to_equal(1.7976931348623157e308)
+        expect(overflow > largest).to_be(true)
+
+    it("rounds binary32 directly without a binary64 double round"):
+        val tie = libc_strtof("1.000000059604644775390625".bytes()).value
+        val above = libc_strtof(
+            "1.0000000596046447753906250000000000000000000000001".bytes()).value
+        expect(tie).to_equal(1.0)
+        expect(above).to_equal(1.00000011920928955078125)
+
+    it("distinguishes binary32 underflow and overflow boundaries"):
+        val below_half = libc_strtof("7.006492321624085e-46".bytes()).value
+        val above_half = libc_strtof("7.006492321624086e-46".bytes()).value
+        val largest = libc_strtof("3.4028234663852886e38".bytes()).value
+        val overflow = libc_strtof("3.4028235677973367e38".bytes()).value
+        expect(below_half).to_equal(0.0)
+        expect(above_half).to_equal(1.401298464324817e-45)
+        expect(largest).to_equal(3.4028234663852886e38)
+        expect(overflow > largest).to_be(true)
+
+    it("uses discarded digits only as an exact tie-breaking sticky bit"):
+        # The final 1 lies beyond the 1,200 retained significant digits. The
+        # retained prefix is the exact midpoint between 1.0 and its successor;
+        # sticky must therefore change ties-to-even from 1.0 to the successor.
+        var input = "1.00000000000000011102230246251565404236316680908203125".bytes()
+        input.extend(repeated_zero(1200))
+        expect(libc_strtod(input).value).to_equal(1.0)
+        input.push(49)
+        expect(libc_strtod(input).value).to_equal(1.0000000000000002)
+
+    it("applies a negative sign once across value classes"):
+        expect(libc_strtod("-0.1".bytes()).value).to_equal(-0.1)
+        expect(libc_strtof("-1.5".bytes()).value).to_equal(-1.5)
+        expect(f64_to_bits(libc_strtod("-0".bytes()).value))
+            .to_equal(0x8000000000000000u64)
+        expect(f64_to_bits(libc_strtod("-1e-9999".bytes()).value))
+            .to_equal(0x8000000000000000u64)
+        expect(f64_to_bits(libc_strtod("-1e9999".bytes()).value))
+            .to_equal(0xFFF0000000000000u64)
