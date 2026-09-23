@@ -7,6 +7,13 @@ backend adapter, and executable-mapping receipt import providers) now has a
 focused regression, but the immutable admitted Phase 2 compiler still predates
 the remaining LLVM method and inference fixes.
 
+The 2026-09-23 cycle-3 rerun did not exercise these fixes: its source worktree
+was still at `8a637124600`, which lacks all four commits from PR #1340 and all
+four restored provider paths.  Its repeated 28-file result is therefore not a
+regression of the import patch.  The exhausted three-cycle full-matrix result
+must not be rerun until this patchset is integrated into the frozen Linux
+bootstrap source revision.
+
 Deferred verification:
 
 - Publish a new SHA-qualified Linux Phase 2 runtime capsule after rebuilding
