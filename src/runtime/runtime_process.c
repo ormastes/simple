@@ -2375,6 +2375,23 @@ static bool browser_renderer_write_proc(const char* path, const char* data) {
     return written == (ssize_t)len;
 }
 
+static bool browser_renderer_sysctl_enabled(const char* path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char value[8] = {0};
+    ssize_t count = read(fd, value, sizeof(value) - 1);
+    close(fd);
+    if (count <= 0) return false;
+    for (ssize_t i = 0; i < count; i++) {
+        if (value[i] == ' ' || value[i] == '\t' ||
+            value[i] == '\r' || value[i] == '\n') {
+            continue;
+        }
+        return value[i] == '1';
+    }
+    return false;
+}
+
 /* Unshare the user, network and IPC namespaces and drop to an unprivileged
    identity inside the new user namespace.
 
@@ -2395,36 +2412,72 @@ static bool browser_renderer_write_proc(const char* path, const char* data) {
    for children created after the unshare, so it would change nothing for a
    worker that never forks (and the jail sets RLIMIT_NPROC=0 precisely so it
    cannot). Claiming it here would be theatre. */
-static bool browser_renderer_enter_namespaces(void) {
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+static bool s_browser_renderer_force_partial_namespace_failure_for_test;
+#endif
+
+static int browser_renderer_enter_namespaces(void) {
 #if !defined(SYS_unshare)
-    return false;
+    return 0;
 #else
     uid_t uid = getuid();
     gid_t gid = getgid();
+    uid_t euid = geteuid();
+    gid_t egid = getegid();
+
+    /* A one-entry mapping cannot preserve distinct real/effective identities.
+       Refuse before unshare rather than silently turning either effective ID
+       into the overflow identity. */
+    if (uid != euid || gid != egid) return 0;
+
+    /* Ubuntu's AppArmor restriction can allow CLONE_NEWUSER while denying the
+       mapping/setup operations that must follow it.  Once unshare succeeds it
+       cannot be rolled back, so reject that known policy before mutating the
+       process.  Root is not subject to the unprivileged-userns restriction. */
+    if (uid != 0 &&
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+        !s_browser_renderer_force_partial_namespace_failure_for_test &&
+#endif
+        browser_renderer_sysctl_enabled(
+            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns")) {
+        return 0;
+    }
 
     /* The user namespace must come first and alone: it is what grants the
        privilege needed to unshare the remaining namespaces unprivileged. */
-    if (syscall(SYS_unshare, CLONE_NEWUSER) != 0) return false;
+    if (syscall(SYS_unshare, CLONE_NEWUSER) != 0) {
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+        if (s_browser_renderer_force_partial_namespace_failure_for_test) {
+            return -1;
+        }
+#endif
+        return 0;
+    }
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+    if (s_browser_renderer_force_partial_namespace_failure_for_test) return -1;
+#endif
 
     /* setgroups must be denied BEFORE gid_map is writable, otherwise the
-       kernel rejects the gid mapping for an unprivileged writer. */
+       kernel rejects the gid mapping for an unprivileged writer.  Failures
+       from here are fatal: the process is already in an irreversible user
+       namespace and must never continue with an overflow identity. */
     if (!browser_renderer_write_proc("/proc/self/setgroups", "deny\n")) {
-        return false;
+        return -1;
     }
 
     char map[64];
     int n = snprintf(map, sizeof map, "%u %u 1\n", (unsigned)gid, (unsigned)gid);
-    if (n <= 0 || (size_t)n >= sizeof map) return false;
-    if (!browser_renderer_write_proc("/proc/self/gid_map", map)) return false;
+    if (n <= 0 || (size_t)n >= sizeof map) return -1;
+    if (!browser_renderer_write_proc("/proc/self/gid_map", map)) return -1;
 
     n = snprintf(map, sizeof map, "%u %u 1\n", (unsigned)uid, (unsigned)uid);
-    if (n <= 0 || (size_t)n >= sizeof map) return false;
-    if (!browser_renderer_write_proc("/proc/self/uid_map", map)) return false;
+    if (n <= 0 || (size_t)n >= sizeof map) return -1;
+    if (!browser_renderer_write_proc("/proc/self/uid_map", map)) return -1;
 
     /* Now unprivileged inside the new user namespace: take the rest. */
-    if (syscall(SYS_unshare, CLONE_NEWNET | CLONE_NEWIPC) != 0) return false;
+    if (syscall(SYS_unshare, CLONE_NEWNET | CLONE_NEWIPC) != 0) return -1;
 
-    return true;
+    return 1;
 #endif
 }
 
@@ -2462,15 +2515,16 @@ static void browser_renderer_preinit(int argc, char** argv, char** envp) {
        writes die) before seccomp (allow-list contains neither unshare nor
        openat).
 
-       Namespace loss is recorded, not fatal. Ubuntu 24.04 ships
-       kernel.apparmor_restrict_unprivileged_userns=1, which lets an unconfined
-       binary create a user namespace but strips its capabilities, so the
-       follow-up CLONE_NEWNET returns EPERM. Treating that as fatal would turn
-       a working seccomp+landlock jail into NO jail on every default Ubuntu
-       host — strictly worse security for a stricter-looking check. The honest
-       posture is: enter the strongest jail available and publish which layers
-       were obtained via rt_browser_renderer_namespaces_active(). */
-    s_browser_renderer_namespaces_active = browser_renderer_enter_namespaces();
+       Namespace unavailability detected before CLONE_NEWUSER is recorded, not
+       fatal. Ubuntu 24.04's AppArmor restriction is checked before that
+       irreversible mutation, preserving a working seccomp+landlock jail. A
+       failure after CLONE_NEWUSER is fatal because continuing could strand
+       the worker under an overflow identity. The honest posture is: enter the
+       strongest intact jail available and publish which layers were obtained
+       via rt_browser_renderer_namespaces_active(). */
+    int namespace_state = browser_renderer_enter_namespaces();
+    if (namespace_state < 0) _exit(126);
+    s_browser_renderer_namespaces_active = namespace_state > 0;
 
     if (!browser_renderer_apply_landlock() ||
         !browser_renderer_apply_startup_seccomp()) {
