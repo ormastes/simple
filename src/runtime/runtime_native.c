@@ -22,6 +22,7 @@
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
+#include "simple_gui_html_provider_abi_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2186,6 +2187,56 @@ static inline RtCoreString* rt_core_as_string(int64_t value) {
     if (!rt_core_is_registered_string(s)) return NULL;
     if (!s || s->kind != RT_VALUE_HEAP_STRING) return NULL;
     return s;
+}
+
+/* Optional HTML GUI provider. Loading is deferred until the GUI is actually
+ * used; ordinary compiler/CLI startup never loads AppKit or a GUI dylib.
+ * One process-lifetime handle is retained, and the hot path does one atomic
+ * readiness check plus one borrowed-byte call (no repeated dlopen/dlsym). */
+static atomic_bool rt_gui_html_ready = ATOMIC_VAR_INIT(false);
+static atomic_flag rt_gui_html_init_lock = ATOMIC_FLAG_INIT;
+static void *rt_gui_html_library = NULL;
+static int64_t (*rt_gui_html_present)(const uint8_t *, uint64_t) = NULL;
+
+static void rt_gui_html_refuse(const char *reason) {
+    fprintf(stderr, "[simple-gui] HTML provider unavailable: %s\n", reason);
+    fflush(stderr);
+    exit(70);
+}
+
+void rt_gui_present_html(int64_t tagged_html) {
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+#if defined(_WIN32)
+    rt_gui_html_refuse("dynamic HTML provider unsupported on this host");
+#else
+    if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_acquire)) {
+        while (atomic_flag_test_and_set_explicit(&rt_gui_html_init_lock, memory_order_acquire)) { }
+        if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_relaxed)) {
+            const char *path = getenv("SIMPLE_GUI_HTML_PROVIDER_PATH");
+            if (!path || path[0] != '/') rt_gui_html_refuse("absolute provider path required");
+            void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+            if (!library) rt_gui_html_refuse("provider load failed");
+            union { void *symbol; int64_t (*call)(void); } version;
+            union { void *symbol; int64_t (*call)(const uint8_t *, uint64_t); } present;
+            version.symbol = dlsym(library, "simple_gui_html_provider_abi_v1");
+            present.symbol = dlsym(library, "simple_gui_present_html_v1");
+            if (!version.call || !present.call ||
+                version.call() != SIMPLE_GUI_HTML_PROVIDER_ABI_VERSION_V1) {
+                dlclose(library);
+                rt_gui_html_refuse("provider ABI mismatch");
+            }
+            rt_gui_html_library = library;
+            rt_gui_html_present = present.call;
+            atomic_store_explicit(&rt_gui_html_ready, true, memory_order_release);
+        }
+        atomic_flag_clear_explicit(&rt_gui_html_init_lock, memory_order_release);
+    }
+    if (!rt_gui_html_library || !rt_gui_html_present ||
+        rt_gui_html_present((const uint8_t *)html->data, html->len) != 1) {
+        rt_gui_html_refuse("provider rejected frame");
+    }
+#endif
 }
 
 static atomic_bool rt_core_invalid_array_reported = ATOMIC_VAR_INIT(false);
@@ -5449,6 +5500,77 @@ int64_t rt_sort(int64_t receiver) {
 bool rt_array_sort(int64_t receiver) {
     (void)rt_sort(receiver);
     return true;
+}
+
+static int rt_sorted_byte_cmp(const void* lhs, const void* rhs) {
+    uint8_t a = *(const uint8_t*)lhs;
+    uint8_t b = *(const uint8_t*)rhs;
+    return (a > b) - (a < b);
+}
+
+static int rt_sorted_u64_cmp(const void* lhs, const void* rhs) {
+    uint64_t a = *(const uint64_t*)lhs;
+    uint64_t b = *(const uint64_t*)rhs;
+    return (a > b) - (a < b);
+}
+
+/* Non-mutating `sorted`: preserve both the input and its storage shape.
+ * Byte and u64-packed arrays carry RAW elements, not tagged RuntimeValues;
+ * feeding those slots to rt_sort_cmp can interpret integers as pointers.
+ * Duplicate packed scalars are identical, so qsort's stability is immaterial.
+ * Generic tagged elements use a stable O(n log n) bottom-up merge, avoiding
+ * rt_sort's O(n^2) insertion-sort cost for a new public entrypoint. */
+int64_t rt_array_sorted(int64_t receiver) {
+    if (!rt_core_as_array(receiver)) return rt_core_nil();
+    SplArray* copy = rt_array_copy((SplArray*)(uintptr_t)receiver);
+    if (!copy) return rt_core_nil();
+    RtCoreArray* array = rt_core_as_array((int64_t)(uintptr_t)copy);
+    if (!array) return rt_core_nil();
+    size_t n = (size_t)array->len;
+    if (n < 2) return (int64_t)(uintptr_t)copy;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        qsort(array->data, n, sizeof(uint8_t), rt_sorted_byte_cmp);
+        return (int64_t)(uintptr_t)copy;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        qsort(array->data, n, sizeof(uint64_t), rt_sorted_u64_cmp);
+        return (int64_t)(uintptr_t)copy;
+    }
+    if (n > SIZE_MAX / sizeof(int64_t)) {
+        rt_array_free(copy);
+        return rt_core_nil();
+    }
+    int64_t* scratch = (int64_t*)malloc(n * sizeof(int64_t));
+    if (!scratch) {
+        rt_array_free(copy);
+        return rt_core_nil();
+    }
+    int64_t* data = (int64_t*)array->data;
+    int64_t* src = data;
+    int64_t* dst = scratch;
+    for (size_t width = 1; width < n; ) {
+        for (size_t left = 0; left < n; ) {
+            size_t middle = left + (width < n - left ? width : n - left);
+            size_t right = middle + (width < n - middle ? width : n - middle);
+            size_t i = left;
+            size_t j = middle;
+            size_t out = left;
+            while (i < middle && j < right) {
+                dst[out++] = rt_sort_cmp(src[i], src[j]) <= 0 ? src[i++] : src[j++];
+            }
+            while (i < middle) dst[out++] = src[i++];
+            while (j < right) dst[out++] = src[j++];
+            left = right;
+        }
+        int64_t* next = src;
+        src = dst;
+        dst = next;
+        if (width > n / 2) break;
+        width *= 2;
+    }
+    if (src != data) memcpy(data, src, n * sizeof(int64_t));
+    free(scratch);
+    return (int64_t)(uintptr_t)copy;
 }
 
 int64_t rt_array_max(int64_t receiver) {
@@ -9345,6 +9467,22 @@ static int splc_array_numeric_at(RtCoreArray* array, int64_t index, double* out)
         return 1;
     }
     return splc_numeric_to_f64(((int64_t*)array->data)[index], out);
+}
+
+/* Scalar parity for the hosted `rt_numeric_sum_f64` fallback. The core-C
+ * provider uses its own array and float boxes, so this cannot be linked from
+ * the Rust runtime. Accumulate in source order, refusing non-numeric elements
+ * and malformed arrays with tagged NIL. No temporary vector is allocated. */
+int64_t rt_numeric_sum_f64(int64_t array_value) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array || array->len < 0) return rt_core_nil();
+    double sum = 0.0;
+    for (int64_t i = 0; i < array->len; i++) {
+        double item = 0.0;
+        if (!splc_array_numeric_at(array, i, &item)) return rt_core_nil();
+        sum += item;
+    }
+    return rt_value_float(sum);
 }
 
 /* Twin of rt_numeric_dot_f64 -> packed_dot_f64 -> scalar_dot_runtime_f64:

@@ -887,6 +887,9 @@ int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
 int8_t   rt_utf8_validate(int64_t bytes_value);
 int64_t  rt_utf8_find_invalid(int64_t bytes_value);
 int64_t  rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value);
+int64_t  rt_numeric_sum_f64(int64_t array_value);
+int64_t  rt_array_sorted(int64_t receiver);
+void     rt_gui_present_html(int64_t tagged_html);
 /* Removes and RETURNS the element at `index` (tagged). NIL for a non-array
  * receiver or an out-of-range index; a negative index is out of range here,
  * it does NOT count from the end. */
