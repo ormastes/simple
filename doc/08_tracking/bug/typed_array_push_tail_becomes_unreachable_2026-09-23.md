@@ -49,10 +49,14 @@ Native red built1 module,0 cached,0 failed in2.7s with strict no-stub policy,
 jobs1, private cache, and sampled tree limit5859375KiB. Build peak187600KiB;
 execution peak2416KiB,exit132; both observer errors0 and quiescent1. The current
 fixture adds returned-value and once-only assertions after that initial red;
-the initial failing source is retained separately in local evidence.
+the initial failing source and receipt output were captured in the tool
+transcript. Expanding the sparse checkout subsequently removed that ignored
+build directory; its binary and original log/receipt files are unavailable.
+The originating PR #1414 binary, receipt, and LLDB triage remain preserved at
+`/Users/ormastes/simple-tmp/provider-digest-contract-20260923/build/provider-digest-admission-probe/`.
 
 Evidence directory:
-`/Users/ormastes/simple-tmp/statement-helper-unit-return-20260923/build/typed-array-push-tail/`.
+`/Users/ormastes/simple-tmp/statement-helper-unit-return-evidence-20260923/`.
 No general compiler suite, Stage2 replacement, Phase2, bootstrap, cross-host,
 or release PASS is claimed. Independent Astra review and a bounded private
 seed/compiler build are required before runtime acceptance.
