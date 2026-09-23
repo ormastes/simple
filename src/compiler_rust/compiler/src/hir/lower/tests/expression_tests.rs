@@ -1621,16 +1621,11 @@ fn any_receiver_retains_dynamic_field_lookup() {
     );
 }
 
-/// An erased receiver may require a conservative field-index fallback, but
-/// that fallback must never select an index beyond any candidate allocation.
-///
-/// Regression for
-/// `stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30`: the old
-/// "most fields wins" rule selected ZzBig.zzq at index 4 and then used byte
-/// offset 32 to read an actual one-slot ZzSmall value.  The smallest candidate
-/// index is the only fallback that is in bounds for every declaring struct.
+/// An erased receiver may use a field slot only when every candidate agrees
+/// on its index and type. A smallest-slot fallback is in bounds but can read a
+/// different field from the actual wide receiver.
 #[test]
-fn erased_receiver_field_fallback_chooses_smallest_in_bounds_index() {
+fn erased_receiver_field_fallback_rejects_conflicting_layouts() {
     fn struct_type(name: &str, fields: &[&str]) -> HirType {
         HirType::Struct {
             name: name.to_string(),
@@ -1651,10 +1646,9 @@ fn erased_receiver_field_fallback_chooses_smallest_in_bounds_index() {
         "ZzBig".to_string(),
         struct_type("ZzBig", &["p0", "p1", "p2", "p3", "zzq"]),
     );
-    assert_eq!(
-        local.get_field_info(TypeId::ANY, "zzq").unwrap().0,
-        0,
-        "local erased-receiver fallback must choose offset 0, not OOB offset 32"
+    assert!(
+        local.get_field_info(TypeId::ANY, "zzq").is_err(),
+        "a narrow index-0 candidate and wide index-4 candidate must not select either slot"
     );
 
     let mut global = Lowerer::new();
@@ -1674,10 +1668,77 @@ fn erased_receiver_field_fallback_chooses_smallest_in_bounds_index() {
             ],
         ),
     ])));
+    assert!(
+        global.resolve_global_field_info("zzq").is_none(),
+        "cross-module candidates with different field slots must fail closed"
+    );
+
+    let mut mixed_slot = Lowerer::new();
+    mixed_slot
+        .module
+        .types
+        .register_named("ZzLocal".to_string(), struct_type("ZzLocal", &["zzq"]));
+    mixed_slot.set_global_struct_defs(Arc::new(HashMap::from([(
+        "ZzImported".to_string(),
+        vec![
+            ("p0".to_string(), Type::Simple("i64".to_string())),
+            ("p1".to_string(), Type::Simple("i64".to_string())),
+            ("zzq".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    assert!(
+        mixed_slot.get_field_info(TypeId::ANY, "zzq").is_err(),
+        "a local slot-0 field and imported slot-2 field must not select either slot"
+    );
+
+    let mut mixed_type = Lowerer::new();
+    mixed_type
+        .module
+        .types
+        .register_named("ZzLocal".to_string(), struct_type("ZzLocal", &["zzq"]));
+    mixed_type.set_global_struct_defs(Arc::new(HashMap::from([(
+        "ZzImported".to_string(),
+        vec![("zzq".to_string(), Type::Simple("text".to_string()))],
+    )])));
+    assert!(
+        mixed_type.get_field_info(TypeId::ANY, "zzq").is_err(),
+        "same-slot local and imported fields with different types must fail closed"
+    );
+}
+
+#[test]
+fn erased_receiver_field_fallback_accepts_an_agreeing_layout() {
+    fn struct_type(name: &str) -> HirType {
+        HirType::Struct {
+            name: name.to_string(),
+            fields: vec![("prefix".to_string(), TypeId::I64), ("shared".to_string(), TypeId::I64)],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
+        }
+    }
+
+    let mut lowerer = Lowerer::new();
+    lowerer
+        .module
+        .types
+        .register_named("First".to_string(), struct_type("First"));
+    lowerer
+        .module
+        .types
+        .register_named("Second".to_string(), struct_type("Second"));
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "Imported".to_string(),
+        vec![
+            ("prefix".to_string(), Type::Simple("i64".to_string())),
+            ("shared".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
     assert_eq!(
-        global.resolve_global_field_info("zzq").unwrap().0,
-        0,
-        "cross-module erased-receiver fallback must choose offset 0, not OOB offset 32"
+        lowerer.get_field_info(TypeId::ANY, "shared").unwrap().0,
+        1,
+        "matching local and imported layouts retain the receiver-blind field access"
     );
 }
 
@@ -1695,4 +1756,3 @@ fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
         module.err()
     );
 }
-
