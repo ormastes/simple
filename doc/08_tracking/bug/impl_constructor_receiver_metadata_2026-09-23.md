@@ -1,8 +1,10 @@
 # Impl constructor-name receiver metadata
 
-Status: OPEN / TEST_BLOCKED. Shared parser candidate accepted by independent
-source review; parser execution and new compiler qualification are blocked by
-disk capacity. No production GPU provider implementation is changed.
+Status: OPEN / PARTIAL_VERIFICATION. Independent review accepted the shared
+parser correction; eight parser tests and CUDA native execution pass. Intel
+and ROCm compile past the receiver failure but cannot link against the frozen
+runtime capsule. Full Phase 2 and bootstrap admission remain unverified.
+No production GPU provider implementation is changed.
 
 ## Evidence and root
 
@@ -71,4 +73,83 @@ observer errors 0, quiescent 1. Preserved evidence:
 (`red.log`, `red.env`, `red.time`). The original fixture used the `std` alias;
 the central fixture imports the canonical owner explicitly. These are source
 equivalent owner routes, but the central fixture still needs its own native
-qualification. No green result is claimed.
+qualification. This baseline result alone establishes no green result.
+
+## Parser execution after disk recovery
+
+Source commit `d1be2cca0f7e2bba24e699713e959423919ae4cf` passed all eight
+`implicit_receiver_metadata` parser tests in 40.20 seconds. Sampled process-tree
+peak: 825264 KiB; enforced cap: 5859375 KiB; observer errors: 0; quiescent: 1.
+
+Private pinned toolchain:
+`/Users/ormastes/simple-tmp/rustup-pinned-20260916.kq7xQk/rustup/toolchains/nightly-2026-09-16-aarch64-apple-darwin`.
+Absolute rustc SHA-256:
+`76470bf06f36ddea8135caeb96efe7fd67896c9331317e8d40369ed002fe408a`;
+Cargo SHA-256:
+`b87b3b4e204be097e048a93c5b45d50d3708a8ef342027232457abc31d945e20`.
+These match the previously independently qualified private dated toolchain.
+No floating rustup proxies or shared-toolchain modification were used.
+
+Evidence root:
+`/Users/ormastes/simple-tmp/phase2-cuda-init-20260923/build/evidence/impl-receiver/`.
+`authority.sha256`, `owner-inputs.sha256`, `run-cargo.shs`, `parser.log`, and
+`parser.rss.env` retain inputs, exact commands, and telemetry. Tests ran with
+`cargo test --locked --offline -p simple-parser --test implicit_receiver_metadata`
+using an isolated target and one Cargo job. The production runtime capsule
+also passed its immutable verification check (`capsule-verify.log`).
+
+## Corrected compiler and native owner results
+
+The pinned diagnostic compiler built successfully in 225.67 seconds with
+3207344 KiB sampled process-tree peak, observer errors 0, quiescent 1. Its
+SHA-256 is `cb26939ab543dccad92dd0494964726cfa5f6067389018a3f51d2db18d27b01f`.
+The build used `--locked --offline --profile bootstrap --target
+aarch64-apple-darwin -p simple-driver --features llvm`, one Cargo job,
+bootstrap LTO off, and 16 codegen units, matching the bounded diagnostic
+configuration used for the preceding receiver fix. Source was `d1be2cca0f7`;
+subsequent changes only reduce the CUDA fixture to its receiver scope and
+update this report.
+
+Known nonfatal `rust-objcopy` stripping failures reported the missing
+`@rpath/libLLVM.dylib`. This executable is diagnostic evidence, not an admitted
+bootstrap compiler or release artifact. No full-suite, throughput, or memory
+regression claim follows from this compile.
+
+All native fixtures used `SIMPLE_NATIVE_BUILD_RUST=1`,
+`SIMPLE_NO_STUB_FALLBACK=1`, no allow-stub override, the verified frozen
+98cbcdb runtime capsule, one native worker, and separate compiler/fixture caches.
+Native sampled enforcement was 976562 KiB. All terminal receipts have observer
+errors 0 and quiescent 1.
+
+| Fixture | Actual result | Elapsed | Peak KiB |
+| --- | --- | --- | --- |
+| CUDA cycle 2 build | PASS | 3.38 s | 279200 |
+| CUDA cycle 2 execution | PASS, four assertions | 0.39 s | 2400 |
+| Intel cycle 1 | Receiver codegen succeeds; link FAIL | 4.87 s | 288736 |
+| ROCm cycle 1 | Receiver codegen succeeds; link FAIL | 5.51 s | 278304 |
+
+CUDA cycle 1 compiled the owner but failed linking `rt_cuda_shutdown`, which
+was reached only by an extra shutdown assertion. That unrelated assertion
+was removed; the four retained assertions cover instance init returning false
+without a library, dynamic mode, availability false, and static factory mode.
+The initial failed build log and cache were retained. CUDA cycle 2 passes with
+the original production provider code. `cuda-cycle2-input.sha256` identifies
+the final fixture; `owner-inputs.sha256` retains the original inputs.
+
+Intel fails to link `rt_intel_is_available`, `rt_intel_init`, and
+`rt_intel_shutdown`. ROCm fails to link the corresponding `rt_rocm_*` names.
+Neither executable ran. These are separate runtime-link boundary failures,
+not evidence that the receiver error persists. Intel's owner documents its
+unimplemented static runtime backend. Read-only ROCm follow-up found its real
+hooks in the native archive, so ROCm archive selection/export diagnosis remains
+open; this log does not establish missing ROCm implementation.
+No replacement hooks or empty
+stubs were introduced, and neither result is labeled native PASS.
+
+Exact logs and receipts are under
+`build/evidence/impl-receiver/native/cb26939ab543dccad92dd0494964726cfa5f6067389018a3f51d2db18d27b01f/`
+in this worktree; CUDA's accepted attempt is `cuda_ffi_init_receiver/cycle2`,
+and Intel/ROCm blocked attempts are their respective `cycle1` directories.
+`run-owner.shs` retains the full native commands. The independent Astra reviewer
+confirmed parser/CUDA evidence and required the Intel/ROCm execution blocker
+to remain explicit. No passing gate was rerun.
