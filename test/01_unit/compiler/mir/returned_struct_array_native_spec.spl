@@ -5,32 +5,27 @@ the interpreter does not replace the native assertions. Set SIMPLE_NATIVE_COMPIL
 to an admitted self-hosted compiler with its source inventory initialized.
 """
 use std.spec.*
+use std.io_runtime.{env_get, process_run_timeout, dir_create_all, getpid, time_now_unix_micros}
 use compiler.mir.mir_data.{
     bootstrap_fn_ret_array_element_shape_register,
     bootstrap_fn_ret_array_element_shape_lookup
 }
 
-extern fn rt_env_get(key: text) -> text
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
-
 describe "native returned struct array provenance":
     it "keeps bytewise sorting, text fields and nonzero field offsets":
-        val compiler = rt_env_get("SIMPLE_NATIVE_COMPILER") ?? ""
+        val compiler = env_get("SIMPLE_NATIVE_COMPILER") ?? ""
         # Missing native tooling is a failure, never an interpreter fallback.
         expect(compiler.len()).to_be_greater_than(0)
-        val directory = "build/test/returned_struct_array_native_{rt_getpid()}_{rt_time_now_unix_micros()}"
+        val directory = "build/test/returned_struct_array_native_{getpid()}_{time_now_unix_micros()}"
         val output = directory + "/probe"
-        val (mkdir_out, mkdir_err, mkdir_code) = rt_process_run_timeout("mkdir", ["-p", directory], 10000)
-        expect(mkdir_code).to_equal(0)
-        val (build_out, build_err, build_code) = rt_process_run_timeout(compiler, [
+        expect(dir_create_all(directory)).to_equal(true)
+        val (build_out, build_err, build_code) = process_run_timeout(compiler, [
             "native-build", "--backend", "llvm", "--threads", "1",
             "--mode", "dynload", "-o", output,
             "test/fixtures/native_returned_struct_array_sort/main.spl"
         ], 360000)
         expect(build_code).to_equal(0)
-        val (native_out, native_err, native_code) = rt_process_run_timeout("./" + output, [], 10000)
+        val (native_out, native_err, native_code) = process_run_timeout("./" + output, [], 10000)
         expect(native_code).to_equal(0)
         expect(native_out).to_equal(
             "count=3\nfirst=src/app/B.spl:10\nsecond=src/app/__init__.spl:20\nthird=src/app/audit/ffi_analyzer.spl:30\n")

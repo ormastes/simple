@@ -119,3 +119,23 @@ with output under a process-id/time-specific directory. Array and Slice share
 the same repaired prescan/direct-call branches. A separately executed native
 Slice fixture and rebuilt compiler validation remain pending; neither is
 claimed covered by the array fixture.
+
+### Tracked deferred Slice regression
+
+TODO after Linux bootstrap admission: add
+`test/fixtures/native_returned_struct_slice_sort/{model,main}.spl` plus a native
+SSpec beside `returned_struct_array_native_spec.spl`. The model must own a
+`SliceRow` struct and export a function returning `Slice<SliceRow>` backed by
+storage whose lifetime extends through the caller. The imported caller must
+assert the exact nonzero length, fixed-index `text` and `i64` fields, bytewise
+sort order, native exit status, and exact stdout. Run it with the admitted
+self-hosted compiler under `SIMPLE_NO_STUB_FALLBACK=1`; interpreter or
+same-module evidence is not acceptance.
+
+This is deferred rather than represented by a fake array alias: the current
+pure-Simple surface has no safe owned `Slice<T>` constructor, while the only
+located constructor (`src/compiler_rust/lib/std/src/core/collections.spl`)
+takes a raw pointer. Adding a raw-pointer fixture now would introduce an
+unrelated lifetime/unsafe dependency and would not isolate returned aggregate
+provenance. Track completion in this OPEN bug and do not close it from the
+array fixture alone.
