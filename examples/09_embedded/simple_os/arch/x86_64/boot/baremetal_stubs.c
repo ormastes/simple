@@ -17964,6 +17964,12 @@ static uint32_t _bm_blend_pixel(uint32_t sp, uint32_t dp)
     return (out_a << 24) | (r << 16) | (g << 8) | b;
 }
 
+#define SIMPLEOS_DEFINE_RT_GUI_BLEND_SPAN8 1
+#include "direct_lfb_blend_span.h"
+
+/* The direct-LFB path uses the same tagged [u32] ABI and blend arithmetic as
+ * the hosted span kernel. Refuse the entire row before writing any pixel so
+ * the Simple caller can safely run its scalar fallback. */
 /* rt_engine2d_simd_fill_span_u32: fill dst[offset .. offset+count) with a
  * single colour, in place. Hosted reference:
  * src/runtime/runtime_simd_dispatch.c:1115 (which delegates to
