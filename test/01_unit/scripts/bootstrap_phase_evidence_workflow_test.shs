@@ -15,6 +15,8 @@ grep -Fq -- '--jobs=8' "$runner" || fail 'Stage 2 does not request eight jobs'
 grep -Fq -- '--jobs=1' "$runner" || fail 'Stage 3 is not pinned to one job'
 grep -Fq -- '--phase=stage2' "$runner" || fail 'Stage 2 verification is absent'
 grep -Fq -- '--phase=stage3' "$runner" || fail 'Stage 3 verification is absent'
+grep -Fq 'if ! phase23_contract_bypasses_artifact_guards; then' "$runner" ||
+  fail 'artifact guards are not protected by the exact contract-mode predicate'
 grep -Fq 'cancel-in-progress: false' "$workflow" || fail 'evidence can be cancelled as stale'
 if grep -Eq '^[[:space:]]+paths:' "$workflow"; then
   fail 'path filtering can omit the required PR evidence job'
@@ -232,5 +234,27 @@ grep -Fq -- '--phase=stage2' "$contract/calls.verifier" || fail 'Stage 2 verifie
 grep -Fq -- '--phase=stage3' "$contract/calls.verifier" || fail 'Stage 3 verifier was not reached'
 grep -Fq 'phase-runtime-capsules/stage2/' "$contract/calls.verifier" || fail 'Stage 2 capsule handoff missing'
 grep -Fq 'phase-runtime-capsules/stage3/' "$contract/calls.verifier" || fail 'Stage 3 capsule handoff missing'
+
+# The bypass predicate is independently executable: only the explicit contract
+# mode with all four fake command owners may suppress real artifact guards.
+predicate="$contract/predicate.shs"
+awk '/^phase23_contract_bypasses_artifact_guards\(\)/ { copy=1 } copy { print } copy && /^}/ { exit }' \
+  "$runner" >"$predicate"
+[ -s "$predicate" ] || fail 'contract bypass predicate could not be extracted'
+check_bypass() (
+  expected=$1 contract_mode=$2 bootstrap_override=$3 verifier_override=$4 capsule_override=$5 evidence_override=$6
+  . "$predicate"
+  PHASE23_CONTRACT_TEST=$contract_mode \
+  PHASE23_BOOTSTRAP_COMMAND=$bootstrap_override \
+  PHASE23_VERIFIER_COMMAND=$verifier_override \
+  PHASE23_CAPSULE_COMMAND=$capsule_override \
+  PHASE23_EVIDENCE_COMMAND=$evidence_override \
+    phase23_contract_bypasses_artifact_guards
+  status=$?
+  [ "$status" = "$expected" ]
+)
+check_bypass 0 1 fake fake fake fake || fail 'complete fake contract did not bypass artifact guards'
+check_bypass 1 0 fake fake fake fake || fail 'production mode bypassed artifact guards'
+check_bypass 1 1 fake fake fake '' || fail 'partial fake contract bypassed artifact guards'
 
 echo 'bootstrap_phase_evidence_workflow_test: PASS'
