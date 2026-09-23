@@ -12,10 +12,29 @@ printf '%s\n' "$TEST_OS"
 EOF
 cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<'EOF'
 #!/bin/sh
-for arg do case "$arg" in --work-root=*) work=${arg#*=};; esac; done
+for arg do case "$arg" in
+    --work-root=*) work=${arg#*=};;
+    --compiler-sha256=*) sha=${arg#*=};;
+esac; done
 mkdir -p "$work/outputs/compiler-tools/fixture"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_test_runner"
+[ "$TEST_CASE" = no_base_receipt ] && exit 0
+phase=stage2
+[ "$TEST_CASE" != wrong_phase ] || phase=stage3
+[ "$TEST_CASE" != wrong_hash ] || sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+outcome=PASS
+[ "$TEST_CASE" != false_base_pass ] || outcome=FAIL
+{
+    echo "phase=$phase"
+    echo 'hash_policy=canonical'
+    echo "expected_compiler_sha256=$sha"
+    echo "actual_compiler_sha256=$sha"
+    echo 'task=compiler_cli_build|result=PASS|status=0'
+    echo 'task=test_runner_build|result=PASS|status=0'
+    echo 'terminal_failures=0'
+    echo "overall=$outcome"
+} >"$work/summary.env"
 EOF
 cat >"$tmp/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
 #!/bin/sh
@@ -61,7 +80,8 @@ checks=0
 for os in Linux FreeBSD; do
     export TEST_OS=$os
     runner=$(printf '%s' "$os" | tr '[:upper:]' '[:lower:]')
-    for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout; do
+    for scenario in good binding zero missing failed skipped inconsistent duplicate stale nonzero timeout \
+        no_base_receipt wrong_phase wrong_hash false_base_pass; do
         export TEST_CASE=$scenario
         work="$tmp/$os-$scenario"
         mkdir -p "$work/post-phase2-fixture"
