@@ -331,6 +331,10 @@ fn result_ok_call_unwrap_retains_nominal_payload_field_layout() {
         "    pad: i64\n",
         "    transformed: i64\n",
         "\n",
+        "impl Outcome:\n",
+        "    fn unwrap() -> text:\n",
+        "        \"hostile\"\n",
+        "\n",
         "struct Decoy:\n",
         "    transformed: bool\n",
         "\n",
@@ -346,6 +350,14 @@ fn result_ok_call_unwrap_retains_nominal_payload_field_layout() {
     let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
     let owner = function.locals.iter().find(|local| local.name == "typed_outcome").unwrap();
     assert_eq!(module.types.get_type_name(owner.ty), Some("Outcome"));
+    let HirStmt::Let { value: Some(projected), .. } = &function.body[1] else {
+        panic!("expected typed_outcome binding, got {:?}", function.body[1]);
+    };
+    let HirExprKind::BuiltinCall { name, args } = &projected.kind else {
+        panic!("Result.ok().unwrap() must not dispatch Outcome.unwrap: {projected:?}");
+    };
+    assert_eq!(name, "rt_enum_payload");
+    assert!(matches!(args.as_slice(), [HirExpr { kind: HirExprKind::Local(_), .. }]));
     assert!(matches!(
         function.body.last(),
         Some(HirStmt::Expr(HirExpr {

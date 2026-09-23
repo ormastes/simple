@@ -846,26 +846,18 @@ impl Lowerer {
         // Check for SIMD vector instance methods
         let receiver_hir = self.lower_expr(receiver, ctx)?;
 
-        // `Result.ok()`/`.err()` lowers to its raw payload, matching MIR's
-        // existing runtime path. A following `.unwrap()` must retain that
-        // payload type; suffix-based method lookup can otherwise borrow an
-        // unrelated `unwrap` return and erase the next field's owner.
+        // `Result.ok()`/`.err()` already lowers to one raw payload projection.
+        // A following `.unwrap()` on that projected value is the identity in
+        // the seed's flat-payload convention. Do not dispatch `unwrap` again:
+        // the payload may itself define an unrelated method with that name,
+        // or be an enum whose payload would be extracted a second time.
         if args.is_empty() && method == "unwrap" {
             if matches!(
                 (&receiver_hir.kind, receiver),
                 (HirExprKind::BuiltinCall { name, .. }, Expr::MethodCall { method, .. })
                     if name == "rt_enum_payload" && (method == "ok" || method == "err")
             ) {
-                let payload_ty = receiver_hir.ty;
-                return Ok(HirExpr {
-                    kind: HirExprKind::MethodCall {
-                        receiver: Box::new(receiver_hir),
-                        method: method.to_string(),
-                        args: vec![],
-                        dispatch: DispatchMode::Dynamic,
-                    },
-                    ty: payload_ty,
-                });
+                return Ok(receiver_hir);
             }
         }
 
