@@ -9,7 +9,10 @@ for tool in powershell cygpath git od awk cmp sha256sum; do
 done
 case_name=setup
 trap 'rc=$?; echo "FIRST FAILURE: case=$case_name line=$LINENO command=$BASH_COMMAND exit=$rc" >&2; [ ! -f "${tmp:-}/last.log" ] || cat "$tmp/last.log" >&2; exit "$rc"' ERR
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-materialize-links.XXXXXX")
+# Receipt paths intentionally stay in lexical /<drive>/ form. MSYS /tmp is
+# outside that contract even when it maps to a Windows drive underneath.
+test -n "${LOCALAPPDATA:-}" || { echo 'BLOCKED: LOCALAPPDATA required' >&2; exit 77; }
+tmp=$(mktemp -d "$(cygpath -u "$LOCALAPPDATA")/Temp/simple-materialize-links.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
 export TMPDIR="$tmp"
 
@@ -162,7 +165,14 @@ foreach ($spec in [IO.File]::ReadAllLines($env:ORACLE_SPECS, $utf8)) {
  Equal $r.target_volume $info.Volume "$name volume"
  Equal $r.target_file_id ("{0}:{1}" -f $info.High,$info.Low) "$name file id"
  Equal $r.target_size (([uint64]$info.SizeHigh * 4294967296) + $info.SizeLow) "$name size"
- $sha=if ($kind -eq "file") { (Get-FileHash -LiteralPath $native -Algorithm SHA256).Hash.ToLowerInvariant() } else { "-" }
+ $sha=if ($kind -eq "file") {
+  $stream=[IO.File]::OpenRead($native)
+  try {
+   $hasher=[Security.Cryptography.SHA256]::Create()
+   try { [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace("-", "").ToLowerInvariant() }
+   finally { $hasher.Dispose() }
+  } finally { $stream.Dispose() }
+ } else { "-" }
  Equal $r.target_sha256 $sha "$name sha"
  Equal $r.kind $kind "$name kind"
  Equal $r.state "created" "$name state"
