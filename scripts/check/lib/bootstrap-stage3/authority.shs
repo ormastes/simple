@@ -3316,8 +3316,7 @@ bootstrap_stage3_publish_seed_generation() {
 "${BOOTSTRAP_STAGE3_AUTHORITY_PUBLISH_HELPER:-\
 $(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")/bootstrap-authority-generation-publish.pl}"
     [ -f "$bootstrap_stage3_publish_helper" ] || return 1
-    perl "$bootstrap_stage3_publish_helper" \
-        "$bootstrap_stage3_publish_mode" \
+    set -- "$bootstrap_stage3_publish_mode" \
         "$bootstrap_stage3_publish_staging" \
         "$bootstrap_stage3_publish_final" \
         "$bootstrap_stage3_publish_marker" \
@@ -3325,6 +3324,15 @@ $(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")/bootstrap-authority-generation-pub
         "$bootstrap_stage3_publish_inputs" \
         "$bootstrap_stage3_publish_hash" \
         "$bootstrap_stage3_publish_stamp_hash"
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+        # MSYS may emulate symlink() by copying the immutable generation.
+        # Require a real link, or fail closed before admitting its marker.
+        MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" \
+            perl "$bootstrap_stage3_publish_helper" "$@"
+        ;;
+    *) perl "$bootstrap_stage3_publish_helper" "$@" ;;
+    esac
 }
 
 bootstrap_stage3_recover_seed_transaction() {
@@ -3759,7 +3767,13 @@ public static class Stage3MaterializedConsumer {
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
     // Callers may tighten budgets, never increase the admitted ceilings.
-    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 100000);
+    // Shared by HEAD and the physical walk: 137461 + 176143 entries at the
+    // admitted source state. 400000 leaves bounded growth without bypassing
+    // the command-output, byte, or 28-second watchdog ceilings.
+    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 400000);
+    // Inventory is separate from the cumulative HEAD/physical count; retain
+    // its previous per-list ceiling and handle-retention bound.
+    const int MaxUntracked = 100000;
     const int MaxOutput = 16 * 1024 * 1024;
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
     static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 28000);
@@ -3838,10 +3852,10 @@ public static class Stage3MaterializedConsumer {
     }
     static void CheckPath(string path) {
         byte[] b = Utf8.GetBytes(path); Relative(Hex(b), b.Length.ToString(), false);
-        // The retained Stage3 line protocol cannot encode these names safely.
-        if (path.IndexOfAny(new char[] {'\n','\r','\t','\\',':','*','?','[',']'}) >= 0) throw new IOException("path.unsupported");
+        // Keep line-protocol and Windows-unsafe characters out; brackets are literal path data.
+        if (path.IndexOfAny(new char[] {'\n','\r','\t','\\',':','*','?'}) >= 0) throw new IOException("path.unsupported");
     }
-    static Dictionary<string,string> HeadLinks(string root, string head) {
+    static Dictionary<string,string> HeadLinks(string root, string head, Dictionary<string,string> gitlinks) {
         var links = new Dictionary<string,string>(StringComparer.Ordinal);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var components = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -3858,7 +3872,9 @@ public static class Stage3MaterializedConsumer {
                 components[prefix] = prefix;
             }
             string[] f = row.Substring(0, tab).Split(' ');
-            if (f.Length != 3 || f[1] != "blob" || (f[0] != "100644" && f[0] != "100755" && f[0] != "120000")) throw new IOException("git.tree-kind");
+            if (f.Length != 3 || !((f[1] == "blob" && (f[0] == "100644" || f[0] == "100755" || f[0] == "120000")) ||
+                (f[1] == "commit" && f[0] == "160000"))) throw new IOException("git.tree-kind");
+            if (f[0] == "160000") gitlinks.Add(path, f[2]);
             if (f[0] == "120000") {
                 byte[] blob = Git(root, "cat-file", "blob", f[2]);
                 links.Add(path, Relative(Hex(blob), blob.Length.ToString(), true));
@@ -3867,7 +3883,101 @@ public static class Stage3MaterializedConsumer {
         }
         return links;
     }
-    static void AuditTree(string root, Dictionary<string,string> aliases, List<SafeFileHandle> held) {
+    static bool CheckGitlink(string root, string path, string expected, Dictionary<string,string> gitlinks,
+        bool discover, List<SafeFileHandle> held) {
+        bool metadata = false, content = false;
+        foreach (string child in Directory.EnumerateFileSystemEntries(path)) {
+            string name = Path.GetFileName(child);
+            if (name.Equals(".git", StringComparison.Ordinal)) {
+                var h = Open(child, true, 0); held.Add(h);
+                var tag = Tag(h);
+                if ((tag.Attributes & (0x400 | 0x40)) != 0) throw new IOException("path.gitlink-metadata");
+                metadata = true;
+            } else if (name.Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+            else content = true;
+        }
+        // Git ignores an uninitialized gitlink's contents in the parent tree.
+        if (!metadata) { if (content) throw new IOException("path.uninitialized-gitlink-content"); return false; }
+        string top = Text(Git(path, "rev-parse", "--show-toplevel")).TrimEnd('\n').Replace('/','\\').TrimEnd('\\');
+        // MSYS Git reports the same bound root as /d/... while native Git
+        // reports D:/...; preserve the top-level root check's exact mapping.
+        string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\').TrimEnd('\\');
+        string posixPath = posixRoot + path.Substring(root.Length).TrimEnd('\\');
+        if (!top.Equals(path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+            !top.Equals(posixPath, StringComparison.Ordinal)) throw new IOException("git.gitlink-root");
+        if (Text(Git(path, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != expected) throw new IOException("git.gitlink-head");
+        foreach (string entry in Nul(Git(path, "ls-files", "-v", "-z")))
+            if (entry.Length < 3 || entry[1] != ' ' || Char.IsLower(entry[0]) || entry[0] == 'S') throw new IOException("git.gitlink-index-flags");
+        if (Git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--ignored=matching").Length != 0)
+            throw new IOException("git.gitlink-dirty");
+        if (discover) {
+            var nested = new Dictionary<string,string>(StringComparer.Ordinal);
+            HeadLinks(path, expected, nested);
+            string prefix = path.Substring(root.Length + 1).Replace('\\','/');
+            foreach (var pair in nested) gitlinks.Add(prefix + "/" + pair.Key, pair.Value);
+        }
+        return true;
+    }
+    static Dictionary<string,string> AuthorityFields(byte[] data) {
+        string text = Text(data);
+        if (!text.EndsWith("\n") || text.IndexOf('\r') >= 0) throw new IOException("authority.format");
+        var fields = new Dictionary<string,string>(StringComparer.Ordinal);
+        foreach (string row in text.Substring(0, text.Length - 1).Split('\n')) {
+            int equal = row.IndexOf('=');
+            if (equal <= 0 || fields.ContainsKey(row.Substring(0, equal))) throw new IOException("authority.fields");
+            fields.Add(row.Substring(0, equal), row.Substring(equal + 1));
+        }
+        return fields;
+    }
+    static string AuthorityHash(Dictionary<string,string> fields, string key) {
+        string value;
+        if (!fields.TryGetValue(key, out value) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(value, "\\A[0-9a-f]{64}\\z")) throw new IOException("authority.hash:" + key);
+        return value;
+    }
+    static void AuthorityAbsent(string path) {
+        uint attrs = GetFileAttributesW(path); int error = Marshal.GetLastWin32Error();
+        if (attrs != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("authority.transaction");
+    }
+    static void CheckGeneratedAuthority(string root, string link, List<SafeFileHandle> held) {
+        string parent = Path.Combine(root, "src", "compiler_rust", "target");
+        if (link != Path.Combine(parent, "bootstrap")) throw new IOException("authority.link-path");
+        string marker = Path.Combine(parent, "bootstrap.current.env");
+        AuthorityAbsent(marker + ".transaction"); AuthorityAbsent(link + ".migration.env");
+        var fields = AuthorityFields(ReadHeld(marker, held, 4096));
+        string schema, generation;
+        if (fields.Count != 5 || !fields.TryGetValue("schema", out schema) || schema != "simple-bootstrap-authority-current-v1" ||
+            !fields.TryGetValue("generation", out generation)) throw new IOException("authority.marker");
+        string inputs = AuthorityHash(fields, "inputs_fingerprint");
+        string generationHash = AuthorityHash(fields, "generation_sha256");
+        string stampHash = AuthorityHash(fields, "stamp_sha256");
+        if (generation != inputs + "-" + generationHash) throw new IOException("authority.generation-name");
+        string target = Path.Combine(parent, "bootstrap.generations", generation);
+        Parents(target, false, held);
+        var expected = Open(target, true, 0); held.Add(expected);
+        if ((Tag(expected).Attributes & 0x450) != 0x10) throw new IOException("authority.generation-kind");
+        var raw = Open(link, true, 0); held.Add(raw);
+        var tag = Tag(raw);
+        if ((tag.Attributes & 0x450) != 0x410 || tag.Tag != 0xA000000Cu)
+            throw new IOException("authority.link-tag");
+        var actual = Open(link, false, 0); held.Add(actual);
+        var x = Identity(actual); var y = Identity(expected);
+        if (x.Volume != y.Volume || x.IndexHigh != y.IndexHigh || x.IndexLow != y.IndexLow)
+            throw new IOException("authority.link-target");
+        byte[] stamp = ReadHeld(Path.Combine(target, "simple.exe.inputs.sha256"), held, 4096);
+        if (Hash(stamp) != stampHash) throw new IOException("authority.stamp-hash");
+        var stampFields = AuthorityFields(stamp);
+        string stampSchema, stampInputs;
+        if (!stampFields.TryGetValue("schema", out stampSchema) || stampSchema != "simple-bootstrap-seed-artifact-stamp-v2" ||
+            !stampFields.TryGetValue("inputs_fingerprint", out stampInputs) || stampInputs != inputs)
+            throw new IOException("authority.stamp-inputs");
+        // This proves the generated link's topology, with all proof handles held.
+        // Runtime bytes remain the committed-seed owner's content-admission job;
+        // hashing them here would consume the source audit's bounded byte budget.
+    }
+    static void AuditTree(string root, Dictionary<string,string> aliases, Dictionary<string,string> gitlinks,
+        HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks,
+        List<string> generatedAuthorities, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3881,13 +3991,28 @@ public static class Stage3MaterializedConsumer {
                 if (relative == ".git") continue;
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
-                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
+                    string parent = relative.Substring(0, relative.Length - 5);
+                    if (!gitlinks.ContainsKey(parent) || relative != parent + "/.git") throw new IOException("path.nested-repository");
+                    continue;
+                }
                 var raw = Open(item, true, 0); held.Add(raw);
                 {
                     var tag = Tag(raw);
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
+                    if ((tag.Attributes & 0x400) != 0 && relative == "src/compiler_rust/target/bootstrap") {
+                        CheckGeneratedAuthority(root, item, held);
+                        generatedAuthorities.Add(item);
+                        continue;
+                    }
                     if ((tag.Attributes & 0x400) != 0) throw new IOException("path.unreceipted-reparse");
                     if ((tag.Attributes & 0x40) != 0) throw new IOException("path.special");
+                    string oid;
+                    if (gitlinks.TryGetValue(relative, out oid)) {
+                        if ((tag.Attributes & 0x10) == 0) throw new IOException("path.gitlink-kind");
+                        if (CheckGitlink(root, item, oid, gitlinks, true, held)) initializedGitlinks.Add(relative);
+                        inspectedGitlinks.Add(relative);
+                    }
                     if ((tag.Attributes & 0x10) != 0) todo.Push(item);
                 }
             }
@@ -3916,7 +4041,7 @@ public static class Stage3MaterializedConsumer {
             collapse.Append("alias-collapse-directory:").Append(Utf8.GetByteCount(path)).Append(':').Append(Hex(Utf8.GetBytes(path))).Append('\n');
         }
         string[] paths = Nul(Git(root, args.ToArray()));
-        if (paths.Length > MaxEntries) throw new IOException("bound.untracked");
+        if (paths.Length > MaxUntracked || paths.Length > MaxEntries) throw new IOException("bound.untracked");
         Array.Sort(paths, (a,b) => CompareBytes(Utf8.GetBytes(a), Utf8.GetBytes(b)));
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string path in paths) {
@@ -3957,7 +4082,8 @@ public static class Stage3MaterializedConsumer {
             string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\');
             if (!top.Equals(root, StringComparison.OrdinalIgnoreCase) && !top.Equals(posixRoot, StringComparison.Ordinal)) throw new IOException("root.git-mismatch");
             string producerHash = Hash(ReadHeld(Path.Combine(root, "scripts", "setup", "materialize-symlinks-windows.shs"), held, 1024 * 1024));
-            var headLinks = HeadLinks(root, head);
+            var gitlinks = new Dictionary<string,string>(StringComparer.Ordinal);
+            var headLinks = HeadLinks(root, head, gitlinks);
             var pending = new List<string>();
             byte[] receiptBytes = ReadHeld(source, held, 8 * 1024 * 1024);
             string receiptText = new UTF8Encoding(false,true).GetString(receiptBytes);
@@ -4092,13 +4218,31 @@ public static class Stage3MaterializedConsumer {
             // unambiguous because aliases themselves are unique and no target
             // may equal or descend from an alias path; do not reject equal or
             // nested canonical target paths here.
-            AuditTree(root, aliases, held);
+            var inspectedGitlinks = new HashSet<string>(StringComparer.Ordinal);
+            var initializedGitlinks = new HashSet<string>(StringComparer.Ordinal);
+            var generatedAuthorities = new List<string>();
+            AuditTree(root, aliases, gitlinks, inspectedGitlinks, initializedGitlinks, generatedAuthorities, held);
             // Held policy/placeholder bytes are authoritative until Git returns.
             // Absence itself cannot be locked: check at use and again at finish.
             CheckPending(pendingLinks, pending, policyRows, held);
             string result = Inventory(root, head, aliases);
             CheckPending(pendingLinks, pending, policyRows, held);
+            // The child status ran before descendant handles were acquired.
+            // Recheck every child after the full walk, including absent and
+            // uninitialized gitlinks whose empty directories cannot lock out
+            // new entries. No new path may appear after the audit.
+            foreach (var pair in gitlinks) {
+                string path = Path.Combine(root, pair.Key.Replace('/','\\'));
+                uint attr = GetFileAttributesW(path);
+                int error = Marshal.GetLastWin32Error();
+                bool present = attr != 0xFFFFFFFFu;
+                if (!present && error != 2 && error != 3) throw new IOException("path.gitlink-absence");
+                if (present != inspectedGitlinks.Contains(pair.Key)) throw new IOException("path.gitlink-appeared-or-vanished");
+                if (present && CheckGitlink(root, path, pair.Value, gitlinks, false, held) != initializedGitlinks.Contains(pair.Key))
+                    throw new IOException("path.gitlink-initialization-changed");
+            }
             if (Text(Git(root, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != head) throw new IOException("head.changed");
+            foreach (string generated in generatedAuthorities) CheckGeneratedAuthority(root, generated, held);
             if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("policy.changed");
             Tick();
             File.WriteAllText(Environment.GetEnvironmentVariable("STAGE3_RESULT"), result, new UTF8Encoding(false));
