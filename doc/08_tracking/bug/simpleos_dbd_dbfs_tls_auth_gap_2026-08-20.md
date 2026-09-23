@@ -154,6 +154,34 @@ Performance/durability blocker:
 Until all evidence exists, `DBD_CAPABILITY_STATE` must remain blocked and the
 daemon must fail closed instead of accepting network clients.
 
+## Boot credential owner closed at source scope (2026-09-23)
+
+The canonical `/SERVERS.ELF` launch path now feeds the bounded credential file
+into `DbdBootCredentialOwnerV1.admit_source`. Hashing and compiler-resistant
+wipe/readback occur in one owner operation over the same authoritative mutable
+source; no independent or replayable wipe receipt is accepted. The owner retains only an
+incremental SHA-256 state, admits its digest-only provider only after exact
+volatile wipe/readback of the sole source buffer, and volatile-wipes the hash
+state and schedule before admission. Overflow, short input, mismatched wipe
+evidence, hash failure, reload, and revocation all fail closed. The previous
+public `DbdServer.provision_service(principal, credential, ...)` raw-array
+bypass is removed; TLS admission accepts only the admitted digest owner.
+
+This closes only the boot credential item. Production startup remains blocked
+at `tls-owner-unavailable`, followed by durable DBFS commit authority. Streaming
+adds constant memory and at most 128 boot-only byte updates; it does not change
+the authenticated request hot path.
+
+TODO(environment): once an admitted Phase-2 test-capable Simple runtime is
+available, run `test/01_unit/os/apps/dbd/dbd_boot_credential_owner_spec.spl`,
+`dbd_provisioning_spec.spl`, `dbd_protocol_hardening_spec.spl`,
+`dbd_launch_spec.spl`, and
+`test/01_unit/os/apps/servers_user/dbd_filesystem_provisioning_spec.spl`; then
+run the SimpleOS QEMU `/SERVERS.ELF` negative boot matrix with missing, short,
+oversized, and revoked `/SYS/SRVDB.KEY`. Optimized-native disassembly must also
+retain volatile source/workspace wipe calls before this deferred target gate is
+closed.
+
 ## tls13_accept entropy bypass closed 2026-08-21 (record stays open)
 
 This record named the bypass exactly: "A canonical typed entropy owner does

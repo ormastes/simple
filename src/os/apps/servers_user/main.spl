@@ -15,6 +15,7 @@ use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
 use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
 use os.apps.dbd.dbd.{DbdServer}
+use os.apps.dbd.dbd_protocol.{DbdBootCredentialOwnerV1}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
@@ -166,8 +167,8 @@ fn provision_database_service(server: DbdServer) -> bool:
     # through digest registration.  Nothing here builds a `text` from it: an
     # immutable `text` cannot be zeroized, so every copy would survive for the
     # process lifetime and could reach a core dump or a retained acceptance
-    # image. Only the SHA-256 digest is retained, by CapabilityTable. The sole
-    # owned buffer is wiped on every path. Surrounding whitespace is rejected
+    # image. Only the SHA-256 digest is retained by the credential provider.
+    # The sole owned buffer is wiped on every path. Surrounding whitespace is rejected
     # instead of trimmed, because trimming would create a second secret copy.
     # doc/08_tracking/bug/simpleos_server_credential_zeroization_gap_2026-08-14.md
     match read_file_bytes_direct_owned(DB_CREDENTIAL_PATH, MAX_DB_CREDENTIAL_BYTES + 1u64):
@@ -180,24 +181,43 @@ fn provision_database_service(server: DbdServer) -> bool:
                 val rejected_report = secure_zero_u8_slots(credential)
                 publish_credential_zeroization("loaded-rejected", rejected_report, false)
                 return false
+            val credential_size = credential.len()
+            var boot_owner = DbdBootCredentialOwnerV1.new("operator")
+            if not boot_owner.admit_source(credential):
+                val rejected_report = secure_zero_u8_slots(credential)
+                publish_credential_zeroization(
+                    "owner-rejected", rejected_report,
+                    boot_owner.hash_workspace_zeroized)
+                return false
+            val credential_report = secure_zero_u8_slots(credential)
+            if not credential_report.verified() or
+                credential_report.slot_count != credential_size:
+                boot_owner.revoke()
+                publish_credential_zeroization(
+                    "caller-source-wipe-failed", credential_report,
+                    boot_owner.hash_workspace_zeroized)
+                return false
             match read_file_bytes_direct_owned(DB_CERTIFICATE_PATH, 65536u64):
                 Err(_):
-                    val report = secure_zero_u8_slots(credential)
-                    publish_credential_zeroization("certificate-missing", report, false)
+                    boot_owner.revoke()
+                    publish_credential_zeroization(
+                        "certificate-missing", credential_report,
+                        boot_owner.hash_workspace_zeroized)
                     false
                 Ok(loaded_cert):
                     var cert = loaded_cert
                     match read_file_bytes_direct_owned(DB_PRIVATE_KEY_PATH, 16384u64):
                         Err(_):
                             val _ = secure_zero_u8_slots(cert)
-                            val report = secure_zero_u8_slots(credential)
-                            publish_credential_zeroization("private-key-missing", report, false)
+                            boot_owner.revoke()
+                            publish_credential_zeroization(
+                                "private-key-missing", credential_report,
+                                boot_owner.hash_workspace_zeroized)
                             false
                         Ok(loaded_key):
                             var key = loaded_key
-                            val admitted = server.provision_service(
-                                "operator", credential, [cert], key, 0x0807u16)
-                            val credential_report = secure_zero_u8_slots(credential)
+                            val admitted = server.provision_service_from_boot_owner(
+                                boot_owner, [cert], key, 0x0807u16)
                             val cert_report = secure_zero_u8_slots(cert)
                             val key_report = secure_zero_u8_slots(key)
                             val all_wiped = credential_report.verified() and
@@ -207,7 +227,7 @@ fn provision_database_service(server: DbdServer) -> bool:
                             admitted and all_wiped
 
 fn main() -> i64:
-    var db_server = DbdServer.new()
+    var db_server = DbdServer.new_filesystem_launched_v1()
     if not provision_database_service(db_server):
         debug_line("[simpleos-servers-user] credential=blocked path=" + DB_CREDENTIAL_PATH)
         return 5
