@@ -87,6 +87,70 @@ bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
 test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$tmp/bin/cmp"
 test "$(bootstrap_stage3_hash_file "$tmp/bin/cmp")" = \
     "$BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256"
+# A stale or wrong explicit candidate cannot replace the comparator selected
+# from the admitted PATH.  These failures retain their input values, proving
+# compare_bind publishes its path/hash only after all authority checks pass.
+bound_cmp=$BOOTSTRAP_STAGE3_COMPARE_TOOL
+bound_cmp_sha=$BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+"$mkdir_path" -p "$tmp/wrong-dir"
+cp "$tmp/bin/cmp" "$tmp/wrong-dir/cmp"
+BOOTSTRAP_STAGE3_COMPARE_TOOL="$tmp/wrong-dir/cmp"
+BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256=uncommitted
+export BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+if bootstrap_stage3_compare_bind; then
+    echo 'FAIL: explicit wrong comparator candidate admitted' >&2
+    exit 1
+elif [ "$?" -ne 2 ]; then
+    echo 'FAIL: explicit wrong comparator candidate returned wrong status' >&2
+    exit 1
+fi
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$tmp/wrong-dir/cmp"
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256" = uncommitted
+BOOTSTRAP_STAGE3_COMPARE_TOOL="$tmp/stale-cmp"
+BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256=uncommitted
+export BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+if bootstrap_stage3_compare_bind; then
+    echo 'FAIL: explicit stale comparator candidate admitted' >&2
+    exit 1
+elif [ "$?" -ne 2 ]; then
+    echo 'FAIL: explicit stale comparator candidate returned wrong status' >&2
+    exit 1
+fi
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$tmp/stale-cmp"
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256" = uncommitted
+BOOTSTRAP_STAGE3_COMPARE_TOOL=$bound_cmp
+BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256=$bound_cmp_sha
+export BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
+# Windows toolchains use paths with spaces, and bootstrap worktrees can exceed
+# MAX_PATH. Bind a real comparator through both forms without word splitting.
+long_component=12345678901234567890123456789012
+long_cmp_dir="$tmp/space comparator/$long_component/$long_component/$long_component/$long_component/$long_component/$long_component/$long_component"
+"$mkdir_path" -p "$long_cmp_dir"
+cp "$tmp/bin/cmp" "$long_cmp_dir/cmp"
+PATH="$long_cmp_dir:/usr/bin:/bin"
+export PATH
+unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two" || {
+    echo 'FAIL: spaced/long-path comparator did not bind' >&2
+    exit 1
+}
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$long_cmp_dir/cmp" || {
+    echo 'FAIL: spaced/long-path comparator bound a different candidate' >&2
+    exit 1
+}
+test "${#BOOTSTRAP_STAGE3_COMPARE_TOOL}" -gt 260 || {
+    echo 'FAIL: spaced/long-path fixture did not exceed Windows MAX_PATH' >&2
+    exit 1
+}
+# The rest of this status matrix deliberately invokes the comparator many
+# times. Restore the short admitted fixture after the single path proof so
+# Windows pathname conversion does not turn a correctness test into a slow
+# bootstrap gate.
+PATH="$tmp/bin:/usr/bin:/bin"
+export PATH
+unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
 if bootstrap_stage3_compare_files "$tmp/one" "$tmp/three"; then
     echo 'FAIL: different files admitted' >&2
     exit 1
