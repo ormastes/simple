@@ -562,6 +562,9 @@ int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
+SplArray* rt_f64_array_alloc(int64_t len);
+SplArray* rt_f32_array_alloc(int64_t len);
+SplArray* rt_i64_array_alloc(int64_t len);
 SplArray* rt_array_new_uninit(int64_t cap);
 /* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
 int rt_array_is_byte_packed(SplArray* value);
@@ -587,6 +590,8 @@ int64_t   rt_dict_free_deep(int64_t value);
 int64_t   rt_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
+int64_t   rt_random_bytes_c(uint64_t count);
+double    rt_random_random(void);
 SplArray* rt_bytes_alloc(int64_t len);
 int64_t  rt_tls13_sha256(int64_t data);
 int64_t  rt_array_len(SplArray* array);
@@ -880,12 +885,15 @@ double   rt_math_sin(double x);
 double   rt_math_cos(double x);
 double   rt_math_tan(double x);
 double   rt_math_hypot(double x, double y);
+double   rt_math_fma(double x, double y, double z);
+int64_t  rt_f64_to_bits(double value);
 /* IEEE-754 minNum/maxNum (fmin/fmax), matching Rust f64::min / f64::max. */
 double   rt_math_min(double a, double b);
 double   rt_math_max(double a, double b);
 int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
 int8_t   rt_utf8_validate(int64_t bytes_value);
 int64_t  rt_utf8_find_invalid(int64_t bytes_value);
+int64_t  rt_numeric_sum_f64(int64_t value);
 int64_t  rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value);
 /* Removes and RETURNS the element at `index` (tagged). NIL for a non-array
  * receiver or an out-of-range index; a negative index is out of range here,

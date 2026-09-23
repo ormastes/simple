@@ -6709,6 +6709,17 @@ double rt_math_hypot(double x, double y) {
     return hypot(x, y);
 }
 
+/* A fused operation is required here: x*y+z can round twice. */
+double rt_math_fma(double x, double y, double z) {
+    return fma(x, y, z);
+}
+
+/* The Simple SFFI spells this boundary rt_f64_to_bits; core memory owns the
+ * identical bit-preserving operation under its original spl_ name. */
+int64_t rt_f64_to_bits(double value) {
+    return spl_f64_to_bits(value);
+}
+
 double rt_math_min(double a, double b) {
     return fmin(a, b);
 }
@@ -6985,6 +6996,34 @@ static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
 
 SplArray* rt_array_new(int64_t cap) {
     return rt_core_array_new(cap, 0);
+}
+
+/* Typed Simple arrays use the ordinary tagged-slot array ABI. The interpreter
+ * allocates the requested length and fills every slot with numeric zero. */
+static SplArray* rt_core_zero_array_alloc(int64_t len, int floating) {
+    if (len < 0) len = 0;
+    SplArray* array = rt_array_new(len);
+    if (!array) return NULL;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t zero = floating ? rt_value_float(0.0) : rt_value_int(0);
+        if (!rt_array_push(array, zero)) {
+            rt_array_free(array);
+            return NULL;
+        }
+    }
+    return array;
+}
+
+SplArray* rt_f64_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 1);
+}
+
+SplArray* rt_f32_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 1);
+}
+
+SplArray* rt_i64_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 0);
 }
 
 SplArray* rt_array_new_uninit(int64_t cap) {
@@ -7468,6 +7507,71 @@ SplArray* rt_byte_array_new_len(uint64_t len) {
         array->len = (int64_t)len;
     }
     return a;
+}
+
+/* The [u8] SFFI boundary returns a packed byte array. Entropy failure is
+ * reported as NIL, never as a zero-filled buffer that looks random. */
+int64_t rt_random_bytes_c(uint64_t count) {
+    if (count > INT64_MAX || count > SIZE_MAX) return rt_core_nil();
+    SplArray* result = rt_byte_array_new_len(count);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) return rt_core_nil();
+    uint8_t* bytes = (uint8_t*)array->data;
+    size_t length = (size_t)count;
+    if (length == 0) return (int64_t)(uintptr_t)result;
+#if defined(_WIN32)
+    typedef long (WINAPI *RtBCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    wchar_t bcrypt_path[MAX_PATH];
+    static const wchar_t bcrypt_leaf[] = L"\\bcrypt.dll";
+    UINT system_len = GetSystemDirectoryW(bcrypt_path, MAX_PATH);
+    HMODULE bcrypt = NULL;
+    if (system_len != 0 &&
+        system_len <= MAX_PATH - (sizeof(bcrypt_leaf) / sizeof(bcrypt_leaf[0]))) {
+        memcpy(bcrypt_path + system_len, bcrypt_leaf, sizeof(bcrypt_leaf));
+        bcrypt = LoadLibraryW(bcrypt_path);
+    }
+    RtBCryptGenRandomFn fill = bcrypt ?
+        (RtBCryptGenRandomFn)GetProcAddress(bcrypt, "BCryptGenRandom") : NULL;
+    int ok = fill != NULL;
+    size_t offset = 0;
+    while (ok && offset < length) {
+        unsigned long chunk = (unsigned long)((length - offset) > 1048576u ? 1048576u : (length - offset));
+        ok = fill(NULL, bytes + offset, chunk, 0x00000002) == 0;
+        offset += chunk;
+    }
+    if (bcrypt) FreeLibrary(bcrypt);
+#else
+    int ok = 1;
+    int fd = -1;
+    if (length != 0) {
+#ifdef O_CLOEXEC
+        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+#else
+        fd = open("/dev/urandom", O_RDONLY);
+        if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            close(fd);
+            fd = -1;
+        }
+#endif
+        ok = fd >= 0;
+    }
+    size_t offset = 0;
+    while (ok && offset < length) {
+        size_t chunk = length - offset > 1048576u ? 1048576u : length - offset;
+        ssize_t n = read(fd, bytes + offset, chunk);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = 0; break; }
+        offset += (size_t)n;
+    }
+    if (fd >= 0) close(fd);
+#endif
+    if (!ok) {
+        volatile uint8_t* wipe = bytes;
+        for (size_t i = 0; i < length; i++) wipe[i] = 0;
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
 }
 
 SplArray* rt_bytes_alloc(int64_t len) {
@@ -9359,6 +9463,20 @@ static int splc_array_numeric_at(RtCoreArray* array, int64_t index, double* out)
     return splc_numeric_to_f64(((int64_t*)array->data)[index], out);
 }
 
+/* Rust's rt_numeric_sum_f64 accepts integer and float elements, returns a
+ * tagged float, and returns NIL for a non-array or non-numeric element. */
+int64_t rt_numeric_sum_f64(int64_t value) {
+    RtCoreArray* array = rt_core_as_array(value);
+    if (!array || array->len < 0) return rt_core_nil();
+    double sum = 0.0;
+    for (int64_t i = 0; i < array->len; i++) {
+        double item;
+        if (!splc_array_numeric_at(array, i, &item)) return rt_core_nil();
+        sum += item;
+    }
+    return rt_value_float(sum);
+}
+
 /* Twin of rt_numeric_dot_f64 -> packed_dot_f64 -> scalar_dot_runtime_f64:
  * lengths must match, every element must be numeric, and the accumulation is
  * `acc = a.mul_add(b, acc)` -- a fused multiply-add, one rounding per term.
@@ -10131,9 +10249,11 @@ int64_t rt_random_randint(int64_t min, int64_t max) {
     uint64_t range = (uint64_t)(max - min + 1);
     return min + (int64_t)(rt_bucket2_random_next() % range);
 }
+double rt_random_random(void) {
+    return (double)rt_bucket2_random_next() / RT_BUCKET2_LCG_M_F;
+}
 double rt_random_uniform(double min, double max) {
-    double r = (double)rt_bucket2_random_next() / RT_BUCKET2_LCG_M_F;
-    return min + r * (max - min);
+    return min + rt_random_random() * (max - min);
 }
 
 /* ---- collections.rs: rt_typed_bytes_u8_data_at --------------------------- */
