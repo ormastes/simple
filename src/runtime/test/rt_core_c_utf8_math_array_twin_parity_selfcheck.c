@@ -105,7 +105,9 @@ static void check_sqrt(void) {
      * tan(0)=0, exp(0)=1, cbrt(8)=2, hypot(3,4)=5) so no tolerance is needed
      * and no rounding-mode assumption is smuggled in. */
     expect_f64_exact("rt_math_exp(0.0)", rt_math_exp(0.0), 1.0);
-    expect_f64_exact("rt_math_exp(1.0)", rt_math_exp(1.0), 2.7182818284590451);
+    /* Regression: the SimpleOS libc Taylor accumulation used to return the
+     * immediately preceding binary64 value (0x1.5bf0a8b145768p+1). */
+    expect_f64_exact("rt_math_exp(1.0)", rt_math_exp(1.0), 0x1.5bf0a8b145769p+1);
     expect_f64_exact("rt_math_cbrt(8.0)", rt_math_cbrt(8.0), 2.0);
     expect_f64_exact("rt_math_cbrt(-27.0)", rt_math_cbrt(-27.0), -3.0);
     expect_f64_exact("rt_math_sin(0.0)", rt_math_sin(0.0), 0.0);

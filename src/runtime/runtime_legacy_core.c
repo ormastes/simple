@@ -127,6 +127,19 @@ int64_t spl_thread_cpu_count(void) {
     return rt_thread_available_parallelism();
 }
 
+#if defined(__simpleos__)
+/* The hosted pthread pool is not part of the SimpleOS user runtime. */
+void rt_thread_sleep(int64_t millis) {
+    if (millis <= 0) return;
+    struct timespec delay = { millis / 1000, (millis % 1000) * 1000000 };
+    (void)nanosleep(&delay, NULL);
+}
+
+static bool simpleos_debug_mode_enabled;
+void rt_set_debug_mode(bool enabled) { simpleos_debug_mode_enabled = enabled; }
+bool rt_is_debug_mode_enabled(void) { return simpleos_debug_mode_enabled; }
+#endif
+
 static SplValue spl_value_nil(void) {
     SplValue v;
     memset(&v, 0, sizeof(v));

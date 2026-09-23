@@ -10633,7 +10633,10 @@ bool rt_munmap(int64_t addr, int64_t size) {
 }
 bool rt_msync(int64_t addr, int64_t size) {
     if (addr <= 0 || size <= 0) return false;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX does not expose a synchronous mapped-file flush primitive yet. */
+    return false;
+#elif defined(_WIN32)
     return FlushViewOfFile((void*)(intptr_t)addr, (SIZE_T)size) != 0;
 #else
     return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
@@ -10641,7 +10644,10 @@ bool rt_msync(int64_t addr, int64_t size) {
 }
 bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (addr <= 0 || size <= 0) return false;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* Advice is optional, but unknown advice remains a contract error. */
+    return advice >= 0 && advice <= 4;
+#elif defined(_WIN32)
     /* Advice is a hint everywhere. Windows offers no VirtualAlloc equivalent
      * for these five, so honour the contract that matters to callers: reject an
      * unknown advice code exactly as the POSIX branch does, accept a known one.
@@ -12916,8 +12922,10 @@ static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
  *     ABI fix uses for the identical single-word-boxed-text shape.
  * ---------------------------------------------------------------- */
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
 #include <glob.h>
+extern char** environ;
+#elif defined(__simpleos__)
 extern char** environ;
 #endif
 
@@ -13142,7 +13150,7 @@ int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
     SplArray* out = rt_array_new(0);
     if (!out) return rt_core_nil();
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
     char* pattern = rt_core_text_arg_to_cstr(pattern_ptr, pattern_len);
     if (!pattern) return (int64_t)(uintptr_t)out;
     glob_t results;
@@ -14195,7 +14203,10 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) || !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX has no secure random temporary-directory primitive yet. */
+    return rt_string_new(NULL, 0);
+#elif defined(_WIN32)
     typedef LONG (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
     typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
@@ -14285,7 +14296,10 @@ static wchar_t* spl_widen_long_path(const char* path) {
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX has no atomic no-replace file publication primitive yet. */
+    return -1;
+#elif defined(_WIN32)
     /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
      * underlying filesystem's real limit; the AOT native-build cache path
      * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
