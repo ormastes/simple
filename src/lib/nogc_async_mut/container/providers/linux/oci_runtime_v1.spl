@@ -30,6 +30,8 @@ pub const OCI_DEFAULT_TIMEOUT_MS: i64 = 30000
 pub const OCI_DEFAULT_STOP_TIMEOUT_SECONDS: i64 = 10
 pub const OCI_MAX_OUTPUT_BYTES: i64 = 1048576
 pub const OCI_MAX_CPU_LIMIT_MILLIS: i64 = 92233720368547758
+pub const OCI_MAX_RETAINED_RECORDS: i64 = 256
+pub const OCI_MAX_RETAINED_DESTROYED: i64 = 64
 
 pub const OCI_REASON_PROVIDER_UNAVAILABLE = "oci-provider-live-execution-unavailable"
 
@@ -269,6 +271,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._ok("prepare_pod", current,
                 RuntimeCommandV1(operation: "prepare_pod", program: "", args: []),
                 "logical attempt already prepared")
+        while self.states.len() >= OCI_MAX_RETAINED_RECORDS:
+            if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
+                return self._rejected("prepare_pod", "state-capacity-exhausted",
+                    runtime_command_empty())
         val id = RuntimeIdentityV1(pod_uid: request.pod_uid,
             attempt: request.attempt, provider_generation: self.provider_generation,
             operation_id: self._next_operation("prepare"), engine: self.engine,
@@ -354,7 +360,11 @@ impl LinuxOciRuntimeProviderV1:
         identity.operation_id = operation_id
         val created = RuntimeStateV1(phase: RUNTIME_PHASE_CREATED,
             identity: identity, exit_code: -1, reason: "created")
-        self.states[state_index] = created
+        val created_index = self._find(request.pod_uid, request.attempt)
+        if created_index < 0:
+            return self._rejected_with_output("create", created, command.1,
+                "state-evicted-during-create", run.stdout, run.stderr, run.exit_code)
+        self.states[created_index] = created
         if not self._save_intent(request, operation_id, native_id, RUNTIME_PHASE_CREATED):
             val cleanup = self.destroy(request, true)
             var failed = self._rejected_with_output("create", created, command.1,
@@ -524,6 +534,24 @@ impl LinuxOciRuntimeProviderV1:
         self._ok("stop", stopped, command.1, "stopped")
 
     me destroy(request: LinuxOciRequestV1, force: bool = false) -> RuntimeOperationV1:
+        val valid = self.validate(request)
+        if not valid.accepted:
+            return self._rejected("destroy", valid.reason, runtime_command_empty())
+        self._load_persisted_intent(request)
+        val cached_index = self._find(request.pod_uid, request.attempt)
+        if cached_index < 0:
+            val durable = self._intent_for(request.pod_uid, request.attempt)
+            if durable.phase == RUNTIME_PHASE_DESTROYED:
+                val identity = RuntimeIdentityV1(pod_uid: durable.pod_uid,
+                    attempt: durable.attempt,
+                    provider_generation: durable.provider_generation,
+                    operation_id: durable.operation_id, engine: durable.engine,
+                    native_id: durable.native_id, node_boot_id: durable.node_boot_id)
+                val destroyed = RuntimeStateV1(phase: RUNTIME_PHASE_DESTROYED,
+                    identity: identity, exit_code: -1, reason: "destroyed")
+                return self._ok("destroy", destroyed,
+                    RuntimeCommandV1(operation: "destroy", program: "", args: []),
+                    "idempotent durable destroyed workload")
         val current_result = self._current_for(request, "destroy")
         if current_result.status != RUNTIME_STATUS_OK:
             return current_result
@@ -568,6 +596,7 @@ impl LinuxOciRuntimeProviderV1:
                 current.identity.native_id, RUNTIME_PHASE_DESTROYED):
             return self._rejected_with_output("destroy", destroyed, command.1,
                 "intent-journal-update-failed", run.stdout, run.stderr, run.exit_code)
+        self._compact_destroyed()
         self._ok("destroy", destroyed, command.1, "destroyed")
 
     me recover(request: LinuxOciRequestV1) -> RuntimeOperationV1:
@@ -652,6 +681,11 @@ impl LinuxOciRuntimeProviderV1:
                 if index >= 0:
                     self.states[index] = recovered
                 else:
+                    while self.states.len() >= OCI_MAX_RETAINED_RECORDS:
+                        if not self._evict_oldest_destroyed(
+                                request.pod_uid, request.attempt):
+                            return self._rejected("recover",
+                                "state-capacity-exhausted", runtime_command_empty())
                     self.states.push(recovered)
                 self._ok("recover", recovered, command.1, "recovered")
 
@@ -670,6 +704,12 @@ impl LinuxOciRuntimeProviderV1:
         if not valid.accepted or operation_id == "" or not _safe_token(operation_id):
             return false
         self._save_intent(request, operation_id, "", RUNTIME_PHASE_PREPARED)
+
+    pub fn retained_state_count() -> i64:
+        self.states.len()
+
+    pub fn retained_intent_count() -> i64:
+        self.intents.len()
 
     # The optional capabilities are explicit.  A caller must never interpret
     # empty output as a successful logs/stats observation.
@@ -744,7 +784,55 @@ impl LinuxOciRuntimeProviderV1:
                 self.intents[index] = loaded
                 return
             index = index + 1
+        while self.intents.len() >= OCI_MAX_RETAINED_RECORDS:
+            if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
+                return
         self.intents.push(loaded)
+
+    fn _destroyed_count() -> i64:
+        var count = 0
+        for state in self.states:
+            if state.phase == RUNTIME_PHASE_DESTROYED:
+                count = count + 1
+        count
+
+    me _compact_destroyed():
+        while self._destroyed_count() > OCI_MAX_RETAINED_DESTROYED:
+            if not self._evict_oldest_destroyed("", 0):
+                return
+
+    me _evict_oldest_destroyed(except_pod_uid: text,
+            except_attempt: i64) -> bool:
+        var victim_uid = ""
+        var victim_attempt = 0
+        for state in self.states:
+            if state.phase == RUNTIME_PHASE_DESTROYED and
+                    (state.identity.pod_uid != except_pod_uid or
+                     state.identity.attempt != except_attempt):
+                victim_uid = state.identity.pod_uid
+                victim_attempt = state.identity.attempt
+                break
+        if victim_uid == "":
+            for intent in self.intents:
+                if intent.phase == RUNTIME_PHASE_DESTROYED and
+                        (intent.pod_uid != except_pod_uid or
+                         intent.attempt != except_attempt):
+                    victim_uid = intent.pod_uid
+                    victim_attempt = intent.attempt
+                    break
+        if victim_uid == "": return false
+        var kept_states: [RuntimeStateV1] = []
+        for state in self.states:
+            if state.identity.pod_uid != victim_uid or
+                    state.identity.attempt != victim_attempt:
+                kept_states.push(state)
+        var kept_intents: [RuntimeIntentV1] = []
+        for intent in self.intents:
+            if intent.pod_uid != victim_uid or intent.attempt != victim_attempt:
+                kept_intents.push(intent)
+        self.states = kept_states
+        self.intents = kept_intents
+        true
 
     fn _find(request_pod_uid: text, request_attempt: i64) -> i64:
         var index = 0
@@ -778,6 +866,9 @@ impl LinuxOciRuntimeProviderV1:
                 self.intents[index] = previous
                 return false
             index = index + 1
+        while self.intents.len() >= OCI_MAX_RETAINED_RECORDS:
+            if not self._evict_oldest_destroyed(request.pod_uid, request.attempt):
+                return false
         self.intents.push(RuntimeIntentV1(pod_uid: request.pod_uid,
             attempt: request.attempt, provider_generation: self.provider_generation,
             operation_id: operation_id, engine: self.engine,

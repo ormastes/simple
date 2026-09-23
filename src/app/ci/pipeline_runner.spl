@@ -33,7 +33,7 @@ use std.common.contracts.orchestration.ci_v1.{JobV1, PipelineV1, OrderedJobV1,
     expand_pipeline, RUN_POLICY_ALWAYS}
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1,
     RUNTIME_STATUS_OK, RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED,
-    runtime_command_empty, runtime_state_empty}
+    RUNTIME_PHASE_DESTROYED, runtime_command_empty, runtime_state_empty}
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.{LinuxOciRuntimeProviderV1,
     LinuxOciRequestV1}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
@@ -207,9 +207,41 @@ fn container_operation_receipt(name: text, spec: PodSpecV1,
         operation_id: result.state.identity.operation_id,
         runtime_state_dir: state_dir)
 
+# Runtime state is temporary pipeline-owned data.  A receipt names the path
+# only when deletion failed and an operator can still inspect it.
+pub fn cleanup_container_runtime_state(receipt: JobReceiptV1,
+        state_dir: text) -> JobReceiptV1:
+    var cleaned = receipt
+    if state_dir == "":
+        cleaned.runtime_state_dir = ""
+        return cleaned
+    if dir_remove_all(state_dir):
+        cleaned.runtime_state_dir = ""
+        return cleaned
+    cleaned.runtime_state_dir = state_dir
+    cleaned.verdict = VERDICT_FAIL
+    cleaned.reason = receipt.reason + "; runtime-state-cleanup-failed"
+    cleaned
+
+fn finalized_container_operation_receipt(name: text, spec: PodSpecV1,
+        result: RuntimeOperationV1, boot: text, attempt: i64,
+        state_dir: text) -> JobReceiptV1:
+    val receipt = container_operation_receipt(name, spec, result, boot,
+        attempt, state_dir)
+    if result.operation != "probe" and result.operation != "prepare_pod" and
+            result.state.phase != RUNTIME_PHASE_DESTROYED:
+        var retained = receipt
+        retained.reason = receipt.reason + "; runtime-state-retained-for-recovery"
+        return retained
+    cleanup_container_runtime_state(receipt, state_dir)
+
 fn merge_container_cleanup(primary: RuntimeOperationV1,
         cleanup: RuntimeOperationV1) -> RuntimeOperationV1:
-    if cleanup.status == RUNTIME_STATUS_OK: return primary
+    if cleanup.status == RUNTIME_STATUS_OK:
+        var cleaned = primary
+        cleaned.state = cleanup.state
+        cleaned.reason = primary.reason + "; cleanup: " + cleanup.reason
+        return cleaned
     var merged = cleanup
     merged.reason = primary.reason + "; cleanup: " + cleanup.reason
     if cleanup.status != RUNTIME_STATUS_BLOCKED:
@@ -246,7 +278,7 @@ fn run_container_job(name: text, spec: PodSpecV1, boot: text,
             operation: "probe", command: runtime_command_empty(),
             state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "",
             reason: provider_probe.reason)
-        return container_operation_receipt(name, spec, unavailable, boot, 0, journal_root)
+        return finalized_container_operation_receipt(name, spec, unavailable, boot, 0, journal_root)
     val request = LinuxOciRequestV1(pod_uid: "run-" + canonical_runtime_token(run_id) +
         "-" + canonical_runtime_token(name),
         attempt: 1, operation_id: "", image: c.image, bundle_path: "",
@@ -256,39 +288,34 @@ fn run_container_job(name: text, spec: PodSpecV1, boot: text,
         network_policy: "bridge", filesystem_policy: "read-only")
     val prepared = provider.prepare_pod(request)
     if prepared.status != RUNTIME_STATUS_OK:
-        return container_operation_receipt(name, spec, prepared, boot, 0, journal_root)
+        return finalized_container_operation_receipt(name, spec, prepared, boot, 0, journal_root)
     val created = provider.create(request)
     if created.status != RUNTIME_STATUS_OK:
         if created.state.identity.native_id != "":
             val cleanup = provider.destroy(request, true)
-            return container_operation_receipt(name, spec,
+            return finalized_container_operation_receipt(name, spec,
                 merge_container_cleanup(created, cleanup), boot, 1, journal_root)
-        return container_operation_receipt(name, spec, created, boot, 1, journal_root)
+        return finalized_container_operation_receipt(name, spec, created, boot, 1, journal_root)
     val started = provider.start(request)
     if started.status != RUNTIME_STATUS_OK:
         val cleanup = provider.destroy(request, true)
-        return container_operation_receipt(name, spec,
+        return finalized_container_operation_receipt(name, spec,
             merge_container_cleanup(started, cleanup), boot, 1, journal_root)
     val waited = provider.wait(request)
     if waited.status != RUNTIME_STATUS_OK:
         val stopped = provider.stop(request)
         val cleanup = provider.destroy(request, true)
-        return container_operation_receipt(name, spec,
+        return finalized_container_operation_receipt(name, spec,
             merge_container_cleanup(merge_container_cleanup(waited, stopped), cleanup), boot, 1, journal_root)
     val logs = provider.logs(request)
     if logs.status != RUNTIME_STATUS_OK:
         val cleanup = provider.destroy(request, true)
-        return container_operation_receipt(name, spec,
+        return finalized_container_operation_receipt(name, spec,
             merge_container_cleanup(logs, cleanup), boot, 1, journal_root)
     val destroyed = provider.destroy(request, false)
     if destroyed.status != RUNTIME_STATUS_OK:
-        return container_operation_receipt(name, spec, destroyed, boot, 1, journal_root)
-    if not dir_remove_all(journal_root):
-        var cleanup_failure = destroyed
-        cleanup_failure.status = RUNTIME_STATUS_REJECTED
-        cleanup_failure.reason = "destroyed; runtime-state-cleanup-failed"
-        return container_operation_receipt(name, spec, cleanup_failure, boot, 1, journal_root)
-    JobReceiptV1(job_name: name, attempt: 1, runtime_class: spec.runtime_class,
+        return finalized_container_operation_receipt(name, spec, destroyed, boot, 1, journal_root)
+    val receipt = JobReceiptV1(job_name: name, attempt: 1, runtime_class: spec.runtime_class,
         verdict: if waited.state.exit_code == 0 then VERDICT_PASS else VERDICT_FAIL,
         reason: if waited.state.exit_code == 0 then "exited 0; destroyed" else "exit status " + waited.state.exit_code.to_text() + "; destroyed",
         exit_code: waited.state.exit_code, stdout: logs.stdout, node_boot_id: boot,
@@ -296,6 +323,7 @@ fn run_container_job(name: text, spec: PodSpecV1, boot: text,
         provider_generation: waited.state.identity.provider_generation,
         operation_id: waited.state.identity.operation_id,
         runtime_state_dir: journal_root)
+    cleanup_container_runtime_state(receipt, journal_root)
 
 fn verdict_of(name: text, receipts: [JobReceiptV1]) -> text:
     for r in receipts:

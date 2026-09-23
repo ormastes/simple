@@ -30,8 +30,9 @@
 # that is refused.
 
 use std.spec.*
-use app.io.mod.{current_time_ms}
-use std.io_runtime.{file_read}
+use app.io.mod.{current_time_ms, file_write}
+use std.io_runtime.{file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1, PodSpecV1}
 use std.common.contracts.orchestration.ci_v1.*
 use app.ci.pipeline_runner.*
@@ -127,6 +128,35 @@ fn run_or_empty(p: PipelineV1, t: Dict<text, JobV1>, id: text) -> RunReceiptV1:
         case Err(r): RunReceiptV1(run_id: id, pipeline: "", verdict: "REJECTED:" + r.kind, jobs: [])
 
 describe "Simple CI runs a pipeline on this host":
+
+    it "cleans temporary container runtime state and reports no stale path":
+        val state_dir = match secure_temp_dir("/tmp", "simpleorch-cleanup-spec-"):
+            case Ok(path): path
+            case Err(_): ""
+        expect(state_dir.len()).to_be_greater_than(0)
+        val receipt = JobReceiptV1(job_name: "boxed", attempt: 1,
+            runtime_class: "native-container", verdict: VERDICT_FAIL,
+            reason: "create failed", exit_code: -1, stdout: "",
+            node_boot_id: "boot-1", native_id: "",
+            provider_generation: 1, operation_id: "create-1",
+            runtime_state_dir: state_dir)
+        val cleaned = cleanup_container_runtime_state(receipt, state_dir)
+        expect(cleaned.verdict).to_equal(VERDICT_FAIL)
+        expect(cleaned.reason).to_equal("create failed")
+        expect(cleaned.runtime_state_dir).to_equal("")
+        expect(file_exists(state_dir)).to_equal(false)
+
+        val blocking_file = match secure_temp_dir("/tmp", "simpleorch-cleanup-fail-"):
+            case Ok(path): path
+            case Err(_): ""
+        expect(file_write(blocking_file + "/regular", "owned")).to_equal(true)
+        val retained = cleanup_container_runtime_state(receipt,
+            blocking_file + "/regular")
+        expect(retained.verdict).to_equal(VERDICT_FAIL)
+        expect(retained.reason).to_equal("create failed; runtime-state-cleanup-failed")
+        expect(retained.runtime_state_dir).to_equal(blocking_file + "/regular")
+        val final_cleanup = cleanup_container_runtime_state(retained, blocking_file)
+        expect(final_cleanup.runtime_state_dir).to_equal("")
 
     it "runs every job in order and each receipt carries that run's fresh nonce":
         """

@@ -119,10 +119,6 @@ checks are implemented and covered without weakening the blocked receipt:
   create argv and retain the effective policy in the receipt;
 - distinguish a positively identified absent container from transient inspect
   failure so a journaled pre-create attempt can safely retry;
-- remove the per-run state directory on every pre-create/error return while
-  retaining an honest durable evidence location when recovery is required;
-- bound or compact the provider's in-memory state and intent tables without
-  discarding unflushed terminal records or invalidating active operation indices;
 - run create/start/wait/logs/destroy/restart recovery against the pinned
   BusyBox fixture and retain the nonce, identity labels, exit status, and
   cleanup receipt.
@@ -138,6 +134,12 @@ host is available, retain cold and warm probe latency plus maximum RSS for the
 exact provider binary, with the resolved effective cgroup path and fallback
 state. Until that receipt exists, do not claim a live startup, latency, or RSS
 performance result from the scripted fixtures.
+
+The 2026-09-23 bounded-storage follow-up caps both provider caches at 256
+records, compacts durable destroyed tombstones to 64, re-resolves indices after
+compaction, and rejects active-state overflow. Pipeline exits now remove their
+temporary state when no recovery authority is needed, retain and name it when
+native cleanup is unresolved, and never report a deleted path as evidence.
 
 ## Engine choice and what "native" costs per host (added 2026-09-07)
 

@@ -10,8 +10,8 @@ use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
 
-fn request(operation_id: text = "") -> LinuxOciRequestV1:
-    LinuxOciRequestV1(pod_uid: "pod-1", attempt: 1,
+fn request(operation_id: text = "", pod_uid: text = "pod-1") -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: pod_uid, attempt: 1,
         operation_id: operation_id,
         image: "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", bundle_path: "",
         command: ["/bin/busybox", "echo"], args: ["SIMPLEORCH-OK"],
@@ -357,3 +357,88 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val r = request()
         expect(provider.persist_intent(r, "create-failed-write")).to_equal(false)
         expect(provider.intent_for(r).operation_id).to_equal("")
+
+    it "bounds active state and intent storage without a growing lookup scan":
+        val states = LinuxOciRuntimeProviderV1.scripted("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, [])
+        var index = 0
+        while index < OCI_MAX_RETAINED_RECORDS:
+            expect(states.prepare_pod(request("", "state-" + index.to_text())).status)
+                .to_equal(RUNTIME_STATUS_OK)
+            index = index + 1
+        expect(states.retained_state_count()).to_equal(OCI_MAX_RETAINED_RECORDS)
+        expect(states.prepare_pod(request("", "state-overflow")).reason)
+            .to_equal("state-capacity-exhausted")
+
+        val intents = LinuxOciRuntimeProviderV1.scripted("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, [])
+        index = 0
+        while index < OCI_MAX_RETAINED_RECORDS:
+            expect(intents.persist_intent(request("", "intent-" + index.to_text()),
+                "create-" + index.to_text())).to_equal(true)
+            index = index + 1
+        expect(intents.retained_intent_count()).to_equal(OCI_MAX_RETAINED_RECORDS)
+        expect(intents.persist_intent(request("", "intent-overflow"),
+            "create-overflow")).to_equal(false)
+
+    it "keeps destroy idempotent when only the durable destroyed intent remains":
+        val destroyed_intent = RuntimeIntentV1(pod_uid: "pod-1", attempt: 1,
+            provider_generation: 7, operation_id: "create-old",
+            engine: OCI_DEFAULT_ENGINE, native_id: "ctr-old",
+            node_boot_id: "boot-1", phase: RUNTIME_PHASE_DESTROYED)
+        val provider = LinuxOciRuntimeProviderV1.scripted_with_intents("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7,
+            [destroyed_intent], [])
+        val result = provider.destroy(request(), false)
+        expect(result.status).to_equal(RUNTIME_STATUS_OK)
+        expect(result.state.phase).to_equal(RUNTIME_PHASE_DESTROYED)
+        expect(result.state.identity.native_id).to_equal("ctr-old")
+        val invalid = request("", "unsafe/pod")
+        expect(provider.destroy(invalid, false).status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(provider.destroy(invalid, false).reason)
+            .to_equal("pod-uid-contains-unsafe-character")
+
+    it "compacts old destroyed pairs while preserving active state":
+        var results: [ScriptedCommandResultV1] = []
+        var index = 0
+        while index <= OCI_MAX_RETAINED_DESTROYED:
+            val r = request("create-" + index.to_text(), "compact-" + index.to_text())
+            val create_cmd = build_create_command(OCI_DEFAULT_ENGINE,
+                "/var/lib/simpleorch", r, r.operation_id, 7, "boot-1").1
+            val native_id = "ctr-" + index.to_text()
+            val destroy_cmd = build_destroy_command(OCI_DEFAULT_ENGINE,
+                "/var/lib/simpleorch", native_id, false).1
+            results.push(scripted_result(create_cmd, native_id, 0))
+            results.push(scripted_result(destroy_cmd, "", 0))
+            index = index + 1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, results)
+        index = 0
+        while index <= OCI_MAX_RETAINED_DESTROYED:
+            val r = request("create-" + index.to_text(), "compact-" + index.to_text())
+            expect(provider.create(r).status).to_equal(RUNTIME_STATUS_OK)
+            expect(provider.destroy(r, false).status).to_equal(RUNTIME_STATUS_OK)
+            index = index + 1
+        expect(provider.retained_state_count()).to_equal(OCI_MAX_RETAINED_DESTROYED)
+        expect(provider.retained_intent_count()).to_equal(OCI_MAX_RETAINED_DESTROYED)
+        val active = request("", "active-survivor")
+        expect(provider.prepare_pod(active).status).to_equal(RUNTIME_STATUS_OK)
+        expect(provider.state_for(active).phase).to_equal(RUNTIME_PHASE_PREPARED)
+
+    it "rejects recovery state insertion at capacity without growing storage":
+        val target = request("recover-capacity", "recover-target")
+        val inspect_cmd = build_inspect_command(OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", "simpleorch-recover-target-1").1
+        val provider = LinuxOciRuntimeProviderV1.scripted("linux",
+            OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7,
+            [scripted_result(inspect_cmd,
+                "recover-target|1|boot-1|7|recover-capacity|ctr-recover|exited", 0)])
+        var index = 0
+        while index < OCI_MAX_RETAINED_RECORDS:
+            expect(provider.prepare_pod(request("", "active-" + index.to_text())).status)
+                .to_equal(RUNTIME_STATUS_OK)
+            index = index + 1
+        val recovered = provider.recover(target)
+        expect(recovered.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(recovered.reason).to_equal("state-capacity-exhausted")
+        expect(provider.retained_state_count()).to_equal(OCI_MAX_RETAINED_RECORDS)
