@@ -4,7 +4,12 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_io_tcp_bind(addr: text) -> i64
+@unsafe(reason: "raw IPv4 socket creation for native benchmark smoke", capabilities: [ffi])
+extern fn rt_io_tcp_socket_create(family: i64) -> i64
+@unsafe(reason: "raw descriptor bind status for native benchmark smoke", capabilities: [ffi])
+extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
+@unsafe(reason: "raw listener publication status for native benchmark smoke", capabilities: [ffi])
+extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
 extern fn rt_io_tcp_close(fd: i64) -> bool
 
 fn env_text(key: text, default_value: text) -> text:
@@ -54,9 +59,17 @@ fn main():
     val get_response = build_response(status, mime, body, false)
     val head_response = build_response(status, mime, body, true)
     val method_response = build_response("405 Method Not Allowed", "text/plain; charset=utf-8", "method not allowed\n", false)
-    val listener = rt_io_tcp_bind(addr)
+    val listener = rt_io_tcp_socket_create(0)
     if listener < 0:
+        print "[native-static-bind-prelude-smoke] socket_error addr={addr}"
+        return
+    if not rt_io_tcp_bind_fd(listener, addr):
+        val _closed = rt_io_tcp_close(listener)
         print "[native-static-bind-prelude-smoke] bind_error addr={addr}"
+        return
+    if not rt_io_tcp_listen(listener, 128):
+        val _closed = rt_io_tcp_close(listener)
+        print "[native-static-bind-prelude-smoke] listen_error addr={addr}"
         return
     val _closed = rt_io_tcp_close(listener)
     print "[native-static-bind-prelude-smoke] ok addr={addr} requests={request_limit} get={get_response.len()} head={head_response.len()} method={method_response.len()}"
