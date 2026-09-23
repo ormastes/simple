@@ -118,21 +118,22 @@ static bool bufs_ensure(uring_driver* ud)
     return true;
 }
 
+static void bufs_insert_no_grow(uring_driver* ud, buf_entry entry)
+{
+    int64_t slot = hash_slot(entry.op_id, ud->bufs_cap);
+    while (ud->bufs[slot].op_id != 0)
+        slot = (slot + 1) & (ud->bufs_cap - 1);
+    ud->bufs[slot] = entry;
+    ud->bufs_count++;
+}
+
 static bool bufs_put(uring_driver* ud, int64_t op_id, char* buf,
                      int64_t len, int op_type, char* path)
 {
     if (!bufs_ensure(ud)) return false;
-
-    int64_t slot = hash_slot(op_id, ud->bufs_cap);
-    while (ud->bufs[slot].op_id != 0)
-        slot = (slot + 1) & (ud->bufs_cap - 1);
-
-    ud->bufs[slot].op_id   = op_id;
-    ud->bufs[slot].buf     = buf;
-    ud->bufs[slot].len     = len;
-    ud->bufs[slot].op_type = op_type;
-    ud->bufs[slot].path    = path;
-    ud->bufs_count++;
+    bufs_insert_no_grow(ud, (buf_entry){
+        .op_id = op_id, .buf = buf, .len = len, .op_type = op_type, .path = path
+    });
     return true;
 }
 
@@ -161,7 +162,9 @@ static buf_entry bufs_take(uring_driver* ud, int64_t op_id)
                 ud->bufs[next].buf   = NULL;
                 ud->bufs[next].path  = NULL;
                 ud->bufs_count--;
-                bufs_put(ud, tmp.op_id, tmp.buf, tmp.len, tmp.op_type, tmp.path);
+                /* Re-probing must not resize the table being traversed.  The
+                 * removal made one slot available, so insertion cannot fail. */
+                bufs_insert_no_grow(ud, tmp);
                 next = (next + 1) & (ud->bufs_cap - 1);
             }
             return e;
@@ -244,7 +247,12 @@ static void uring_destroy(spl_driver* d)
 {
     uring_driver* ud = UD(d);
 
-    /* Free all tracked buffers */
+    /* Closing the ring first cancels and joins kernel ownership of submitted
+     * buffers.  Freeing those buffers before queue_exit is a use-after-free
+     * when an operation is still in flight. */
+    io_uring_queue_exit(&ud->ring);
+
+    /* Free all buffers that did not transfer to a completion consumer. */
     if (ud->bufs) {
         for (int64_t i = 0; i < ud->bufs_cap; i++) {
             if (ud->bufs[i].op_id != 0) {
@@ -256,7 +264,6 @@ static void uring_destroy(spl_driver* d)
     }
 
     free(ud->sf_ops);
-    io_uring_queue_exit(&ud->ring);
     free(ud);
 }
 

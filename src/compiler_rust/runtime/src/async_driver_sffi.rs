@@ -27,6 +27,11 @@ struct CCompletion {
     data_len: i64,
 }
 
+// Instances are stored and consumed only while the global driver mutex is
+// held. The owned C payload is released in that critical section.
+#[cfg(target_os = "linux")]
+unsafe impl Send for CCompletion {}
+
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct CSplDriver {
@@ -152,6 +157,8 @@ struct Driver {
     queue: Vec<Operation>,
     completions: Vec<Completion>,
     poll_snapshot: Vec<Completion>,
+    #[cfg(target_os = "linux")]
+    raw_poll: Vec<CCompletion>,
 }
 
 impl Driver {
@@ -163,6 +170,8 @@ impl Driver {
             queue: Vec::with_capacity(capacity),
             completions: Vec::with_capacity(capacity.min(1024)),
             poll_snapshot: Vec::with_capacity(capacity.min(1024)),
+            #[cfg(target_os = "linux")]
+            raw_poll: Vec::new(),
         }
     }
 
@@ -174,6 +183,7 @@ impl Driver {
             queue: Vec::new(),
             completions: Vec::new(),
             poll_snapshot: Vec::new(),
+            raw_poll: Vec::new(),
         }
     }
 
@@ -313,16 +323,17 @@ impl Driver {
             self.poll_snapshot.clear();
             return 0;
         }
-        let mut raw: Vec<CCompletion> = (0..limit)
-            .map(|_| CCompletion {
+        self.raw_poll.clear();
+        self.raw_poll.resize_with(limit, || CCompletion {
                 id: 0,
                 result: 0,
                 flags: 0,
                 data: std::ptr::null_mut(),
                 data_len: 0,
-            })
-            .collect();
-        let count = unsafe { spl_driver_poll(driver, raw.as_mut_ptr(), limit as i64, timeout_ms) };
+            });
+        let count = unsafe {
+            spl_driver_poll(driver, self.raw_poll.as_mut_ptr(), limit as i64, timeout_ms)
+        };
         if count <= 0 {
             self.poll_snapshot.clear();
             return count;
@@ -330,7 +341,7 @@ impl Driver {
         let count = (count as usize).min(limit);
         self.poll_snapshot.clear();
         self.poll_snapshot.reserve(count);
-        for completion in raw.iter_mut().take(count) {
+        for completion in self.raw_poll.iter_mut().take(count) {
             let data = if completion.data.is_null() || completion.data_len <= 0 {
                 Vec::new()
             } else {
