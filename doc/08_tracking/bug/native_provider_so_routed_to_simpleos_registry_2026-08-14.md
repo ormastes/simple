@@ -41,4 +41,3 @@ result encoder. Its size predicate is tested without allocating a megabyte-size
 fixture, avoiding an interpreter-performance regression in the regression test.
 Do not claim invocation PASS until a fresh bounded session rebuilds the provider
 and runner once with the admitted Pure Simple Stage 2/3 tool.
-
