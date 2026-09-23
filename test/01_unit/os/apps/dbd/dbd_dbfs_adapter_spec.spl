@@ -17,12 +17,69 @@ use std.spec
 use std.spec.step
 use os.apps.dbd.dbd_dbfs_adapter.{
     DbdDbfsAdapter, DbdDbfsAdapterState, dbd_dbfs_adapter_from_driver,
-    DBD_DBFS_MAX_RECOVERY_BYTES
+    dbd_dbfs_adapter_from_filesystem_vfs, DBD_DBFS_MAX_RECOVERY_BYTES,
+    DBD_DBFS_JOURNAL_PATH_V1
 }
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.ramfs.{RamFsDriver}
 use std.fs_driver.types.{Path, OpenFlags}
+
+var _dbd_test_next_id: i64 = 1
+var _dbd_test_ids: [i64] = []
+var _dbd_test_flushes: [i64] = []
+var _dbd_test_fail_flush: [bool] = []
+var _dbd_test_fail_reads_after: [i64] = []
+
+fn _dbd_test_idx(id: i64) -> i32:
+    var i: i32 = 0
+    while i < _dbd_test_ids.len() as i32:
+        if _dbd_test_ids[i] == id: return i
+        i = i + 1
+    -1
+
+struct DbdDurableTestDevice:
+    id: i64
+    inner: MemBlockDevice
+
+impl DbdDurableTestDevice:
+    static fn new() -> DbdDurableTestDevice:
+        val id = _dbd_test_next_id
+        _dbd_test_next_id = _dbd_test_next_id + 1
+        _dbd_test_ids.push(id)
+        _dbd_test_flushes.push(0)
+        _dbd_test_fail_flush.push(false)
+        _dbd_test_fail_reads_after.push(-1)
+        DbdDurableTestDevice(id: id, inner: MemBlockDevice.new(64u64, 512u32))
+
+    fn fail_flush():
+        _dbd_test_fail_flush[_dbd_test_idx(self.id)] = true
+
+    fn fail_reads_after_flushes(count: i64):
+        _dbd_test_fail_reads_after[_dbd_test_idx(self.id)] = count
+
+impl BlockDevice for DbdDurableTestDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        val idx = _dbd_test_idx(self.id)
+        if idx < 0: return Err("test device missing")
+        if _dbd_test_fail_reads_after[idx] >= 0 and
+                _dbd_test_flushes[idx] >= _dbd_test_fail_reads_after[idx]:
+            return Err("injected post-flush read failure")
+        self.inner.read_sector(lba)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        self.inner.write_sector(lba, data)
+
+    fn sector_size() -> u32: 512u32
+
+    me fn flush() -> Result<bool, text>:
+        val idx = _dbd_test_idx(self.id)
+        if idx < 0 or _dbd_test_fail_flush[idx]:
+            return Err("injected flush failure")
+        _dbd_test_flushes[idx] = _dbd_test_flushes[idx] + 1
+        Ok(true)
 
 
 fn _mounted_adapter(): DbdDbfsAdapter:
@@ -58,6 +115,68 @@ describe "dbd DBFS adapter durable admission":
         expect(adapter.state).to_equal(DbdDbfsAdapterState.Detached)
         expect(adapter.ready()).to_be(false)
         expect(adapter.blocker()).to_equal("mounted-root-is-not-dbfs")
+
+    it "blocks the disconnected filesystem syscall path without a false receipt":
+        val adapter = dbd_dbfs_adapter_from_filesystem_vfs()
+        expect(adapter.ready()).to_be(false)
+        expect(adapter.blocker()).to_equal(
+            "filesystem-vfs-dbfs-operation-authority-unavailable")
+
+describe "dbd device-backed verified commit":
+    it "issues a generation-bound receipt only after device flush and readback":
+        val dev = DbdDurableTestDevice.new()
+        val driver = DbFsDriver.open_on_device(dev, 0, 64).unwrap()
+        var adapter = dbd_dbfs_adapter_from_driver(DriverInstance.DbFs(driver))
+        val committed = adapter.commit_and_sync(
+            DBD_DBFS_JOURNAL_PATH_V1, [1u8, 2u8, 3u8, 4u8])
+        expect(committed.is_ok()).to_be(true)
+        val receipt = committed.unwrap()
+        expect(receipt.driver_instance_id).to_equal(driver.inst_id)
+        expect(receipt.commit_generation).to_equal(1i64)
+        expect(receipt.byte_count).to_equal(4i64)
+        expect(adapter.open_handles).to_equal(0i64)
+        expect(adapter.ready()).to_be(true)
+
+    it "quarantines an exact post-flush read failure as uncertain":
+        val dev = DbdDurableTestDevice.new()
+        dev.fail_reads_after_flushes(2)
+        val driver = DbFsDriver.open_on_device(dev, 0, 64).unwrap()
+        var adapter = dbd_dbfs_adapter_from_driver(DriverInstance.DbFs(driver))
+        val committed = adapter.commit_and_sync(
+            DBD_DBFS_JOURNAL_PATH_V1, [9u8, 8u8, 7u8])
+        expect(committed.is_err()).to_be(true)
+        expect(adapter.state).to_equal(DbdDbfsAdapterState.Quarantined)
+        expect(adapter.commit_outcome_uncertain()).to_be(true)
+        expect(adapter.open_handles).to_equal(0i64)
+        expect(adapter.reset_for_restart()).to_be(true)
+        expect(adapter.ready()).to_be(false)
+
+    it "rejects a flush failure before acknowledging publication":
+        val dev = DbdDurableTestDevice.new()
+        dev.fail_flush()
+        val driver = DbFsDriver.open_on_device(dev, 0, 64).unwrap()
+        var adapter = dbd_dbfs_adapter_from_driver(DriverInstance.DbFs(driver))
+        val committed = adapter.commit_and_sync(
+            DBD_DBFS_JOURNAL_PATH_V1, [4u8, 5u8])
+        expect(committed.is_err()).to_be(true)
+        expect(adapter.ready()).to_be(false)
+        expect(adapter.commit_outcome_uncertain()).to_be(false)
+
+    it "retains verification-handle authority after an unproved close":
+        var adapter = DbdDbfsAdapter(
+            state: DbdDbfsAdapterState.Quarantined,
+            driver: nil,
+            driver_instance_id: 41,
+            generation: 3,
+            open_handles: 1,
+            last_error: "dbfs-commit-postflush-verify-close-failed",
+            filesystem_vfs: false,
+            filesystem_vfs_transactional_replace: false,
+            filesystem_vfs_generation: 0u64)
+        expect(adapter.commit_outcome_uncertain()).to_be(true)
+        expect(adapter.close()).to_be(false)
+        expect(adapter.reset_for_restart()).to_be(false)
+        expect(adapter.open_handles).to_equal(1i64)
 
 describe "dbd DBFS adapter bounded recovery read":
     it "reads exact existing journal bytes through the typed driver":

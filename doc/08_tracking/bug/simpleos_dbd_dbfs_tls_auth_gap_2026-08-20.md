@@ -157,13 +157,21 @@ daemon must fail closed instead of accepting network clients.
 ## Durable DBFS authority integrated at source scope (2026-09-23)
 
 DBD no longer accepts root/durable-sync/transactional-replace booleans from its
-launcher. It snapshots the canonical mounted-DBFS owner twice, pins that exact
-generation, and rejects a remount before recovery or commit. A successful
-commit now returns `DbdDbfsCommitReceiptV1` only after exclusive staging,
-complete write, backing-device sync, atomic namespace replacement, namespace
-sync, and an exact bounded readback of the published bytes. Post-publication
-close, remount, or readback failures quarantine the adapter and report an
-uncertain outcome; they cannot be acknowledged as an abort or success.
+launcher. The filesystem-process descriptors currently route through the
+FAT32 syscall registration, while the mount capability describes a different
+in-kernel DBFS driver. Because those authorities are disconnected, the
+filesystem-launched constructor now fails closed with
+`filesystem-vfs-dbfs-operation-authority-unavailable`; it cannot mint a false
+receipt from a capability snapshot.
+
+The directly device-backed `DbFsDriver` path returns
+`DbdDbfsCommitReceiptV1` only after serialized staging, complete write,
+backing-device flush, atomic namespace replacement, a second namespace flush,
+and exact bounded readback of the published bytes. Its staging name is
+generation-scoped under the DBFS transaction owner; it is not claimed to use
+the filesystem syscall path's exclusive-open operation. Post-publication
+close or readback failures quarantine the adapter and report an uncertain
+outcome; they cannot be acknowledged as an abort or success.
 
 The underlying `DbFsDriver` path remains admitted only when its serialized
 device owner is registered. Its `fsync` advances the durable checkpoint only
