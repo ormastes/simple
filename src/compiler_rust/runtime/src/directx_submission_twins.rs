@@ -2,7 +2,7 @@
 //! capsule API (`src/runtime/runtime_directx_core.c`). The Rust runtime has
 //! no DirectX submission-lifecycle machinery of its own -- these are
 //! dual-implementation-ratchet twins, not a port of the Windows D3D11
-//! device/event-query bookkeeping. The five Rust-callable functions
+//! device/event-query bookkeeping. The six Rust-callable functions
 //! return exactly what the C implementation returns on ITS OWN non-Windows
 //! stub path (`#else` branch, `runtime_directx_core.c:633-684`), so a caller
 //! sees identical behaviour whether it is linked against the C runtime on a
@@ -18,6 +18,21 @@
 //! owner of the unmangled C ABI. These twins deliberately retain Rust symbol
 //! mangling: exporting them would collide with C and could replace Windows'
 //! real submission lifecycle with constant-return reference behavior.
+
+/// Contract: `int64_t rt_directx_submission_submit(int64_t width, int64_t
+/// height, const int64_t *words, int64_t words_len)`
+/// (`runtime_directx_core.c:651`). C's non-Windows stub ignores every
+/// argument and always returns `0` (no valid submission id is ever handed
+/// out). Fail-closed twin; no Rust DirectX device. The pointer argument is
+/// never dereferenced, matching the C stub.
+pub extern "C" fn rt_directx_submission_submit(
+    _width: i64,
+    _height: i64,
+    _words: *const i64,
+    _words_len: i64,
+) -> i64 {
+    0
+}
 
 /// Contract: `int64_t rt_directx_submission_poll(int64_t submission_id)`
 /// (`runtime_directx_core.c:660`). C's non-Windows stub always returns `-1`

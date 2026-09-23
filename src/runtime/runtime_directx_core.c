@@ -293,8 +293,7 @@ static void rt_directx_argb_color(uint32_t argb, float color[4]) {
     color[3] = (float)((argb >> 24) & 0xffu) / 255.0f;
 }
 
-int64_t rt_directx_submission_submit(int64_t width_arg, int64_t height_arg,
-                                     const int64_t *words, int64_t words_len) {
+int64_t rt_directx_submission_submit(int64_t width_arg, int64_t height_arg, const int64_t *words, int64_t words_len) {
     RtDirectXSubmission *submission;
     D3D11_QUERY_DESC query_desc;
     D3D11_TEXTURE2D_DESC desc;
@@ -648,8 +647,7 @@ int64_t rt_directx_hardware_adapter_identity(void) {
     return 0;
 }
 
-int64_t rt_directx_submission_submit(int64_t width, int64_t height,
-                                     const int64_t *words, int64_t words_len) {
+int64_t rt_directx_submission_submit(int64_t width, int64_t height, const int64_t *words, int64_t words_len) {
     (void)width;
     (void)height;
     (void)words;
