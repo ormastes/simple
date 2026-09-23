@@ -3,6 +3,13 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase-command-owner.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+loader_oracle=test/01_unit/compiler/loader/module_loader_relocation_spec.spl
+case "$(uname -s)" in
+  Darwin) loader_oracle=test/01_unit/compiler/loader/module_load_intent_spec.spl ;;
+esac
+PHASE_LOADER_ORACLE=$loader_oracle
+export PHASE_LOADER_ORACLE
 trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -11,6 +18,9 @@ mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
   "$tmp/source/test/02_integration/app" \
   "$tmp/source/test/01_unit/lib" "$tmp/source/src/lib" "$tmp/source/tools" \
   "$tmp/work" "$tmp/stage2-admitted" "$tmp/bin"
+mkdir -p "$tmp/source/scripts/resource"
+cp "$root/scripts/resource/process-tree-rss-watchdog.pl" "$tmp/source/scripts/resource/"
+cp "$root/scripts/bootstrap/bootstrap-session-exec.c" "$tmp/source/scripts/bootstrap/"
 cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
   "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
 cp "$root/scripts/bootstrap/windows-process-group-rss.awk" \
@@ -40,8 +50,7 @@ chmod 500 "$tmp/runtime/deps" "$tmp/runtime"
 : >"$tmp/executions"
 : >"$tmp/source/test/01_unit/compiler/fixture_spec.spl"
 : >"$tmp/source/test/01_unit/compiler/fixture_test.spl"
-cp "$root/test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl" \
-  "$tmp/source/test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl"
+: >"$tmp/source/$loader_oracle"
 : >"$tmp/source/test/02_integration/app/mcp_stdio_integration_spec.spl"
 : >"$tmp/source/test/01_unit/lib/expanded_fixture_spec.spl"
 
@@ -61,7 +70,7 @@ cat >"$tmp/tool" <<'EOF'
 #!/bin/sh
 printf '%s\t%s\t%s\n' "$(basename "$0")" "${SIMPLE_BINARY:-}" "$*" >>"$PHASE_EXECUTIONS"
 case "${1:-}" in
-  test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl)
+  test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_relocation_spec.spl|test/01_unit/compiler/loader/module_load_intent_spec.spl)
     [ "${SIMPLE_BIN:-}" = "${SIMPLE_BINARY:-}" ] || exit 24
     # The positive RSS assertion needs a live sample window on Windows.
     # Negative routing cases below do not incur this fixture-only delay.
@@ -109,9 +118,19 @@ if [ "${1:-}" = test/02_integration/app/mcp_stdio_integration_spec.spl ]; then
 fi
 case " $* " in
   *' --json '*)
-    if [ "${PHASE_VACUOUS_BOOTSTRAP:-0}" = 1 ] && \
+    if [ "${PHASE_NO_FOCUSED_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = "${PHASE_LOADER_ORACLE:?}" ]; then
+      :
+    elif [ "${PHASE_VACUOUS_BOOTSTRAP:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/bootstrap ]; then
       :
+    elif [ "${PHASE_AMBIGUOUS_REPOSITORY_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_spec.spl ]; then
+      echo '{"success":true,"success":false,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    elif [ "${PHASE_AMBIGUOUS_REPOSITORY_JSON:-0}" = 1 ] && \
+       [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+      echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
     elif [ "${PHASE_DUPLICATE_FULL_JSON:-0}" = 1 ] && \
        [ "${1:-}" = test/01_unit/compiler/fixture_test.spl ]; then
       echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
@@ -206,14 +225,14 @@ grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/
   "$tmp/executions" || fail "interpreter test was not bound to the full CLI"
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "compile test was not bound to the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+$loader_oracle --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "loader interpreter oracle was not bound to the full CLI"
-grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/loader/module_loader_segment_transaction_spec.spl --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+$loader_oracle --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "loader compile oracle was not bound to the full CLI"
 grep -Fq 'timing_scope=post-admission-excludes-git-lfs-checkout' "$tmp/work/summary.env" ||
   fail "post-admission timing scope was not retained"
 case "$(sed -n 's/^max_rss_measurement=//p' "$tmp/work/summary.env")" in
-  gnu-time-rusage-kib|proc-group-rss-kib) rss_value='[1-9][0-9]*' ;;
+  gnu-time-rusage-kib|proc-group-rss-kib|darwin-time-rusage-bytes-normalized-kib|bsd-time-rusage-kib) rss_value='[1-9][0-9]*' ;;
   unavailable) rss_value=unavailable ;;
   *) fail "unknown RSS measurement authority" ;;
 esac
@@ -484,6 +503,29 @@ for failed_mode in PHASE_FALSE_OUTER_SUCCESS PHASE_FALSE_SPEC_SUCCESS \
     "$failed_work/logs/repository_full_tests.inventory.tsv" ||
     fail "zero-exit failed JSON mode $failed_mode did not terminalize as a failure"
 done
+
+# Repository inventory rows have the same canonical terminal-JSON contract as
+# focused rows. Duplicate object keys and multiple terminal rows are ambiguous
+# even when a grep/sed parser could select values that look successful.
+: >"$tmp/executions"
+status=0
+PATH="$tmp/bin:$PATH" PHASE_AMBIGUOUS_REPOSITORY_JSON=1 \
+PHASE_INVOCATIONS="$tmp/invocations" PHASE_EXECUTIONS="$tmp/executions" \
+PHASE_TOOL="$tmp/tool" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage3 --compiler="$compiler" --compiler-sha256="$compiler_sha" \
+    --strategy=full --hash-policy=canonical --source-root="$tmp/source" \
+    --runtime-path="$tmp/runtime" --work-root="$tmp/ambiguous-repository-json-work" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "ambiguous repository terminal JSON was admitted"
+awk -F '\t' '$1 ~ /fixture_spec[.]spl$/ && $2 == "FAIL" && $3 == 91 && \
+  $4 == 0 { found=1 } END { exit !found }' \
+  "$tmp/ambiguous-repository-json-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "duplicate-key repository row did not fail canonical validation"
+awk -F '\t' '$1 ~ /fixture_test[.]spl$/ && $2 == "FAIL" && $3 == 91 && \
+  $4 == 0 { found=1 } END { exit !found }' \
+  "$tmp/ambiguous-repository-json-work/logs/repository_full_tests.inventory.tsv" ||
+  fail "multiple-terminal-row repository output did not fail canonical validation"
 
 # A test runner can be executable and return zero while changing the full CLI.
 # The verifier must reject it after the invocation instead of admitting a

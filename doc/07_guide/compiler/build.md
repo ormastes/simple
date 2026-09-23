@@ -143,6 +143,28 @@ The compiler supports multiple code generation backends:
 - **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
 - **Windows MSVC C builds:** configure a validated LLVM 23.1.x driver from `C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc`; use `clang-cl.exe` for MSVC C (or the validated `clang.exe` C driver where required), and leave `CXX` unset. `cl.exe`, GCC, G++, MinGW, and `clang++` are not admitted C compiler selections. Cargo may use `link.exe` only as its MSVC Rust linker. Static lint rule `W-WIN-CC-001` checks Windows-specific compiler selection files.
 
+For a pinned macOS bootstrap, Stage 2 forwards `CC`, `CXX`, `AR`, `LD`,
+`LLVM_CONFIG`, and `SIMPLE_LLVM_REQUIRED_VERSION` through its scrubbed child
+environment with either the Cranelift or LLVM backend. These exact values are
+also bound into the admission digest and reconstructed from the transcript by
+Stage 3 resume. Validate this boundary without compiling using
+`sh scripts/check/check-stage2-macos-toolchain-env.shs`; it exercises the real
+argument builder and checks execution/admission/replay agreement, including
+tool paths containing spaces and absence of macOS pins on Linux.
+
+The macOS bootstrap authority also freezes `libsimple_runtime.dylib`: Cocoa
+functions belong to this dynamic provider. Canonical generation and legacy
+migration pass the target explicitly, so a macOS tuple missing the dylib is
+refused. Phase 2/3 runtime capsules preserve its bytes, record
+`dynamic_runtime_sha256`, and include that digest in capsule identity. Existing
+capsules without that optional field retain their original identity format;
+they cannot silently carry an unbound dylib. Projection copies use the existing
+bounded streaming path, so provider size does not become a new peak RSS cost.
+Before Stage 2 compilation, macOS audits the frozen dylib/native-all pair with
+the pinned LLVM `nm` and a real offscreen Cocoa probe under a 60-second process
+deadline. See the retained `macos-cocoa-owner.log`; missing or duplicate Cocoa
+providers stop the bootstrap before compilation.
+
 ### SimpleOS Multi-Platform Binaries
 
 SimpleOS target metadata is centralized in `src/os/port/simpleos_multiplatform_build.spl`. The catalog lists the Simple entrypoint, linker script, QEMU binary, freestanding C flags, assembly flags, and boot support sources for each OS target.
