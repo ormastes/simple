@@ -33,3 +33,7 @@ The exact rejection inside `environment_variant_policy_handoff_decode_v1` is unp
 Existing regression surfaces are `test/01_unit/compiler/common/environment_variant_policy_handoff_v1_spec.spl` and `test/01_unit/app/cli/environment_variant_policy_handoff_owner_v1_spec.spl`. A direct-route owner probe failed on unrelated unresolved I/O facade names; a reduced pure-contract probe emitted unresolved-method const-zero warnings, so it cannot establish trustworthy decoder semantics. See `native_no_stub_mir_method_placeholder_exact424_2026-09-23.md`.
 
 Resolution requires preserving useful typed rejection evidence, identifying the failed contract with a semantically valid focused executable, and then obtaining fresh source-matched admission before canonical Stage3/4 claims.
+
+## Follow-up diagnostic checkpoint
+
+The publication source now preserves typed construction, encoding, attach, and extract errors at the CLI boundary. A focused no-stub native probe passed malformed-payload reason checks, then its separate roundtrip fixture stopped with `policy-construction-failed:invalid-policy` before encode/decode. That fixture result does **not** identify the original exact424 attach rejection. The owner SSpec and canonical Stage3 have not passed on the changed source; a new source-matched admission is required before retrying Stage3.
