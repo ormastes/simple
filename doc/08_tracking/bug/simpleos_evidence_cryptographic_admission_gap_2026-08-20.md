@@ -58,5 +58,42 @@ Current focused implementation/evidence surfaces:
 - `test/01_unit/os/services/evidence/artifact_snapshot_spec.spl`
 - `test/01_unit/os/services/evidence/verifier_owner_spec.spl`
 
+## Trust, policy, and time owner checkpoint (2026-09-23)
+
+`authority_owner.spl` now projects evidence signing roots only from the
+loader's one-time immutable trust-root registry and pins its generation. It
+owns the bounded receipt-age/challenge-TTL policy and samples the raw wall-clock
+provider behind a typed negative-failure boundary with rollback quarantine.
+The umbrella admission path uses those authoritative roots and time; its
+legacy roots parameter is only an exact assertion and cannot select authority.
+Partial initialization, root-generation change, clock failure, rollback, lock
+failure, and unlock failure reject the operation.
+
+This deliberately does not admit any release gate. Astra review found that the
+loader's public first-writer initializer is not yet privileged, the legacy
+verifier APIs still accept caller roots/timestamps, and performance campaign
+policy remains caller-provided. Trust/policy/time therefore stay false and the
+first blocker remains `trust-root-owner-unavailable`; crypto and serialization
+also remain false. No caller-provided boolean or timestamp is promoted to
+authority.
+
+The owner keeps at most 16 copied 32-byte public keys and performs bounded
+O(root-count) work only at initialization/root projection. Steady-state time
+sampling is O(1), allocation-free apart from returned value construction, and
+does not alter receipt signature verification or ledger hot loops.
+
+TODO(environment): once an admitted Phase-2 test-capable runtime exists, run
+`test/01_unit/os/services/evidence/authority_owner_spec.spl`,
+`artifact_snapshot_spec.spl`, `verifier_owner_spec.spl`, and
+`umbrella_admission_spec.spl`; then run SimpleOS QEMU root-absence,
+root-replacement, clock-failure, and clock-rollback cases. Keep PASS blocked
+until executable Ed25519 KAT/native constant-work evidence and authoritative
+mutex concurrency evidence independently admit their remaining gates.
+Before admitting trust/policy/time, route every exported verifier entrypoint
+through this owner (or reject mismatched assertions), require a privileged boot
+token for loader root initialization, move performance campaign policy out of
+the copyable admission context, and add deterministic clock failure/rollback
+and lock-failure injection coverage.
+
 Static review is complete. Executable status remains unverified because only a
 Stage-2 compile/native-build lane is admitted; it is not SSpec/test authority.

@@ -17,6 +17,12 @@ val _loader_crypto_mutex: i64 = mutex_raw_create()
 var _loader_crypto_roots: [ExecutableTrustedSignerV1] = []
 var _loader_crypto_initialized: bool = false
 var _loader_crypto_quarantined: bool = false
+var _loader_crypto_generation: u64 = 0u64
+
+pub(package) struct ExecutableTrustRootsSnapshotV1:
+    ok: bool
+    generation: u64
+    roots: [ExecutableTrustedSignerV1]
 
 fn _copy_bytes(source: [u8]) -> [u8]:
     var out: [u8] = []
@@ -80,7 +86,31 @@ pub fn executable_loader_trust_roots_initialize(
             key_id: root.key_id, public_key: _copy_bytes(root.public_key)))
     _loader_crypto_roots = installed
     _loader_crypto_initialized = true
+    if _loader_crypto_generation == 18446744073709551615u64:
+        _loader_crypto_quarantined = true
+        return _unlock(false)
+    _loader_crypto_generation = _loader_crypto_generation + 1u64
     _unlock(true)
+
+pub(package) fn executable_loader_trust_roots_snapshot_v1(
+) -> ExecutableTrustRootsSnapshotV1:
+    if _loader_crypto_quarantined or not mutex_raw_lock(_loader_crypto_mutex):
+        return ExecutableTrustRootsSnapshotV1(
+            ok: false, generation: 0u64, roots: [])
+    if not _loader_crypto_initialized or _loader_crypto_generation == 0u64:
+        val _ = _unlock(false)
+        return ExecutableTrustRootsSnapshotV1(
+            ok: false, generation: 0u64, roots: [])
+    var copied: [ExecutableTrustedSignerV1] = []
+    for root in _loader_crypto_roots:
+        copied.push(ExecutableTrustedSignerV1(
+            key_id: root.key_id, public_key: _copy_bytes(root.public_key)))
+    val generation = _loader_crypto_generation
+    if not _unlock(true):
+        return ExecutableTrustRootsSnapshotV1(
+            ok: false, generation: 0u64, roots: [])
+    ExecutableTrustRootsSnapshotV1(
+        ok: true, generation: generation, roots: copied)
 
 fn _append_field(body: text, value: text) -> text:
     body + value.len().to_text() + ":" + value

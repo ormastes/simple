@@ -16,12 +16,18 @@ use os.services.evidence.verifier_owner.{
     simpleos_evidence_consume_verified, simpleos_evidence_release_verified,
     simpleos_evidence_row_admitted
 }
+use os.services.evidence.authority_owner.{
+    SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1,
+    simpleos_evidence_authority_start_v1,
+    simpleos_evidence_authority_time_v1,
+    simpleos_evidence_authority_roots_v1
+}
 use std.nogc_sync_mut.io.file_ops.{
     file_exists, file_read, file_atomic_write, file_lock, file_unlock
 }
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
-val SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US: i64 = 900000000
+val SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US: i64 =
+    SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1
 val SIMPLEOS_UMBRELLA_MAX_NONCE_LEDGER_BYTES: i64 = 1048576
 val _SIMPLEOS_UMBRELLA_NONCE_LEDGER_PATH: text =
     "build/test-artifacts/simpleos_complete_os_hardening/consumed_nonces.v1"
@@ -128,6 +134,19 @@ fn _candidate(receipt_bytes: [u8]) -> SimpleOsCapabilityLedgerCandidateV1?:
             resume_command: "", owner: receipt.owner, reviewer: receipt.reviewer),
         receipt_present: true, receipt: receipt))
 
+fn _roots_same(
+    asserted: [SimpleOsTrustedEvidenceSignerV1],
+    authoritative: [SimpleOsTrustedEvidenceSignerV1]
+) -> bool:
+    if asserted.len() != authoritative.len(): return false
+    var index: i64 = 0
+    while index < asserted.len():
+        if asserted[index].key_id != authoritative[index].key_id or
+            asserted[index].public_key != authoritative[index].public_key:
+            return false
+        index = index + 1
+    true
+
 pub fn simpleos_umbrella_admit_exact_evidence_v1(
     requirement: text,
     consumer: text,
@@ -135,9 +154,17 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
     receipt_bytes: [u8],
     snapshot: SimpleOsEvidenceArtifactSnapshotV1
 ) -> SimpleOsUmbrellaAdmissionResultV1:
-    val now_unix_us = time_now_unix_micros()
     val candidate_value = _candidate(receipt_bytes)
     if not candidate_value.?: return _reject("receipt-decode")
+    val authority = simpleos_evidence_authority_start_v1()
+    if not authority.ok: return _reject("authority:" + authority.reason)
+    val time = simpleos_evidence_authority_time_v1()
+    if not time.ok: return _reject("authority:" + time.reason)
+    val now_unix_us = time.unix_us
+    val authoritative_roots = simpleos_evidence_authority_roots_v1()
+    if authoritative_roots.len() == 0 or
+        not _roots_same(trusted_roots, authoritative_roots):
+        return _reject("trust-root-assertion-mismatch")
     val candidate = candidate_value.unwrap()
     if candidate.row.requirement_id != requirement:
         return _reject("requirement-binding")
@@ -145,7 +172,10 @@ pub fn simpleos_umbrella_admit_exact_evidence_v1(
     val freshness = simpleos_umbrella_receipt_freshness_reason_v1(
         receipt.started_unix_us, receipt.finished_unix_us, now_unix_us)
     if freshness != "": return _reject(freshness)
-    val started = simpleos_evidence_verifier_start(trusted_roots)
+    if now_unix_us - receipt.finished_unix_us >
+        SIMPLEOS_EVIDENCE_POLICY_MAX_RECEIPT_AGE_US_V1:
+        return _reject("receipt-expired")
+    val started = simpleos_evidence_verifier_start(authoritative_roots)
     if not started.ok: return _reject("verifier:" + started.reason)
     # Keep replay exclusion live until either no state changed or both the
     # admitted row and its durable nonce record exist. A retryable pending
