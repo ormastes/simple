@@ -29,6 +29,7 @@ pub const OCI_DEFAULT_ENGINE = OCI_ENGINE_PODMAN
 pub const OCI_DEFAULT_TIMEOUT_MS: i64 = 30000
 pub const OCI_DEFAULT_STOP_TIMEOUT_SECONDS: i64 = 10
 pub const OCI_MAX_OUTPUT_BYTES: i64 = 1048576
+pub const OCI_MAX_CPU_LIMIT_MILLIS: i64 = 92233720368547758
 
 pub const OCI_REASON_PROVIDER_UNAVAILABLE = "oci-provider-live-execution-unavailable"
 
@@ -55,6 +56,7 @@ pub struct LinuxOciRequestV1:
 
 pub struct RootlessCapabilityEvidenceV1:
     uid: text
+    username: text
     uid_map: text
     gid_map: text
     subuid: text
@@ -243,6 +245,8 @@ impl LinuxOciRuntimeProviderV1:
                     reason: "argument-contains-control-character")
         if request.cpu_limit_millis <= 0:
             return RuntimeValidationV1(accepted: false, reason: "cpu-limit-invalid")
+        if request.cpu_limit_millis > OCI_MAX_CPU_LIMIT_MILLIS:
+            return RuntimeValidationV1(accepted: false, reason: "cpu-limit-overflow")
         if request.memory_limit_bytes <= 0:
             return RuntimeValidationV1(accepted: false, reason: "memory-limit-invalid")
         if request.pid_limit <= 0:
@@ -301,6 +305,9 @@ impl LinuxOciRuntimeProviderV1:
                 runtime_command_empty())
         self._load_persisted_intent(request)
         val saved_intent = self._intent_for(request.pod_uid, request.attempt)
+        if saved_intent.phase == RUNTIME_PHASE_DESTROYED:
+            return self._rejected("create", "attempt-already-destroyed",
+                runtime_command_empty())
         if saved_intent.operation_id != "":
             # A previous create may have timed out after native side effects.
             # Inspect/adopt the exact owned identity before permitting any
@@ -566,6 +573,16 @@ impl LinuxOciRuntimeProviderV1:
         self._load_persisted_intent(request)
         val index = self._find(request.pod_uid, request.attempt)
         val saved_intent = self._intent_for(request.pod_uid, request.attempt)
+        if saved_intent.phase == RUNTIME_PHASE_DESTROYED:
+            val destroyed = _state_from_intent(saved_intent, RUNTIME_PHASE_DESTROYED,
+                "destroyed")
+            if index >= 0:
+                self.states[index] = destroyed
+            else:
+                self.states.push(destroyed)
+            return self._ok("recover", destroyed,
+                RuntimeCommandV1(operation: "recover", program: "", args: []),
+                "recovered durable destroyed tombstone")
         var expected_operation_id = request.operation_id
         var expected_native_id = ""
         if saved_intent.operation_id != "" and request.operation_id != "" and
@@ -887,37 +904,72 @@ fn _read_probe_file(path: text) -> text:
         case Ok(value): value
         case Err(_): ""
 
+fn _state_from_intent(intent: RuntimeIntentV1, phase: text, reason: text) -> RuntimeStateV1:
+    val identity = RuntimeIdentityV1(pod_uid: intent.pod_uid,
+        attempt: intent.attempt, provider_generation: intent.provider_generation,
+        operation_id: intent.operation_id, engine: intent.engine,
+        native_id: intent.native_id, node_boot_id: intent.node_boot_id)
+    RuntimeStateV1(phase: phase, identity: identity, exit_code: -1, reason: reason)
+
+fn _effective_cgroup_dir(content: text) -> text:
+    for line in content.split("\n"):
+        if line.trim() == "0::/":
+            return "/sys/fs/cgroup"
+        if line.starts_with("0::/"):
+            val relative = line.substring(4, line.len()).trim()
+            if relative == "" or relative.contains("..") or relative.contains("\n") or
+                    relative.contains("\r"):
+                return ""
+            return "/sys/fs/cgroup/" + relative
+    ""
+
 fn _rootless_capability_evidence() -> RootlessCapabilityEvidenceV1:
     val uid_result = process_run_timeout("id", ["-u"], 5000)
     val uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
-    RootlessCapabilityEvidenceV1(uid: uid,
+    val username_result = process_run_timeout("id", ["-un"], 5000)
+    val username = if username_result.2.to_i64() == 0 then username_result.0.trim() else ""
+    val cgroup_dir = _effective_cgroup_dir(_read_probe_file("/proc/self/cgroup"))
+    RootlessCapabilityEvidenceV1(uid: uid, username: username,
         uid_map: _read_probe_file("/proc/self/uid_map"),
         gid_map: _read_probe_file("/proc/self/gid_map"),
         subuid: _read_probe_file("/etc/subuid"),
         subgid: _read_probe_file("/etc/subgid"),
-        cgroup_controllers: _read_probe_file("/sys/fs/cgroup/cgroup.controllers"),
-        cgroup_subtree_control: _read_probe_file("/sys/fs/cgroup/cgroup.subtree_control"))
+        cgroup_controllers: if cgroup_dir == "" then "" else
+            _read_probe_file(cgroup_dir + "/cgroup.controllers"),
+        cgroup_subtree_control: if cgroup_dir == "" then "" else
+            _read_probe_file(cgroup_dir + "/cgroup.subtree_control"))
 
-fn _has_subid_range(content: text, uid: text) -> bool:
+fn _has_subid_range(content: text, uid: text, username: text) -> bool:
     if uid == "": return false
     for line in content.split("\n"):
         val fields = line.trim().split(":")
-        if fields.len() == 3 and fields[0] == uid and
+        if fields.len() == 3 and (fields[0] == uid or
+                (username != "" and fields[0] == username)) and
                 fields[1].to_i64() > 0 and fields[2].to_i64() > 0:
             return true
     false
+
+fn _has_controller(content: text, expected: text) -> bool:
+    val normalized = content.replace("+", "").replace("\n", " ").replace("\t", " ")
+    for item in normalized.split(" "):
+        if item == expected: return true
+    false
+
+fn _has_required_controllers(content: text) -> bool:
+    _has_controller(content, "cpu") and _has_controller(content, "memory") and
+        _has_controller(content, "pids")
 
 pub fn rootless_capability_error(evidence: RootlessCapabilityEvidenceV1) -> text:
     if evidence.uid == "": return "rootless-uid-unavailable"
     if evidence.uid_map.trim() == "": return "rootless-uid-map-unavailable"
     if evidence.gid_map.trim() == "": return "rootless-gid-map-unavailable"
-    if not _has_subid_range(evidence.subuid, evidence.uid):
+    if not _has_subid_range(evidence.subuid, evidence.uid, evidence.username):
         return "rootless-subuid-range-unavailable"
-    if not _has_subid_range(evidence.subgid, evidence.uid):
+    if not _has_subid_range(evidence.subgid, evidence.uid, evidence.username):
         return "rootless-subgid-range-unavailable"
-    if evidence.cgroup_controllers.trim() == "":
+    if not _has_required_controllers(evidence.cgroup_controllers):
         return "rootless-cgroup-v2-controllers-unavailable"
-    if evidence.cgroup_subtree_control.trim() == "":
+    if not _has_required_controllers(evidence.cgroup_subtree_control):
         return "rootless-cgroup-delegation-unavailable"
     ""
 
@@ -983,6 +1035,10 @@ pub fn build_create_command(engine: text, state_dir: text,
                 return ("image-empty", runtime_command_empty())
             if not _locked_image(request.image):
                 return ("image-must-use-sha256-digest", runtime_command_empty())
+            if request.cpu_limit_millis <= 0:
+                return ("cpu-limit-invalid", runtime_command_empty())
+            if request.cpu_limit_millis > OCI_MAX_CPU_LIMIT_MILLIS:
+                return ("cpu-limit-overflow", runtime_command_empty())
             var args: [text] = ["create", "--name", name,
                 "--label", "io.simpleorch.pod_uid=" + request.pod_uid,
                 "--label", "io.simpleorch.attempt=" + request.attempt.to_text(),

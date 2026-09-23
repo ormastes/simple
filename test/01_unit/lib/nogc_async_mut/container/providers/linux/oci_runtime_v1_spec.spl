@@ -8,6 +8,7 @@ use std.spec.*
 use std.common.contracts.container.runtime_v1.*
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
 
 fn request(operation_id: text = "") -> LinuxOciRequestV1:
     LinuxOciRequestV1(pod_uid: "pod-1", attempt: 1,
@@ -34,39 +35,36 @@ fn scripted_result(command: RuntimeCommandV1, stdout: text, exit_code: i64) -> S
 describe "Linux OCI LinuxOciRuntimeProviderV1":
 
     it "assembles Podman argv without a shell and keeps the default engine explicit":
-        val r = request("create-1")
+        var r = request("create-1")
+        r.cpu_limit_millis = 1250
         val built = build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
             r, "create-1", 7, "boot-1")
         expect(built.0).to_equal("")
         expect(built.1.program).to_equal("podman")
-        expect(built.1.args[0]).to_equal("create")
-        expect(built.1.args[1]).to_equal("--name")
-        expect(built.1.args[2]).to_equal("simpleorch-pod-1-1")
-        expect(built.1.args[3]).to_equal("--label")
-        expect(built.1.args[4]).to_equal("io.simpleorch.pod_uid=pod-1")
-        expect(built.1.args[8]).to_equal("io.simpleorch.node_boot_id=boot-1")
-        expect(built.1.args[12]).to_equal("io.simpleorch.operation_id=create-1")
-        expect(built.1.args).to_contain("--cpu-quota")
-        expect(built.1.args).to_contain("100000")
-        expect(built.1.args).to_contain("--memory")
-        expect(built.1.args).to_contain("268435456")
-        expect(built.1.args).to_contain("--pids-limit")
-        expect(built.1.args).to_contain("64")
-        expect(built.1.args).to_contain("--network")
-        expect(built.1.args).to_contain("bridge")
-        expect(built.1.args).to_contain("--read-only")
-        expect(built.1.args).to_contain("no-new-privileges")
-        expect(built.1.args).to_contain("ALL")
-        expect(built.1.args).to_contain("docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        expect(built.1.args).to_contain("/bin/busybox")
-        expect(built.1.args).to_contain("SIMPLEORCH-OK")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-pod-1-1",
+            "--label", "io.simpleorch.pod_uid=pod-1",
+            "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1",
+            "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-1",
+            "--cpu-period", "100000", "--cpu-quota", "125000",
+            "--memory", "268435456", "--pids-limit", "64",
+            "--network", "bridge", "--read-only",
+            "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+            "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "/bin/busybox", "echo", "SIMPLEORCH-OK"])
 
     it "fails closed when any rootless launch prerequisite is absent":
-        val good = RootlessCapabilityEvidenceV1(uid: "1000",
+        val good = RootlessCapabilityEvidenceV1(uid: "1000", username: "alice",
             uid_map: "0 1000 1", gid_map: "0 1000 1",
-            subuid: "1000:100000:65536", subgid: "1000:100000:65536",
-            cgroup_controllers: "cpu memory pids", cgroup_subtree_control: "cpu memory pids")
+            subuid: "alice:100000:65536", subgid: "alice:100000:65536",
+            cgroup_controllers: "io cpu memory pids",
+            cgroup_subtree_control: "+cpu +memory +pids")
         expect(rootless_capability_error(good)).to_equal("")
+        var numeric_subids = good
+        numeric_subids.subuid = "1000:100000:65536"
+        numeric_subids.subgid = "1000:100000:65536"
+        expect(rootless_capability_error(numeric_subids)).to_equal("")
         var missing_gid = good
         missing_gid.gid_map = ""
         expect(rootless_capability_error(missing_gid)).to_equal("rootless-gid-map-unavailable")
@@ -74,8 +72,11 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         missing_subgid.subgid = ""
         expect(rootless_capability_error(missing_subgid)).to_equal("rootless-subgid-range-unavailable")
         var missing_delegation = good
-        missing_delegation.cgroup_subtree_control = ""
+        missing_delegation.cgroup_subtree_control = "+cpu +memory"
         expect(rootless_capability_error(missing_delegation)).to_equal("rootless-cgroup-delegation-unavailable")
+        var missing_controller = good
+        missing_controller.cgroup_controllers = "cpu memory"
+        expect(rootless_capability_error(missing_controller)).to_equal("rootless-cgroup-v2-controllers-unavailable")
 
     it "rejects missing create policy instead of silently launching unbounded":
         var unbounded = request()
@@ -83,6 +84,17 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_DEFAULT_ENGINE,
             "/var/lib/simpleorch", "boot-1", 7, false)
         expect(provider.validate(unbounded).reason).to_equal("pid-limit-invalid")
+
+    it "rejects CPU quota multiplication overflow before argv construction":
+        var overflowing = request()
+        overflowing.cpu_limit_millis = OCI_MAX_CPU_LIMIT_MILLIS + 1
+        val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", "boot-1", 7, false)
+        expect(provider.validate(overflowing).reason).to_equal("cpu-limit-overflow")
+        val built = build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            overflowing, "create-1", 7, "boot-1")
+        expect(built.0).to_equal("cpu-limit-overflow")
+        expect(built.1.args.len()).to_equal(0)
 
     it "classifies only engine-specific definitive absence as not found":
         expect(native_inspect_definitively_not_found(OCI_ENGINE_PODMAN, 125,
@@ -201,6 +213,25 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val recovered = fresh.recover(r)
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.state.identity.native_id).to_equal("ctr-disk")
+
+    it "honors a durable destroyed tombstone after restart without native recreation":
+        val r = request()
+        val journal_dir = match secure_temp_dir("/tmp", "simpleorch-tombstone-spec-"):
+            case Ok(path): path
+            case Err(_): ""
+        val journal_path = journal_dir + "/runtime-intent-pod-1-1-7"
+        val tombstone = "runtime-intent-v1|pod-1|1|7|create-old|podman|ctr-old|boot-1|destroyed"
+        expect(file_atomic_write_mode(journal_path, tombstone, 0o600)).to_equal(true)
+        val restarted = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
+            journal_dir, "boot-1", 7, [])
+        val recovered = restarted.recover(r)
+        expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
+        expect(recovered.state.phase).to_equal(RUNTIME_PHASE_DESTROYED)
+        expect(recovered.command.args.len()).to_equal(0)
+        val recreate = restarted.create(r)
+        expect(recreate.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(recreate.reason).to_equal("attempt-already-destroyed")
+        expect(recreate.command.args.len()).to_equal(0)
 
     it "inspects a timed out attempt before allowing a create retry":
         val r = request()

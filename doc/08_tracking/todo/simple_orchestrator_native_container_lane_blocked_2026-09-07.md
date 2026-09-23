@@ -129,6 +129,16 @@ checks are implemented and covered without weakening the blocked receipt:
 
 Do not close this TODO from scripted executor coverage alone.
 
+### Live probe performance evidence still required (2026-09-23)
+
+The static repair keeps launch probing bounded to two timeout-limited `id`
+calls and seven bounded regular-file reads; it performs no directory walk or
+retry loop. This is structural evidence only. Once an admitted rootless Podman
+host is available, retain cold and warm probe latency plus maximum RSS for the
+exact provider binary, with the resolved effective cgroup path and fallback
+state. Until that receipt exists, do not claim a live startup, latency, or RSS
+performance result from the scripted fixtures.
+
 ## Engine choice and what "native" costs per host (added 2026-09-07)
 
 The default engine is **podman**, then docker, then bare runc
