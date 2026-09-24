@@ -906,7 +906,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
 }
 
 fn archive_members(path: &Path) -> Option<Vec<String>> {
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().ok()?;
     let output = archive_list_command(&tool, path).output().ok()?;
     if !output.status.success() {
         return None;
@@ -1063,7 +1063,7 @@ fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str
         objects.push(object_path);
     }
     let archive = root.join(format!("lib{name}.a"));
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().unwrap();
     assert!(archive_create_command(&tool, &archive, &objects, false, false)
         .status()
         .unwrap()
@@ -2607,7 +2607,7 @@ void rt_process_run(void) {}
         .status()
         .unwrap()
         .success());
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().unwrap();
     assert!(
         archive_create_command(&tool, &runtime, std::slice::from_ref(&object), false, false)
             .status()
@@ -3237,7 +3237,7 @@ __attribute__((constructor)) static void compiler_ctor(void) { hidden_helper(); 
         .iter()
         .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
     assert_eq!(archive_members(&output).unwrap(), ["compiler_backfill_local.o"]);
-    let symbols = nm_command().arg("--defined-only").arg(&output).output().unwrap();
+    let symbols = nm_command().unwrap().arg("--defined-only").arg(&output).output().unwrap();
     assert!(symbols.status.success());
     let symbols = String::from_utf8_lossy(&symbols.stdout);
     assert!(symbols.lines().any(|line| {
@@ -6623,7 +6623,7 @@ int main(void) { app_call(); return 0; }
         .status()
         .unwrap()
         .success());
-    let tool = find_archive_tool();
+    let tool = find_archive_tool().unwrap();
     assert!(
         archive_create_command(&tool, &runtime_a, std::slice::from_ref(&runtime_o), false, false)
             .status()
@@ -6692,7 +6692,7 @@ int main(void) { app_call(); return 0; }
         .unwrap()
         .success());
     assert!(std::process::Command::new(&linked).status().unwrap().success());
-    let symbols = nm_command().arg("-g").arg(&linked).output().unwrap();
+    let symbols = nm_command().unwrap().arg("-g").arg(&linked).output().unwrap();
     assert!(symbols.status.success());
     assert!(String::from_utf8_lossy(&symbols.stdout)
         .lines()

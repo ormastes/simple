@@ -483,19 +483,18 @@ mod tests {
         std::env::remove_var("CC");
 
         let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        // Unix detection prefers an installed clang, else gcc (cc_detect.rs:65-66).
+        // Clang-only toolchain: the default is always a clang driver, never
+        // gcc / cc / cl.exe (cc_detect.rs).
+        let is_clang = |cc: &str| {
+            let stem = std::path::Path::new(cc).file_stem().and_then(|s| s.to_str()).unwrap_or(cc).to_ascii_lowercase();
+            stem == "clang" || stem == "clang-cl"
+        };
         let linux_cc = detect_c_compiler(&linux);
-        assert!(
-            linux_cc == "clang" || linux_cc == "gcc",
-            "unexpected Linux C compiler: {linux_cc}"
-        );
+        assert!(is_clang(&linux_cc), "unexpected Linux C compiler: {linux_cc}");
 
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
         let win_cc = detect_c_compiler(&windows);
-        assert!(
-            win_cc == "cl.exe" || win_cc == "gcc" || win_cc == "cc",
-            "unexpected Windows C compiler: {win_cc}"
-        );
+        assert!(is_clang(&win_cc), "unexpected Windows C compiler: {win_cc}");
 
         if let Some(cc) = saved {
             std::env::set_var("CC", cc);

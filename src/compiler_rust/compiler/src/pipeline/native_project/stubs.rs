@@ -531,7 +531,7 @@ pub(crate) fn generate_stub_object_freestanding(
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
-        let output = nm_command().arg("-g").arg("-p").arg(external_tool_path(path)).output().ok()?;
+        let output = nm_command().ok()?.arg("-g").arg("-p").arg(external_tool_path(path)).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -930,7 +930,7 @@ pub(crate) fn generate_stub_object(
     };
 
     for path in &scan_paths {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
             .arg(external_tool_path(path))
@@ -962,7 +962,7 @@ pub(crate) fn generate_stub_object(
         selected_runtime_libs.to_vec()
     };
     for rt_path in runtime_libs {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
             .arg(external_tool_path(rt_path))
@@ -986,7 +986,7 @@ pub(crate) fn generate_stub_object(
     let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
     for lib_path in &plat_config.system_scan_libs {
         if std::path::Path::new(lib_path).exists() {
-            let mut nm_cmd = nm_command();
+            let mut nm_cmd = nm_command()?;
             for flag in &plat_config.nm_flags {
                 nm_cmd.arg(flag);
             }
@@ -1344,7 +1344,7 @@ the old fabricating behaviour.",
                 return Err("strict Windows compatibility aliases produced no COFF members".to_string());
             }
             let archive = temp_dir.join("_compat_aliases.lib");
-            let archive_tool = find_archive_tool();
+            let archive_tool = find_archive_tool()?;
             // `lib.exe`/`llvm-lib` receive object paths directly.  Bound each
             // invocation by its encoded Windows command-line length, not a
             // member count: 128 generated paths can exceed CreateProcess'
@@ -1411,7 +1411,10 @@ the old fabricating behaviour.",
         std::fs::write(&stub_c, &c_code).map_err(|e| format!("write stubs: {e}"))?;
 
         let stub_o = temp_dir.join("_stubs.o");
-        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "gcc".to_string());
+        // GNU-style driver flags and `__asm__` labels below: clang's GNU
+        // driver, never gcc (clang-only toolchain). Fail fast if it is absent.
+        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        simple_common::platform::cc_detect::require_compiler(&stub_cc)?;
         let output = std::process::Command::new(&stub_cc)
             .arg("-c")
             .arg("-ffunction-sections")
