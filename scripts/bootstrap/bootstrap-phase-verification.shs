@@ -112,6 +112,7 @@ phase=""
 compiler=""
 expected_sha=""
 strategy=normal
+profile=full
 hash_policy=canonical
 work_root=""
 cache_root=""
@@ -130,6 +131,16 @@ for arg in "$@"; do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
+    # --profile=slim is an explicit opt-in, phase=stage2 only (see
+    # stage2_slim_profile below). EVERY behavioral effect of slim mode --
+    # skipped MCP/LSP builds and checks, skipped compile-mode test
+    # duplicates, and the shared CLI/test-runner build cache -- is gated on
+    # stage2_slim_profile, so default "full" is genuinely byte-identical:
+    # every existing caller (run-linux-phase2-tests.shs,
+    # run-freebsd-phase2-tests.shs, run-macos-phase23-evidence.shs, and this
+    # script's own stage1/stage3/stage4 paths) is unaffected unless it opts
+    # in. Any new stage2_slim_profile-conditioned code must keep this true.
+    --profile=*) profile=${arg#*=} ;;
     --hash-policy=*) hash_policy=${arg#*=} ;;
     --work-root=*) work_root=${arg#*=} ;;
     --cache-root=*) cache_root=${arg#*=} ;;
@@ -142,6 +153,9 @@ done
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 case "$strategy" in normal|full) ;; *) die "verification requires normal or full" ;; esac
+case "$profile" in full|slim) ;; *) die "--profile requires full or slim" ;; esac
+[ "$profile" != slim ] || [ "$phase" = stage2 ] || die "--profile=slim is stage2-only"
+[ "$profile" != slim ] || [ "$strategy" != full ] || die "--profile=slim and --strategy=full are mutually exclusive"
 case "$hash_policy" in canonical|temporary) ;; *) die "invalid hash policy" ;; esac
 case "$timeout_seconds" in ''|*[!0-9]*|0) die "timeout must be a positive integer" ;; esac
 case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a positive integer" ;; esac
@@ -162,6 +176,28 @@ fi
 [ -n "$expected_sha" ] || die "compiler SHA-256 is required"
 [ -n "$work_root" ] || die "work root is required"
 [ -d "$source_root" ] || die "source root is not a directory"
+
+# Stage-2 slim profile (perf/memory audit of PR #1458, 2026-09-24): the
+# owner's actual ask for the stage-2 gate is "as soon as phase 2 can make
+# compiler test binary and it works and run some tests" -- not four full-CLI
+# builds, three source `check` runs, and six test suites run in both modes.
+# Opt in explicitly with `--profile=slim` (stage2-only, rejected together
+# with --strategy=full above): skip the MCP/LSP builds, their source checks,
+# their behavior integration tests, and the *_compile duplicate of each
+# remaining test task. A task skipped this way emits NO row at all:
+# `record_unsupported_task` would count as UNSUPPORTED and flip `overall` to
+# FAIL below (see the `failures=$(grep -cE
+# 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' ...)` accounting near the
+# end of this script), so silent omission -- not an unsupported row -- is the
+# only correct way to skip a task here. Default `--profile=full` keeps every
+# existing caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
+# run-macos-phase23-evidence.shs, and this script's own stage1/stage3/stage4
+# paths) byte-identical in behavior; only bootstrap-from-scratch.sh's own
+# stage-2 step passes --profile=slim, and only for the normal strategy.
+stage2_slim_profile=0
+if [ "$phase" = stage2 ] && [ "$profile" = slim ]; then
+  stage2_slim_profile=1
+fi
 
 mkdir -p "$work_root" || die "cannot create work root"
 work_root=$(cd "$work_root" && pwd -P)
@@ -1334,7 +1370,23 @@ else
     tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
-    mkdir -p "$tool_cache/full-cli" "$tool_cache/test-runner"
+    # Slim profile only: one shared object cache for both builds (same
+    # compiler, same --source closure of src/compiler + src/app + src/lib),
+    # so the CLI and test-runner entry points reuse each other's compiled
+    # objects instead of each paying for the whole closure independently
+    # (perf audit of PR #1458). Gated on stage2_slim_profile so every other
+    # caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
+    # run-macos-phase23-evidence.shs, stage1/stage3/stage4) keeps its
+    # original two-separate-caches behaviour byte-identically under
+    # --profile=full (the default).
+    if [ "$stage2_slim_profile" -eq 1 ]; then
+      tool_cache_cli="$tool_cache/shared"
+      tool_cache_runner="$tool_cache/shared"
+    else
+      tool_cache_cli="$tool_cache/full-cli"
+      tool_cache_runner="$tool_cache/test-runner"
+    fi
+    mkdir -p "$tool_cache_cli" "$tool_cache_runner"
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
     run_matrix_task compiler_cli_build --verification-expect-executable="$compiler_cli" \
@@ -1342,14 +1394,14 @@ else
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
-      --cache-dir "$tool_cache/full-cli" --output "$compiler_cli"
+      --cache-dir "$tool_cache_cli" --output "$compiler_cli"
     compiler_cli_ready=$matrix_task_passed
     run_matrix_task test_runner_build --verification-expect-executable="$test_runner" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
-      --cache-dir "$tool_cache/test-runner" --output "$test_runner"
+      --cache-dir "$tool_cache_runner" --output "$test_runner"
     test_runner_ready=$matrix_task_passed
   fi
 
@@ -1369,7 +1421,11 @@ else
   # hash, so no phase can substitute an ambient bin/simple_mcp_server wrapper.
   mcp_server=""
   mcp_server_sha=""
-  if [ "$hosted_runtime_ready" -eq 1 ]; then
+  if [ "$stage2_slim_profile" -eq 1 ]; then
+    : # slim stage-2 profile: MCP/LSP server builds are out of scope for the
+      # "compiler test binary works" proof; skip entirely (no task row --
+      # see the stage2_slim_profile note above for why no row is emitted).
+  elif [ "$hosted_runtime_ready" -eq 1 ]; then
     tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"
     server_outputs="$outputs/tool-builds/$phase/$snapshot_sha/$runtime_cache_identity"
     mcp_server="$server_outputs/simple_mcp_server"
@@ -1438,7 +1494,10 @@ else
     fi
   fi
 
-  if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ] && \
+  if [ "$stage2_slim_profile" -eq 1 ]; then
+    : # slim stage-2 profile: source `check` runs belong to the full matrix
+      # (--strategy=full); skip entirely (no task row).
+  elif [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ] && \
      [ -n "$command_owner_receipt" ]; then
     run_matrix_task compiler_check --verification-command-owner-receipt="$command_owner_receipt" \
       env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/compiler
@@ -1472,12 +1531,14 @@ else
       test/01_unit/compiler/bootstrap --mode=interpreter --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
-    run_matrix_task compiler_bootstrap_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
-      --verification-require-test-json \
-      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/bootstrap --mode=compile --unstable \
-      --assert-ran --no-cache --no-db --no-session-daemon \
-      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      run_matrix_task compiler_bootstrap_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-require-test-json \
+        env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+        test/01_unit/compiler/bootstrap --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    fi
     # Keep the interpreter subsystem as an explicit inventory in both modes.
     # The full compiler walk below remains independently terminalized per file.
     run_matrix_task interpreter_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
@@ -1486,12 +1547,14 @@ else
       test/01_unit/compiler/interpreter --mode=interpreter --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
-    run_matrix_task interpreter_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
-      --verification-require-test-json \
-      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/interpreter --mode=compile --unstable \
-      --assert-ran --no-cache --no-db --no-session-daemon \
-      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      run_matrix_task interpreter_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-require-test-json \
+        env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+        test/01_unit/compiler/interpreter --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    fi
     # The full compiler inventory below covers loader sources in interpreter
     # mode. Keep one explicit loader behavior oracle in both execution modes so
     # a phase cannot claim compiler/loader coverage from the bootstrap subset
@@ -1502,12 +1565,14 @@ else
       "$loader_oracle" --mode=interpreter --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
-    run_matrix_task loader_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
-      --verification-require-test-json \
-      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      "$loader_oracle" --mode=compile --unstable \
-      --assert-ran --no-cache --no-db --no-session-daemon \
-      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      run_matrix_task loader_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-require-test-json \
+        env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+        "$loader_oracle" --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    fi
     if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then
       matrix_failed=1
     fi
@@ -1534,11 +1599,17 @@ else
       test_owner_reason=command-owner-receipt-not-built
     fi
     record_unsupported_task compiler_bootstrap_tests "$test_owner_reason"
-    record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
+    fi
     record_unsupported_task interpreter_interpreter_tests "$test_owner_reason"
-    record_unsupported_task interpreter_compile_tests "$test_owner_reason"
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      record_unsupported_task interpreter_compile_tests "$test_owner_reason"
+    fi
     record_unsupported_task loader_interpreter_tests "$test_owner_reason"
-    record_unsupported_task loader_compile_tests "$test_owner_reason"
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      record_unsupported_task loader_compile_tests "$test_owner_reason"
+    fi
     if [ "$strategy" = full ]; then
       record_unsupported_task compiler_unit_tests "$test_owner_reason"
       if [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; then
@@ -1568,7 +1639,10 @@ else
   :
 fi
 
-if [ "$phase" != stage1 ] && [ "${compiler_cli_ready:-0}" -eq 1 ] && \
+if [ "$stage2_slim_profile" -eq 1 ]; then
+  : # slim stage-2 profile: the MCP behavior integration test needs the
+    # skipped MCP build; skip entirely (no task row).
+elif [ "$phase" != stage1 ] && [ "${compiler_cli_ready:-0}" -eq 1 ] && \
    [ "${test_runner_ready:-0}" -eq 1 ] && [ "${mcp_build_ready:-0}" -eq 1 ] && \
    [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && [ -x "$mcp_server" ] && \
    [ -n "${command_owner_receipt:-}" ]; then
@@ -1620,32 +1694,54 @@ else
   record_unsupported_task mcp_behavior_compile "$behavior_owner_reason"
 fi
 
-for tool in simple_mcp_server simple_lsp_mcp_server; do
-  tool_path="$outputs/$tool"
-  tool_ready=0
-  if [ "$phase" != stage1 ]; then
-    tool_path="$server_outputs/$tool"
-  fi
-  case "$tool" in
-    simple_mcp_server) tool_ready=${mcp_build_ready:-0} ;;
-    simple_lsp_mcp_server) tool_ready=${lsp_build_ready:-0} ;;
-  esac
-  if [ "$tool_ready" -eq 1 ] && [ -x "$tool_path" ]; then
-    if [ "$phase" = stage4 ]; then
-      if [ -n "$stage4_tooling_receipt" ]; then
-        run_matrix_task "${tool}_help" \
-          --verification-stage4-tooling-receipt="$stage4_tooling_receipt" "$tool_path" --help
+if [ "$stage2_slim_profile" -ne 1 ]; then
+  for tool in simple_mcp_server simple_lsp_mcp_server; do
+    tool_path="$outputs/$tool"
+    tool_ready=0
+    if [ "$phase" != stage1 ]; then
+      tool_path="$server_outputs/$tool"
+    fi
+    case "$tool" in
+      simple_mcp_server) tool_ready=${mcp_build_ready:-0} ;;
+      simple_lsp_mcp_server) tool_ready=${lsp_build_ready:-0} ;;
+    esac
+    if [ "$tool_ready" -eq 1 ] && [ -x "$tool_path" ]; then
+      if [ "$phase" = stage4 ]; then
+        if [ -n "$stage4_tooling_receipt" ]; then
+          run_matrix_task "${tool}_help" \
+            --verification-stage4-tooling-receipt="$stage4_tooling_receipt" "$tool_path" --help
+        else
+          record_unsupported_task "${tool}_help" stage4-tooling-owners-not-built
+        fi
       else
-        record_unsupported_task "${tool}_help" stage4-tooling-owners-not-built
+        run_matrix_task "${tool}_help" "$tool_path" --help
       fi
     else
-      run_matrix_task "${tool}_help" "$tool_path" --help
+      printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
+        "$tool" >>"$summary" || die "cannot append verification summary"
     fi
-  else
-    printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
-      "$tool" >>"$summary" || die "cannot append verification summary"
-  fi
-done
+  done
+fi
+
+# Self-check the slim stage-2 profile's own guarantee instead of resting it
+# solely on a caller's awk gate (bootstrap-from-scratch.sh's stage2-tests
+# summary validator makes the same check today, but a verifier that can only
+# be trusted correctly by ONE caller is not actually trustworthy). These are
+# the five rows the slim profile exists to produce: proof that a compiler
+# test binary was built (compiler_cli_build, test_runner_build) AND used
+# (compiler_bootstrap_tests, interpreter_interpreter_tests,
+# loader_interpreter_tests). A summary missing any of them, or carrying one
+# that is not exactly PASS, checked nothing and must not report PASS.
+if [ "$stage2_slim_profile" -eq 1 ]; then
+  for stage2_slim_required_task in compiler_cli_build test_runner_build \
+      compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests; do
+    if ! grep -q "^task=${stage2_slim_required_task}|result=PASS|" "$summary"; then
+      printf 'bootstrap-phase-verification: slim stage-2 profile is missing a required PASS row for %s\n' \
+        "$stage2_slim_required_task" >&2
+      matrix_failed=1
+    fi
+  done
+fi
 
 summary_read_status=0
 failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' "$summary") || summary_read_status=$?

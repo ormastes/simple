@@ -3880,18 +3880,241 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 2 compiler tests have no admission receipt at ${stage2_admission_receipt}" >&2
       exit 1
     }
-    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}") || {
-      echo "error: cannot hash the admitted Stage 2 compiler for verification" >&2
+    # Under `set -eu` (line 114), a bare `sha=$(cmd)` with `cmd` failing would
+    # exit the script on that line -- before a later `status=$?` line ever
+    # runs -- so the diagnostic below would never print. Initialize the
+    # status and let `|| stage2_tests_hash_status=$?` capture a nonzero exit
+    # without tripping -e.
+    stage2_tests_hash_status=0
+    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}") || stage2_tests_hash_status=$?
+    # bootstrap_stage3_hash_file's own body is a pipeline (`sha256sum "$1" |
+    # awk '{print $1}'`, or the shasum/sha256/openssl equivalents): if the
+    # hashing command fails but awk still runs (on no input, awk exits 0 and
+    # prints nothing), the FUNCTION's exit status is awk's, so `|| { ... }`
+    # on the call above would never fire even though the hash is empty.
+    # Check the captured status directly (never through a further pipe) AND
+    # require non-empty output before trusting this value for anything --
+    # especially before the prune below, which would otherwise delete the
+    # CURRENT hash's own cache/output dirs (never anything outside this
+    # tree, but it silently discards a warm cache on every such failure).
+    [ "${stage2_tests_hash_status}" -eq 0 ] && [ -n "${stage2_tests_sha}" ] || {
+      echo "error: cannot hash the admitted Stage 2 compiler for verification (status=${stage2_tests_hash_status}, sha='${stage2_tests_sha}')" >&2
       exit 1
     }
+    # Prune stale per-hash cache/output dirs from earlier bootstraps before
+    # running. The verifier keys its object cache and built-tool output dirs
+    # by this Stage 2 compiler's own hash (perf/mem audit of PR #1458,
+    # 2026-09-24), which changes on essentially every bootstrap, so nothing
+    # ever deleted the PREVIOUS hash's cache/output dir; left alone, disk use
+    # under stage2-compiler-tests/<PLATFORM>/ grows without bound across
+    # repeated bootstraps. Keep only the directory matching the CURRENT
+    # admitted-compiler hash; everything else here is dead weight from a
+    # compiler that is no longer the admitted Stage 2 binary.
+    for stage2_tests_stale_root in \
+      "${stage2_tests_root}/cache/compiler-tools/stage2" \
+      "${stage2_tests_root}/cache/tool_builds/stage2" \
+      "${stage2_tests_work}/outputs/compiler-tools/stage2" \
+      "${stage2_tests_work}/outputs/tool-builds/stage2"; do
+      [ -d "${stage2_tests_stale_root}" ] || continue
+      for stage2_tests_stale_dir in "${stage2_tests_stale_root}"/*; do
+        [ -d "${stage2_tests_stale_dir}" ] || continue
+        [ "$(basename "${stage2_tests_stale_dir}")" = "${stage2_tests_sha}" ] && continue
+        rm -rf "${stage2_tests_stale_dir}" ||
+          echo "warning: could not prune stale Stage 2 compiler-test dir: ${stage2_tests_stale_dir}" >&2
+      done
+    done
     # The verifier accepts normal or full only; every other bootstrap strategy
     # (adhoc, unset) maps onto its normal matrix, which already includes the
     # compiler-bootstrap, interpreter and loader suites at Stage 2.
     case "${SIMPLE_BOOTSTRAP_STRATEGY:-normal}" in
-      full) stage2_tests_strategy=full ;;
-      *) stage2_tests_strategy=normal ;;
+      full) stage2_tests_strategy=full; stage2_tests_profile=full ;;
+      *) stage2_tests_strategy=normal; stage2_tests_profile=slim ;;
     esac
-    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy})"
+    # Timeout/worker realism (perf/mem audit of PR #1458): the outer per-task
+    # timeout (BOOTSTRAP_VERIFY_TIMEOUT_SECONDS, verifier default 1800s) binds
+    # a cold full-CLI/test-runner native-build, and documented full-CLI builds
+    # of this same closure took 18-40+ minutes elsewhere -- 1800s is not
+    # realistic on a cold cache, especially on Windows (slower spawns,
+    # Defender, cold cache, and native-build's own worker default is already
+    # sized in hours for exactly this reason). Raise it, and raise it further
+    # still on Windows (MSYS/MINGW/CYGWIN via `uname -s`) until real Windows
+    # numbers exist. Also default the test-runner's own internal worker count
+    # above the verifier's built-in default of 1 (fully sequential); nothing
+    # in this codebase's `--parallel --max-workers=N` test-runner path
+    # (already used elsewhere in bootstrap-phase-verification.shs) documents
+    # it as unsafe for this suite. Capped at 4, matching the audit's own
+    # min(nproc/2, 4) recommendation rather than the verifier's wider
+    # accepted range (1-12): per-worker RSS in interpreter mode is unmeasured
+    # here and this repo has SIGKILL-for-memory history on large parses
+    # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so this
+    # stays conservative pending a real measurement. Scoped to this stage-2
+    # step only via the subshell below -- other bootstrap-phase-verification
+    # .shs callers (stage1/stage3/stage4, run-*-phase2-tests.shs) keep their
+    # own defaults.
+    case "$(uname -s 2>/dev/null || :)" in
+      MINGW*|MSYS*|CYGWIN*) stage2_tests_timeout_default=7200 ;;
+      *) stage2_tests_timeout_default=3600 ;;
+    esac
+    stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-${stage2_tests_timeout_default}}
+    # `jobs` (this bootstrap's own --jobs selection) is expected to already be
+    # a resolved integer by the time this step runs (bootstrap_select_jobs,
+    # sourced from bootstrap-jobs.shs above, replaces a symbolic
+    # full/half/min/auto with a real host CPU count). Do not trust that
+    # blindly: a symbolic or empty value here would otherwise silently
+    # collapse to 1 test worker / 1 build thread even on a wide host
+    # (observed: `--jobs=full --stop-after-stage2` on a 24-thread host).
+    # Re-resolve a real host CPU count whenever `jobs` is not a plain
+    # positive integer, reusing bootstrap_detect_host_cpus (same
+    # nproc -> getconf _NPROCESSORS_ONLN -> sysctl -> NUMBER_OF_PROCESSORS
+    # probe chain bootstrap-jobs.shs itself uses, so Windows Git Bash where
+    # `nproc` is absent still resolves via NUMBER_OF_PROCESSORS).
+    case "${jobs:-}" in
+      ''|*[!0-9]*|0)
+        # `0` is included here (not just empty/non-numeric): a literal
+        # --jobs=0 is not a valid worker count either, and letting it
+        # through would divide-derive a 0 build-thread count that
+        # bootstrap-phase-verification.shs's own `case "$build_threads" in
+        # ''|*[!0-9]*|0) die ...` (:164) rejects outright, killing the
+        # verifier instead of just re-detecting a sane count here.
+        stage2_tests_cpu_basis=$(bootstrap_detect_host_cpus 2>/dev/null || :)
+        case "${stage2_tests_cpu_basis}" in
+          ''|*[!0-9]*|0) stage2_tests_cpu_basis=1 ;;
+        esac
+        ;;
+      *) stage2_tests_cpu_basis=${jobs} ;;
+    esac
+    stage2_tests_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-}
+    if [ -z "${stage2_tests_workers}" ]; then
+      # Capped at 4, matching the audit's own min(nproc/2, 4) recommendation
+      # rather than the verifier's wider accepted range (1-12): per-worker
+      # RSS in interpreter mode is unmeasured here and this repo has
+      # SIGKILL-for-memory history on large parses
+      # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so
+      # this stays conservative pending a real measurement. Confirmed still
+      # appropriate after the build-thread memory review below: each test
+      # worker here runs `simple_test_runner` against ALREADY-BUILT CLI/
+      # test-runner binaries (spec-by-spec interpreter execution), not a
+      # fresh whole-entry-closure native-build per worker, so it is not the
+      # same 2.4-2.7 GB-per-worker cost native-build threads carry. 4 stays
+      # the cap pending a real per-worker RSS measurement of this path.
+      stage2_tests_workers=$((stage2_tests_cpu_basis / 2))
+      [ "${stage2_tests_workers}" -ge 1 ] || stage2_tests_workers=1
+      [ "${stage2_tests_workers}" -le 4 ] || stage2_tests_workers=4
+    fi
+    # Portable free-memory probe (perf/mem re-review, 2026-09-24): deriving
+    # build threads from CPU count alone (the prior version of this step)
+    # is wrong by the repo's own numbers -- shard_mem_clamp.spl and the
+    # 2026-08-18 bug record measure each native-build worker at 2.4-2.7 GB
+    # with nothing shared between workers, and a 16-worker run was already
+    # OOM-killed at ~40 GB. On a 24-thread/64 GB host, 24 threads would ask
+    # for ~58-65 GB against ~36-52 GB free. The existing memory clamp
+    # (bootstrap_build_jobs_memory_clamp, bootstrap-build-jobs-policy.shs)
+    # reads only /proc/meminfo, which does not exist on Windows -- this
+    # step's own primary target -- so it is reimplemented here per-platform:
+    # Linux via /proc/meminfo MemAvailable, macOS via hw.pagesize + vm_stat
+    # "Pages free", FreeBSD via hw.pagesize + vm.stats.vm.v_free_count, and
+    # Windows via `Get-CimInstance Win32_OperatingSystem` (FreePhysicalMemory
+    # is already reported in KiB). Any detection failure leaves
+    # stage2_tests_free_kib empty, which the build-threads block below
+    # treats as "assume the worst" (falls back to the 8-thread hard ceiling
+    # below, never to the full CPU count).
+    stage2_tests_free_kib=""
+    case "$(uname -s 2>/dev/null || :)" in
+      Linux)
+        if [ -r /proc/meminfo ]; then
+          stage2_tests_free_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null)
+        fi
+        ;;
+      Darwin)
+        # `|| :` on every `$(sysctl ...)`/`$(vm_stat ...)` substitution below:
+        # under `set -eu` (line 114), a failing command substitution on its
+        # own line exits the WHOLE SCRIPT immediately (verified:
+        # `sh -c 'set -eu; x=$(false); echo survived'` -> exit 1, no output)
+        # rather than merely leaving the variable empty for the numeric
+        # guard below to catch -- so a missing/failing sysctl or vm_stat
+        # must never be allowed to propagate a nonzero status here.
+        # "Pages free" alone undercounts real headroom: macOS also reports
+        # inactive/purgeable/speculative pages as reclaimable without
+        # swapping, so sum all four the way `vm_stat`'s own summary line
+        # implies (matches the intent of MemAvailable on Linux, not just
+        # MemFree).
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+        stage2_tests_vm_stat_out=$(vm_stat 2>/dev/null || :)
+        stage2_tests_free_pages=$(printf '%s\n' "${stage2_tests_vm_stat_out}" |
+          awk '
+            /^Pages free:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages inactive:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages purgeable:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages speculative:/ { gsub(/\./, "", $3); sum += $3 }
+            END { print sum + 0 }
+          ')
+        case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
+        case "${stage2_tests_free_pages}" in ''|*[!0-9]*) stage2_tests_free_pages="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_pages}" ]; then
+          stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
+        fi
+        ;;
+      FreeBSD)
+        # Same `|| :` reasoning as the Darwin branch above. Also add
+        # v_inactive_count: FreeBSD's v_free_count alone is the same
+        # undercount as macOS's "Pages free" -- inactive pages are
+        # reclaimable without swapping.
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+        stage2_tests_free_count=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || :)
+        stage2_tests_inactive_count=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null || :)
+        case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
+        case "${stage2_tests_free_count}" in ''|*[!0-9]*) stage2_tests_free_count="" ;; esac
+        case "${stage2_tests_inactive_count}" in ''|*[!0-9]*) stage2_tests_inactive_count="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_count}" ]; then
+          stage2_tests_free_pages=$(( stage2_tests_free_count + ${stage2_tests_inactive_count:-0} ))
+          stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
+        fi
+        ;;
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v powershell.exe >/dev/null 2>&1; then
+          # WMI can stall; bound it with `timeout` when available (this repo
+          # already requires POSIX sh + clang-only tooling, not extra
+          # dependencies, and `timeout` is coreutils, already assumed
+          # elsewhere in this script). -NonInteractive plus redirecting
+          # stdin from /dev/null stops a stalled/broken WMI provider from
+          # ever presenting a prompt this non-interactive step cannot answer.
+          if command -v timeout >/dev/null 2>&1; then
+            stage2_tests_free_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" </dev/null 2>/dev/null |
+              tr -d '\r\n ') || :
+          else
+            stage2_tests_free_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
+              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" </dev/null 2>/dev/null |
+              tr -d '\r\n ') || :
+          fi
+        fi
+        ;;
+    esac
+    case "${stage2_tests_free_kib}" in ''|*[!0-9]*) stage2_tests_free_kib="" ;; esac
+    # An explicit BOOTSTRAP_VERIFY_BUILD_THREADS is a deliberate override: it
+    # is honored as-is and deliberately bypasses the free-memory derivation
+    # and the 8-thread hard ceiling below -- the caller who sets this env var
+    # is asserting they already know the safe count for their host.
+    stage2_tests_build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-}
+    if [ -z "${stage2_tests_build_threads}" ]; then
+      if [ -n "${stage2_tests_free_kib}" ]; then
+        # free_GB / 3, per the measured ~2.4-2.7 GB/worker above (3 GB divisor
+        # leaves headroom rather than assuming the tightest measured figure).
+        stage2_tests_build_threads=$(( stage2_tests_free_kib / 1024 / 1024 / 3 ))
+      else
+        # Detection failed outright: fall back to the conservative 8-thread
+        # ceiling below, never to the (potentially much larger) CPU count.
+        stage2_tests_build_threads=8
+      fi
+      case "${stage2_tests_build_threads}" in ''|*[!0-9]*) stage2_tests_build_threads=8 ;; esac
+      [ "${stage2_tests_build_threads}" -ge 1 ] || stage2_tests_build_threads=1
+      [ "${stage2_tests_build_threads}" -le "${stage2_tests_cpu_basis}" ] ||
+        stage2_tests_build_threads=${stage2_tests_cpu_basis}
+      # Hard ceiling regardless of how much memory is free -- this is a
+      # native-build worker count, not a job-scheduling optimization target.
+      [ "${stage2_tests_build_threads}" -le 8 ] || stage2_tests_build_threads=8
+    fi
+    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, build-threads=${stage2_tests_build_threads}, test-workers=${stage2_tests_workers})"
     # Without a milestone the progress watcher reads this multi-minute step as a
     # hang between Stage 2 and Stage 3.
     bootstrap_progress_mark stage2-compiler-tests \
@@ -3902,15 +4125,20 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # this repo before.
     (
       cd "${repo_root}" || exit 125
+      BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
+      BOOTSTRAP_VERIFY_BUILD_THREADS="${stage2_tests_build_threads}"
+      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --compiler="${stage2_admitted_absolute}" \
         --compiler-sha256="${stage2_tests_sha}" \
         --strategy="${stage2_tests_strategy}" \
+        --profile="${stage2_tests_profile}" \
         --hash-policy=canonical \
         --work-root="${stage2_tests_work}" \
         --cache-root="${stage2_tests_root}/cache" \
-        --source-root="${repo_root}"
+        --source-root="${repo_root}" \
+        --timeout-seconds="${stage2_tests_timeout_seconds}"
     ) >"${stage2_tests_log}" 2>&1 || stage2_tests_status=$?
     if [ "${stage2_tests_status}" -eq 0 ] && [ ! -f "${stage2_tests_summary}" ]; then
       echo "error: Stage 2 compiler tests exited 0 but wrote no verification summary" >&2
