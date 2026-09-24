@@ -42,12 +42,17 @@
 set -eu
 
 usage() {
-    echo "usage: sh $0 {list|add|remove}" >&2
+    echo "usage: sh $0 {list|add|remove} [--dev-tools]" >&2
     exit 2
 }
 
-[ "$#" -eq 1 ] || usage
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
 action=$1
+dev_tools=0
+if [ "$#" -eq 2 ]; then
+    [ "$2" = --dev-tools ] || usage
+    dev_tools=1
+fi
 case "$action" in
     list|add|remove) ;;
     *) usage ;;
@@ -104,6 +109,75 @@ for abs in \
     [ "$action" = list ] && echo "path     $win_path"
 done
 
+# --dev-tools: also exclude the files these developer tools OPEN. Opt-in, never
+# the default, because it is a real trade-off: git clone, gh release download,
+# cargo fetch and the AI agents all write content fetched from the network, and
+# that content is then not scanned as they write it.
+#
+# The list is evidence-based, not guessed. File READERS are what matter — a
+# process exclusion only skips scanning files the process opens — so it holds
+# the tools that open file contents heavily. Call-site counts across scripts/
+# (2026-09-24): grep 10,780, sh 4,672, sed 3,682, awk 3,401, cat 2,487, git
+# 2,099, tail 1,959, sha256sum 1,146, clang 301, cargo 234, jj 175. Defender's
+# own profiler caught grep.exe spending 27 s of every 30 s scanning .spl files.
+# Tools that rarely open file contents (rm, mkdir, dirname, date, kill) are
+# left out: excluding them buys nothing. The general-purpose language runtimes
+# node and python ARE included, at the owner's explicit request (2026-09-24),
+# with the risk stated: interpreters are where script malware runs, so this
+# is a broader hole than excluding grep. perl is not included.
+#
+# Each tool is resolved on PATH, and shims are followed to the binary that does
+# the work: scoop shims (jj), rustup proxies (cargo, rustc), and the native
+# codex.exe inside its npm package.
+# Missing tools are skipped. Source the toolchain env first (e.g.
+# scripts/setup/windows-msvc-bootstrap-env.shs) so the toolchain the build
+# really uses is on PATH. Cost measured ~10 s, mostly `npm root -g` starting
+# Node; one-time setup, not on any build or push path.
+dev_tool_paths() {
+    for t in claude codex kimi gemini \
+        git gh jj \
+        clang clang-cl clang++ lld-link ld.lld llvm-ar llvm-lib llvm-nm llvm-objcopy \
+        cargo rustc rustup cmake ninja make \
+        node python \
+        sh bash grep sed awk gawk cat head tail sort cut tr wc xargs find tee cmp diff sha256sum; do
+        # Every match on PATH, not just the first: several LLVM installs can
+        # coexist, and the toolchain a build actually uses may not be first.
+        which -a "$t" 2>/dev/null | while IFS= read -r p; do
+            case "$p" in *.exe) ;; *) p="$p.exe" ;; esac
+            # Only real executables are processes; a script shim is not.
+            [ -f "$p" ] && printf '%s\n' "$p"
+            shim="${p%.exe}.shim"
+            [ -f "$shim" ] &&
+                sed -n 's/^path *= *"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$shim" |
+                head -n 1 | while IFS= read -r real; do cygpath -u "$real"; done
+            # A missing .shim leaves the && list returning 1 as the loop body's
+            # last status; under `set -e` that would abandon the resolver.
+            :
+        done
+    done
+    # The bootstrap reaches its LLVM through these variables, not PATH, so the
+    # toolchain it really runs is invisible to `which`. Resolve them directly.
+    for llvm_root in "${SIMPLE_LLVM_WIN_ROOT_23:-}" "${LLVM_SYS_231_PREFIX:-}"; do
+        [ -n "$llvm_root" ] || continue
+        llvm_bin="$(cygpath -u "$llvm_root")/bin"
+        for t in clang clang-cl clang++ lld-link ld.lld llvm-ar llvm-lib llvm-nm llvm-objcopy; do
+            [ -f "$llvm_bin/$t.exe" ] && printf '%s\n' "$llvm_bin/$t.exe"
+        done
+    done
+    if command -v rustup >/dev/null 2>&1; then
+        for t in cargo rustc; do
+            rustup which "$t" 2>/dev/null | tr -d '\r' |
+                while IFS= read -r real; do cygpath -u "$real"; done
+        done
+    fi
+    if command -v npm >/dev/null 2>&1; then
+        npm_root=$(npm root -g 2>/dev/null | tr -d '\r') &&
+            [ -d "$(cygpath -u "$npm_root")/@openai/codex" ] &&
+            find "$(cygpath -u "$npm_root")/@openai/codex" -maxdepth 8 -iname 'codex*.exe' 2>/dev/null
+    fi
+    return 0
+}
+
 # Process exclusions cover the files a compiler OPENS (sources it reads), which
 # path exclusions do not. Stage 2/3 compilers and the stage-2 seed are listed
 # at their expected paths even before they exist, because they are created
@@ -120,6 +194,7 @@ proc_list=$(
         done
         [ -d "$bootstrap_root" ] &&
             find "$bootstrap_root" -maxdepth 5 -name 'simple*.exe' 2>/dev/null
+        [ "$dev_tools" -eq 1 ] && dev_tool_paths
     } | sort -u
 )
 ps_procs=""
@@ -127,6 +202,9 @@ proc_count=0
 while IFS= read -r exe; do
     [ -n "$exe" ] || continue
     win_exe=$(cygpath -w "$exe")
+    # /bin and /usr/bin name the same file under MSYS; de-duplicate on the
+    # Windows path, which is what Defender stores.
+    case ",$ps_procs," in *",$(ps_quote "$win_exe"),"*) continue ;; esac
     ps_procs="${ps_procs:+$ps_procs,}$(ps_quote "$win_exe")"
     proc_count=$((proc_count + 1))
     [ "$action" = list ] && echo "process  $win_exe"
