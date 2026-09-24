@@ -10,7 +10,7 @@ use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page, pmm_all
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.memory.vmm.{
     PAGE_SIZE, ENTRIES_PER_TABLE,
-    PTE_PRESENT, PTE_WRITABLE, PTE_USER, PTE_HUGE_PAGE, PTE_ADDR_MASK,
+    PTE_PRESENT, PTE_WRITABLE, PTE_USER, PTE_HUGE_PAGE, PTE_ADDR_MASK, PTE_NO_EXECUTE,
     g_vmm, g_next_as_id, vmm_kernel_pml4_phys, vmm_manager_snapshot,
     _phys_to_virt, _alloc_table_page, _read_pte, _write_pte,
     _pte_is_present, _pte_phys_addr, _ensure_table_entry,
@@ -254,6 +254,57 @@ fn vmm_map_user_low_page(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, fl
     val pte_flags = _flags_to_pte_bits(safe_flags)
     _write_pte(pt_virt, _pt_index(vaddr), (paddr & PTE_ADDR_MASK) | pte_flags)
     true
+
+# ---------------------------------------------------------------------------
+# B12 fix (2026-09-24): VmFlags must NOT cross module boundaries by value.
+#
+# Serial evidence from the ring-3 handoff: user leaf PTEs were written with
+# their low TWO BITS stripped — user_rx (P|U = 0x05) landed as 0x04 and
+# user_rw (P|W|U|NX = 0x27) landed as 0x24 — while intermediate entries built
+# from local PTE_* constants were exact. P=0 on the image leaf turned the
+# first CPL3 instruction fetch into a not-present #PF (errcode 0x14), the
+# "iretq triple fault". The mask matches a nil-tag (& ~3) applied to the
+# boxed struct word during the cross-module pass (the VmFlags declaration
+# itself warns: "uses u32 to avoid cross-module bool struct codegen bug" —
+# the avoidance does not work on this seed). These wrappers keep every flag
+# bit inside THIS module: callers pick rx or rw with a scalar bool, no
+# VmFlags value ever crosses the boundary, and the PTE bits are derived from
+# local constants only.
+# ---------------------------------------------------------------------------
+
+# Leaf PTE flags for a user page: RX (not writable) stays executable; RW gets
+# NX (W^X, same policy as vmm_map_user_low_page's safe_flags).
+fn _user_leaf_pte_bits(writable: bool) -> u64:
+    var bits: u64 = PTE_PRESENT | PTE_USER
+    if writable:
+        bits = bits | PTE_WRITABLE | PTE_NO_EXECUTE
+    bits
+
+fn _vmm_map_user_page_impl(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, writable: bool) -> bool:
+    if space.phys_root == 0 or space.phys_root == 1:
+        return false
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
+    val pml4_virt = _phys_to_virt(space.phys_root)
+    val pdpt_virt = _privatize_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+    val pd_virt = _privatize_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+    val pt_virt = _privatize_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+    _write_pte(pt_virt, _pt_index(vaddr), (paddr & PTE_ADDR_MASK) | _user_leaf_pte_bits(writable))
+    true
+
+pub fn vmm_map_user_page_rx(space: AddressSpace, virt: VirtAddr, phys: PhysAddr) -> bool:
+    """Map a 4KB read/execute user page (no VmFlags crossing — see B12 note)."""
+    _vmm_map_user_page_impl(space, virt, phys, false)
+
+pub fn vmm_map_user_page_rw(space: AddressSpace, virt: VirtAddr, phys: PhysAddr) -> bool:
+    """Map a 4KB read/write (NX) user page (no VmFlags crossing — see B12 note)."""
+    _vmm_map_user_page_impl(space, virt, phys, true)
 
 fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
     """Shallow COW clone of a user address space (wave-4b scaffold).

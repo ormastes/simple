@@ -41,6 +41,28 @@ rt_x86_enter_user_first:
      * (and it is — create_user_address_space copies the kernel mappings). */
     movq    %r9, %rax               /* cr3 */
 
+    /* Establish the exit savepoint (2026-09-24). Only the CONSUMER of this
+     * mechanism (rt_x86_ring3_resume, below) existed in this file — nothing
+     * ever filled _ring3_resume_buf or set _ring3_resume_valid, so the
+     * ring-3 program's exit(2) syscall had nowhere to longjmp and the kernel
+     * fell off the user stack into garbage. Save the kernel context here,
+     * BEFORE any push: [rsp] is exactly the return address into
+     * arch_x86_64_enter_user_task, and cr3 is still the kernel's. On exit,
+     * rt_x86_ring3_resume restores all of these and rets — so this function
+     * "returns" with the exit status in _ring3_exit_rc. */
+    movq    %rbx, _ring3_resume_buf+0(%rip)
+    movq    %rbp, _ring3_resume_buf+8(%rip)
+    movq    %r12, _ring3_resume_buf+16(%rip)
+    movq    %r13, _ring3_resume_buf+24(%rip)
+    movq    %r14, _ring3_resume_buf+32(%rip)
+    movq    %r15, _ring3_resume_buf+40(%rip)
+    movq    %rsp, _ring3_resume_buf+48(%rip)
+    pushq   %rax
+    movq    %cr3, %rax
+    movq    %rax, _ring3_resume_buf+56(%rip)   /* kernel cr3, not the user's */
+    popq    %rax
+    movq    $1, _ring3_resume_valid(%rip)
+
     /* Fault-only IRET receipt.  Capture the unmodified ABI arguments before
      * the diagnostic UART writes and before the frame is built, so an IRET
      * #GP can distinguish an invalid supplied frame from descriptor state.
