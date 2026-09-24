@@ -1,0 +1,37 @@
+use std.spec.*
+use std.scv.compile_source_inventory_core.*
+
+describe "cold inventory batch preserves sequential create semantics":
+    it "sorts reversed source events and increments generation once per source":
+        val events = [
+            compile_source_inventory_git_event_v1("create", "src/z.spl", "fn z(): 3"),
+            compile_source_inventory_git_event_v1("create", "src/a.spl", "fn a(): 1"),
+            compile_source_inventory_git_event_v1("create", "src/m.spl", "fn m(): 2")
+        ]
+        val initial = compile_source_inventory_initial_events_v1(events)
+        expect(initial != nil).to_equal(true)
+        expect(initial!.generation).to_equal(3)
+        expect(initial!.entries[0].source_identity).to_equal("src/a.spl")
+        expect(initial!.entries[2].source_identity).to_equal("src/z.spl")
+        var sequential = CompileSourceInventoryV1(1, 0, [])
+        for event in events:
+            sequential = compile_source_inventory_apply_event_v1(sequential, event).inventory!
+        expect(compile_source_inventory_encode_v1(initial!)).to_equal(
+            compile_source_inventory_encode_v1(sequential))
+
+    it "defers duplicates deletions and invalid rows to the sequential validator":
+        val event = compile_source_inventory_git_event_v1("create", "src/a.spl", "fn a(): 1")
+        expect(compile_source_inventory_initial_events_v1([event, event])).to_be_nil()
+        expect(compile_source_inventory_initial_events_v1([
+            compile_source_inventory_git_event_v1("delete", "src/a.spl", "")])).to_be_nil()
+        expect(compile_source_inventory_initial_events_v1([
+            compile_source_inventory_git_event_v1("create", "../a.spl", "fn a(): 1")])).to_be_nil()
+
+    it "preserves empty and one-entry batch boundaries":
+        val empty = compile_source_inventory_initial_events_v1([])
+        expect(empty!.generation).to_equal(0)
+        expect(empty!.entries.len()).to_equal(0)
+        val one = compile_source_inventory_initial_events_v1([
+            compile_source_inventory_git_event_v1("create", "src/a.spl", "fn a(): 1")])
+        expect(one!.generation).to_equal(1)
+        expect(one!.entries[0].source_identity).to_equal("src/a.spl")

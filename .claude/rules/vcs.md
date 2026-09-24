@@ -286,9 +286,14 @@ tree-size, conflict-markers, sdn-crc32-sealed, rust-duplicate-reexport
 parse + new guard wired), runtime-api-regression, rt-dual-implementation (delta
 vs base, content-keyed census cache). The required status context
 "Code Idiom & Structural Ratchet Gates" is now carried by the `fast-gates` job
-in `repo-hygiene.yml`, which runs 8 of those 9 against the PR's base..head with
-a sparse checkout (rewind needs a 40-ancestor window a shallow PR fetch lacks,
-so that class is push-only); the 47-step ratchet lane is the non-required
+in `repo-hygiene.yml`, which runs all 9 against the PR's base..head with a
+sparse checkout. `no-stale-snapshot-rewind` is included: it is BLOCKING at push
+and the push tier is bypassable, so a class with no automatic lane would be
+unenforced. It consults up to 40 first-parent ancestors as contributors, so that
+job fetches `PR_COMMITS + 41` rather than `PR_COMMITS + 1` — a shallower fetch
+would have left it exiting 0 over a near-empty window, which is a silent
+weakening rather than a FAIL. The extended job runs it too (`--range`, in the
+"Push-tier core gates" step). The 47-step ratchet lane is the non-required
 "(extended)" job and still runs on every PR and on main, including the FROZEN
 rt-dual comparison so main's own single-lane debt stays a red verdict there.
 Local-CI receipts now only affect the extended job. Classes that moved

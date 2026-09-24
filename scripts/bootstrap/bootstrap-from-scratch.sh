@@ -1694,7 +1694,7 @@ bootstrap_stage_sanity() (
   # shell `where llc`, and the LLVM object stage returned "llc not found" --
   # surfacing only as "backend object-path status 1".
   sanity_llvm_bin=${SIMPLE_LLVM_BIN:-}
-  sanity_llvm_prefix=${LLVM_SYS_180_PREFIX:-}
+  sanity_llvm_prefix=${LLVM_SYS_231_PREFIX:-}
   sanity_include=${INCLUDE:-}
   sanity_lib=${LIB:-}
   sanity_libpath=${LIBPATH:-}
@@ -1739,8 +1739,8 @@ bootstrap_stage_sanity() (
     export SIMPLE_LLVM_BIN
   fi
   if [ -n "${sanity_llvm_prefix}" ]; then
-    LLVM_SYS_180_PREFIX=${sanity_llvm_prefix}
-    export LLVM_SYS_180_PREFIX
+    LLVM_SYS_231_PREFIX=${sanity_llvm_prefix}
+    export LLVM_SYS_231_PREFIX
   fi
   if [ -n "${sanity_build_timeout}" ]; then
     COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
@@ -1847,7 +1847,18 @@ bootstrap_stage_sanity() (
   candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
   frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
-  CANDIDATE_FRONTEND_BACKEND="${backend}" \
+  # The smoke exercises the FRONTEND through whichever worker binary the lane
+  # admits. When the Rust seed was built without the llvm cargo feature (the
+  # decoupled lane: SIMPLE_BOOTSTRAP_RUST_LLVM=0, LLVM served to the
+  # pure-Simple backends via LLVM-C.dll), the seed-side worker cannot honour
+  # --backend llvm, so the smoke drives it with cranelift. The llvm backend
+  # admission itself is the K1 composition gate downstream, unaffected here.
+  if [ "${llvm_features}" = "" ]; then
+    frontend_smoke_backend=cranelift
+  else
+    frontend_smoke_backend=${backend}
+  fi
+  CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
     CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
@@ -1864,7 +1875,7 @@ bootstrap_stage_sanity() (
   frontend_bootstrap_ran=false
   if [ "${frontend_status}" -eq 0 ]; then
     frontend_bootstrap_ran=true
-    CANDIDATE_FRONTEND_BACKEND="${backend}" \
+    CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
       CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
@@ -2152,15 +2163,30 @@ if [ -e "${rust_authority_current_marker}.transaction" ]; then
 fi
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect LLVM 18 availability for LLVM backends.
+# Detect the pinned LLVM 23.1.1 provider for LLVM backends.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
   # (scripts/setup/platform-detect.shs, sourced above), which also exports the
-  # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
+  # LLVM_SYS_231_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
+    if [ "$LLVM_VERSION" != 23 ]; then
+      echo "error: LLVM backend requires LLVM 23.1.1, found LLVM ${LLVM_VERSION}" >&2
+      exit 1
+    fi
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
-    llvm_features="--features llvm"
+    # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
+    # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
+    # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
+    # set SIMPLE_BOOTSTRAP_RUST_LLVM=0 to keep LLVM for the pure-Simple
+    # backends and build the seed without the llvm feature (the seed does not
+    # need it to drive the bootstrap).
+    if [ "${SIMPLE_BOOTSTRAP_RUST_LLVM:-1}" = "1" ]; then
+      llvm_features="--features llvm"
+    else
+      llvm_features=""
+      echo "LLVM ${LLVM_VERSION} reserved for the pure-Simple backends (SIMPLE_BOOTSTRAP_RUST_LLVM=0; Rust seed builds without the llvm feature)"
+    fi
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
       brew_prefix="$(brew --prefix 2>/dev/null || true)"
@@ -2171,7 +2197,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "error: LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18})" >&2
+    echo "error: LLVM 23.1.1 not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
@@ -2344,6 +2370,22 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-prefix=//p'
   )
+  rust_llvm_version=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-version=//p'
+  )
+  rust_llvm_link_kind=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-link-kind=//p'
+  )
+  rust_llvm_clang_cl_path=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-clang-cl-path=//p'
+  )
+  rust_llvm_clang_cl_version=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-clang-cl-version=//p'
+  )
   rust_llvm_sdkroot=$(
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-sdkroot=//p'
@@ -2356,6 +2398,39 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-library-path=//p'
   )
+  if [ "${rust_llvm_status}" = enabled ]; then
+    [ "${rust_llvm_major}" = 23 ] || {
+      echo "error: Rust LLVM authority must be major 23, got ${rust_llvm_major}" >&2
+      exit 1
+    }
+    if [ -n "${rust_llvm_version}" ] &&
+       [ "${rust_llvm_version}" != 23.1.1 ]; then
+      echo "error: Rust LLVM authority must be 23.1.1, got ${rust_llvm_version}" >&2
+      exit 1
+    fi
+    if [ "${os}" = windows ] &&
+       [ "${rust_llvm_link_kind}" != dynamic-c-api ]; then
+      echo "error: Windows Rust LLVM authority must use dynamic-c-api" >&2
+      exit 1
+    fi
+    if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
+      [ -x "${rust_llvm_clang_cl_path}" ] || {
+        echo "error: Windows Rust LLVM authority lacks physical clang-cl: ${rust_llvm_clang_cl_path}" >&2
+        exit 1
+      }
+      [ "${rust_llvm_clang_cl_version}" = 23.1.1 ] || {
+        echo "error: Windows Rust LLVM authority must bind clang-cl 23.1.1, got ${rust_llvm_clang_cl_version:-unknown}" >&2
+        exit 1
+      }
+      # Keep the C ABI owner in the same immutable LLVM 23.1.1 package as
+      # llvm-config and LLVM-C. An ambient clang-cl is never carried forward.
+      cc_abs=${rust_llvm_clang_cl_path}
+      bootstrap_windows_cc_env="CC=${cc_abs}"
+      CC=${cc_abs}
+      export CC
+    fi
+    rust_llvm_path="${rust_llvm_prefix}/bin:${PATH}"
+  fi
 fi
 
 rust_authority_workspace_prepared=0
@@ -2481,7 +2556,7 @@ run_rust_authority_cargo() {
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
-        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
@@ -2491,7 +2566,7 @@ run_rust_authority_cargo() {
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
@@ -2501,7 +2576,7 @@ run_rust_authority_cargo() {
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
-        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
@@ -2511,7 +2586,7 @@ run_rust_authority_cargo() {
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" \
@@ -2592,10 +2667,17 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-driver ${llvm_features}
+  # spl_hosted_runtime is selected alongside simple-native-all because the
+  # authority tuple freezes deps/libspl_hosted_runtime-*.rlib: cargo < 1.100
+  # left it in deps/ as a byproduct of these invocations, but the cargo >=
+  # 1.100 build-dir layout only materializes artifacts of SELECTED packages,
+  # so the hosted rlib must be selected explicitly or the publish step has
+  # nothing to freeze. Same features as the simple-compiler dependency
+  # (win32-real on Windows), so feature unification is unchanged.
   run_rust_authority_cargo rust-native-all-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-native-all ${llvm_features}
+    --target "${PLATFORM}" -p simple-native-all -p spl_hosted_runtime ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
@@ -3153,6 +3235,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
       --cache-dir "${stage2_cache_absolute}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"
@@ -3228,6 +3311,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --runtime-path "${stage_runtime_absolute}" \
       --entry src/app/cli/bootstrap_main.spl -o "${stage3_bin}"
   )
@@ -3246,7 +3330,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_run_stage2_native() {
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
-      "LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-}" \
+      "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
+      "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
+      "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
@@ -3324,6 +3410,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${native_verbose_arg} \
     ${stage2_timeout_args} \
     --cache-dir "${stage2_cache_absolute}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \

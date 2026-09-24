@@ -236,6 +236,21 @@ impl Lowerer {
             && !self.is_reference_type(ret_ty);
         let mut args_hir = if proven_nonescaping {
             self.lower_nonescaping_call_args(args, ctx)?
+        } else if matches!(callee, Expr::Identifier(name) if name == "array_sort_by")
+            && matches!(args, [_, ast::Argument { value: Expr::Lambda { .. }, .. }])
+        {
+            let first = self.lower_expr(&args[0].value, ctx)?;
+            let callback = if let (
+                Some(HirType::Array { element, .. }),
+                Expr::Lambda { params, body, capture_all, .. },
+            ) = (self.module.types.get(first.ty), &args[1].value)
+            {
+                let element = *element;
+                self.lower_lambda_with_param_types(params, body, *capture_all, ctx, &[element, element])?
+            } else {
+                self.lower_expr(&args[1].value, ctx)?
+            };
+            vec![first, callback]
         } else {
             self.lower_call_args(args, ctx)?
         };

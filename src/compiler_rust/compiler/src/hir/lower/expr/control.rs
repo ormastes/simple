@@ -206,6 +206,19 @@ impl Lowerer {
         capture_all: bool,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.lower_lambda_with_param_types(params, body, capture_all, ctx, &[])
+    }
+
+    /// Unannotated callback parameters receive the collection element types.
+    /// Explicit annotations take precedence over the contextual types.
+    pub(super) fn lower_lambda_with_param_types(
+        &mut self,
+        params: &[ast::LambdaParam],
+        body: &Expr,
+        capture_all: bool,
+        ctx: &mut FunctionContext,
+        inferred_param_types: &[TypeId],
+    ) -> LowerResult<HirExpr> {
         // Track captured variables from outer scope
         let captures: Vec<usize> = if capture_all {
             // Capture all immutable variables from outer scope
@@ -224,11 +237,12 @@ impl Lowerer {
         // Collect parameter names and types
         let param_info: Vec<(String, TypeId)> = params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(index, p)| {
                 let ty = if let Some(ref t) = p.ty {
                     self.resolve_type(t).unwrap_or(TypeId::I64)
                 } else {
-                    TypeId::I64 // Default to I64 for untyped params
+                    inferred_param_types.get(index).copied().unwrap_or(TypeId::I64)
                 };
                 (p.name.clone(), ty)
             })

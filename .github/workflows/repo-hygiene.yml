@@ -83,7 +83,14 @@ jobs:
               exit 0
           fi
           case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
-          git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 1 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
+          # PR_COMMITS + 1 is enough for every diff-scoped gate, but
+          # check-no-stale-snapshot-rewind consults up to --window (default 40)
+          # first-parent ancestors of each commit's parent as contributors. With
+          # only one ancestor beyond the range it would still exit 0 while
+          # examining a near-empty contributor window — a silent weakening, not a
+          # FAIL, which is exactly the fail-open shape this workflow avoids
+          # elsewhere. 41 extra commits keeps the window real.
+          git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
               { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
           RANGE="$BASE_SHA..$HEAD_SHA"
           rc_total=0
@@ -103,6 +110,14 @@ jobs:
           run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$HEAD_SHA" --baseline-rev "$BASE_SHA"
           run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
           run_gate scripts/check/check-range-shs-hygiene-push.shs "$RANGE"
+          # Blocking at push (push-no-stale-snapshot-rewind) and therefore
+          # required here too: the push tier is bypassable and the rewind class
+          # (e274cd33719 and two more, 2026-09-06) is precisely what a stale
+          # whole-tree snapshot pushed over someone else's landed work looks
+          # like. It reads committed objects only, so the sparse checkout above
+          # is sufficient; the depth fetched covers every commit in the range
+          # and its parent, which is what the single-parent walk needs.
+          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
           [ "$rc_total" -eq 0 ] || { echo "fast-gates: one or more fast gates failed"; exit 1; }
 
   # Idiom / structural ratchet gates. Every gate here self-passes green on the
@@ -636,7 +651,7 @@ jobs:
       # runner image ships clang). Deliberately NOT here: the full seed `cargo
       # check` (check-seed-builds-push.shs) — cold on a runner it is unmeasured
       # and the pool is two slots; measure on a branch before making it required.
-      - name: Push-tier core gates (crc32 / E0252 / rt dual-lane delta / rt_* API / C runtime)
+      - name: Push-tier core gates (crc32 / E0252 / rt dual-lane delta / rt_* API / stale-snapshot rewind / C runtime)
         if: ${{ !cancelled() && steps.receipt.outputs.range != '' }}
         shell: sh
         env:
@@ -663,6 +678,11 @@ jobs:
           # PR, it reports).
           run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$head"
           run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
+          # The stale-snapshot rewind class itself. It is BLOCKING at push
+          # (push-no-stale-snapshot-rewind), and the push tier is bypassable, so
+          # it must also have an automatic lane here; it reads committed objects
+          # only, so no working tree is needed.
+          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
           run_gate scripts/check/check-c-runtime-compiles-push.shs --rev "$head"
           [ "$rc_total" -eq 0 ] || exit 1
 

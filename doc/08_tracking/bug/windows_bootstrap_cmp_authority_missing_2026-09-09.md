@@ -40,3 +40,32 @@ the applied admitted PATH and one successful post-fix bootstrap admission —
 and neither can be produced here (a bootstrap is already running and this
 session may not start one). Status unchanged.
 
+## 2026-09-22 Windows focused authority proof: source-fixed, admission proof pending
+
+The focused Windows control was run from the isolated
+`D:/simple-p1-bootstrap-cmp-authority-20260922` worktree with MSYS2
+`/usr/bin` admitted before the test establishes its own canonical fixture PATH.
+It passed the following controls against
+`scripts/check/lib/bootstrap-stage3/authority.shs`:
+
+- a real `cmp` bound and compared equal inputs from a physical path longer
+  than 260 characters containing a space;
+- a separately copied, wrong explicit candidate was refused because the
+  admitted PATH resolved a different physical `cmp`;
+- a nonexistent explicit candidate was refused with status 2;
+- after binding, a byte mutation of the selected `cmp` was refused with
+  infrastructure status 2 rather than treated as equal or different; and
+- failed binds retained their caller values, so an error cannot publish a
+  partially replaced path/hash pair.
+
+The command completed `PASS` in 2.43 seconds with 719420 KiB peak RSS on this
+Windows/MSYS2 host. The extended regression is encoded in
+`test/01_unit/scripts/bootstrap_compare_files_test.shs`; it adds the same
+wrong/stale candidate, long-space path, and publish-after-validation checks to
+the existing status matrix. This changes shell admission evidence only: there
+is no compiler, runtime, generated-code, cache, or cross-host artifact change.
+
+The focused proof does not admit a build cache or close this P1. One successful
+post-fix MSVC incremental bootstrap with the applied canonical tool-authority
+PATH is still required. The bug database status therefore remains
+`fix-implemented-verification-pending`.

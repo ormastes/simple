@@ -611,6 +611,47 @@ pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, C
     }
 }
 
+/// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
+/// payloads (images, archives). Identical admission arms and bound; the
+/// content is returned as a `[u8]` value instead of being UTF-8 decoded,
+/// which the text form must reject.
+pub fn rt_file_read_regular_no_follow_bounded_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let max_bytes = match args.get(1) {
+        Some(Value::Int(value)) if *value >= 0 => *value,
+        _ => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_ARGS)),
+    };
+    let mut file = match open_regular_no_follow(Path::new(&path)) {
+        Some(file) => file,
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_OPEN)),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_METADATA)),
+    };
+    if !metadata.is_file() {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_NOT_REGULAR));
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE));
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_REPARSE));
+    }
+    let limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE)),
+    };
+    let mut bytes = Vec::new();
+    let mut bounded = file.take(limit);
+    if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as i64 > max_bytes {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_READ));
+    }
+    INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(INTERP_READ_NF_OK));
+    Ok(Value::byte_array(bytes))
+}
+
 /// Read file through the mmap-named API.
 ///
 /// The interpreter does not expose raw mapped memory, so it preserves the

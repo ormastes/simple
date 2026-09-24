@@ -17,6 +17,57 @@ fn jit_compile(source: &str) -> JitResult<JitCompiler> {
 }
 
 #[test]
+fn stage2_nullable_named_unwrap_jit_preserves_present_values() {
+    use simple_runtime::value::{hash_variant_discriminant, rt_enum_new, rt_string_new, RuntimeValue};
+    let some = |payload| rt_enum_new(1, hash_variant_discriminant("Some"), payload);
+    let none = rt_enum_new(1, hash_variant_discriminant("None"), RuntimeValue::NIL);
+    let jit = jit_compile("enum UserKind:\n    Ok(value: i64)\n    Err(value: text)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n\nfn nested(value: Option<i64>?) -> Option<i64>:\n    value.unwrap()\n").unwrap();
+    for variant in ["Ok", "Err", "None"] {
+        let value = rt_enum_new(773, hash_variant_discriminant(variant), RuntimeValue::from_int(19));
+        for input in [value, some(value)] {
+            let actual = unsafe { jit.call_i64_i64("probe", input.to_raw() as i64).unwrap() };
+            assert_eq!(actual as u64, value.to_raw(), "present user variant {variant} remains intact");
+        }
+    }
+    // Exercise the runtime ABI with falsy and empty payload words: absence
+    // depends on nil/Option.None, never truthiness or collection length.
+    for value in [RuntimeValue::from_int(0), RuntimeValue::from_bool(false), rt_string_new(b"".as_ptr(), 0)] {
+        for input in [value, some(value)] {
+            let actual = unsafe { jit.call_i64_i64("probe", input.to_raw() as i64).unwrap() };
+            assert_eq!(actual as u64, value.to_raw());
+        }
+    }
+    for inner in [none, some(RuntimeValue::from_int(0))] {
+        let outer = some(inner);
+        let actual = unsafe { jit.call_i64_i64("nested", outer.to_raw() as i64).unwrap() };
+        assert_eq!(actual as u64, inner.to_raw(), "only the outer Option is unwrapped");
+    }
+}
+
+#[test]
+fn stage2_nullable_named_unwrap_jit_traps_absence() {
+    const MODE: &str = "SIMPLE_STAGE2_NULLABLE_TRAP_TEST";
+    if let Ok(mode) = std::env::var(MODE) {
+        let jit = jit_compile("enum UserKind:\n    Ok(value: i64)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n").unwrap();
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_new, RuntimeValue};
+        let value = if mode == "nil" { RuntimeValue::NIL } else { rt_enum_new(1, hash_variant_discriminant("None"), RuntimeValue::NIL) };
+        eprintln!("NULLABLE_TRAP_READY");
+        unsafe { jit.call_i64_i64("probe", value.to_raw() as i64).unwrap(); }
+        panic!("NULLABLE_TRAP_RETURNED");
+    }
+    for mode in ["nil", "none"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "codegen::jit::tests::stage2_nullable_named_unwrap_jit_traps_absence", "--nocapture"])
+            .env(MODE, mode).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("NULLABLE_TRAP_READY"), "child must reach unwrap: {stderr}");
+        assert!(!output.status.success(), "{mode} must trap");
+        assert!(stderr.contains("unwrap"), "expected unwrap diagnostic: {stderr}");
+        assert!(!stderr.contains("NULLABLE_TRAP_RETURNED"), "{stderr}");
+    }
+}
+
+#[test]
 fn strict_all_marks_jit_fallbacks_as_hard_failures() {
     // Keep this predicate test process-local: mutating the environment would
     // race the parallel JIT test suite. The contained native-build worker

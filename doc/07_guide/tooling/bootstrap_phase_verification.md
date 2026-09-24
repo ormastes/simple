@@ -44,6 +44,10 @@ rows fail before launch; Phase 1/2 results are never release evidence.
 `bootstrap-phase-verification.shs --strategy=full` runs each
 `test/01_unit/compiler/**/*_spec.spl` row, including loader specs, through the
 phase-owned standalone test runner and full CLI. Exit code zero is insufficient.
+The compiler inventory is the complete `*_spec.spl` tree. The separate
+`*_test.spl` compiler files include standalone `run` harnesses and are not
+admitted by this inventory; their execution needs a distinct same-generation
+test receipt before claiming coverage of every compiler test file.
 Each row uses `--assert-ran` and isolated caches, emits exactly one complete
 terminal JSON object, and must report outer and spec success, zero failures,
 canonical bounded counters, and at least one executed example. Malformed,
@@ -91,14 +95,15 @@ and noncanonical spellings fail closed. Aggregate directory smoke rows cannot
 prove a per-file category, so any skip in those rows is also a failure.
 
 The phase-owned full CLI and standalone test runner also run the compiler
-bootstrap suite and `compiler/loader/module_loader_segment_transaction_spec.spl` in explicit
+bootstrap suite, the complete `compiler/interpreter` subtree, and
+`compiler/loader/module_loader_segment_transaction_spec.spl` in explicit
 interpreter and compile modes. Every focused row uses `--assert-ran`, isolated
 cache/database/session state, strict terminal JSON, nonzero executed counts,
 and the frozen command-owner receipt. The receipt binds the compiler snapshot
 and hosted runtime identity as well as the produced CLI and test runner. The Stage 2
 bootstrap executable remains compiler-only; these test commands belong to the
 same-generation full CLI built by that admitted compiler. Missing either owner
-artifact records all four rows as unsupported and cannot produce an overall
+artifact records all six rows as unsupported and cannot produce an overall
 PASS.
 
 Each task summary retains `elapsed_seconds` and `max_rss_kib` when GNU time
@@ -112,6 +117,12 @@ The sampler selects the timeout wrapper's unique direct-child session leader,
 deduplicates PIDs, checks group membership, and validates wrapper/leader
 identities before and after each sample. It excludes the watchdog, ambient
 groups and processes that create a separate session outside the timeout group.
+The Windows sampler runs external `ps` plus `awk` every 50 ms. Those sampler
+processes are outside the reported process-tree RSS, while their scheduling
+cost remains in `elapsed_seconds`. Summaries record
+`max_rss_sample_interval_ms=50` and a separate
+`max_rss_sampling_overhead_scope` value so the measurement does not imply zero
+overhead.
 This is a sampled peak of summed resident sets, including shared pages in each
 member, not private memory or an exact kernel high-water mark. Short-lived
 groups can produce `max_rss_kib=unavailable`; invalid identities cannot produce
@@ -128,7 +139,8 @@ invalid process authority. The portable loader guard is owned by
 
 The retained task rows make the long tail attributable. After admission the
 verifier builds four native products (full CLI, test runner, MCP, and LSP),
-runs source checks, executes the bootstrap and loader oracles in two modes, and
+runs source checks, executes bootstrap, interpreter, and loader inventories in
+two modes, and
 under `--strategy=full` starts one contained test-runner process for every
 discovered compiler spec. That per-spec containment preserves later evidence
 after a crash or timeout, but process startup and repeated compiler loading can

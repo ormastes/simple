@@ -42,7 +42,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let struct_ptr = match alloc_value {
             inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
@@ -190,7 +190,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let new_ptr =
             match alloc_value {
@@ -492,7 +492,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let closure_ptr =
             match alloc_value {
