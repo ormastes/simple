@@ -1013,14 +1013,14 @@ bootstrap_step_mark() {
   step_name=$1
   step_now=$(date +%s)
   if [ -n "${bootstrap_step_ts}" ]; then
-    step_elapsed_ms=$(( (step_now - bootstrap_step_ts) * 1000 ))
+    step_elapsed_s=$(( step_now - bootstrap_step_ts ))
   else
-    step_elapsed_ms=0
+    step_elapsed_s=0
   fi
   bootstrap_step_ts=${step_now}
-  printf 'step=%s elapsed_ms=%s\n' "${step_name}" "${step_elapsed_ms}" >&2
+  printf 'event=step name=%s elapsed_s=%s\n' "${step_name}" "${step_elapsed_s}" >&2
   if [ -n "${progress_log}" ]; then
-    printf 'step=%s elapsed_ms=%s\n' "${step_name}" "${step_elapsed_ms}" >>"${progress_log}" 2>/dev/null || true
+    printf 'event=step name=%s elapsed_s=%s\n' "${step_name}" "${step_elapsed_s}" >>"${progress_log}" 2>/dev/null || true
   fi
 }
 bootstrap_cleanup() {
@@ -3592,25 +3592,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 1
   }
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
-  # Prune sibling `scope-*` seed-cache dirs that are provably NOT the scope
-  # this run just used. The scope name comes straight from the seed's own
-  # `[native-build] ... scope=<name>` receipt line (never recomputed here),
-  # so a dead scope from a superseded seed fingerprint (e.g. the `bb9e`
-  # scope orphaned by a prior seed rebuild) is removed the same run it goes
-  # stale, instead of waiting on an mtime TTL that never fires for an
-  # actively-used scope and never fires soon enough for a freshly dead one.
-  # Read only, no status through a pipe: `stage2_current_scope` is a plain
-  # variable assignment from command substitution.
-  stage2_current_scope=$(grep -o 'scope=[^ ]*' "${stage2_native_log}" 2>/dev/null | tail -1 | cut -d= -f2)
-  if [ -n "${stage2_current_scope}" ] &&
-     [ -d "${stage2_cache_absolute}/${stage2_current_scope}" ]; then
-    for stage2_stale_scope_dir in "${stage2_cache_absolute}"/scope-*; do
-      [ -d "${stage2_stale_scope_dir}" ] || continue
-      [ "$(basename "${stage2_stale_scope_dir}")" = "${stage2_current_scope}" ] && continue
-      rm -rf "${stage2_stale_scope_dir}"
-      echo "  native cache: pruned stale seed scope dir $(basename "${stage2_stale_scope_dir}") (current: ${stage2_current_scope})"
-    done
-  fi
+  # See bootstrap_prune_stale_seed_scope_dirs (bootstrap-cache-policy.shs)
+  # for the full rationale and safety rules (Stage-2-success gate, exact
+  # scope-<16 hex> match, single-value requirement, warn-not-fail on rm).
+  bootstrap_prune_stale_seed_scope_dirs \
+    "${stage2_status}" "${stage2_native_log}" "${stage2_cache_absolute}"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
     if ! bootstrap_stage_sanity "${stage2_bin}" \
