@@ -76,12 +76,22 @@ else
     echo "  workload may be only partially installed." >&2
     return 1 2>/dev/null || exit 1
   fi
-  # Newest MSVC toolset version wins (dotted-decimal, same field width, so a
-  # plain version sort is correct — e.g. 14.44.35207 > 14.39.33519).
+  # Newest MSVC toolset version wins (dotted-decimal, e.g. 14.44.35207 >
+  # 14.39.33519). Sort on the VERSION COMPONENT (the basename) only, not the
+  # full path -- `sort -V` on a full `/c/.../VC/Tools/MSVC/14.44.35207` path
+  # sorts lexically on the common prefix first and never reaches the version
+  # digits in a meaningful way, so a naive full-path version sort silently
+  # picks the wrong (e.g. filesystem-order) entry when multiple toolset
+  # versions are installed side by side, which is the normal case here (this
+  # host has 14.34.31933, 14.38.33130, 14.39.33519 and 14.44.35207
+  # side by side). Emit "<version>\t<full path>" pairs, sort by the version
+  # field only, then take the path from the winning row.
   simple_msvc_vc_root=$(
     for simple_msvc_v_dir in "$simple_msvc_msvc_versions_dir"/*/; do
-      [ -d "$simple_msvc_v_dir" ] && printf '%s\n' "${simple_msvc_v_dir%/}"
-    done | sort -t/ -k1,1 -V | tail -n1
+      [ -d "$simple_msvc_v_dir" ] || continue
+      simple_msvc_v_dir="${simple_msvc_v_dir%/}"
+      printf '%s\t%s\n' "$(basename "$simple_msvc_v_dir")" "$simple_msvc_v_dir"
+    done | sort -t "$(printf '\t')" -k1,1 -V | tail -n1 | cut -f2-
   )
   if [ -z "$simple_msvc_vc_root" ]; then
     echo "windows-msvc-bootstrap-env: no MSVC toolset version directory found under" >&2
@@ -199,6 +209,17 @@ IFS=$simple_msvc_oifs
 PATH=$simple_msvc_filtered
 export PATH
 
+# LIB is not optional decoration here: unlike MSVC `link.exe` (which, run
+# from inside a vcvars-initialized shell, can also resolve its import
+# libraries via VS-registered environment state), `lld-link` is a standalone
+# LLD driver with no such registration path -- it locates .lib files ONLY
+# from an explicit `/LIBPATH:` flag or the `LIB` environment variable. Without
+# LIB set, a plain `cargo build --release --bin simple` in src/compiler_rust
+# (no extra flags) fails at the final link step with unresolved externals for
+# every MSVC/UCRT import library (kernel32.lib, msvcrt.lib, ...), even though
+# `cargo check` can appear to succeed (check does not always reach the link
+# step). This is why LIB is computed and exported unconditionally by this
+# script rather than left to an inherited vcvars environment.
 INCLUDE="$(cygpath -w "$simple_msvc_vc_include" 2>/dev/null || printf '%s' "$simple_msvc_vc_include");$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/ucrt" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/shared" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/um" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/winrt" 2>/dev/null)"
 LIB="$(cygpath -w "$simple_msvc_vc_lib" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Lib/$simple_msvc_sdk_ver/ucrt/x64" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Lib/$simple_msvc_sdk_ver/um/x64" 2>/dev/null)"
 export INCLUDE LIB

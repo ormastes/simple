@@ -1172,11 +1172,70 @@ case "$(uname -s)" in
     # never runnable there either), but a bootstrap invoked directly, without
     # first running setup.shs in that same worktree, never reached that fix.
     # Run it here too, unconditionally and idempotently, before anything reads
-    # the tree. `|| rc=$?` captures the status directly from the command itself
-    # (never through a pipe) under `set -e`-safe semantics; `--strict-missing`
-    # is deliberately NOT passed, since unbuilt bin/release/** targets are a
-    # legitimate, benign skip this early in a bootstrap.
+    # the tree.
+    #
+    # Deliberately a BARE call (no --receipt), and deliberately placed HERE --
+    # before Stage 2/3 setup even begins, and in particular before the very
+    # first `bootstrap_stage3_git_state`/`bootstrap_stage3_source_snapshot`
+    # "before" baseline is captured (stage3_git_before /
+    # stage3_source_before, first bound far below at the start of the Stage 3
+    # block). git core.symlinks=false means every one of the ~55 tracked
+    # symlink paths this converts shows up as "modified" in `git diff HEAD`
+    # from the moment of conversion onward (git always re-reads their content
+    # and finds it disagrees with the index) -- forever, not just at the
+    # instant of materialization. Two ways to keep that from being mistaken
+    # for a genuine Stage 3 source change: (a) make the snapshot machinery
+    # aware of and exclude the receipted paths (the existing
+    # SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT / --receipt / --strict-missing
+    # path below authority.shs's bootstrap_stage3_materialized_git_state), or
+    # (b) make sure materialization happens ONCE, before the FIRST snapshot,
+    # so "before" and "after" both already include the post-materialize state
+    # and a before/after diff never sees a delta from it at all. (a) was tried
+    # first here and reverted: `--receipt` forces --strict-missing, which
+    # additionally requires every untracked-but-already-a-real-symlink path on
+    # disk to match a curated allowlist (windows-materialized-pending-
+    # policy.tsv) or fail the whole bootstrap outright -- measured on this
+    # host, a legitimately not-yet-hydrated `.spipe/spipe` submodule path
+    # (doc/00_llm_process/domain_expert -> ../../.spipe/spipe/...) is not in
+    # that allowlist and turned a harmless pre-existing skip into a hard
+    # bootstrap failure unrelated to anything this package changed. (b) needs
+    # no allowlist and is already true by construction: this call sits before
+    # ANY snapshot in the file (confirmed by reading the whole script; the
+    # first is far below, at the start of Stage 3 setup) and materialization
+    # is otherwise a one-shot operation for a given worktree (idempotent
+    # reruns are already_ok, not created). Verified directly (not just argued)
+    # on this host: sourcing authority.shs and calling
+    # `bootstrap_stage3_git_state` twice in a row against this same,
+    # already-materialized worktree, with nothing in between, produces BYTE-
+    # IDENTICAL `dirty_fingerprint` values both times -- i.e. the snapshot the
+    # Stage 3 before/after comparison relies on is stable across repeated
+    # captures of the same post-materialize tree, which is exactly the
+    # property (b) needs. `|| rc=$?` captures the status directly from the
+    # command itself (never through a pipe) under `set -e`-safe semantics;
+    # `--strict-missing` is deliberately NOT passed, matching setup.shs's own
+    # existing bare call, for the same allowlist-avoidance reason as above.
     if [ -f "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" ]; then
+      # Undo-then-materialize, unconditionally, on every run: a worktree that
+      # gets REUSED across revisions (checked out to a different rev between
+      # bootstrap runs, e.g. by whatever manages a shared/long-lived
+      # worktree) can be left holding junctions from a PRIOR materialize
+      # whose targets the new revision's tree no longer has at that path --
+      # `git checkout -f <rev>` on such a tree can itself fail (observed:
+      # "cannot opendir '<path>'" against a broken junction) before bootstrap
+      # ever gets a chance to run. `--undo` reverses exactly what the last
+      # materialize run recorded (nothing if this is a fresh worktree or
+      # nothing was ever materialized -- a harmless, fast no-op either way),
+      # so any subsequent checkout of this tree -- by this script or by
+      # whatever invoked it -- starts from a clean, junction-free state
+      # before the bare materialize call below re-establishes fresh
+      # junctions/hardlinks matching whatever revision the tree is actually
+      # at right now.
+      materialize_symlinks_rc=0
+      bash "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" --undo "${repo_root}" || materialize_symlinks_rc=$?
+      if [ "${materialize_symlinks_rc}" -ne 0 ]; then
+        echo "bootstrap-from-scratch: FAILED to undo prior materialized git symlinks (rc=${materialize_symlinks_rc})" >&2
+        exit "${materialize_symlinks_rc}"
+      fi
       materialize_symlinks_rc=0
       bash "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" "${repo_root}" || materialize_symlinks_rc=$?
       if [ "${materialize_symlinks_rc}" -ne 0 ]; then
