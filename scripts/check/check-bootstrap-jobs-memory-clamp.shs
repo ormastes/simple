@@ -72,14 +72,60 @@ expect 'already-small count unchanged' 2 \
 expect 'floors at one worker' 1 \
     "$(BOOTSTRAP_MEMINFO_PATH=$(meminfo 524288) bootstrap_build_jobs_memory_clamp 8)"
 
-# 5/6. Unreadable or unparsable meminfo leaves the count untouched. Deliberately
-#      fail-open: this bounds a known overshoot, it is not an admission gate,
-#      and it must never make a bootstrap unrunnable on a host without procfs.
-expect 'missing meminfo does not clamp' 20 \
-    "$(BOOTSTRAP_MEMINFO_PATH=$work/absent bootstrap_build_jobs_memory_clamp 20)"
+# 5/6. Unreadable or unparsable meminfo, AND no OS-specific fallback probe
+#      recognises the host (BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE forces the
+#      "none of the above" case branch), leaves the count untouched.
+#      Deliberately fail-open in that case: this bounds a known overshoot,
+#      it is not an admission gate, and it must never make a bootstrap
+#      unrunnable on a host neither /proc/meminfo nor a fallback covers.
+expect 'missing meminfo, no fallback, does not clamp' 20 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$work/absent BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE=UnknownOS \
+       bootstrap_build_jobs_memory_clamp 20)"
 printf 'MemTotal: 126000000 kB\nMemAvailable: not-a-number\n' >"$work/bad"
-expect 'unparsable meminfo does not clamp' 20 \
-    "$(BOOTSTRAP_MEMINFO_PATH=$work/bad bootstrap_build_jobs_memory_clamp 20)"
+expect 'unparsable meminfo, no fallback, does not clamp' 20 \
+    "$(BOOTSTRAP_MEMINFO_PATH=$work/bad BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE=UnknownOS \
+       bootstrap_build_jobs_memory_clamp 20)"
+
+# 5a/5b/5c. PKG-G: missing/unreadable meminfo (macOS and FreeBSD have none,
+# and a non-MSYS Windows POSIX layer may lack it) now tries an OS-specific
+# available-memory probe before giving up -- stubbed here via a throwaway
+# PATH dir so no real sysctl/vm_stat/powershell.exe is required.
+fixbin=$work/fixbin
+mkdir -p "$fixbin"
+fake() {
+    fk_name=$1; fk_body=$2
+    printf '#!/bin/sh\n%s\n' "$fk_body" >"$fixbin/$fk_name"
+    chmod +x "$fixbin/$fk_name"
+}
+
+# Darwin: hw.pagesize=4096, free+inactive+purgeable+speculative pages sum to
+# 2,621,440 -> 10 GiB available -> 10485760 KiB / 3300 MiB = 3 workers.
+fake sysctl 'case "$2" in hw.pagesize) echo 4096 ;; esac'
+fake vm_stat 'printf "Pages free: 1000000.\nPages inactive: 1000000.\nPages purgeable: 500000.\nPages speculative: 121440.\n"'
+expect 'macOS fallback (no meminfo) clamps' 3 \
+    "$(PATH=$fixbin:$PATH BOOTSTRAP_MEMINFO_PATH=$work/absent \
+       BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE=Darwin bootstrap_build_jobs_memory_clamp 20)"
+rm -f "$fixbin/sysctl" "$fixbin/vm_stat"
+
+# FreeBSD: hw.pagesize=4096, v_free_count+v_inactive_count = 2,621,440 pages
+# -> same 10 GiB -> 3 workers.
+fake sysctl 'case "$2" in
+  hw.pagesize) echo 4096 ;;
+  vm.stats.vm.v_free_count) echo 2000000 ;;
+  vm.stats.vm.v_inactive_count) echo 621440 ;;
+esac'
+expect 'FreeBSD fallback (no meminfo) clamps' 3 \
+    "$(PATH=$fixbin:$PATH BOOTSTRAP_MEMINFO_PATH=$work/absent \
+       BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE=FreeBSD bootstrap_build_jobs_memory_clamp 20)"
+rm -f "$fixbin/sysctl"
+
+# Windows (non-MSYS POSIX layer, no /proc/meminfo): PowerShell
+# FreePhysicalMemory reports 10485760 KiB -> 3 workers.
+fake powershell.exe 'echo 10485760'
+expect 'Windows PowerShell fallback (no meminfo) clamps' 3 \
+    "$(PATH=$fixbin:$PATH BOOTSTRAP_MEMINFO_PATH=$work/absent \
+       BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE=MINGW64_NT bootstrap_build_jobs_memory_clamp 20)"
+rm -f "$fixbin/powershell.exe"
 
 # 7. A per-worker budget override is honoured: 10 GiB / 1024 MiB = 10.
 expect 'per-worker budget override honoured' 10 \
