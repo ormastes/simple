@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
+#include "arm64_nonce_slot_contract.h"
+#include "arm_fs_path_classifier.h"
 
 typedef int64_t RuntimeValue;
 
@@ -114,6 +116,11 @@ typedef struct {
 #define HEAP_MAP    3
 #define HEAP_OBJECT 4
 #define HEAP_ENUM   7
+
+/* One validated SIMPLEOS_QEMU_NONCE= line fits the 118-byte nonce slot
+ * (see arm64_nonce_slot_contract.h); the recorded user-stdout line is
+ * bounded by the same contract. */
+#define ARM64_USER_STDOUT_MAX 118
 
 static uint64_t simpleos_raw_or_encoded_int(RuntimeValue value)
 {
@@ -1792,7 +1799,6 @@ RuntimeValue rt_arm_array_new_with_cap_raw(RuntimeValue raw_cap_val)
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = cap;
-    a->items = (RuntimeValue *)(a + 1);
     for (uint64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
 }
@@ -2446,7 +2452,8 @@ S1(rt_error_new) S1(rt_error_message) S1(rt_error_code) S1(rt_error_stack)
 S2(rt_result_ok) S2(rt_result_err) S1(rt_result_is_ok) S1(rt_result_is_err)
 S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 
-S1(rt_weak_ref) S1(rt_weak_deref) S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
+S1(rt_weak_ref) S1(rt_weak_deref) S2(rt_closure_call) S1(rt_closure_bind)
+S3(rt_ipc_send_bytes) S2(rt_ipc_recv_bytes) S2(rt_collection_remove)
 
 /* MMIO — use RAW addresses (not DECODE_INT) to match x86_64 convention.
  * Simple code passes MMIO addresses as raw u64 values. */
@@ -2559,6 +2566,11 @@ S1(rt_read_sysreg) S2(rt_write_sysreg)
 
 uint64_t g_fb_addr = 0;
 uint64_t g_fb_w = 0;
+static volatile uint64_t g_gui_simd_fill_hits = 0;
+static volatile uint64_t g_gui_simd_fill_chunks = 0;
+static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
+static volatile uint64_t g_gui_simd_fill_scalar_parity_checks = 0;
+static volatile uint64_t g_gui_simd_fill_scalar_parity_failures = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -5094,6 +5106,521 @@ void cap_init_task_record(RuntimeValue task, RuntimeValue full)
 int64_t rt_pool_safepoint(void)
 {
     return 0;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Minimal-boot runtime additions for the clang-bringup closure.
+ *
+ * The historical fs-exec kernels never referenced these entry points, so the
+ * minimal boot runtime did not provide them; the clang-bringup entry is the
+ * first arm64 kernel to pull them into the link. Semantics mirror
+ * src/runtime/runtime_native.c / runtime_process.c (hosted twins) and the
+ * x86_64 freestanding backends; heap layouts match this file's
+ * RuntimeString/RuntimeArray/RuntimeEnum ABI. Integer extern arguments arrive
+ * raw (untagged), `text`/any arguments arrive tagged — the convention used by
+ * every function above. Where the hosted twin deliberately traps
+ * (rt_collection_remove), the S-macro trap list below is used instead of a
+ * silent fake.
+ * ------------------------------------------------------------------------- */
+
+/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
+ * multi-byte literal. The freestanding kernel has no intern table, so forward
+ * to rt_string_new — functionally identical (a fresh heap string per call).
+ * Historical arm64 implementation (matches the riscv32 stub). */
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
+RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
+{
+    return rt_string_new(data, len_val);
+}
+
+/* Scalar compares for the erased `any` ordering path (value_runtime_owner.c
+ * twin): both operands are tagged ints; floats are not produced by the
+ * kernel closure that reaches these. */
+RuntimeValue rt_any_lt(RuntimeValue a, RuntimeValue b)
+{
+    return (RuntimeValue)(DECODE_INT(a) < DECODE_INT(b) ? 1 : 0);
+}
+RuntimeValue rt_any_gt(RuntimeValue a, RuntimeValue b)
+{
+    return (RuntimeValue)(DECODE_INT(a) > DECODE_INT(b) ? 1 : 0);
+}
+
+/* i64 -> decimal text. Mirror of value_runtime_owner.c's owner (freestanding
+ * sibling of hosted rt_raw_i64_to_string). */
+RuntimeValue rt_raw_i64_to_string(RuntimeValue raw)
+{
+    int64_t value = (int64_t)raw;
+    uint64_t magnitude = value < 0
+        ? (uint64_t)(-(value + 1)) + 1u
+        : (uint64_t)value;
+    char buffer[21];
+    int position = 0;
+    do {
+        buffer[position++] = (char)('0' + (magnitude % 10u));
+        magnitude /= 10u;
+    } while (magnitude);
+    if (value < 0) buffer[position++] = '-';
+
+    RuntimeString *string = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)position + 1u);
+    if (!string) return NIL_VALUE;
+    string->hdr.type = HEAP_STRING;
+    string->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)position + 1u);
+    string->len = (uint64_t)position;
+    int output = 0;
+    while (position > 0) string->data[output++] = buffer[--position];
+    string->data[output] = '\0';
+    return ENCODE_PTR(string);
+}
+
+/* Enum identity for the unwrap trap below. Heap enums only; anything else is
+ * not an enum (hosted twin: rt_enum_id). */
+static RuntimeEnum *_rt_enum_cast(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return (RuntimeEnum *)0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return (RuntimeEnum *)0;
+    return e;
+}
+
+RuntimeValue rt_enum_id(RuntimeValue value)
+{
+    RuntimeEnum *e = _rt_enum_cast(value);
+    return e ? (RuntimeValue)(int64_t)e->enum_id : (RuntimeValue)(-1);
+}
+
+#define SPL_OPTION_ENUM_ID 1
+#define SPL_RESULT_ENUM_ID 2
+#define SPL_HASH_SOME   4053299545u
+#define SPL_HASH_NONE   2371748697u
+#define SPL_HASH_OK     2405352012u
+#define SPL_HASH_ERR    4200179024u
+
+/* Total unwrap: Some/Ok -> payload; None/Err -> FATAL trap (freestanding
+ * equivalent of the hosted abort). Mirrors runtime_native.c
+ * rt_unwrap_or_trap. */
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    RuntimeEnum *e = _rt_enum_cast(value);
+    if (!e) return value;
+    if ((int64_t)e->enum_id == SPL_OPTION_ENUM_ID) {
+        if (e->discriminant == 0u || e->discriminant == SPL_HASH_SOME) return e->payload;
+        if (e->discriminant == 1u || e->discriminant == SPL_HASH_NONE) {
+            serial_puts("FATAL: .unwrap() called on None\n");
+            for (;;) __asm__ volatile("wfe");
+        }
+        return value;
+    }
+    if (e->discriminant == SPL_HASH_OK) return e->payload;
+    if (e->discriminant == SPL_HASH_ERR) {
+        serial_puts("FATAL: .unwrap() called on Err\n");
+        for (;;) __asm__ volatile("wfe");
+    }
+    return value;
+}
+
+/* Wide-int boxes for values that do not fit the 61-bit inline tag. Heap kind
+ * ids are private to this runtime; rt_value_as_u64/unbox_int below are the
+ * only readers, matching the hosted RtCoreWideInt/RtCoreUInt contract
+ * (runtime_native.c rt_value_int_wide/rt_value_u64). */
+#define HEAP_WIDE_INT  20
+#define HEAP_WIDE_UINT 21
+
+typedef struct { HeapHeader hdr; int64_t value; } RuntimeWideInt;
+typedef struct { HeapHeader hdr; uint64_t value; } RuntimeWideUInt;
+
+static int _rt_int_fits_tagged(int64_t v)
+{
+    return v >= (-(int64_t)1 << 60) && v < ((int64_t)1 << 60);
+}
+
+RuntimeValue rt_value_int(RuntimeValue value)
+{
+    if (_rt_int_fits_tagged((int64_t)value)) return ENCODE_INT((int64_t)value);
+    RuntimeWideInt *n = (RuntimeWideInt *)malloc(sizeof(RuntimeWideInt));
+    if (!n) return ENCODE_INT((int64_t)value); /* OOM: truncating tag, hosted twin does the same */
+    n->hdr.type = HEAP_WIDE_INT;
+    n->hdr.size = (uint32_t)sizeof(RuntimeWideInt);
+    n->value = (int64_t)value;
+    return ENCODE_PTR(n);
+}
+
+RuntimeValue rt_value_u64(RuntimeValue bits)
+{
+    uint64_t value = (uint64_t)bits;
+    if (value <= (uint64_t)(INT64_MAX >> 3)) return ENCODE_INT((int64_t)value);
+    RuntimeWideUInt *u = (RuntimeWideUInt *)malloc(sizeof(RuntimeWideUInt));
+    if (!u) return ENCODE_INT((int64_t)value); /* OOM: truncating tag, hosted twin does the same */
+    u->hdr.type = HEAP_WIDE_UINT;
+    u->hdr.size = (uint32_t)sizeof(RuntimeWideUInt);
+    u->value = value;
+    return ENCODE_PTR(u);
+}
+
+RuntimeValue rt_value_as_u64(RuntimeValue value)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_WIDE_UINT) return (RuntimeValue)((RuntimeWideUInt *)h)->value;
+        if (h && h->type == HEAP_WIDE_INT) return (RuntimeValue)((RuntimeWideInt *)h)->value;
+    }
+    return (RuntimeValue)((uint64_t)value >> 3);
+}
+
+RuntimeValue rt_value_unbox_int(RuntimeValue value)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_WIDE_INT) return (RuntimeValue)((RuntimeWideInt *)h)->value;
+    }
+    if ((((uint64_t)value) & TAG_MASK) == TAG_INT) return (RuntimeValue)((int64_t)value >> 3);
+    if (value == 11) return 1; /* TAG_SPECIAL | SPECIAL_TRUE  */
+    if (value == 19) return 0; /* TAG_SPECIAL | SPECIAL_FALSE */
+    return value; /* heap handles and anything else pass through verbatim */
+}
+
+/* pop: arrays mutate (last element); text is pure and yields the last
+ * CHARACTER as new text (hosted twin semantics, runtime_native.c rt_pop). */
+RuntimeValue rt_pop(RuntimeValue receiver)
+{
+    if (IS_HEAP(receiver)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(receiver);
+        if (h && h->type == HEAP_ARRAY) return rt_array_pop(receiver);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len == 0) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+            uint64_t last_start = 0;
+            for (uint64_t i = 0; i < s->len;) {
+                uint8_t c = (uint8_t)s->data[i];
+                last_start = i;
+                if ((c & 0x80u) == 0u) i += 1;
+                else if ((c & 0xE0u) == 0xC0u) i += 2;
+                else if ((c & 0xF0u) == 0xE0u) i += 3;
+                else i += 4;
+            }
+            return rt_string_new((RuntimeValue)(uintptr_t)(s->data + last_start),
+                                 (RuntimeValue)(s->len - last_start));
+        }
+    }
+    serial_puts("FATAL: pop receiver is not an array or text\n");
+    for (;;) __asm__ volatile("wfe");
+    return NIL_VALUE;
+}
+
+/* Zero-filled byte array of exactly `len` elements (raw i64 argument, tagged
+ * array result; sffi_vulkan.spl / hosted rt_byte_array_new_len contract). */
+RuntimeValue rt_byte_array_new_len(RuntimeValue len)
+{
+    if (len < 0 || len > 0x1000000) return NIL_VALUE;
+    size_t count = (size_t)len;
+    size_t alloc_size = sizeof(RuntimeArray) + count * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = (uint32_t)count;
+    a->cap = (uint32_t)count;
+    for (size_t i = 0; i < count; i++) a->items[i] = 0; /* ENCODE_INT(0) == 0 */
+    return ENCODE_PTR(a);
+}
+
+/* Byte at `index` of a heap string (or raw C string); 0 when out of range.
+ * `index` is a raw i64 (hosted twin rt_string_byte_at). */
+RuntimeValue rt_string_byte_at(RuntimeValue string, RuntimeValue index)
+{
+    if (index < 0) return 0;
+    const uint8_t *data;
+    uint64_t len;
+    if (IS_HEAP(string)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(string);
+        if (!s || s->hdr.type != HEAP_STRING) return 0;
+        data = (const uint8_t *)s->data;
+        len = s->len;
+    } else {
+        data = (const uint8_t *)(uintptr_t)string;
+        if (!data) return 0;
+        len = strlen((const char *)data);
+    }
+    if ((uint64_t)index >= len) return 0;
+    return (RuntimeValue)data[index];
+}
+
+/* Tagged byte/int array -> text; any element outside 0..255 fails to empty
+ * text (hosted twin rt_string_from_byte_array). */
+RuntimeValue rt_string_from_byte_array(RuntimeValue array_value)
+{
+    if (!IS_HEAP(array_value)) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(array_value);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0)
+        return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    size_t len = a->len;
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return NIL_VALUE;
+    for (size_t i = 0; i < len; i++) {
+        RuntimeValue v = a->items[i];
+        if ((v & 7) != 0) { free(buf); return rt_string_new((RuntimeValue)(uintptr_t)"", 0); }
+        int64_t byte = (int64_t)v >> 3;
+        if (byte < 0 || byte > 255) { free(buf); return rt_string_new((RuntimeValue)(uintptr_t)"", 0); }
+        buf[i] = (char)byte;
+    }
+    buf[len] = '\0';
+    RuntimeValue result = rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)len);
+    free(buf);
+    return result;
+}
+
+/* Opaque string builder (string_builder.spl ABI). The handle is a raw C
+ * pointer owned by the runtime; finish() consumes it. */
+typedef struct {
+    char *data;
+    uint64_t len;
+    uint64_t cap;
+} RtFreestandingStringBuilder;
+
+int64_t rt_string_builder_new(void)
+{
+    RtFreestandingStringBuilder *b = (RtFreestandingStringBuilder *)calloc(1, sizeof(RtFreestandingStringBuilder));
+    return (int64_t)(uintptr_t)b;
+}
+
+int64_t rt_string_builder_push(int64_t handle, RuntimeValue string)
+{
+    RtFreestandingStringBuilder *b = (RtFreestandingStringBuilder *)(uintptr_t)handle;
+    if (!b) return 0;
+    if (!IS_HEAP(string)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(string);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    if (s->len == 0) return 1;
+    uint64_t required = b->len + s->len;
+    if (required > b->cap) {
+        uint64_t next_cap = b->cap == 0 ? 64 : b->cap;
+        while (next_cap < required) next_cap *= 2;
+        char *next = (char *)malloc(next_cap);
+        if (!next) return 0;
+        for (uint64_t i = 0; i < b->len; i++) next[i] = b->data[i];
+        free(b->data);
+        b->data = next;
+        b->cap = next_cap;
+    }
+    for (uint64_t i = 0; i < s->len; i++) b->data[b->len + i] = s->data[i];
+    b->len = required;
+    return 1;
+}
+
+int64_t rt_string_builder_len(int64_t handle)
+{
+    RtFreestandingStringBuilder *b = (RtFreestandingStringBuilder *)(uintptr_t)handle;
+    return b ? (int64_t)b->len : 0;
+}
+
+RuntimeValue rt_string_builder_finish(int64_t handle)
+{
+    RtFreestandingStringBuilder *b = (RtFreestandingStringBuilder *)(uintptr_t)handle;
+    if (!b) return NIL_VALUE;
+    RuntimeValue result = rt_string_new((RuntimeValue)(uintptr_t)b->data, (RuntimeValue)b->len);
+    free(b->data);
+    free(b);
+    return result;
+}
+
+int64_t rt_string_builder_free(int64_t handle)
+{
+    RtFreestandingStringBuilder *b = (RtFreestandingStringBuilder *)(uintptr_t)handle;
+    if (!b) return 0;
+    free(b->data);
+    free(b);
+    return 1;
+}
+
+/* Ordering compare for erased operands: heap strings compare by content, a
+ * raw C string on either side is normalized to bytes, otherwise a raw signed
+ * compare of the two values (hosted twin rt_text_cmp_any). */
+static int _rt_bytes_cmp(const uint8_t *a, uint64_t alen, const uint8_t *b, uint64_t blen)
+{
+    uint64_t n = alen < blen ? alen : blen;
+    for (uint64_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) return (int)a[i] - (int)b[i];
+    }
+    if (alen == blen) return 0;
+    return alen < blen ? -1 : 1;
+}
+
+RuntimeValue rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
+{
+    const uint8_t *a; uint64_t alen;
+    const uint8_t *b; uint64_t blen;
+    if (IS_HEAP(left)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(left);
+        if (!s || s->hdr.type != HEAP_STRING) return (RuntimeValue)0;
+        a = (const uint8_t *)s->data; alen = s->len;
+    } else {
+        a = (const uint8_t *)(uintptr_t)left; alen = a ? strlen((const char *)a) : 0;
+    }
+    if (IS_HEAP(right)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(right);
+        if (!s || s->hdr.type != HEAP_STRING) return (RuntimeValue)0;
+        b = (const uint8_t *)s->data; blen = s->len;
+    } else {
+        b = (const uint8_t *)(uintptr_t)right; blen = b ? strlen((const char *)b) : 0;
+    }
+    return (RuntimeValue)_rt_bytes_cmp(a, alen, b, blen);
+}
+
+/* Platform identity for the freestanding kernel. */
+RuntimeValue rt_platform_name(void)
+{
+    static const char name[] = "simpleos-arm64";
+    return rt_string_new((RuntimeValue)(uintptr_t)name, (RuntimeValue)(sizeof(name) - 1));
+}
+
+/* First-class closure ABI (pure-Simple twin: core_closure.spl). Layout:
+ * [0]=type byte in hdr, [8]=func ptr, [16]=capture count, [24]=registry
+ * link, [32+i*8]=captures. The registry head gives the membership test that
+ * keeps raw pointers from masquerading as closures. Freestanding deviates
+ * from the hosted twin only in omitting transient tracking (no collector). */
+static uintptr_t _rt_closure_registry_head = 0;
+
+typedef struct RuntimeClosure {
+    HeapHeader hdr;
+    uintptr_t func_ptr;
+    int64_t capture_count;
+    uintptr_t registry_next;
+    RuntimeValue captures[];
+} RuntimeClosure;
+
+RuntimeValue rt_closure_new(RuntimeValue func_ptr, RuntimeValue capture_count)
+{
+    if (func_ptr == 0 || capture_count < 0 || capture_count > 1152921504606846971LL) return 3;
+    RuntimeClosure *c = (RuntimeClosure *)calloc(1, sizeof(RuntimeClosure) + (size_t)capture_count * sizeof(RuntimeValue));
+    if (!c) {
+        serial_puts("FATAL: closure allocation failed\n");
+        for (;;) __asm__ volatile("wfe");
+    }
+    c->hdr.type = HEAP_OBJECT;
+    c->hdr.size = (uint32_t)(sizeof(RuntimeClosure) + (size_t)capture_count * sizeof(RuntimeValue));
+    c->func_ptr = (uintptr_t)func_ptr;
+    c->capture_count = capture_count;
+    c->registry_next = _rt_closure_registry_head;
+    _rt_closure_registry_head = (uintptr_t)c;
+    return ENCODE_PTR(c);
+}
+
+static RuntimeClosure *_rt_closure_cast(RuntimeValue value)
+{
+    if (value < 4096 || (((uint64_t)value) & 7) != TAG_HEAP) return (RuntimeClosure *)0;
+    uintptr_t candidate = (uintptr_t)((uint64_t)value & ~(uint64_t)7);
+    uintptr_t current = _rt_closure_registry_head;
+    while (current != 0) {
+        if (current == candidate) return (RuntimeClosure *)candidate;
+        current = ((RuntimeClosure *)current)->registry_next;
+    }
+    return (RuntimeClosure *)0;
+}
+
+RuntimeValue rt_closure_set_capture(RuntimeValue closure, RuntimeValue index, RuntimeValue value)
+{
+    RuntimeClosure *c = _rt_closure_cast(closure);
+    if (!c || index < 0 || index >= c->capture_count) return 0;
+    c->captures[index] = value;
+    return 1;
+}
+
+RuntimeValue rt_closure_get_capture(RuntimeValue closure, RuntimeValue index)
+{
+    RuntimeClosure *c = _rt_closure_cast(closure);
+    if (!c || index < 0 || index >= c->capture_count) return NIL_VALUE;
+    return c->captures[index];
+}
+
+RuntimeValue rt_closure_func_ptr(RuntimeValue closure)
+{
+    RuntimeClosure *c = _rt_closure_cast(closure);
+    if (!c) return 0;
+    return (RuntimeValue)c->func_ptr;
+}
+
+/* Thread/mutex shim for the single-core freestanding kernel (mirror of the
+ * x86_64 primitives.c stubs): one implicit owner CPU, locks always succeed.
+ * vfs_boot_state's mount-table mutex uses these around NVMe submission on
+ * the boot path; mutual exclusion with IRQ handlers is provided by the
+ * request-owner atomics below, matching the historical kernels' behaviour. */
+RuntimeValue spl_mutex_create(void)
+{
+    return ENCODE_INT(1); /* dummy non-nil handle */
+}
+RuntimeValue spl_mutex_lock(RuntimeValue m)
+{
+    (void)m;
+    return TRUE_VALUE;
+}
+RuntimeValue spl_mutex_unlock(RuntimeValue m)
+{
+    (void)m;
+    return TRUE_VALUE;
+}
+RuntimeValue spl_thread_current_id(void)
+{
+    return ENCODE_INT(0);
+}
+
+/* User-mode syscall instruction wrapper. The EL1 SVC vector (crt0.S) moves
+ * x8 -> id and x0-x4 -> args before entering rt_arm64_handle_user_svc, so
+ * the user side places them there (userlib syscall_raw.spl convention). */
+uint64_t simpleos_syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                          uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    register uint64_t r0 asm("x0") = a0;
+    register uint64_t r1 asm("x1") = a1;
+    register uint64_t r2 asm("x2") = a2;
+    register uint64_t r3 asm("x3") = a3;
+    register uint64_t r4 asm("x4") = a4;
+    register uint64_t r8 asm("x8") = id;
+    __asm__ volatile("svc #0"
+                     : "+r"(r0)
+                     : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r8)
+                     : "memory");
+    return r0;
+}
+
+/* virtio-blk request-owner word: single-writer admission for the request
+ * slot (driver_class _virtio_blk_request_begin). LDAXR/STLXR give the
+ * compare-and-swap even if an interrupt lands mid-sequence. */
+static volatile uint64_t g_rt_virtio_blk_request_owner = 0;
+
+int64_t rt_arm_virtio_blk_request_owner_load(void)
+{
+    return (int64_t)g_rt_virtio_blk_request_owner;
+}
+
+void rt_arm_virtio_blk_request_owner_store(int64_t value)
+{
+    g_rt_virtio_blk_request_owner = (uint64_t)value;
+}
+
+int64_t rt_arm_virtio_blk_request_owner_compare_exchange(int64_t expected, int64_t desired)
+{
+    uint64_t old;
+    uint32_t done;
+    do {
+        __asm__ volatile("ldaxr %0, [%1]" : "=r"(old) : "r"(&g_rt_virtio_blk_request_owner) : "memory");
+        if ((int64_t)old != expected) return 0;
+        __asm__ volatile("stlxr %w0, %2, [%1]" : "=&r"(done) : "r"(&g_rt_virtio_blk_request_owner), "r"((uint64_t)desired) : "memory");
+    } while (done != 0u);
+    return 1;
+}
+
+/* Canonical trait-default owner for Cranelift's existential BlockDevice
+ * dispatch (symbol is referenced when the default body is not emitted).
+ * Result uses enum id 2 and the stable Err hash shared by
+ * simple-core/runtime_native.c; this is a real error value, not a nil stub.
+ * Mirror of x86_64 freestanding_optional_backends.c. */
+int64_t src__lib__nogc_sync_mut__fs_driver__block_device__BlockDevice_dot_flush(int64_t receiver)
+{
+    static const uint8_t message[] = "block device does not support durable flush";
+    (void)receiver;
+    return (int64_t)rt_enum_new(
+        SPL_RESULT_ENUM_ID, (RuntimeValue)(int32_t)SPL_HASH_ERR,
+        rt_string_new_literal((RuntimeValue)(uintptr_t)message,
+                              (RuntimeValue)(sizeof(message) - 1)));
 }
 
 #define RV_INT int64_t
