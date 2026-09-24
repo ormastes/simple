@@ -176,6 +176,47 @@ fn hir_expr_is_optional_type(e: HirExpr) -> bool:
         case HirTypeKind.Optional(_): true
         case _: false
 
+fn hir_type_has_unresolved_type_param(ty: HirType) -> bool:
+    """True when `ty` still carries a bare, uninstantiated `TypeParam`
+    anywhere in its structure (shallow recursion through the composite type
+    shapes; a `Named(sym, args)`'s own type ARGUMENTS are checked, not its
+    definition). Used by `try_lower_function_value` to refuse lowering a
+    generic/unresolved function signature to a concrete MIR FuncPtr rather
+    than silently guessing a wrong ABI for it."""
+    match ty.kind:
+        case HirTypeKind.TypeParam(_, _): true
+        case HirTypeKind.Array(elem, _): hir_type_has_unresolved_type_param(elem)
+        case HirTypeKind.Slice(elem): hir_type_has_unresolved_type_param(elem)
+        case HirTypeKind.Optional(inner): hir_type_has_unresolved_type_param(inner)
+        case HirTypeKind.Ref(inner, _): hir_type_has_unresolved_type_param(inner)
+        case HirTypeKind.Ptr(inner, _): hir_type_has_unresolved_type_param(inner)
+        case HirTypeKind.Dict(key, value):
+            hir_type_has_unresolved_type_param(key) or hir_type_has_unresolved_type_param(value)
+        case HirTypeKind.Result(ok, err):
+            hir_type_has_unresolved_type_param(ok) or hir_type_has_unresolved_type_param(err)
+        case HirTypeKind.Tuple(elements):
+            var i = 0
+            var found = false
+            while i < elements.len() and not found:
+                found = hir_type_has_unresolved_type_param(elements[i])
+                i = i + 1
+            found
+        case HirTypeKind.Function(params, ret, _):
+            var found = hir_type_has_unresolved_type_param(ret)
+            var i = 0
+            while i < params.len() and not found:
+                found = hir_type_has_unresolved_type_param(params[i])
+                i = i + 1
+            found
+        case HirTypeKind.Named(_, args):
+            var i = 0
+            var found = false
+            while i < args.len() and not found:
+                found = hir_type_has_unresolved_type_param(args[i])
+                i = i + 1
+            found
+        case _: false
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -459,6 +500,84 @@ impl MirLowering:
             val hir_init = self.global_const_exprs[symbol_id]
             return Some(self.lower_expr(hir_init))
         nil
+
+    me try_lower_function_value(symbol_id: i64, span: Span) -> LocalId?:
+        """A bare `Var`/`NamedVar` reference to a top-level FUNCTION symbol
+        used as a first-class VALUE (not called), e.g. a struct field
+        initializer `Port(current_owner_fn: unavailable_owner)` or a local
+        `val f = some_helper`. `try_lower_global_read` only recognizes
+        static/const globals, and the Var/NamedVar dispatch had no other
+        fallback, so this case fell straight to the "undefined variable"
+        error path and produced a `Const(Int(0))` placeholder -- the
+        function's own symbol was never referenced, so the field silently
+        held a null function pointer instead of the intended callable value
+        (P3, undefined-symbol audit `stage2_cli_link_undefined.md`: a local
+        `fn` used as a value must be emitted/referenced by the right symbol).
+
+        Deliberately resolves by the ALREADY-BOUND `symbol_id` the HIR node
+        carries -- never by re-looking the name up in the symbol table (that
+        was `named_function_operand`'s approach, and this codebase has real
+        same-named overload sets, see `is_known_top_level_function`'s doc:
+        "JIT call sites resolve by exact arg-type match ... falling back to
+        the last definition when types are ambiguous"). A name-based re-
+        lookup here could silently pick the WRONG overload; using the
+        resolver's own binding cannot.
+
+        Refuses (loud compiler error, no guess) rather than emit a wrong
+        function pointer when the symbol's type is not a single concrete
+        `HirTypeKind.Function` signature -- e.g. an unresolved/generic
+        function whose parameter or return type still carries a bare
+        `TypeParam` (see `hir_type_has_unresolved_type_param`). The previous
+        version of this fix used a blanket `FuncPtr([] -> i64)` signature for
+        every case, which is wrong ABI for any function that takes/returns
+        anything other than one `i64`.
+        """
+        val sym = self.symbols.get_symbol_raw(symbol_id)
+        if sym == nil:
+            return nil
+        match sym.kind:
+            case SymbolKind.Function | SymbolKind.Method: ()
+            case _: return nil
+        val declared_resolved = SymbolId(id: symbol_id)
+        if not self.is_known_top_level_function(sym.name, declared_resolved):
+            return nil
+        if sym.type_ == nil:
+            self.error("cannot lower '{sym.name}' as a function value: no resolved function type", Some(span))
+            var b_no_ty = self.builder
+            val no_ty_tmp = b_no_ty.emit_const_int(0)
+            self.builder = b_no_ty
+            return Some(no_ty_tmp)
+        var mir_params: [MirType] = []
+        var mir_ret = MirType.i64()
+        var is_concrete_function_type = false
+        match sym.type_.kind:
+            case HirTypeKind.Function(params, ret, _):
+                if hir_type_has_unresolved_type_param(ret):
+                    is_concrete_function_type = false
+                else:
+                    var all_params_concrete = true
+                    for param in params:
+                        if hir_type_has_unresolved_type_param(param):
+                            all_params_concrete = false
+                        mir_params = mir_params.push(self.lower_type(param))
+                    mir_ret = self.lower_type(ret)
+                    is_concrete_function_type = all_params_concrete
+            case _: ()
+        if not is_concrete_function_type:
+            self.error("cannot lower generic or unresolved function '{sym.name}' as a value here; instantiate a concrete signature first", Some(span))
+            var b_generic = self.builder
+            val generic_tmp = b_generic.emit_const_int(0)
+            self.builder = b_generic
+            return Some(generic_tmp)
+        val callable_name = self.provider_callable_symbol_name(declared_resolved, sym.name)
+        val fn_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(callable_name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: mir_params, return_type: mir_ret, is_variadic: false)))
+        ))
+        var b_fn = self.builder
+        val fn_local = b_fn.emit_cast(fn_operand, MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: mir_params, return_type: mir_ret, is_variadic: false))))
+        self.builder = b_fn
+        Some(fn_local)
 
     fn local_is_runtime_array(local: LocalId) -> bool:
         # EXPLICIT DISCRIMINANTS, not `match` -- mirrors local_is_runtime_dict
@@ -4045,6 +4164,8 @@ impl MirLowering:
                     self.find_local(symbol_id)
                 elif val global_local = self.try_lower_global_read(symbol_id):
                     global_local
+                elif val fn_local = self.try_lower_function_value(symbol_id, expr_value.span):
+                    fn_local
                 else:
                     self.error("undefined variable", Some(expr_value.span))
                     var b_err = self.builder
@@ -4085,6 +4206,8 @@ impl MirLowering:
                         self.find_local(symbol_id)
                     elif val global_local2 = self.try_lower_global_read(symbol_id):
                         global_local2
+                    elif val fn_local2 = self.try_lower_function_value(symbol_id, expr_value.span):
+                        fn_local2
                     else:
                         self.error("undefined variable: {name}", Some(expr_value.span))
                         var b_err2 = self.builder
