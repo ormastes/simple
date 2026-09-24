@@ -645,7 +645,14 @@ fn ctx_unescape_json(s: text) -> text:
     _ctx_unescape_segments(s, true)
 
 # Parse a JSON array of strings ("[\"a\", \"b\"]") into unescaped texts.
-# A bare string is accepted as a one-element list.
+# A bare string is accepted as a one-element list. Built from native
+# `index_of`/`substring` passes only (see the scale contract in the
+# header): a per-character loop here would crash on a StrBytes request
+# body, and request bodies can carry arbitrary bytes.
+#
+# The closing quote of an element is the next '"' preceded by an EVEN
+# run of backslashes; escape runs are short, so backslash parity is
+# computed by stripping "\\" pairs with native ends_with/substring.
 fn ctx_parse_string_array(raw: text) -> [text]:
     var out: [text] = []
     val t = raw.trim()
@@ -659,24 +666,32 @@ fn ctx_parse_string_array(raw: text) -> [text]:
         return out
     if not t.starts_with("["):
         return out
-    var in_str = false
-    var esc = false
-    var cur: [text] = []
-    for ch in t:
-        if in_str:
-            if esc:
-                cur.push("\\" + ch)
-                esc = false
-            elif ch == "\\":
-                esc = true
-            elif ch == "\"":
-                out.push(ctx_unescape_json(cur.join("")))
-                cur = []
-                in_str = false
-            else:
-                cur.push(ch)
-        elif ch == "\"":
-            in_str = true
+    var from: i64 = 1
+    while from < t.len():
+        val open = t.index_of("\"", from) ?? -1
+        if open < 0:
+            break
+        var close: i64 = -1
+        var scan: i64 = open + 1
+        while scan < t.len():
+            val cand = t.index_of("\"", scan) ?? -1
+            if cand < 0:
+                break
+            var backslashes: i64 = 0
+            var tail = t.substring(open + 1, cand)
+            while tail.ends_with("\\\\"):
+                tail = tail.substring(0, tail.len() - 2)
+                backslashes = backslashes + 2
+            if tail.ends_with("\\"):
+                backslashes = backslashes + 1
+            if backslashes % 2 == 0:
+                close = cand
+                break
+            scan = cand + 1
+        if close < 0:
+            break
+        out.push(ctx_unescape_json(t.substring(open + 1, close)))
+        from = close + 1
     out
 
 fn _ctx_int_param(body: text, key: text, default_value: i64, max_value: i64) -> i64:
@@ -725,6 +740,15 @@ fn _ctx_summarize_stderr(stderr: text, truncated: bool) -> text:
         s = s + " [truncated]"
     s
 
+# The runtime's bounded-capture marker, left inside a retained stream that
+# hit the output cap. The legacy bounded fallback (platforms without the
+# owned-observed process ABI) drops the `stdout_truncated` receipt flag but
+# still leaves this marker in the stream, so the cap is detected from the
+# marker too — otherwise a truncated capture is never counted on those
+# platforms.
+fn _ctx_has_rt_truncation_marker(s: text) -> bool:
+    s.contains("[output truncated: ") and s.contains(" bytes omitted]")
+
 # `capture_max` bounds each stream AT THE READER (runtime-enforced), so the
 # server's memory is bounded by the cap regardless of what the child prints.
 fn ctx_run_bounded(cmd: text, args: [text], timeout_ms: i64, capture_max: i64) -> CtxExecResult:
@@ -734,17 +758,23 @@ fn ctx_run_bounded(cmd: text, args: [text], timeout_ms: i64, capture_max: i64) -
     val exit_code = p.usage.exit_code
     val timed_out = p.usage.termination == TerminationCause.WallTimeout
     var out = p.stdout
-    if p.stdout_truncated:
-        out = out + "\n[capture truncated at " + str(capture_max) + " bytes]"
+    var truncated = p.stdout_truncated
+    if not truncated and _ctx_has_rt_truncation_marker(out):
+        truncated = true
+    if truncated:
+        # The stream may already carry the runtime's own truncation marker;
+        # only add ours when it does not, so a capture is marked exactly once.
+        if not _ctx_has_rt_truncation_marker(out):
+            out = out + "\n[capture truncated at " + str(capture_max) + " bytes]"
         _ctx_stats_bump("capture_truncations", 1)
     CtxExecResult(
         stdout: out,
-        stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated),
+        stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated or _ctx_has_rt_truncation_marker(p.stderr)),
         exit_code: exit_code,
         timed_out: timed_out,
         wall_ms: p.usage.wall_ms,
         raw_bytes: p.stdout.len() + p.stderr.len(),
-        truncated: p.stdout_truncated,
+        truncated: truncated,
         capture_max: capture_max
     )
 

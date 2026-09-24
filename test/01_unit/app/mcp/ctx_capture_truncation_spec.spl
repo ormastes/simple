@@ -1,0 +1,80 @@
+"""
+# MCP Context Tools — capture-cap truncation accounting
+
+**Requirements:** N/A
+
+## Overview
+
+`ctx_run_bounded` must mark a capture that hit the per-command cap and count
+it in `simple_ctx_stats` as `capture_truncations`. The runtime usually
+reports the cap through the `stdout_truncated` process receipt flag — but the
+legacy bounded fallback (platforms without the owned-observed process ABI)
+drops that flag and instead leaves the runtime's own
+`[output truncated: N bytes omitted]` marker inside the retained stream. The
+handler detects the cap from either signal; without the marker fallback the
+truncation was silently uncounted (2026-09-24 regression: a 50 KB capture
+under a 4096-byte cap indexed 4184 bytes with `capture_truncations: 0`).
+
+## Behavior
+
+- A batch command whose output exceeds `capture_bytes` is marked
+  `[capture truncated at N bytes]` in the batch line and counted once in
+  `capture_truncations`, on both the receipt-flag and the runtime-marker path.
+- A capture under the cap is neither marked nor counted.
+- The stderr summary reports a truncated stderr stream.
+"""
+
+# @feature mcp_ctx_tools
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, time_now_unix_micros}
+use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_batch_execute, ctx_stats_text, ctx_run_bounded}
+
+fn _fresh_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_ctx_trunc_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    env_set("SIMPLE_CTX_CAPTURE_MAX_BYTES", "")
+    dir
+
+fn _truncations() -> i64:
+    for line in ctx_stats_text().split("\n"):
+        if line.starts_with("capture_truncations: "):
+            return line.substring(21).to_int() ?? -1
+    -1
+
+describe "capture cap accounting":
+    it "marks and counts a capture that hits capture_bytes":
+        _fresh_store()
+        val body = "{\"commands\":[\"yes abcdefgh | head -c 20000\"],\"queries\":[],\"source\":\"trunc:cap\",\"capture_bytes\":1024}"
+        val r = handle_simple_ctx_batch_execute("1", body)
+        assert_contains(r, "[0] exit 0")
+        assert_contains(r, "[capture truncated at 1024 bytes]")
+        assert_equal(_truncations(), 1)
+        # The captured head stays searchable under the batch source.
+        val s = handle_simple_ctx_batch_execute("2", "{\"commands\":[\"echo small\"],\"queries\":[\"abcdefgh\"],\"source\":\"trunc:cap\"}")
+        assert_contains(s, "## query: abcdefgh (")
+
+    it "does not mark or count a capture under the cap":
+        _fresh_store()
+        val body = "{\"commands\":[\"echo within budget\"],\"queries\":[],\"source\":\"trunc:ok\",\"capture_bytes\":1024}"
+        val r = handle_simple_ctx_batch_execute("3", body)
+        assert_contains(r, "[0] exit 0")
+        assert_false(r.contains("[capture truncated"))
+        assert_false(r.contains("output truncated"))
+        assert_equal(_truncations(), 0)
+
+    it "detects the cap from the runtime marker when the receipt flag is dropped":
+        _fresh_store()
+        # Direct bounded run: the legacy fallback path keeps the runtime
+        # marker in the stream even when stdout_truncated is false. Either
+        # way, the handler must report the capture as truncated.
+        val res = ctx_run_bounded("/bin/sh", ["-c", "yes zzzzzzzz | head -c 20000"], 15000, 512)
+        assert_true(res.truncated)
+        assert_contains(res.stdout, "[output truncated: 19488 bytes omitted]")
+        assert_equal(_truncations(), 1)
