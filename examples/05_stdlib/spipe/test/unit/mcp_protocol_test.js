@@ -77,11 +77,11 @@ test("notification namespace remains silent through the transport", () => {
   assert.deepEqual(output, []);
 });
 
-test("transport preserves legacy null ids on handler errors", () => {
+test("transport preserves the request id on handler errors", () => {
   const output = [];
   const handleLine = createLineHandler(route, (line) => output.push(JSON.parse(line)));
   handleLine(JSON.stringify({ jsonrpc: "2.0", id: 91, method: "tools/call", params: { name: "missing" } }));
-  assert.equal(output[0].id, null);
+  assert.equal(output[0].id, 91);
   assert.equal(output[0].error.code, -32000);
   assert.match(output[0].error.message, /unknown tool/);
 });
