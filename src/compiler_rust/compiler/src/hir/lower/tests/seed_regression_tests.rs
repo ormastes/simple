@@ -15,6 +15,152 @@ use super::super::super::types::*;
 use super::super::*;
 use super::parse_and_lower;
 
+#[test]
+fn stage2_result_projection_map_filter_preserves_checked_result_and_output_owner() {
+    let source = concat!(
+        "struct Decoy:\n    filler: i64\n    kind: text\n\n",
+        "struct Input:\n    kind: i64\n\n",
+        "struct Output:\n    kind: i64\n\n",
+        "fn make() -> Result<[Input], text>:\n    Ok([Input(kind: 7)])\n\n",
+        "fn probe() -> i64:\n",
+        "    make().ok().unwrap().filter(\\item: item.kind > 0).map(\\item: Output(kind: item.kind))[0].kind\n",
+    );
+    let module = parse_and_lower(source).expect("combined Result and collection lowering");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert_eq!(body.matches("rt_enum_payload").count(), 1, "{body}");
+    assert!(body.contains("rt_enum_check_variant"), "{body}");
+    assert!(body.contains("rt_unwrap_or_trap"), "wrong Result variant must trap: {body}");
+    assert!(!body.contains("field_index: 1"), "Decoy cannot provide a field: {body}");
+    let HirStmt::Expr(result) = function.body.last().unwrap() else { panic!("expected expression") };
+    assert_eq!(result.ty, TypeId::I64);
+}
+
+#[test]
+fn stage2_nullable_unwrap_evaluates_receiver_once_and_traps_canonical_none() {
+    let source = "enum UserKind:\n    Ok(value: i64)\n    Err(value: text)\n    None\n\nfn make() -> UserKind?:\n    nil\n\nfn probe() -> UserKind:\n    make().unwrap()\n";
+    let module = parse_and_lower(source).expect("nullable enum lowering");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let HirStmt::Expr(result) = function.body.last().unwrap() else { panic!("expected expression") };
+    assert_eq!(module.types.get_type_name(result.ty), Some("UserKind"));
+    let HirExprKind::LetIn { local_idx, value, body } = &result.kind else { panic!("receiver once") };
+    assert!(format!("{value:?}").contains("Global(\"make\")"));
+    let HirExprKind::If { condition, then_branch, else_branch: Some(present) } = &body.kind else { panic!("absence guard") };
+    for (expr, expected) in [(condition.as_ref(), "rt_is_none"), (present.as_ref(), "rt_unwrap_or_self")] {
+        let HirExprKind::BuiltinCall { name, args } = &expr.kind else { panic!("expected builtin") };
+        assert_eq!(name, expected);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(args[0].kind, HirExprKind::Local(index) if index == *local_idx));
+    }
+    let HirExprKind::BuiltinCall { name, args } = &then_branch.kind else { panic!("checked absence") };
+    assert_eq!(name, "rt_unwrap_or_trap");
+    let HirExprKind::BuiltinCall { name, args } = &args[0].kind else { panic!("canonical None constructor") };
+    assert_eq!(name, "rt_enum_new");
+    assert!(matches!(args[0].kind, HirExprKind::Integer(1)));
+    assert!(matches!(args[1].kind, HirExprKind::Integer(tag) if tag == simple_runtime::value::hash_variant_discriminant("None") as i64));
+    assert!(matches!(args[2].kind, HirExprKind::Nil));
+    assert_eq!(present.ty, result.ty);
+    assert!(!format!("{result:?}").contains("rt_enum_payload"));
+}
+
+#[test]
+fn stage2_indexed_struct_field_keeps_declared_element_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    action_id: i64\n\nstruct Runtime:\n    action_id: text\n    state: i64\n\nstruct Coordinator:\n    runtime: [Runtime]\n\nfn probe(coordinator: Coordinator, index: i64) -> text:\n    coordinator.runtime[index].action_id\n";
+    let module = parse_and_lower(source).expect("indexed field must use array element owner");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(
+        body.contains("field_index: 0"),
+        "Runtime.action_id is slot zero: {body}"
+    );
+    assert!(
+        !body.contains("field_index: 1"),
+        "Decoy.action_id must not supply the slot: {body}"
+    );
+}
+
+#[test]
+fn stage2_array_sort_callback_uses_both_declared_element_types() {
+    let source = "struct Decoy:\n    filler: i64\n    span: i64\n\nstruct Span:\n    start: i64\n\nstruct Item:\n    span: Span\n\nfn array_sort_by(items: [Item], comparator: i64) -> [Item]:\n    items\n\nfn probe(items: [Item]) -> [Item]:\n    array_sort_by(items, \\a, b: if a.span.start < b.span.start: -1 else: 1)\n";
+    let module = parse_and_lower(source).expect("two-parameter sort callback must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "Item.span is slot zero: {body}");
+    assert!(
+        !body.contains("field_index: 1"),
+        "Decoy.span must not supply a slot: {body}"
+    );
+}
+
+#[test]
+fn stage2_nullable_unwrap_field_uses_pointee_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    kind: text\n\nstruct Payload:\n    kind: i64\n\nfn probe(value: Payload?) -> i64:\n    val unwrapped = value.unwrap()\n    unwrapped.kind\n";
+    let module = parse_and_lower(source).expect("nullable unwrap must retain payload type");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "Payload.kind is slot zero: {body}");
+    assert!(
+        !body.contains("field_index: 1"),
+        "Decoy.kind must not supply a slot: {body}"
+    );
+}
+
+#[test]
+fn stage2_nullable_user_enum_unwrap_keeps_enum_not_first_variant_payload() {
+    let source = "enum UserKind:\n    First(value: i64)\n    Second\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n";
+    let module = parse_and_lower(source).expect("nullable user enum unwrap must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(
+        body.contains("rt_unwrap_or_self") && body.contains("rt_is_none") && body.contains("rt_unwrap_or_trap"),
+        "nullable user enum must unwrap only its outer envelope: {body}"
+    );
+    assert!(!body.contains("rt_enum_payload"), "must not project First payload: {body}");
+}
+
+#[test]
+fn stage2_named_map_callback_uses_function_return_not_function_value() {
+    let source = "struct Decoy:\n    filler: i64\n    priority: text\n\nstruct Rule:\n    priority: i64\n\nstruct Selected:\n    priority: i64\n\nfn select(rule: Rule) -> Selected:\n    Selected(priority: rule.priority)\n\nfn probe(rules: [Rule]) -> i64:\n    rules.map(select)[0].priority\n";
+    let module = parse_and_lower(source).expect("named map callback must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "Selected.priority is slot zero: {body}");
+    assert!(!body.contains("field_index: 1"), "Decoy.priority must not supply a slot: {body}");
+}
+
+#[test]
+fn stage2_nested_numbered_map_placeholder_keeps_input_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    priority: text\n\nstruct Rule:\n    priority: i64\n\nstruct Selected:\n    priority: i64\n\nfn probe(rules: [Rule]) -> [Selected]:\n    rules.map(Selected(priority: _1.priority))\n";
+    let module = parse_and_lower(source).expect("nested numbered placeholder must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "Rule.priority is slot zero: {body}");
+    assert!(!body.contains("field_index: 1"), "Decoy.priority must not supply a slot: {body}");
+}
+
+#[test]
+fn stage2_map_placeholder_type_field_keeps_input_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    type_: text\n\nstruct Param:\n    type_: i64\n\nfn probe(params: [Param]) -> [i64]:\n    params.map(_.type_)\n";
+    let module = parse_and_lower(source).expect("type_ placeholder must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "Param.type_ is slot zero: {body}");
+    assert!(!body.contains("field_index: 1"), "Decoy.type_ must not supply a slot: {body}");
+}
+
+#[test]
+fn stage2_map_placeholder_uses_collection_element_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    priority: text\n\nstruct Rule:\n    priority: i64\n\nfn probe(rules: [Rule]) -> [i64]:\n    rules.map(_.priority)\n";
+    let module = parse_and_lower(source).expect("map placeholder must use array element owner");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "Rule.priority is slot zero: {body}");
+    assert!(
+        !body.contains("field_index: 1"),
+        "Decoy.priority must not supply a slot: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // jit_is_some_is_none_method_dispatch_gap_2026-08-17 (silent-wrong-value shape)
 //

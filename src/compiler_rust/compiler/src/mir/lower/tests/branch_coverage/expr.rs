@@ -314,6 +314,17 @@ fn result_ok_err_method_projection_builds_options_and_checks_outer_variant() {
 }
 
 #[test]
+fn stage2_nullable_user_enum_unwrap_uses_guarded_existing_runtime_calls() {
+    let mir = compile_to_mir(
+        "enum UserKind:\n    Ok(value: i64)\n    Err(value: text)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n",
+    ).unwrap();
+    for name in ["rt_is_none", "rt_enum_new", "rt_unwrap_or_trap", "rt_unwrap_or_self"] {
+        assert!(has_inst(&mir, |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name(name))), "missing {name}: {mir:?}");
+    }
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload"))));
+}
+
+#[test]
 fn result_ok_unwrap_has_one_payload_read_and_wrong_variant_trap() {
     let mir = compile_to_mir(
         "fn make(flag: bool) -> Result<i64, text>:\n    if flag:\n        return Ok(7)\n    Err(\"bad\")\n\nfn probe(flag: bool) -> i64:\n    make(flag).ok().unwrap()\n",
