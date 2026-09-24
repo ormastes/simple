@@ -32,6 +32,26 @@ offenders=""
 fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
 err()  { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
 
+# ------------------------------------------------------------- tool preflight
+# Clang-only toolchain policy (2026-09-24): never `cc`/`gcc`/`cl`. This guard
+# also needs `readelf` and `nm` (ELF tooling) to read NEEDED/undefined-symbol
+# tables, which do not exist on a non-ELF host (e.g. native Windows — no MSYS
+# ELF binutils on PATH). Before, a missing tool made the selftest's `cc`/
+# `readelf` calls fail silently (redirected to /dev/null), `selftest` returned
+# 1 with no explanation, and the caller printed a bare, unhelpful
+# "ERROR — nothing was checked (selftest failed)". Name the exact missing
+# tool up front instead, so e.g. a plain Windows shell gets
+# "ERROR — nothing was checked (missing tool(s): readelf nm; this guard needs
+# ELF tooling not present on this host)" rather than a mystery selftest
+# failure. WSL/Linux hosts with clang+binutils are unaffected (PASS).
+_missing=""
+for _tool in clang readelf nm; do
+    command -v "$_tool" >/dev/null 2>&1 || _missing="$_missing $_tool"
+done
+if [ -n "$_missing" ]; then
+    err "missing tool(s):$_missing; this guard needs ELF tooling (clang, readelf, nm) not present on this host"
+fi
+
 # ---------------------------------------------------------------- selftest ---
 # Fatal, runs before every scan. Fixture 2 replicates the exact pre-fix shape:
 # a binary linked with `-lunwind` against a host that has libunwind.so.8.
@@ -42,7 +62,7 @@ selftest() {
     printf 'int main(void){return 0;}\n' > "$tmp/m.c"
 
     # -- fixture 1: a plain binary must be CLEAN (no libunwind in NEEDED).
-    if ! cc "$tmp/m.c" -o "$tmp/clean" 2>/dev/null; then
+    if ! clang "$tmp/m.c" -o "$tmp/clean" 2>/dev/null; then
         rm -rf "$tmp"; return 1
     fi
     if readelf -d "$tmp/clean" 2>/dev/null | grep -q 'libunwind'; then
@@ -53,13 +73,13 @@ selftest() {
     # exactly as scripts/bootstrap/bootstrap-from-scratch.sh's compat shim does,
     # then link with -lunwind and WITHOUT --as-needed. NEEDED must gain
     # libunwind.so.8 and the scanner must call it an offender.
-    uw=$(cc -print-file-name=libunwind.so.8 2>/dev/null)
+    uw=$(clang -print-file-name=libunwind.so.8 2>/dev/null)
     if [ -f "$uw" ]; then
         mkdir -p "$tmp/compat"
         cp -pL "$uw" "$tmp/compat/libunwind.so" 2>/dev/null
         # `--no-as-needed` MUST precede `-lunwind`: linker flags are positional,
         # and placing it after silently produces a clean binary (a false green).
-        if cc "$tmp/m.c" -Wl,--no-as-needed -L"$tmp/compat" -lunwind \
+        if clang "$tmp/m.c" -Wl,--no-as-needed -L"$tmp/compat" -lunwind \
                -o "$tmp/dirty" 2>/dev/null; then
             if ! readelf -d "$tmp/dirty" 2>/dev/null | grep -q 'libunwind'; then
                 echo "selftest: pre-fix fixture did not reproduce a libunwind NEEDED" >&2
@@ -76,7 +96,7 @@ selftest() {
 
     # -- fixture 3: an artifact with no NEEDED at all must NOT pass the
     # positive libgcc_s assertion (guards against a vacuous green).
-    if cc "$tmp/m.c" -static -o "$tmp/static" 2>/dev/null; then
+    if clang "$tmp/m.c" -static -o "$tmp/static" 2>/dev/null; then
         if scan_artifact_positive "$tmp/static" >/dev/null 2>&1; then
             echo "selftest: positive assertion passed on a static artifact" >&2
             rc=1
