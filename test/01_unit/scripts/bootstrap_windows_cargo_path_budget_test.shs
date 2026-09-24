@@ -10,33 +10,80 @@ esac
 fail() { echo "FAIL: $1" >&2; exit 1; }
 fp_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fp_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cfg_a=aaaaaaaaaaaa
+cfg_b=bbbbbbbbbbbb
 legacy="$root/build/p1-combined-verify/rust-authority-$fp_a"
-# The CARGO_TARGET_DIR is deliberately SHARED across seed-input fingerprints
-# (fixed "target"/"rust-cargo-target" name, not fingerprint-keyed) so a
-# test-only/comment-only Rust change reuses cargo's own per-crate incremental
-# cache instead of forcing a cold rebuild. Only the caller's authority root
-# (home/cargo-home/tmp/receipts, passed in as bootstrap_cargo_legacy_root)
-# stays fingerprint-keyed -- see bootstrap-authority-wiring.shs for the full
-# rationale, including why this cannot admit a stale seed.
-target=$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")
-[ "$target" = "$root/build/c/target" ] || fail 'cache left repo/build or gained a fingerprint-keyed path'
-[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")" ] || fail 'retry changes cache'
-[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$root/build/other-log-root/rust-authority-$fp_a")" ] || fail 'log-root change discards cache'
-[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_b" "$root/build/other/rust-authority-$fp_b")" ] || fail 'changed inputs no longer share the Cargo build cache'
-[ "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy")" = "$(dirname -- "$legacy")/rust-cargo-target" ] || fail 'non-Windows cache is not shared across fingerprints'
-[ "$target" = "$(CARGO_TARGET_DIR=C:/ambient-untrusted-cache bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")" ] || fail 'ambient Cargo target overrides authority'
+# The CARGO_TARGET_DIR is deliberately SHARED across seed-input CONTENT
+# fingerprints (keyed by a 12-hex BUILD CONFIGURATION key, not by fingerprint)
+# so a test-only/comment-only Rust change reuses cargo's own per-crate
+# incremental cache instead of forcing a cold rebuild. A changed CONFIGURATION
+# key (rustc/cargo identity, target, backend/features, LLVM version, C
+# toolchain) always selects a different directory -- see
+# bootstrap_authority_rust_build_config_key in bootstrap-authority-wiring.shs
+# for why: two configurations must never share a directory, or a fixed-name
+# artifact (not a hash-suffixed deps/*.rlib) can freeze stale.
+target=$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy" "$cfg_a")
+[ "$target" = "$root/build/c/$cfg_a" ] || fail 'cache left repo/build or lost the config key'
+[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy" "$cfg_a")" ] || fail 'retry changes cache'
+[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$root/build/other-log-root/rust-authority-$fp_a" "$cfg_a")" ] || fail 'log-root change discards cache'
+[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_b" "$root/build/other/rust-authority-$fp_b" "$cfg_a")" ] || fail 'content-only fingerprint change no longer shares the Cargo build cache'
+[ "$target" != "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy" "$cfg_b")" ] || fail 'different build configurations share a cache directory'
+[ "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy" "$cfg_a")" = "$(dirname -- "$legacy")/rust-cargo-target-$cfg_a" ] || fail 'non-Windows cache is not configuration-keyed'
+[ "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy" "$cfg_a")" != "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy" "$cfg_b")" ] || fail 'non-Windows different configurations share a cache directory'
+[ "$target" = "$(CARGO_TARGET_DIR=C:/ambient-untrusted-cache bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy" "$cfg_a")" ] || fail 'ambient Cargo target overrides authority'
 space_repo='C:/work/checkout with spaces'
-space_target=$(bootstrap_authority_rust_cargo_target "$space_repo" windows "$fp_a" "$legacy")
-[ "$space_target" = "$space_repo/build/c/target" ] || fail 'space-containing checkout split'
-if bootstrap_authority_rust_cargo_target "$root" windows ../escape "$legacy" >/dev/null 2>&1; then
+space_target=$(bootstrap_authority_rust_cargo_target "$space_repo" windows "$fp_a" "$legacy" "$cfg_a")
+[ "$space_target" = "$space_repo/build/c/$cfg_a" ] || fail 'space-containing checkout split'
+if bootstrap_authority_rust_cargo_target "$root" windows ../escape "$legacy" "$cfg_a" >/dev/null 2>&1; then
   fail 'unsafe fingerprint admitted'
 fi
+if bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy" ../escape >/dev/null 2>&1; then
+  fail 'unsafe config key admitted'
+fi
+if bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy" "$fp_a" >/dev/null 2>&1; then
+  fail 'a 64-hex fingerprint was admitted as a 12-hex config key'
+fi
+
+# The config-key computation itself: same inputs -> same key; any one input
+# changing -> a different key; the key is always 12 lowercase hex characters.
+key_reference=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+printf '%s\n' "$key_reference" | LC_ALL=C grep -Eq '^[0-9a-f]{12}$' ||
+  fail 'config key is not 12 lowercase hex characters'
+[ "$key_reference" = "$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')" ] ||
+  fail 'config key is not deterministic'
+key_diff_rustc=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.99.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+key_diff_cargo=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.99.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+key_diff_platform=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-unknown-linux-gnu \
+  llvm '--features llvm' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+key_diff_backend=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  cranelift '' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+key_diff_llvm_version=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 22.0.0 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+key_diff_toolchain_extra=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 'cc=clang;mingw_linker=;mingw_cc=;mingw_ar=')
+for candidate_name in rustc cargo platform backend llvm_version toolchain_extra; do
+  eval "candidate=\$key_diff_$candidate_name"
+  [ "$candidate" != "$key_reference" ] ||
+    fail "config key ignores a changed $candidate_name input"
+done
 
 # Actual failing checkout spelling and cc-rs libmimalloc-sys nesting, including
 # the target triple, Cargo crate hash and object-source hash. No paths created.
 fixture_repo=C:/Users/ormas/dev/simple-combined-integration
 fixture_legacy="$fixture_repo/build/p1-combined-verify/rust-authority-$fp_a"
-fixture_target=$(bootstrap_authority_rust_cargo_target "$fixture_repo" windows "$fp_a" "$fixture_legacy")
+fixture_target=$(bootstrap_authority_rust_cargo_target "$fixture_repo" windows "$fp_a" "$fixture_legacy" "$cfg_a")
 suffix=/x86_64-pc-windows-msvc/bootstrap/build/libmimalloc-sys-74092f04eda43372/out/077ae3504b1c7768-static.o
 runtime_backend_plugin_suffix=/x86_64-pc-windows-msvc/bootstrap/build/simple-runtime-74092f04eda43372/out/077ae3504b1c7768-runtime_backend_plugin.o
 old_object=$(cygpath -am "$fixture_legacy/target$suffix")
@@ -52,13 +99,13 @@ native_target=$(cygpath -am "$fixture_target")
 
 # Exercise exact prefix boundary and one byte over; long checkout roots fail
 # before launching Cargo instead of repeating the cryptic MSVC C1083 failure.
-# Boundary length accounts for the fixed "/build/c/target" suffix (15 bytes),
-# not a 64-byte fingerprint -- the shared, non-fingerprint-keyed cache name.
+# Boundary length accounts for the fixed "/build/c/<12-hex>" suffix (21 bytes),
+# not a 64-byte fingerprint -- the shared, configuration-keyed cache name.
 boundary_repo=C:/
-while [ "${#boundary_repo}" -lt 105 ]; do boundary_repo="${boundary_repo}x"; done
-boundary_target=$(bootstrap_authority_rust_cargo_target "$boundary_repo" windows "$fp_a" "$legacy")
+while [ "${#boundary_repo}" -lt 99 ]; do boundary_repo="${boundary_repo}x"; done
+boundary_target=$(bootstrap_authority_rust_cargo_target "$boundary_repo" windows "$fp_a" "$legacy" "$cfg_a")
 [ "${#boundary_target}" -eq 120 ] || fail '120-byte boundary changed'
-if bootstrap_authority_rust_cargo_target "${boundary_repo}x" windows "$fp_a" "$legacy" >/dev/null 2>&1; then
+if bootstrap_authority_rust_cargo_target "${boundary_repo}x" windows "$fp_a" "$legacy" "$cfg_a" >/dev/null 2>&1; then
   fail 'over-budget checkout admitted'
 fi
 configured_native=$(cygpath -am "$target")

@@ -2294,10 +2294,12 @@ fi
 
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
-  rust_authority_target=$(bootstrap_authority_rust_cargo_target \
-    "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
-    "${rust_authority_root}") || exit 1
-  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
+  # rust_authority_target/profile_dir are computed further below, once the
+  # Rust toolchain and LLVM authorities are resolved: the shared
+  # CARGO_TARGET_DIR is keyed by build CONFIGURATION (rustc/cargo identity,
+  # target, backend/features, LLVM version, C toolchain), not by
+  # seed_inputs_fingerprint (which also hashes source content) -- see
+  # bootstrap_authority_rust_build_config_key in bootstrap-authority-wiring.shs.
   rust_authority_home="${rust_authority_root}/home"
   rust_authority_cargo_home="${rust_authority_root}/cargo-home"
   rust_authority_tmp="${rust_authority_root}/tmp"
@@ -2459,6 +2461,33 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     fi
     rust_llvm_path="${rust_llvm_prefix}/bin:${PATH}"
   fi
+
+  # Compute the shared CARGO_TARGET_DIR now that every build-configuration
+  # input (toolchain identity, target, backend/features, LLVM version, C
+  # toolchain) has settled -- see bootstrap_authority_rust_build_config_key
+  # in bootstrap-authority-wiring.shs for exactly what is folded in and why.
+  rust_authority_rustc_version=$("${rustc_abs}" --version) || {
+    echo "error: could not query Rust seed toolchain identity" >&2
+    exit 1
+  }
+  rust_authority_cargo_version=$("${cargo_abs}" --version) || {
+    echo "error: could not query Cargo seed toolchain identity" >&2
+    exit 1
+  }
+  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-}"
+  rust_authority_config_key=$(
+    bootstrap_authority_rust_build_config_key \
+      "${rust_authority_rustc_version}" "${rust_authority_cargo_version}" \
+      "${PLATFORM}" "${backend}" "${llvm_features}" "${rust_llvm_version:-}" \
+      "${rust_authority_toolchain_extra}"
+  ) || {
+    echo "error: could not compute Rust build configuration key" >&2
+    exit 1
+  }
+  rust_authority_target=$(bootstrap_authority_rust_cargo_target \
+    "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
+    "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
+  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
 fi
 
 rust_authority_workspace_prepared=0
