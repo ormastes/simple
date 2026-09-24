@@ -1004,6 +1004,25 @@ bootstrap_progress_mark() {
       ;;
   esac
 }
+# Cheap per-step elapsed-time instrumentation for the pre-stage-2 region
+# (fingerprint milestone -> stage2 milestone), which measured ~85-106s at
+# 0.5-7% tree CPU with no prior attribution. One `date +%s` call per named
+# step (never per inner-loop iteration) — negligible added wall time.
+bootstrap_step_ts=""
+bootstrap_step_mark() {
+  step_name=$1
+  step_now=$(date +%s)
+  if [ -n "${bootstrap_step_ts}" ]; then
+    step_elapsed_ms=$(( (step_now - bootstrap_step_ts) * 1000 ))
+  else
+    step_elapsed_ms=0
+  fi
+  bootstrap_step_ts=${step_now}
+  printf 'step=%s elapsed_ms=%s\n' "${step_name}" "${step_elapsed_ms}" >&2
+  if [ -n "${progress_log}" ]; then
+    printf 'step=%s elapsed_ms=%s\n' "${step_name}" "${step_elapsed_ms}" >>"${progress_log}" 2>/dev/null || true
+  fi
+}
 bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
@@ -1454,6 +1473,18 @@ bootstrap_native_cache_prune() {
   find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
     -mtime +"${bnc_ttl}" -exec rm -rf {} + 2>/dev/null || true
   echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
+  # NOTE: the Rust seed's stage-2/3 native-build cache uses a DIFFERENT
+  # layout — `scope-<16hex>/objects/<16hex>.o`, keyed by lane +
+  # compiler_fingerprint (native_project/mod.rs: cache_scope_segment). An
+  # mtime-based TTL is UNSAFE for that layout: writes land in
+  # `scope-*/objects/`, not the scope dir itself, so the in-use scope's own
+  # mtime goes stale under continuous use and a naive TTL sweep here would
+  # eventually delete the dir a build is actively reading (and would not
+  # remove a freshly-orphaned scope from a seed rebuild until the TTL
+  # elapses either). That case is handled at its own call site instead —
+  # see the scope-name-provable prune right after the Stage 2 native-build
+  # log is written in the main script, keyed off the seed's own
+  # `[native-build] ... scope=<name>` receipt rather than mtime.
 }
 
 # Per-lane private cache. Each stage gets build/bootstrap/native_cache/<lane>/
@@ -2272,10 +2303,12 @@ fi
 seed_inputs_fingerprint=not-used-by-admitted-stage4-resume
 if [ -z "${resume_stage4_output}" ]; then
   bootstrap_progress_mark fingerprint ""
+  bootstrap_step_mark fingerprint-start
   seed_inputs_fingerprint=$(seed_inputs_hash pre) || {
     echo "error: failed to fingerprint Rust seed inputs" >&2
     exit 1
   }
+  bootstrap_step_mark seed-inputs-hash-pre
 fi
 if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
   if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
@@ -2291,6 +2324,7 @@ if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_al
     echo "Seed/runtime current (input content hash matches); skipping Rust rebuild."
   fi
 fi
+bootstrap_step_mark seed-stale-check
 
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
@@ -2309,6 +2343,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: could not resolve canonical Rust toolchain" >&2
     exit 1
   }
+  bootstrap_step_mark rust-toolchain-resolve
   rust_sysroot=$(
     printf '%s\n' "${rust_toolchain_authority}" |
       sed -n 's/^rust-sysroot=//p'
@@ -2461,6 +2496,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     fi
     rust_llvm_path="${rust_llvm_prefix}/bin:${PATH}"
   fi
+  bootstrap_step_mark rust-llvm-authority-resolve
 
   # Compute the shared CARGO_TARGET_DIR now that every build-configuration
   # input (toolchain identity, target, backend/features, LLVM version, C
@@ -2518,6 +2554,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
   rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
 fi
+bootstrap_step_mark rust-authority-target-key
 
 rust_authority_workspace_prepared=0
 prepare_rust_authority_workspace() {
@@ -2844,6 +2881,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   seed_fingerprint_observation_details=\
 "${output_dir}/rust-authority-fingerprint-current.details.env"
 fi
+bootstrap_step_mark cargo-build-or-skip
 
 # Cargo is itself the producer of the selected Rust seed, so the authoritative
 # preflight must run after that seed is rebuilt/published and before any
@@ -2864,6 +2902,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT \
     SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG
 fi
+bootstrap_step_mark bootstrap-preflight
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
 # The full CLI `build bootstrap` command doesn't forward the runtime path
@@ -3083,6 +3122,7 @@ else
     echo "error: could not snapshot Rust runtime authority" >&2
     exit 1
   }
+  bootstrap_step_mark runtime-origin-before
   bootstrap_stage3_copy_authority "${runtime_origin_absolute}" \
     "$(absolute_path "${stage2_runtime_authority}")" || {
     echo "error: could not freeze Stage 2 runtime authority" >&2
@@ -3160,6 +3200,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: hosted runtime identity changed while pinning Stage 2 authority" >&2
     exit 1
   }
+  bootstrap_step_mark private-admission-and-pin-stage4
   stage_runtime_absolute=${BOOTSTRAP_STAGE4_RUNTIME_PATH}
   stage2_seed_absolute=${BOOTSTRAP_STAGE4_SEED}
   seed_bin=${BOOTSTRAP_STAGE4_SEED}
@@ -3175,14 +3216,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: could not bind bootstrap tool authority" >&2
     exit 1
   }
+  bootstrap_step_mark tool-authority-before
   bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
     echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
     exit 1
   }
+  bootstrap_step_mark git-state-before
   bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
     echo "error: could not snapshot Stage 3 source authority" >&2
     exit 1
   }
+  bootstrap_step_mark source-inputs-before
 
   # Stage 2: the admitted parent compiles bootstrap_main.spl.
   # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
@@ -3195,6 +3239,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${seed_bin}" phase1 || \
       echo "  warning: phase1 snapshot preservation failed (non-fatal)" >&2
   fi
+  bootstrap_step_mark phase1-snapshot-preserve
   bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
   mkdir -p "${stage2_provenance_cache}"
   # M3 manifests bind canonical filesystem roots, not unresolved future path
@@ -3547,6 +3592,25 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 1
   }
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
+  # Prune sibling `scope-*` seed-cache dirs that are provably NOT the scope
+  # this run just used. The scope name comes straight from the seed's own
+  # `[native-build] ... scope=<name>` receipt line (never recomputed here),
+  # so a dead scope from a superseded seed fingerprint (e.g. the `bb9e`
+  # scope orphaned by a prior seed rebuild) is removed the same run it goes
+  # stale, instead of waiting on an mtime TTL that never fires for an
+  # actively-used scope and never fires soon enough for a freshly dead one.
+  # Read only, no status through a pipe: `stage2_current_scope` is a plain
+  # variable assignment from command substitution.
+  stage2_current_scope=$(grep -o 'scope=[^ ]*' "${stage2_native_log}" 2>/dev/null | tail -1 | cut -d= -f2)
+  if [ -n "${stage2_current_scope}" ] &&
+     [ -d "${stage2_cache_absolute}/${stage2_current_scope}" ]; then
+    for stage2_stale_scope_dir in "${stage2_cache_absolute}"/scope-*; do
+      [ -d "${stage2_stale_scope_dir}" ] || continue
+      [ "$(basename "${stage2_stale_scope_dir}")" = "${stage2_current_scope}" ] && continue
+      rm -rf "${stage2_stale_scope_dir}"
+      echo "  native cache: pruned stale seed scope dir $(basename "${stage2_stale_scope_dir}") (current: ${stage2_current_scope})"
+    done
+  fi
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
     if ! bootstrap_stage_sanity "${stage2_bin}" \

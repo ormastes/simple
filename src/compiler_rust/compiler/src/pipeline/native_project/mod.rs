@@ -1184,6 +1184,26 @@ impl NativeProjectBuilder {
         let compiled = object_paths.len();
         let failed = failures.len();
 
+        // Always print compiled/reused/failed counts, unconditionally and on
+        // BOTH the success and failure paths — previously this only appeared
+        // with SIMPLE_NATIVE_INCREMENTAL=1 and after the failure early-return
+        // below, so a failed build never showed counts (see rebuild_separation
+        // measurement, gap G3). Print-only; no logic change.
+        // `compiled` (object_paths.len()) is cached ∪ freshly-compiled, so the
+        // "compiled" field here is freshly_compiled.len() specifically —
+        // reused=cached_count, compiled=freshly_compiled.len() do not overlap.
+        // `scope=` names the seed-keyed cache directory (cache_scope_segment())
+        // so the bootstrap script can tell which scope a run actually used,
+        // without recomputing the hash itself.
+        let native_build_scope_name = cache_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        eprintln!(
+            "[native-build] compiled={} reused={cached_count} failed={failed} scope={native_build_scope_name}",
+            freshly_compiled.len()
+        );
+
         // Always log individual failures when present (bootstrap visibility).
         if failed > 0 {
             eprintln!("\nFAILED FILES ({failed}):");
