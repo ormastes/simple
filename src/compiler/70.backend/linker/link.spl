@@ -278,10 +278,18 @@ impl Linker:
             val reader = reader_result.unwrap()
             self.readers = self.readers.push(reader)
 
-            # Load note.sdn metadata for lazy instantiation
-            val metadata_result = reader.read_note_sdn()
-            if metadata_result.is_ok():
-                self.lazy_inst.load_metadata(path, metadata_result.unwrap())
+            # Load note.sdn metadata for lazy instantiation.
+            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly
+            # (smf_reader.spl:294), not a Result -- same bug class as
+            # collect_deferred_hints below (the previous `.is_ok()`/
+            # `.unwrap()` here left the value receiver-typed ANY). There is
+            # no failure case to gate on: an absent note.sdn section yields
+            # `NoteSdnMetadata.new()` (all-empty), and `load_metadata` is a
+            # no-op-safe merge over empty arrays plus an idempotent map
+            # write, so calling it unconditionally is the correct restored
+            # semantics, not a behavior change.
+            val metadata: NoteSdnMetadata = reader.read_note_sdn()
+            self.lazy_inst.load_metadata(path, metadata)
 
         Ok(())
 
@@ -383,6 +391,7 @@ impl Linker:
             val err: LinkError = e
             if err.kind == LinkErrorKind.TypeMismatch:
                 has_type_mismatch = true
+                break
         if has_type_mismatch:
             Err("Type unification failed")
         else:
@@ -451,6 +460,7 @@ impl Linker:
             val err: LinkError = e
             if err.kind == LinkErrorKind.InstantiationFailed:
                 has_instantiation_failure = true
+                break
         if has_instantiation_failure:
             Err("Instantiation failed")
         else:
