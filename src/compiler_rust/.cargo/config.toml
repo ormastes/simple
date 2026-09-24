@@ -41,11 +41,19 @@ rustflags = [
 ]
 
 [target.x86_64-pc-windows-msvc]
-# Rust executables use the native MSVC linker.  clang-cl is the C compiler for
-# the runtime build; using it as Cargo's linker risks passing Rust's linker
-# arguments through a C driver and makes MSYS/Git `link` shadowing ambiguous.
-# The MSVC environment resolves link.exe.
-linker = "link.exe"
+# clang-only policy (.claude/rules/code-style.md, 2026-09-24): never `cl`,
+# never MSVC `link.exe`. `lld-link` is LLD's COFF linker driver -- it accepts
+# the same /OPT:REF, /OPT:ICF and other MSVC-flavour flags `link.exe` does
+# (it is a drop-in linker.exe-CLI-compatible replacement), so it is NOT the
+# same risk the old comment warned about for clang-cl-as-linker: clang-cl is a
+# C COMPILER DRIVER that reinterprets argv before invoking a linker, which is
+# what could mis-pass Rust's raw `-C link-arg=...` flags; `lld-link` IS the
+# linker itself, with no driver translation step in front of it, so Cargo's
+# linker-argv contract holds. scripts/setup/windows-msvc-bootstrap-env.shs
+# puts the LLVM 23 `bin/` directory (which ships `lld-link.exe`) on PATH and
+# no longer puts the MSVC `VC/Tools/.../bin/Hostx64/x64` directory on PATH, so
+# a bare `link.exe`/`cl.exe` cannot shadow this even by accident.
+linker = "lld-link"
 # Size optimization linker flags (Windows MSVC equivalent of --gc-sections)
 rustflags = [
     # Remove unreferenced functions/data
@@ -54,9 +62,19 @@ rustflags = [
     "-C", "link-arg=/OPT:ICF",
 ]
 
-# Cross-compilation linker configs for non-Windows targets
+# Cross-compilation linker configs for non-Windows targets. clang-only policy:
+# these used to invoke a GCC cross toolchain (`*-gcc`) by name, in violation
+# of "never gcc" (.claude/rules/code-style.md). clang is a native cross
+# compiler/linker driver -- one binary handles every target via `--target=`,
+# so no per-arch GCC cross-toolchain package is required at all. Not
+# verified on this Windows host: it has no aarch64/riscv64 Linux cross
+# sysroot installed, so `cargo check --target aarch64-unknown-linux-gnu`
+# cannot be exercised here. Verify on a Linux host with those cross sysroots
+# before relying on this for an actual cross-build.
 [target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
+linker = "clang"
+rustflags = ["-C", "link-arg=--target=aarch64-linux-gnu"]
 
 [target.riscv64gc-unknown-linux-gnu]
-linker = "riscv64-linux-gnu-gcc"
+linker = "clang"
+rustflags = ["-C", "link-arg=--target=riscv64-linux-gnu"]
