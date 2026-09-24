@@ -496,7 +496,7 @@ class Walk:
         Returns:
             Walk with only files
         """
-        self.filter(fn(e: DirEntry): e.is_file)
+        self.filter(_.is_file)
 
     fn dirs_only() -> Walk:
         """Filter to directories only.
@@ -504,7 +504,7 @@ class Walk:
         Returns:
             Walk with only directories
         """
-        self.filter(fn(e: DirEntry): e.is_dir)
+        self.filter(_.is_dir)
 
     fn to_list() -> [DirEntry]:
         """Convert to list of entries.
@@ -608,21 +608,57 @@ fn list_dir(path: text) -> [text]?:
 # SFFI Functions
 # ============================================================================
 
-# Path operations
-# NOTE(stage4_stub_symbol_plan step 2): no rt_-prefixed runtime symbols exist
-# for path manipulation anywhere in src/runtime/{runtime.h,runtime.c,
-# runtime_native.c} (grepped for rt_path_*) — left as bare externs, marked
-# unresolvable-here (would require new pure-Simple or new runtime
-# implementations, out of scope of the naming-mismatch fix).
-extern fn path_join(path: text, other: text) -> text
-extern fn path_normalize(path: text) -> text
-extern fn path_parent(path: text) -> text?
-extern fn path_filename(path: text) -> text?
-extern fn path_extension(path: text) -> text?
-extern fn path_stem(path: text) -> text?
-extern fn path_components(path: text) -> [text]
-extern fn path_is_absolute(path: text) -> bool
-extern fn path_with_extension(path: text, ext: text) -> text
+# Path operations — these used to be bare `extern fn` with no `rt_path_*`
+# runtime symbol anywhere in src/runtime (that part of the old NOTE was
+# correct), but a real pure-Simple implementation already existed at
+# std.nogc_sync_mut.path (src/lib/nogc_sync_mut/path.spl) and was simply
+# never wired up here. This was a wrong-import bug, not a missing-capability
+# gap — see doc/08_tracking/bug (stage2_cli_link_undefined P4).
+use std.nogc_sync_mut.path.{join2 as _fs_path_join2, normalize as _fs_path_normalize, dirname as _fs_path_dirname, basename as _fs_path_basename, extension as _fs_path_extension, stem as _fs_path_stem, split_path as _fs_path_split, is_absolute as _fs_path_is_absolute, parent_dir_option as _fs_path_parent_option}
+
+fn path_join(path: text, other: text) -> text:
+    _fs_path_join2(path, other)
+
+fn path_normalize(path: text) -> text:
+    _fs_path_normalize(path)
+
+fn path_parent(path: text) -> text?:
+    _fs_path_parent_option(path)
+
+fn path_filename(path: text) -> text?:
+    val name = _fs_path_basename(path)
+    if name == "":
+        nil
+    else:
+        Some(name)
+
+fn path_extension(path: text) -> text?:
+    val ext = _fs_path_extension(path)
+    if ext == "":
+        nil
+    else:
+        Some(ext)
+
+fn path_stem(path: text) -> text?:
+    val s = _fs_path_stem(path)
+    if s == "":
+        nil
+    else:
+        Some(s)
+
+fn path_components(path: text) -> [text]:
+    _fs_path_split(path)
+
+fn path_is_absolute(path: text) -> bool:
+    _fs_path_is_absolute(path)
+
+fn path_with_extension(path: text, ext: text) -> text:
+    val dir = _fs_path_dirname(path)
+    val new_name = _fs_path_stem(path) + "." + ext
+    if dir == ".":
+        new_name
+    else:
+        _fs_path_join2(dir, new_name)
 
 # File operations — renamed to the real rt_-prefixed runtime symbols
 # (src/runtime/runtime.h + runtime_native.c).
@@ -707,10 +743,22 @@ fn walk_dir(root: text) -> [DirEntry]:
         entries.push(DirEntry(path: path, name: name, is_file: not is_dir, is_dir: is_dir))
     entries
 
-# Glob pattern matching
-# NOTE: no rt_glob_* runtime symbols exist anywhere — unresolvable-here.
-extern fn glob_find(pattern: text) -> [text]
-extern fn glob_matches(pattern: text, path: text) -> bool
+# Glob pattern matching — no rt_glob_* runtime symbol exists, but a real
+# pure-Simple glob matcher already exists at std.nogc_sync_mut.glob
+# (src/lib/nogc_sync_mut/glob.spl). Wrong-import bug, same as the path
+# operations above.
+use std.nogc_sync_mut.glob.{glob_match as _fs_glob_match}
+
+fn glob_matches(pattern: text, path: text) -> bool:
+    _fs_glob_match(path, pattern)
+
+fn glob_find(pattern: text) -> [text]:
+    """Find files under the current directory matching a glob pattern."""
+    var matches: [text] = []
+    for path in dir_walk("."):
+        if _fs_glob_match(path, pattern):
+            matches.push(path)
+    matches
 
 # read_file — alias for read_to_string (returns text? or "" on nil)
 fn read_file(path: text) -> text:
