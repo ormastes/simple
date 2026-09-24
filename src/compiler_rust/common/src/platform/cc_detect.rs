@@ -6,11 +6,14 @@
 use crate::platform::path::to_native_owned;
 use crate::target::{LinkerFlavor, Target, TargetOS};
 
-const WINDOWS_GNU_C_COMPILERS: &[&str] = &["gcc", "clang"];
-const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["g++", "clang++"];
+// Toolchain policy (2026-09-24): clang only -- never gcc/g++/cl.exe as a
+// host compiler. A missing clang is reported by `require_compiler` with the
+// install hint instead of silently switching to another toolchain.
+const WINDOWS_GNU_C_COMPILERS: &[&str] = &["clang"];
+const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["clang++"];
 const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-gcc"];
 const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
-const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang", "cl.exe"];
+const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang"];
 const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
 
 /// True when `target` names the *same* Windows machine we are already
@@ -44,7 +47,7 @@ fn cxx_candidates(target: &Target, flavor: LinkerFlavor) -> &'static [&'static s
     match (target.os, flavor) {
         (_, LinkerFlavor::Msvc) => MSVC_CXX_COMPILERS,
         (TargetOS::Windows, LinkerFlavor::Gnu) => WINDOWS_GNU_CXX_COMPILERS,
-        _ => &["clang++", "g++"],
+        _ => &["clang++"],
     }
 }
 
@@ -52,7 +55,7 @@ fn cxx_candidates(target: &Target, flavor: LinkerFlavor) -> &'static [&'static s
 ///
 /// Respects the `CC` environment variable. When `SIMPLE_LINKER_FLAVOR=msvc`,
 /// prefers MSVC-compatible compilers (`clang-cl`). On Windows, prefers `clang-cl`.
-/// On Unix, prefers `clang` over `gcc`.
+/// On Unix, uses `clang` (clang-only toolchain).
 pub fn find_c_compiler() -> String {
     detect_c_compiler_for_target(&Target::host())
 }
@@ -60,8 +63,8 @@ pub fn find_c_compiler() -> String {
 /// Detect the C compiler for a specific target platform.
 ///
 /// The target's resolved linker flavor selects an ABI-compatible toolchain:
-/// Windows GNU prefers `gcc`; Windows MSVC prefers `clang-cl`.
-/// On Unix targets, defaults to `cc`.
+/// Windows GNU uses `clang`; Windows MSVC prefers `clang-cl`.
+/// On Unix targets, uses `clang`.
 pub fn detect_c_compiler_for_target(target: &Target) -> String {
     if let Ok(cc) = std::env::var("CC") {
         // MSYS does NOT path-convert env vars for native child processes, so a
@@ -82,7 +85,7 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
                 }
             }
         }
-        return "cl.exe".to_string();
+        return "clang-cl".to_string();
     }
     match target.os {
         TargetOS::Windows => {
@@ -91,17 +94,33 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
                     return cc.to_string();
                 }
             }
-            "gcc".to_string()
+            "clang".to_string()
         }
-        _ if command_exists("clang") => "clang".to_string(),
-        _ => "gcc".to_string(),
+        _ => "clang".to_string(),
+    }
+}
+
+/// Error for a required clang compiler that is not installed (clang-only
+/// toolchain; no gcc/g++/cl.exe fallback), naming the install command.
+pub fn missing_compiler_error(tool: &str) -> String {
+    format!(
+        "required compiler `{tool}` was not found on PATH (clang-only toolchain;          gcc, g++ and MSVC cl.exe are not used as a fallback).          Install it with: sh scripts/setup/bootstrap-prereqs.shs install"
+    )
+}
+
+/// Fail fast when the selected compiler cannot be run.
+pub fn require_compiler(tool: &str) -> Result<(), String> {
+    if command_exists(tool) {
+        Ok(())
+    } else {
+        Err(missing_compiler_error(tool))
     }
 }
 
 /// Find a C++ compiler.
 ///
-/// Uses the host target's resolved linker flavor. Windows GNU prefers `g++`;
-/// Windows MSVC prefers `clang-cl`. On Unix, tries clang++ then g++.
+/// Uses the host target's resolved linker flavor. Windows GNU uses `clang++`;
+/// Windows MSVC prefers `clang-cl`. On Unix, `clang++`.
 pub fn find_cxx_compiler() -> String {
     detect_cxx_compiler_for_target(&Target::host())
 }
@@ -129,7 +148,7 @@ pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
     if flavor == LinkerFlavor::Msvc {
         "clang-cl".to_string()
     } else {
-        "g++".to_string()
+        "clang++".to_string()
     }
 }
 
@@ -279,10 +298,10 @@ mod tests {
     use crate::target::TargetArch;
 
     #[test]
-    fn windows_gnu_prefers_gnu_compilers() {
+    fn windows_gnu_uses_clang_candidates() {
         let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
-        assert_eq!(WINDOWS_GNU_C_COMPILERS, &["gcc", "clang"]);
-        assert_eq!(cxx_candidates(&target, LinkerFlavor::Gnu), &["g++", "clang++"]);
+        assert_eq!(WINDOWS_GNU_C_COMPILERS, &["clang"]);
+        assert_eq!(cxx_candidates(&target, LinkerFlavor::Gnu), &["clang++"]);
         assert!(!compiler_matches_flavor("clang-cl", LinkerFlavor::Gnu));
         assert_eq!(target.linker_flavor(), LinkerFlavor::Gnu);
         assert_eq!(target.triple_str(), "x86_64-pc-windows-gnu");
@@ -293,7 +312,7 @@ mod tests {
     #[test]
     fn windows_msvc_keeps_msvc_compilers() {
         let target = Target::parse("x86_64-pc-windows-msvc").unwrap();
-        assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang", "cl.exe"]);
+        assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang"]);
         assert_eq!(
             cxx_candidates(&target, LinkerFlavor::Msvc),
             &["clang-cl", "clang++", "clang"]
@@ -323,5 +342,24 @@ mod tests {
                 "C:\\healthy\\clang-cl.exe".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn host_compiler_candidates_are_clang_only() {
+        for list in [WINDOWS_GNU_C_COMPILERS, WINDOWS_GNU_CXX_COMPILERS, MSVC_C_COMPILERS, MSVC_CXX_COMPILERS] {
+            for cc in list {
+                assert!(!matches!(*cc, "gcc" | "g++" | "cc" | "c++" | "cl" | "cl.exe"), "{cc}");
+            }
+        }
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert_eq!(cxx_candidates(&linux, LinkerFlavor::Gnu), &["clang++"]);
+    }
+
+    #[test]
+    fn missing_compiler_error_names_tool_and_install_command() {
+        let message = missing_compiler_error("clang-cl");
+        assert!(message.contains("`clang-cl`"), "{message}");
+        assert!(message.contains("sh scripts/setup/bootstrap-prereqs.shs install"), "{message}");
+        assert!(require_compiler("definitely-not-a-compiler-xyz").is_err());
     }
 }

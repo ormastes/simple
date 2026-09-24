@@ -1411,7 +1411,10 @@ the old fabricating behaviour.",
         std::fs::write(&stub_c, &c_code).map_err(|e| format!("write stubs: {e}"))?;
 
         let stub_o = temp_dir.join("_stubs.o");
-        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "gcc".to_string());
+        // GNU-style driver flags and `__asm__` labels below: clang's GNU
+        // driver, never gcc (clang-only toolchain). Fail fast if it is absent.
+        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        simple_common::platform::cc_detect::require_compiler(&stub_cc)?;
         let output = std::process::Command::new(&stub_cc)
             .arg("-c")
             .arg("-ffunction-sections")

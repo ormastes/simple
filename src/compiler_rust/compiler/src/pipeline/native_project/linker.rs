@@ -1606,6 +1606,9 @@ int main(int argc, char** argv) {
         } else {
             target_c_compiler(cross_target)
         };
+        // Fail fast with the install hint instead of a bare spawn error: the
+        // detector reports a clang name even when none is installed.
+        simple_common::platform::cc_detect::require_compiler(&cc)?;
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
