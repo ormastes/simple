@@ -579,6 +579,77 @@ mcp_bd_selftest() {
        mcp_bd_selftest_failed=1 ;;
   esac
 
+  # --- item 1 (Opus re-verify #2): local auto-deploy fires on a missing/
+  # broken deployed server by default (no CI, no --no-deploy-mcp), and CI
+  # auto-off still applies - independent of any "receipt" concept, which is
+  # a bootstrap-from-scratch.sh-only idea this script has never known about.
+  # The hook must not gate local deploy on receipt presence (it always has
+  # one on the sanctioned path), so simulate exactly that: a marker file
+  # standing in for "a receipt exists" that this script correctly ignores.
+  item1_root=$(mktemp -d "${TMPDIR:-/tmp}/mcp-bd-selftest-item1.XXXXXX")
+  mkdir -p "${item1_root}/cand" "${item1_root}/deploy"
+  printf '#!/bin/sh\nexit 0\n' >"${item1_root}/cand/simple_mcp_server"
+  chmod +x "${item1_root}/cand/simple_mcp_server"
+  # "a receipt exists" - irrelevant to this script, must not affect anything.
+  printf 'schema=simple-bootstrap-receipt-v2\n' >"${item1_root}/fake-receipt.txt"
+
+  mcp_bd_seed_broken_deploy() {
+    # A present, sidecar-admitted, but protocol-non-conformant server: the
+    # exact "broken" case an operator wants auto-recovered locally.
+    cp "${item1_root}/cand/simple_mcp_server" "${item1_root}/deploy/simple_mcp_server"
+    chmod +x "${item1_root}/deploy/simple_mcp_server"
+    mcp_bd_hash_file "${item1_root}/deploy/simple_mcp_server" >"${item1_root}/deploy/simple_mcp_server.sha256"
+  }
+
+  mcp_bd_seed_broken_deploy
+  item1_out=$(unset CI GITHUB_ACTIONS 2>/dev/null; sh "$0" --skip-build --skip-tests --assume-tests-ok \
+    --mcp-candidate="${item1_root}/cand/simple_mcp_server" --deploy-root="${item1_root}/deploy" 2>&1)
+  case "${item1_out}" in
+    *"deployed: simple-mcp"*) ;;
+    *)
+      echo "FAIL selftest: item1 - a broken deployed server on a developer host (no CI) must auto-deploy by default: ${item1_out}" >&2
+      mcp_bd_selftest_failed=1
+      ;;
+  esac
+
+  mcp_bd_seed_broken_deploy
+  item1_before_hash=$(mcp_bd_hash_file "${item1_root}/deploy/simple_mcp_server")
+  item1_ci_out=$(CI=1 sh "$0" --skip-build --skip-tests --assume-tests-ok \
+    --mcp-candidate="${item1_root}/cand/simple_mcp_server" --deploy-root="${item1_root}/deploy" 2>&1)
+  case "${item1_ci_out}" in
+    *"deployed: simple-mcp"*)
+      echo "FAIL selftest: item1 - CI=1 must NOT auto-deploy: ${item1_ci_out}" >&2
+      mcp_bd_selftest_failed=1
+      ;;
+  esac
+  item1_after_hash=$(mcp_bd_hash_file "${item1_root}/deploy/simple_mcp_server")
+  [ "${item1_before_hash}" = "${item1_after_hash}" ] \
+    || { echo "FAIL selftest: item1 - CI=1 run modified the deployed binary" >&2; mcp_bd_selftest_failed=1; }
+
+  rm -rf "${item1_root}"
+
+  # --- item 3 (Opus re-verify #2): row-splitting must survive a literal
+  # colon in a path (a Windows drive letter, e.g. C:/Users/...) - the
+  # original `cut -d:` field parsing silently mis-split every field after it.
+  item3_root="${TMPDIR:-/tmp}/mcp-bd-selftest-item3-C:/fakepath.$$"
+  mkdir -p "${item3_root}/cand" "${item3_root}/deploy"
+  printf '#!/bin/sh\nexit 0\n' >"${item3_root}/cand/simple_mcp_server"
+  chmod +x "${item3_root}/cand/simple_mcp_server"
+  item3_out=$(sh "$0" --skip-build --skip-tests --assume-tests-ok \
+    --mcp-candidate="${item3_root}/cand/simple_mcp_server" --deploy-root="${item3_root}/deploy" 2>&1)
+  case "${item3_out}" in
+    *"deployed: simple-mcp -> ${item3_root}/deploy/simple_mcp_server"*) ;;
+    *)
+      echo "FAIL selftest: item3 - install into a path containing a literal colon did not land at the exact expected path: ${item3_out}" >&2
+      mcp_bd_selftest_failed=1
+      ;;
+  esac
+  [ -s "${item3_root}/deploy/simple_mcp_server" ] \
+    || { echo "FAIL selftest: item3 - colon-path destination was not actually written" >&2; mcp_bd_selftest_failed=1; }
+  [ -s "${item3_root}/deploy/simple_mcp_server.sha256" ] \
+    || { echo "FAIL selftest: item3 - colon-path sidecar was not written" >&2; mcp_bd_selftest_failed=1; }
+  rm -rf "${item3_root}"
+
   rm -rf "${tmp}"
   trap - EXIT
 
@@ -586,7 +657,7 @@ mcp_bd_selftest() {
     echo "FAIL — bootstrap-mcp-build-deploy.shs selftest: one or more fixtures failed"
     return 1
   fi
-  echo "PASS — bootstrap-mcp-build-deploy.shs selftest: 30 fixture(s) checked, 0 failed"
+  echo "PASS — bootstrap-mcp-build-deploy.shs selftest: 34 fixture(s) checked, 0 failed"
   return 0
 }
 
@@ -839,8 +910,22 @@ mcp_bd_main() {
   mcp_dest="${deploy_root}/${mcp_exe_name}"
   lsp_dest="${deploy_root}/${lsp_exe_name}"
 
+  # Field separator for the tuple rows below. ":" (the original choice) can
+  # appear inside a real path (a Windows drive letter, "C:/..."), which
+  # silently mis-splits every field after it. A TAB never occurs in a path on
+  # any platform this script targets, so it is used instead.
+  mcp_bd_sep=$(printf '\t')
+
   test_ok=1
-  if [ "${assume_tests_ok}" -eq 1 ]; then
+  if [ "${no_deploy}" -eq 1 ]; then
+    # Nothing will be deployed this run regardless of what the tests say
+    # (--no-deploy-mcp, or the CI/GITHUB_ACTIONS auto-off above) - Stage 5's
+    # own smoke gate already covered the mcp/lsp legs, and running the full
+    # system-test + handshake suite here just to throw the verdict away buys
+    # nothing. Skip it and say so, rather than silently doing the work anyway.
+    test_ok=0
+    mcp_bd_log "note: deploy is disabled this run (--no-deploy-mcp or CI auto-off) - skipping system tests/handshake since nothing will be deployed"
+  elif [ "${assume_tests_ok}" -eq 1 ]; then
     # Independent of --skip-tests, per correction: a caller that already
     # verified elsewhere (or trusts the unchanged-hash check below) can say so
     # directly.
@@ -857,13 +942,12 @@ mcp_bd_main() {
     # forces a real test run.
     all_unchanged=1
     any_ok=0
-    for chk in "${build_state_mcp}:${mcp_candidate}:${mcp_dest}" \
-               "${build_state_lsp}:${lsp_candidate}:${lsp_dest}" \
-               "${build_state_spipe}:${spipe_candidate}:${spipe_output}"; do
-      chk_state=${chk%%:*}
-      chk_rest=${chk#*:}
-      chk_cand=${chk_rest%%:*}
-      chk_dest=${chk_rest#*:}
+    for chk in "${build_state_mcp}${mcp_bd_sep}${mcp_candidate}${mcp_bd_sep}${mcp_dest}" \
+               "${build_state_lsp}${mcp_bd_sep}${lsp_candidate}${mcp_bd_sep}${lsp_dest}" \
+               "${build_state_spipe}${mcp_bd_sep}${spipe_candidate}${mcp_bd_sep}${spipe_output}"; do
+      chk_state=$(printf '%s' "${chk}" | cut -d "${mcp_bd_sep}" -f1)
+      chk_cand=$(printf '%s' "${chk}" | cut -d "${mcp_bd_sep}" -f2)
+      chk_dest=$(printf '%s' "${chk}" | cut -d "${mcp_bd_sep}" -f3)
       [ "${chk_state}" = ok ] || continue
       any_ok=1
       if [ -z "${chk_cand}" ] || [ ! -f "${chk_cand}" ] || [ ! -s "${chk_dest}.sha256" ]; then
@@ -893,19 +977,20 @@ mcp_bd_main() {
   deployed=0
   offenders=0
 
+  s=${mcp_bd_sep}
   for row in \
-    "simple-mcp:${mcp_candidate}:${mcp_dest}:${build_state_mcp}:${mirror_root:+${mirror_root}/${mcp_exe_name}}:" \
-    "simple-lsp-mcp:${lsp_candidate}:${lsp_dest}:${build_state_lsp}:${mirror_root:+${mirror_root}/${lsp_exe_name}}:" \
-    "spipe-mcp:${spipe_candidate}:${spipe_output}:${build_state_spipe}::${spipe_wrapper}"; do
-    label=$(echo "${row}" | cut -d: -f1)
-    cand=$(echo "${row}" | cut -d: -f2)
-    dest=$(echo "${row}" | cut -d: -f3)
-    b_state=$(echo "${row}" | cut -d: -f4)
-    mirror=$(echo "${row}" | cut -d: -f5)
+    "simple-mcp${s}${mcp_candidate}${s}${mcp_dest}${s}${build_state_mcp}${s}${mirror_root:+${mirror_root}/${mcp_exe_name}}${s}" \
+    "simple-lsp-mcp${s}${lsp_candidate}${s}${lsp_dest}${s}${build_state_lsp}${s}${mirror_root:+${mirror_root}/${lsp_exe_name}}${s}" \
+    "spipe-mcp${s}${spipe_candidate}${s}${spipe_output}${s}${build_state_spipe}${s}${s}${spipe_wrapper}"; do
+    label=$(printf '%s' "${row}" | cut -d "${s}" -f1)
+    cand=$(printf '%s' "${row}" | cut -d "${s}" -f2)
+    dest=$(printf '%s' "${row}" | cut -d "${s}" -f3)
+    b_state=$(printf '%s' "${row}" | cut -d "${s}" -f4)
+    mirror=$(printf '%s' "${row}" | cut -d "${s}" -f5)
     # launch_cmd: the command a real client actually invokes when it differs
     # from dest (spipe-mcp's real launcher is its wrapper script, which
     # internally resolves/admits dest - see mcp_bd_health's doc comment).
-    launch_cmd=$(echo "${row}" | cut -d: -f6)
+    launch_cmd=$(printf '%s' "${row}" | cut -d "${s}" -f6)
     [ -n "${launch_cmd}" ] || launch_cmd=${dest}
     processed=$((processed + 1))
 

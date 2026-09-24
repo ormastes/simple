@@ -289,8 +289,10 @@ Options:
   --no-deploy-mcp    Build/test the MCP-family servers (simple-mcp, simple-lsp-mcp,
                      spipe-mcp) but never auto-deploy them locally; see
                      scripts/bootstrap/bootstrap-mcp-build-deploy.shs. Auto-deploy
+                     is ON by default on a developer host (it only recovers a
+                     missing/broken server, never touches a healthy one) and
                      already defaults OFF under CI/GITHUB_ACTIONS.
-  --force-deploy-mcp Override the CI/receipt-gated auto-deploy-off default.
+  --force-deploy-mcp Override the CI auto-deploy-off default.
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
   --progress[=<path>]
@@ -5062,13 +5064,17 @@ if [ "${build_mcp}" -eq 1 ]; then
   # already-healthy server; see scripts/bootstrap/bootstrap-mcp-build-deploy.shs
   # for the decision matrix and --selftest.
   #
-  # Deploy defaults OFF here unless the bootstrap itself is deploying
-  # (--deploy) or the operator explicitly forced it (--force-deploy-mcp): a
-  # plain build-only bootstrap run must never write into bin/release outside
-  # the bootstrap's own deploy transaction below. --no-deploy-mcp always wins.
-  mcp_bd_want_deploy=0
-  [ "${deploy}" -eq 0 ] || mcp_bd_want_deploy=1
-  [ "${force_deploy_mcp}" -eq 0 ] || mcp_bd_want_deploy=1
+  # Deploy defaults ON here (auto-recover a missing/broken local server is
+  # the whole point on a developer host, and the helper's own per-server
+  # health decision already refuses to touch an already-healthy one) and is
+  # turned OFF only for two reasons: an explicit --no-deploy-mcp, or a CI
+  # environment (CI/GITHUB_ACTIONS - delegated to the helper's own built-in
+  # detection below, so it is not duplicated here). This is deliberately NOT
+  # tied to bootstrap_receipt_path: the sanctioned day-to-day bootstrap run
+  # always carries a receipt (see :574), so gating on receipt presence would
+  # have meant local auto-deploy could never fire at all. --force-deploy-mcp
+  # overrides the CI auto-off when an operator explicitly wants it anyway.
+  mcp_bd_want_deploy=1
   [ "${no_deploy_mcp}" -eq 0 ] || mcp_bd_want_deploy=0
 
   # bin/release/linux-x86_64 is a hardlink twin of the real per-triple
@@ -5099,7 +5105,6 @@ if [ "${build_mcp}" -eq 1 ]; then
     [ -z "${mcp_bd_mirror_root}" ] || set -- "$@" "--mirror-root=${mcp_bd_mirror_root}"
     [ "${mcp_bd_want_deploy}" -eq 1 ] || set -- "$@" "--no-deploy-mcp"
     [ "${force_deploy_mcp}" -eq 0 ] || set -- "$@" "--force-deploy-mcp"
-    [ -z "${bootstrap_receipt_path}" ] || set -- "$@" "--receipt-gated"
     sh "${repo_root}/scripts/bootstrap/bootstrap-mcp-build-deploy.shs" "$@"
   }
   mcp_bd_status=0
